@@ -17,6 +17,8 @@ Clinical variant interpretation MVP built with Python and Streamlit.
   can flow into prioritization without being fully loaded into memory.
 - MVP prioritization uses bounded-memory uniform random selection.
 - Candidate count defaults to `TOP_VARIANTS` and can be overridden per call.
+- Annotation phase one connects candidates to Ensembl VEP in bounded batches.
+- VEP output is cleaned into a stable evidence structure before later stages.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
 The two current files under `data/samples/` are Ensembl reference VCFs.
@@ -77,3 +79,28 @@ ranking algorithm. The pipeline calls only `prioritize_variants()`, so the
 internal strategy can later be replaced with configurable frequency,
 functional-impact, phenotype, gene-disease, and inheritance scoring without
 changing the pipeline interface.
+
+## Annotation phase one
+
+`backend/annotation.py` currently integrates Ensembl VEP:
+
+- explicit GRCh37/GRCh38 assembly configuration;
+- POST batching with Ensembl's 200-variant maximum;
+- request timeout and limited retries for transient failures;
+- structured per-variant error output without stopping the whole pipeline;
+- cleaned transcript, gene, consequence, impact, HGVS protein change, and
+  source-reference fields;
+- no raw API response is passed to later pipeline stages.
+
+MyVariant, direct ClinVar evidence, and ClinGen evidence remain later
+annotation phases. They can be added under the existing `sources` field
+without changing the public `annotate_variants()` interface.
+
+Run live Ensembl VEP, MyVariant.info, and ClinGen connectivity checks
+separately from the offline test suite:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_annotation_smoke.py
+```
+
+An optional manual variant can be supplied in `CHROM:POS:REF:ALT` format.

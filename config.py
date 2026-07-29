@@ -50,6 +50,27 @@ def _get_positive_int(name: str, default: int) -> int:
     return value
 
 
+def _get_non_negative_int(name: str, default: int) -> int:
+    """
+    Read a non-negative integer environment variable.
+    """
+    raw_value = os.getenv(name, str(default)).strip()
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable '{name}' must be an integer."
+        ) from exc
+
+    if value < 0:
+        raise RuntimeError(
+            f"Environment variable '{name}' cannot be negative."
+        )
+
+    return value
+
+
 def _resolve_path(name: str, default: str) -> Path:
     """
     Resolve a path from an environment variable.
@@ -112,6 +133,22 @@ class Settings:
         "MYVARIANT_BASE_URL",
         "https://myvariant.info/v1",
     ).strip().rstrip("/")
+
+    # Genome assembly must remain explicit when coordinates are sent to
+    # external annotation services.
+    GENOME_ASSEMBLY: str = _get_required_env(
+        "GENOME_ASSEMBLY"
+    )
+
+    VEP_BATCH_SIZE: int = _get_positive_int(
+        "VEP_BATCH_SIZE",
+        50,
+    )
+
+    ANNOTATION_MAX_RETRIES: int = _get_non_negative_int(
+        "ANNOTATION_MAX_RETRIES",
+        2,
+    )
 
     # ------------------------------------------------------------------
     # Request settings
@@ -202,6 +239,16 @@ class Settings:
         if not cls.APP_NAME:
             raise RuntimeError(
                 "APP_NAME cannot be empty."
+            )
+
+        if cls.GENOME_ASSEMBLY not in {"GRCh37", "GRCh38"}:
+            raise RuntimeError(
+                "GENOME_ASSEMBLY must be GRCh37 or GRCh38."
+            )
+
+        if cls.VEP_BATCH_SIZE > 200:
+            raise RuntimeError(
+                "VEP_BATCH_SIZE cannot exceed Ensembl's limit of 200."
             )
 
     @classmethod
