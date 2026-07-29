@@ -62,12 +62,16 @@ class FakeSession:
         responses: list[object],
         *,
         get_responses: list[object] | None = None,
+        clinvar_responses: list[object] | None = None,
     ) -> None:
         self.responses = list(responses)
         self.get_responses = list(get_responses or [])
+        self.clinvar_responses = list(clinvar_responses or [])
         self.calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
         self.get_calls: list[dict[str, object]] = []
+        self.myvariant_get_calls: list[dict[str, object]] = []
+        self.clinvar_get_calls: list[dict[str, object]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
@@ -87,10 +91,28 @@ class FakeSession:
         self.calls.append(call)
         self.get_calls.append(call)
 
-        if not self.get_responses:
-            return FakeResponse(404, {"error": "not found"})
+        is_clinvar = url.endswith(
+            ("/esearch.fcgi", "/esummary.fcgi")
+        )
+        if is_clinvar:
+            self.clinvar_get_calls.append(call)
+            if not self.clinvar_responses:
+                return FakeResponse(
+                    200,
+                    {
+                        "esearchresult": {
+                            "count": "0",
+                            "idlist": [],
+                        }
+                    },
+                )
+            response = self.clinvar_responses.pop(0)
+        else:
+            self.myvariant_get_calls.append(call)
+            if not self.get_responses:
+                return FakeResponse(404, {"error": "not found"})
+            response = self.get_responses.pop(0)
 
-        response = self.get_responses.pop(0)
         if isinstance(response, Exception):
             raise response
 
@@ -683,6 +705,81 @@ class TestAnnotation:
             "exac": {"af": 0.0005},
         }
 
+    @staticmethod
+    def _clinvar_search_response(
+        identifiers: list[str] | None = None,
+    ) -> dict[str, object]:
+        """Build an NCBI ClinVar ESearch response."""
+        result_ids = identifiers if identifiers is not None else ["123"]
+        return {
+            "esearchresult": {
+                "count": str(len(result_ids)),
+                "idlist": result_ids,
+            }
+        }
+
+    @staticmethod
+    def _clinvar_summary_response(
+        *,
+        variation_id: str = "123",
+        assembly: str = "GRCh38",
+        spdi: str = "NC_000001.11:99:A:G",
+    ) -> dict[str, object]:
+        """Build a standardized ClinVar ESummary response."""
+        summary = {
+            "uid": variation_id,
+            "obj_type": "single nucleotide variant",
+            "accession": "VCV000000123",
+            "accession_version": "VCV000000123.4",
+            "title": "NM_000001.1(GENE1):c.100A>G",
+            "variation_set": [
+                {
+                    "canonical_spdi": spdi,
+                    "variation_loc": [
+                        {
+                            "assembly_name": assembly,
+                            "chr": "1",
+                            "start": "100",
+                            "stop": "100",
+                        }
+                    ],
+                }
+            ],
+            "supporting_submissions": {
+                "scv": ["SCV000000001", "SCV000000002"],
+                "rcv": ["RCV000000001"],
+            },
+            "germline_classification": {
+                "description": "Pathogenic",
+                "last_evaluated": "2025/01/02 00:00",
+                "review_status": "reviewed by expert panel",
+                "trait_set": [
+                    {
+                        "trait_name": "Example disease",
+                        "trait_xrefs": [
+                            {
+                                "db_source": "MedGen",
+                                "db_id": "C0000001",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "gene_sort": "GENE1",
+            "genes": [
+                {
+                    "symbol": "GENE1",
+                    "geneid": "1",
+                }
+            ],
+        }
+        return {
+            "result": {
+                "uids": [variation_id],
+                variation_id: summary,
+            }
+        }
+
     def test_successful_vep_response_is_standardized(self) -> None:
         session = FakeSession(
             [
@@ -747,7 +844,7 @@ class TestAnnotation:
         }
         assert annotation["population_frequency"] == 0.004
         assert "dbsnp" not in myvariant
-        assert session.get_calls[0]["params"] == {
+        assert session.myvariant_get_calls[0]["params"] == {
             "assembly": "hg38",
             "fields": (
                 "_id,dbsnp.rsid,dbsnp.gene.symbol,dbsnp.alleles,"
@@ -755,7 +852,7 @@ class TestAnnotation:
                 "gnomad_genome.af,exac.af"
             ),
         }
-        assert session.get_calls[0]["url"].endswith(
+        assert session.myvariant_get_calls[0]["url"].endswith(
             "/variant/chr1%3Ag.100A%3EG"
         )
         assert annotation["references"][-1]["source"] == "MyVariant.info"
@@ -791,7 +888,10 @@ class TestAnnotation:
 
         assert annotation["assembly"] == "GRCh37"
         assert annotation["sources"]["myvariant"]["status"] == "success"
-        assert session.get_calls[0]["params"]["assembly"] == "hg19"
+        assert (
+            session.myvariant_get_calls[0]["params"]["assembly"]
+            == "hg19"
+        )
 
     def test_myvariant_rejects_non_exact_record(self) -> None:
         session = FakeSession(
@@ -813,7 +913,10 @@ class TestAnnotation:
         assert annotation["sources"]["vep"]["status"] == "success"
         assert annotation["sources"]["myvariant"]["status"] == "error"
         assert annotation["population_frequency"] is None
-        assert "does not exactly match" in annotation["warnings"][-1]
+        assert any(
+            "does not exactly match" in warning
+            for warning in annotation["warnings"]
+        )
 
     @pytest.mark.parametrize(
         ("payload", "expected_warning"),
@@ -840,7 +943,10 @@ class TestAnnotation:
 
         assert annotation["sources"]["vep"]["status"] == "success"
         assert annotation["sources"]["myvariant"]["status"] == "error"
-        assert expected_warning in annotation["warnings"][-1]
+        assert any(
+            expected_warning in warning
+            for warning in annotation["warnings"]
+        )
 
     def test_myvariant_timeout_is_retried_then_succeeds(
         self,
@@ -866,7 +972,7 @@ class TestAnnotation:
         )[0]
 
         assert annotation["sources"]["myvariant"]["status"] == "success"
-        assert len(session.get_calls) == 2
+        assert len(session.myvariant_get_calls) == 2
         assert delays == [1.0]
 
     def test_myvariant_http_500_preserves_vep_evidence(self) -> None:
@@ -886,7 +992,10 @@ class TestAnnotation:
         assert annotation["sources"]["vep"]["status"] == "success"
         assert annotation["gene"] == "GENE1"
         assert annotation["sources"]["myvariant"]["status"] == "error"
-        assert "HTTP 500" in annotation["warnings"][-1]
+        assert any(
+            "HTTP 500" in warning
+            for warning in annotation["warnings"]
+        )
 
     def test_myvariant_404_is_marked_not_found(self) -> None:
         session = FakeSession(
@@ -927,9 +1036,254 @@ class TestAnnotation:
         )[0]
 
         assert annotation["sources"]["myvariant"]["status"] == "success"
-        assert session.get_calls[0]["url"].endswith(
+        assert session.myvariant_get_calls[0]["url"].endswith(
             "/variant/chr1%3Ag.101del"
         )
+
+    def test_successful_direct_clinvar_response_is_standardized(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert annotation["sources"]["myvariant"]["status"] == "not_found"
+        assert clinvar == {
+            "status": "success",
+            "query_hgvs": "NC_000001.11:g.100A>G",
+            "variation_id": "123",
+            "accession": "VCV000000123",
+            "accession_version": "VCV000000123.4",
+            "gene": "GENE1",
+            "clinical_significance": "Pathogenic",
+            "review_status": "reviewed by expert panel",
+            "last_evaluated": "2025/01/02 00:00",
+            "conditions": [
+                {
+                    "name": "Example disease",
+                    "identifiers": [
+                        {
+                            "source": "MedGen",
+                            "id": "C0000001",
+                        }
+                    ],
+                }
+            ],
+            "condition_count": 1,
+            "conditions_truncated": False,
+            "scv_accessions": [
+                "SCV000000001",
+                "SCV000000002",
+            ],
+            "rcv_accessions": ["RCV000000001"],
+        }
+        assert "germline_classification" not in clinvar
+        assert session.clinvar_get_calls[0]["params"] == {
+            "tool": "clinical_variant_app",
+            "db": "clinvar",
+            "term": '"NC_000001.11:g.100A>G"[varnam]',
+            "retmode": "json",
+            "retmax": 20,
+        }
+        assert session.clinvar_get_calls[1]["params"] == {
+            "tool": "clinical_variant_app",
+            "db": "clinvar",
+            "id": "123",
+            "retmode": "json",
+            "version": "2.0",
+        }
+        assert annotation["references"][-1] == {
+            "source": "NCBI ClinVar",
+            "url": (
+                "https://www.ncbi.nlm.nih.gov/clinvar/"
+                "variation/123/"
+            ),
+        }
+
+    def test_clinvar_uses_explicit_grch37_hgvs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.annotation.settings.GENOME_ASSEMBLY",
+            "GRCh37",
+        )
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [self._vep_response(assembly="GRCh37")],
+                )
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(
+                        assembly="GRCh37",
+                    ),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["query_hgvs"] == (
+            "NC_000001.10:g.100A>G"
+        )
+        assert session.clinvar_get_calls[0]["params"]["term"] == (
+            '"NC_000001.10:g.100A>G"[varnam]'
+        )
+
+    def test_clinvar_rejects_non_exact_summary(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(
+                        spdi="NC_000001.11:99:A:T",
+                    ),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "error"
+        assert any(
+            "did not return exactly one record" in warning
+            for warning in annotation["warnings"]
+        )
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_warning"),
+        [
+            (ValueError("invalid JSON"), "invalid JSON"),
+            ([], "unexpected response structure"),
+        ],
+    )
+    def test_clinvar_invalid_response_is_isolated(
+        self,
+        payload: object,
+        expected_warning: str,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "error"
+        assert any(
+            expected_warning in warning
+            for warning in annotation["warnings"]
+        )
+
+    def test_clinvar_timeout_is_retried_then_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                requests.Timeout("temporary timeout"),
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+        )
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "backend.annotation.time.sleep",
+            delays.append,
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=1,
+        )[0]
+
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert len(session.clinvar_get_calls) == 3
+        assert delays == [1.0]
+
+    def test_clinvar_http_500_preserves_other_sources(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(500, {"error": "temporary failure"})
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "error"
+        assert any(
+            "HTTP 500" in warning
+            for warning in annotation["warnings"]
+        )
+
+    def test_clinvar_empty_search_is_marked_not_found(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(
+                    200,
+                    self._clinvar_search_response([]),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["clinvar"]["status"] == "not_found"
+        assert len(session.clinvar_get_calls) == 1
 
     def test_multiple_candidates_use_one_batch_request(self) -> None:
         session = FakeSession(
@@ -952,7 +1306,8 @@ class TestAnnotation:
 
         assert len(annotations) == 2
         assert len(session.post_calls) == 1
-        assert len(session.get_calls) == 2
+        assert len(session.myvariant_get_calls) == 2
+        assert len(session.clinvar_get_calls) == 2
         request_json = session.post_calls[0]["json"]
         assert isinstance(request_json, dict)
         assert len(request_json["variants"]) == 2

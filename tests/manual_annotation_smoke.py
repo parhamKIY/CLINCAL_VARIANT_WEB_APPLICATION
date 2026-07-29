@@ -25,7 +25,9 @@ CLINGEN_API_URL = "https://ldh.clinicalgenome.org/ldh/srvc"
 def _parse_arguments() -> argparse.Namespace:
     """Read an optional CHROM:POS:REF:ALT value from the command line."""
     parser = argparse.ArgumentParser(
-        description="Run one live VEP and MyVariant annotation request.",
+        description=(
+            "Run one live VEP, MyVariant, and ClinVar annotation request."
+        ),
     )
     parser.add_argument(
         "variant",
@@ -40,7 +42,7 @@ def _parse_arguments() -> argparse.Namespace:
 
 
 def check_production_annotation(variant_text: str) -> None:
-    """Validate standardized VEP and MyVariant production evidence."""
+    """Validate standardized VEP, MyVariant, and ClinVar evidence."""
     variants = parse_manual_variant(variant_text)
     started_at = perf_counter()
     annotations = annotate_variants(variants, batch_size=1)
@@ -54,6 +56,7 @@ def check_production_annotation(variant_text: str) -> None:
     annotation = annotations[0]
     vep_result = annotation["sources"]["vep"]
     myvariant_result = annotation["sources"]["myvariant"]
+    clinvar_result = annotation["sources"]["clinvar"]
 
     print(f"Endpoint: {settings.VEP_BASE_URL}")
     print(f"Assembly: {settings.GENOME_ASSEMBLY}")
@@ -61,6 +64,7 @@ def check_production_annotation(variant_text: str) -> None:
     print(f"Response time: {elapsed_seconds:.2f} seconds")
     print(f"VEP status: {vep_result['status']}")
     print(f"MyVariant.info status: {myvariant_result['status']}")
+    print(f"NCBI ClinVar status: {clinvar_result['status']}")
 
     if vep_result["status"] != "success":
         warning_text = "; ".join(annotation["warnings"]) or "No details"
@@ -70,6 +74,12 @@ def check_production_annotation(variant_text: str) -> None:
         warning_text = "; ".join(annotation["warnings"]) or "No details"
         raise RuntimeError(
             f"MyVariant.info annotation failed: {warning_text}"
+        )
+
+    if clinvar_result["status"] != "success":
+        warning_text = "; ".join(annotation["warnings"]) or "No details"
+        raise RuntimeError(
+            f"NCBI ClinVar annotation failed: {warning_text}"
         )
 
     # Print only the cleaned fields used by the application, not the raw API
@@ -84,6 +94,18 @@ def check_production_annotation(variant_text: str) -> None:
     print(
         "Population frequency: "
         f"{annotation['population_frequency'] or 'not available'}"
+    )
+    print(
+        "ClinVar accession: "
+        f"{clinvar_result['accession_version'] or 'not available'}"
+    )
+    print(
+        "Clinical significance: "
+        f"{clinvar_result['clinical_significance'] or 'not available'}"
+    )
+    print(
+        "ClinVar review status: "
+        f"{clinvar_result['review_status'] or 'not available'}"
     )
 
 
@@ -140,7 +162,7 @@ def main() -> int:
 
     checks = (
         (
-            "VEP and MyVariant.info",
+            "VEP, MyVariant.info, and ClinVar",
             lambda: check_production_annotation(arguments.variant),
         ),
         ("ClinGen", check_clingen_connection),

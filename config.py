@@ -134,6 +134,11 @@ class Settings:
         "https://myvariant.info/v1",
     ).strip().rstrip("/")
 
+    CLINVAR_BASE_URL: str = os.getenv(
+        "CLINVAR_BASE_URL",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+    ).strip().rstrip("/")
+
     # Genome assembly must remain explicit when coordinates are sent to
     # external annotation services.
     GENOME_ASSEMBLY: str = _get_required_env(
@@ -222,6 +227,7 @@ class Settings:
             "LLM_BASE_URL": cls.LLM_BASE_URL,
             "VEP_BASE_URL": cls.VEP_BASE_URL,
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
+            "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
         }
 
         for name, value in url_settings.items():

@@ -4,6 +4,7 @@ import logging
 import math
 import time
 from collections.abc import Iterable, Iterator
+from threading import Lock
 from typing import Any
 from urllib.parse import quote
 
@@ -18,6 +19,10 @@ LOGGER = logging.getLogger(__name__)
 # Ensembl documents a maximum of 200 variants per POST request.
 MAX_VEP_BATCH_SIZE = 200
 MAX_STORED_TRANSCRIPTS = 10
+MAX_CLINVAR_SEARCH_RESULTS = 20
+MAX_CLINVAR_CONDITIONS = 10
+MAX_CLINVAR_ACCESSIONS = 20
+CLINVAR_REQUEST_INTERVAL = 0.34
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
 MYVARIANT_ASSEMBLIES = {
@@ -37,6 +42,71 @@ MYVARIANT_FIELDS = ",".join(
         "exac.af",
     )
 )
+CLINVAR_REFSEQ_BASES = {
+    **{
+        str(chromosome): f"NC_{chromosome:06d}"
+        for chromosome in range(1, 23)
+    },
+    "X": "NC_000023",
+    "Y": "NC_000024",
+    "MT": "NC_012920",
+}
+CLINVAR_REFSEQ_VERSIONS = {
+    "GRCh37": {
+        "1": 10,
+        "2": 11,
+        "3": 11,
+        "4": 11,
+        "5": 9,
+        "6": 11,
+        "7": 13,
+        "8": 10,
+        "9": 11,
+        "10": 10,
+        "11": 9,
+        "12": 11,
+        "13": 10,
+        "14": 8,
+        "15": 9,
+        "16": 9,
+        "17": 10,
+        "18": 9,
+        "19": 9,
+        "20": 10,
+        "21": 8,
+        "22": 10,
+        "X": 10,
+        "Y": 9,
+        "MT": 1,
+    },
+    "GRCh38": {
+        "1": 11,
+        "2": 12,
+        "3": 12,
+        "4": 12,
+        "5": 10,
+        "6": 12,
+        "7": 14,
+        "8": 11,
+        "9": 12,
+        "10": 11,
+        "11": 10,
+        "12": 12,
+        "13": 11,
+        "14": 9,
+        "15": 10,
+        "16": 10,
+        "17": 11,
+        "18": 10,
+        "19": 10,
+        "20": 11,
+        "21": 9,
+        "22": 11,
+        "X": 11,
+        "Y": 10,
+        "MT": 1,
+    },
+}
 IMPACT_PRIORITY = {
     "HIGH": 4,
     "MODERATE": 3,
@@ -45,6 +115,8 @@ IMPACT_PRIORITY = {
 }
 
 AnnotationData = dict[str, Any]
+_CLINVAR_RATE_LOCK = Lock()
+_LAST_CLINVAR_REQUEST_AT = 0.0
 
 
 class AnnotationError(ValueError):
@@ -265,8 +337,8 @@ def _post_vep_batch(
 # MyVariant.info HTTP client
 # ---------------------------------------------------------------------------
 
-def _normalize_myvariant_chromosome(chromosome: Any) -> str | None:
-    """Convert a VCF chromosome to MyVariant.info's HGVS chromosome form."""
+def _normalize_chromosome(chromosome: Any) -> str | None:
+    """Convert a VCF chromosome to a standard human chromosome name."""
     normalized = str(chromosome).strip()
     if normalized.lower().startswith("chr"):
         normalized = normalized[3:]
@@ -284,9 +356,11 @@ def _normalize_myvariant_chromosome(chromosome: Any) -> str | None:
     return None
 
 
-def _to_myvariant_hgvs(variant: VariantData) -> str | None:
-    """Convert normalized VCF alleles to a genomic HGVS identifier."""
-    chromosome = _normalize_myvariant_chromosome(variant["chrom"])
+def _normalize_variant_edit(
+    variant: VariantData,
+) -> tuple[str, int, str, str] | None:
+    """Remove shared VCF padding from one exact small-variant edit."""
+    chromosome = _normalize_chromosome(variant["chrom"])
     reference = str(variant["ref"]).strip().upper()
     alternate = str(variant["alt"]).strip().upper()
 
@@ -312,7 +386,17 @@ def _to_myvariant_hgvs(variant: VariantData) -> str | None:
         reference = reference[:-1]
         alternate = alternate[:-1]
 
-    prefix = f"chr{chromosome}:g."
+    return chromosome, start, reference, alternate
+
+
+def _format_genomic_hgvs(
+    sequence: str,
+    start: int,
+    reference: str,
+    alternate: str,
+) -> str:
+    """Format one normalized small-variant edit as genomic HGVS."""
+    prefix = f"{sequence}:g."
 
     if not reference and alternate:
         return f"{prefix}{start - 1}_{start}ins{alternate}"
@@ -328,6 +412,21 @@ def _to_myvariant_hgvs(variant: VariantData) -> str | None:
     end = start + len(reference) - 1
     location = str(start) if start == end else f"{start}_{end}"
     return f"{prefix}{location}delins{alternate}"
+
+
+def _to_myvariant_hgvs(variant: VariantData) -> str | None:
+    """Convert normalized VCF alleles to a MyVariant genomic HGVS ID."""
+    edit = _normalize_variant_edit(variant)
+    if edit is None:
+        return None
+
+    chromosome, start, reference, alternate = edit
+    return _format_genomic_hgvs(
+        f"chr{chromosome}",
+        start,
+        reference,
+        alternate,
+    )
 
 
 def _get_myvariant(
@@ -418,6 +517,334 @@ def _get_myvariant(
     raise AnnotationServiceError(
         "MyVariant.info retry loop ended unexpectedly."
     )
+
+
+# ---------------------------------------------------------------------------
+# NCBI ClinVar HTTP client
+# ---------------------------------------------------------------------------
+
+def _to_clinvar_identifiers(
+    variant: VariantData,
+) -> tuple[str, str, str, int] | None:
+    """Build exact assembly-specific HGVS and SPDI identifiers."""
+    edit = _normalize_variant_edit(variant)
+    if edit is None:
+        return None
+
+    chromosome, start, reference, alternate = edit
+    accession_base = CLINVAR_REFSEQ_BASES[chromosome]
+    accession_version = CLINVAR_REFSEQ_VERSIONS[
+        settings.GENOME_ASSEMBLY
+    ][chromosome]
+    accession = f"{accession_base}.{accession_version}"
+    hgvs = _format_genomic_hgvs(
+        accession,
+        start,
+        reference,
+        alternate,
+    )
+    spdi = f"{accession}:{start - 1}:{reference}:{alternate}"
+    return hgvs, spdi, chromosome, start
+
+
+def _wait_for_clinvar_request_slot(
+    session: requests.Session,
+) -> None:
+    """Keep real NCBI E-utility traffic below three requests per second."""
+    if not isinstance(session, requests.Session):
+        return
+
+    global _LAST_CLINVAR_REQUEST_AT
+
+    with _CLINVAR_RATE_LOCK:
+        elapsed = time.monotonic() - _LAST_CLINVAR_REQUEST_AT
+        remaining = CLINVAR_REQUEST_INTERVAL - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+        _LAST_CLINVAR_REQUEST_AT = time.monotonic()
+
+
+def _get_clinvar_json(
+    session: requests.Session,
+    endpoint_name: str,
+    params: dict[str, Any],
+    max_retries: int,
+) -> dict[str, Any]:
+    """Call one ClinVar E-utility endpoint with bounded retries."""
+    endpoint = f"{settings.CLINVAR_BASE_URL}/{endpoint_name}"
+    request_params = {
+        "tool": "clinical_variant_app",
+        **params,
+    }
+
+    for attempt in range(max_retries + 1):
+        response: requests.Response | None = None
+
+        try:
+            _wait_for_clinvar_request_slot(session)
+            response = session.get(
+                endpoint,
+                params=request_params,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "ClinicalVariantInterpretation/0.1",
+                },
+                timeout=settings.REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            if attempt >= max_retries:
+                raise AnnotationServiceError(
+                    f"NCBI ClinVar request failed: {exc}"
+                ) from exc
+
+            LOGGER.warning(
+                "Retrying NCBI ClinVar after a connection error."
+            )
+            time.sleep(_retry_delay(attempt))
+            continue
+
+        if response.status_code in TRANSIENT_HTTP_STATUSES:
+            if attempt < max_retries:
+                LOGGER.warning(
+                    "Retrying NCBI ClinVar after HTTP %s.",
+                    response.status_code,
+                )
+                time.sleep(_retry_delay(attempt, response))
+                continue
+
+        if not 200 <= response.status_code < 300:
+            raise AnnotationServiceError(
+                "NCBI ClinVar returned HTTP "
+                f"{response.status_code}."
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AnnotationServiceError(
+                "NCBI ClinVar returned invalid JSON."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise AnnotationServiceError(
+                "NCBI ClinVar returned an unexpected response structure."
+            )
+
+        if payload.get("error"):
+            if attempt < max_retries:
+                LOGGER.warning(
+                    "Retrying NCBI ClinVar after an API error."
+                )
+                time.sleep(_retry_delay(attempt, response))
+                continue
+
+            raise AnnotationServiceError(
+                "NCBI ClinVar returned an API error."
+            )
+
+        return payload
+
+    raise AnnotationServiceError(
+        "NCBI ClinVar retry loop ended unexpectedly."
+    )
+
+
+def _search_clinvar_ids(
+    session: requests.Session,
+    hgvs: str,
+    max_retries: int,
+) -> list[str]:
+    """Find ClinVar Variation IDs using one exact HGVS variant name."""
+    payload = _get_clinvar_json(
+        session,
+        "esearch.fcgi",
+        {
+            "db": "clinvar",
+            "term": f'"{hgvs}"[varnam]',
+            "retmode": "json",
+            "retmax": MAX_CLINVAR_SEARCH_RESULTS,
+        },
+        max_retries,
+    )
+    result = payload.get("esearchresult")
+    if not isinstance(result, dict):
+        raise AnnotationServiceError(
+            "NCBI ClinVar search returned an unexpected response structure."
+        )
+
+    raw_count = result.get("count")
+    identifiers = result.get("idlist")
+    try:
+        count = int(raw_count)
+    except (TypeError, ValueError) as exc:
+        raise AnnotationServiceError(
+            "NCBI ClinVar search returned an invalid result count."
+        ) from exc
+
+    if count == 0:
+        return []
+
+    if count > MAX_CLINVAR_SEARCH_RESULTS:
+        raise AnnotationServiceError(
+            "NCBI ClinVar returned too many records for one exact variant."
+        )
+
+    if (
+        not isinstance(identifiers, list)
+        or len(identifiers) != count
+        or any(
+            not isinstance(identifier, str) or not identifier
+            for identifier in identifiers
+        )
+    ):
+        raise AnnotationServiceError(
+            "NCBI ClinVar search returned invalid Variation IDs."
+        )
+
+    return identifiers
+
+
+def _get_clinvar_summaries(
+    session: requests.Session,
+    identifiers: list[str],
+    max_retries: int,
+) -> list[dict[str, Any]]:
+    """Retrieve bounded ClinVar document summaries for exact search hits."""
+    payload = _get_clinvar_json(
+        session,
+        "esummary.fcgi",
+        {
+            "db": "clinvar",
+            "id": ",".join(identifiers),
+            "retmode": "json",
+            "version": "2.0",
+        },
+        max_retries,
+    )
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise AnnotationServiceError(
+            "NCBI ClinVar summary returned an unexpected response structure."
+        )
+
+    summaries: list[dict[str, Any]] = []
+    for identifier in identifiers:
+        summary = result.get(identifier)
+        if (
+            not isinstance(summary, dict)
+            or str(summary.get("uid", "")) != identifier
+        ):
+            raise AnnotationServiceError(
+                "NCBI ClinVar summary omitted a requested Variation ID."
+            )
+        summaries.append(summary)
+
+    return summaries
+
+
+def _clinvar_location_matches(
+    measure: dict[str, Any],
+    chromosome: str,
+    start: int,
+) -> bool:
+    """Validate the configured assembly, chromosome, and start coordinate."""
+    locations = measure.get("variation_loc")
+    if not isinstance(locations, list):
+        return False
+
+    return any(
+        isinstance(location, dict)
+        and location.get("assembly_name") == settings.GENOME_ASSEMBLY
+        and str(location.get("chr", "")).upper() == chromosome
+        and str(location.get("start", "")) == str(start)
+        for location in locations
+    )
+
+
+def _select_exact_clinvar_record(
+    summaries: list[dict[str, Any]],
+    expected_spdi: str,
+    chromosome: str,
+    start: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Select exactly one summary measure matching the requested variant."""
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    for summary in summaries:
+        measures = summary.get("variation_set")
+        if not isinstance(measures, list):
+            continue
+
+        for measure in measures:
+            if (
+                not isinstance(measure, dict)
+                or not _clinvar_location_matches(
+                    measure,
+                    chromosome,
+                    start,
+                )
+            ):
+                continue
+
+            # ClinVar reports canonical SPDI on GRCh38. GRCh37 allele
+            # exactness is guaranteed by the exact assembly-specific HGVS
+            # ESearch term and coordinate validation above.
+            if (
+                settings.GENOME_ASSEMBLY == "GRCh38"
+                and measure.get("canonical_spdi") != expected_spdi
+            ):
+                continue
+
+            matches.append((summary, measure))
+
+    if len(matches) != 1:
+        raise AnnotationServiceError(
+            "NCBI ClinVar did not return exactly one record matching the "
+            "requested assembly, chromosome, position, REF, and ALT."
+        )
+
+    return matches[0]
+
+
+def _get_clinvar(
+    session: requests.Session,
+    variant: VariantData,
+    max_retries: int,
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    str | None,
+    str | None,
+]:
+    """Retrieve one exact direct ClinVar record and its matching measure."""
+    identifiers = _to_clinvar_identifiers(variant)
+    if identifiers is None:
+        return None, None, None, (
+            "NCBI ClinVar does not support this chromosome or allele "
+            "representation."
+        )
+
+    hgvs, spdi, chromosome, start = identifiers
+    variation_ids = _search_clinvar_ids(
+        session,
+        hgvs,
+        max_retries,
+    )
+    if not variation_ids:
+        return None, None, hgvs, None
+
+    summaries = _get_clinvar_summaries(
+        session,
+        variation_ids,
+        max_retries,
+    )
+    summary, measure = _select_exact_clinvar_record(
+        summaries,
+        spdi,
+        chromosome,
+        start,
+    )
+    return summary, measure, hgvs, None
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +979,22 @@ def _base_annotation(
                 "gene": None,
                 "population_frequencies": {},
                 "max_population_frequency": None,
+            },
+            "clinvar": {
+                "status": "pending",
+                "query_hgvs": None,
+                "variation_id": None,
+                "accession": None,
+                "accession_version": None,
+                "gene": None,
+                "clinical_significance": None,
+                "review_status": None,
+                "last_evaluated": None,
+                "conditions": [],
+                "condition_count": 0,
+                "conditions_truncated": False,
+                "scv_accessions": [],
+                "rcv_accessions": [],
             }
         },
         "references": [
@@ -822,6 +1265,206 @@ def _annotate_with_myvariant(
     )
 
 
+def _bounded_string_list(
+    value: Any,
+    maximum: int,
+) -> list[str]:
+    """Keep a bounded, ordered list of unique non-empty strings."""
+    if not isinstance(value, list):
+        return []
+
+    cleaned: list[str] = []
+    for item in value:
+        if (
+            isinstance(item, str)
+            and item.strip()
+            and item.strip() not in cleaned
+        ):
+            cleaned.append(item.strip())
+
+        if len(cleaned) == maximum:
+            break
+
+    return cleaned
+
+
+def _clean_clinvar_conditions(
+    classification: Any,
+) -> tuple[list[dict[str, Any]], int]:
+    """Standardize a bounded set of ClinVar germline conditions."""
+    if not isinstance(classification, dict):
+        return [], 0
+
+    raw_traits = classification.get("trait_set")
+    if not isinstance(raw_traits, list):
+        return [], 0
+
+    conditions: list[dict[str, Any]] = []
+    total_conditions = 0
+
+    for trait in raw_traits:
+        if not isinstance(trait, dict):
+            continue
+
+        name = trait.get("trait_name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+
+        total_conditions += 1
+        if len(conditions) >= MAX_CLINVAR_CONDITIONS:
+            continue
+
+        identifiers: list[dict[str, str]] = []
+        raw_xrefs = trait.get("trait_xrefs")
+        if isinstance(raw_xrefs, list):
+            for xref in raw_xrefs:
+                if not isinstance(xref, dict):
+                    continue
+
+                source = xref.get("db_source")
+                identifier = xref.get("db_id")
+                if (
+                    isinstance(source, str)
+                    and source.strip()
+                    and isinstance(identifier, str)
+                    and identifier.strip()
+                ):
+                    identifiers.append(
+                        {
+                            "source": source.strip(),
+                            "id": identifier.strip(),
+                        }
+                    )
+
+        conditions.append(
+            {
+                "name": name.strip(),
+                "identifiers": identifiers,
+            }
+        )
+
+    return conditions, total_conditions
+
+
+def _standardize_clinvar_response(
+    annotation: AnnotationData,
+    summary: dict[str, Any],
+    hgvs: str,
+) -> None:
+    """Add bounded direct ClinVar evidence without retaining raw JSON."""
+    classification = summary.get("germline_classification")
+    if not isinstance(classification, dict):
+        classification = {}
+
+    conditions, condition_count = _clean_clinvar_conditions(
+        classification
+    )
+    supporting = summary.get("supporting_submissions")
+    if not isinstance(supporting, dict):
+        supporting = {}
+
+    gene = summary.get("gene_sort")
+    if not isinstance(gene, str) or not gene.strip():
+        gene = _first_nested_string(summary.get("genes"), "symbol")
+
+    significance = classification.get("description")
+    if not isinstance(significance, str) or not significance.strip():
+        significance = None
+
+    review_status = classification.get("review_status")
+    if not isinstance(review_status, str) or not review_status.strip():
+        review_status = None
+
+    last_evaluated = classification.get("last_evaluated")
+    if not isinstance(last_evaluated, str) or not last_evaluated.strip():
+        last_evaluated = None
+
+    variation_id = str(summary.get("uid", "")).strip() or None
+    accession = summary.get("accession")
+    if not isinstance(accession, str) or not accession.strip():
+        accession = None
+
+    accession_version = summary.get("accession_version")
+    if (
+        not isinstance(accession_version, str)
+        or not accession_version.strip()
+    ):
+        accession_version = None
+
+    annotation["sources"]["clinvar"].update(
+        {
+            "status": "success",
+            "query_hgvs": hgvs,
+            "variation_id": variation_id,
+            "accession": accession,
+            "accession_version": accession_version,
+            "gene": gene.strip() if isinstance(gene, str) else None,
+            "clinical_significance": significance,
+            "review_status": review_status,
+            "last_evaluated": last_evaluated,
+            "conditions": conditions,
+            "condition_count": condition_count,
+            "conditions_truncated": condition_count > len(conditions),
+            "scv_accessions": _bounded_string_list(
+                supporting.get("scv"),
+                MAX_CLINVAR_ACCESSIONS,
+            ),
+            "rcv_accessions": _bounded_string_list(
+                supporting.get("rcv"),
+                MAX_CLINVAR_ACCESSIONS,
+            ),
+        }
+    )
+
+    if variation_id is not None:
+        annotation["references"].append(
+            {
+                "source": "NCBI ClinVar",
+                "url": (
+                    "https://www.ncbi.nlm.nih.gov/clinvar/variation/"
+                    f"{variation_id}/"
+                ),
+            }
+        )
+
+
+def _annotate_with_clinvar(
+    annotation: AnnotationData,
+    session: requests.Session,
+    max_retries: int,
+) -> None:
+    """Add isolated direct ClinVar evidence to one annotation."""
+    try:
+        summary, _, hgvs, unsupported_warning = _get_clinvar(
+            session,
+            annotation["variant"],
+            max_retries,
+        )
+    except AnnotationServiceError as exc:
+        LOGGER.error("NCBI ClinVar request failed: %s", exc)
+        annotation["sources"]["clinvar"]["status"] = "error"
+        annotation["warnings"].append(str(exc))
+        return
+
+    if unsupported_warning is not None:
+        annotation["sources"]["clinvar"]["status"] = "unsupported"
+        annotation["warnings"].append(unsupported_warning)
+        return
+
+    if summary is None or hgvs is None:
+        annotation["sources"]["clinvar"]["status"] = "not_found"
+        annotation["warnings"].append(
+            "NCBI ClinVar returned no exact result for this variant."
+        )
+        return
+
+    _standardize_clinvar_response(
+        annotation,
+        summary,
+        hgvs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public annotation entry point
 # ---------------------------------------------------------------------------
@@ -833,11 +1476,10 @@ def annotate_variants(
     max_retries: int | None = None,
     session: requests.Session | None = None,
 ) -> list[AnnotationData]:
-    """Annotate variants with VEP and MyVariant without exposing raw output.
+    """Annotate with VEP, MyVariant, and ClinVar without exposing raw output.
 
-    Each external source fails independently. ClinVar and ClinGen evidence can
-    later be added under the same ``sources`` field without changing this
-    public interface.
+    Each external source fails independently. ClinGen evidence can later be
+    added under the same ``sources`` field without changing this interface.
     """
     resolved_batch_size = _resolve_batch_size(batch_size)
     resolved_retries = _resolve_retries(max_retries)
@@ -901,6 +1543,11 @@ def annotate_variants(
 
         for annotation in annotations:
             _annotate_with_myvariant(
+                annotation,
+                active_session,
+                resolved_retries,
+            )
+            _annotate_with_clinvar(
                 annotation,
                 active_session,
                 resolved_retries,

@@ -20,6 +20,8 @@ Clinical variant interpretation MVP built with Python and Streamlit.
 - Annotation phase one connects candidates to Ensembl VEP in bounded batches.
 - Annotation phase two queries exact MyVariant.info records and standardizes
   population-frequency evidence.
+- Annotation phase three queries NCBI ClinVar directly and standardizes
+  germline classification and review evidence.
 - External-source failures are isolated so evidence from another source is
   preserved.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
@@ -83,25 +85,31 @@ internal strategy can later be replaced with configurable frequency,
 functional-impact, phenotype, gene-disease, and inheritance scoring without
 changing the pipeline interface.
 
-## Annotation phases one and two
+## Annotation phases one through three
 
-`backend/annotation.py` currently integrates Ensembl VEP and MyVariant.info:
+`backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info, and
+NCBI ClinVar:
 
 - explicit GRCh37/GRCh38 assembly configuration;
 - POST batching with Ensembl's 200-variant maximum;
 - exact MyVariant chromosome, position, REF, ALT, and assembly matching;
+- direct ClinVar ESearch and ESummary queries using exact assembly-specific
+  HGVS identifiers;
+- NCBI E-utility requests limited to fewer than three requests per second;
 - request timeout and limited retries for transient failures;
 - structured per-variant error output without stopping the whole pipeline;
 - cleaned transcript, gene, consequence, impact, HGVS protein change, and
   source-reference fields;
 - standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
+- standardized ClinVar VCV/RCV/SCV accessions, germline clinical
+  significance, review status, evaluation date, and conditions;
 - no raw API response is passed to later pipeline stages.
 
-Direct ClinVar evidence and ClinGen evidence remain later annotation phases.
-They can be added under the existing `sources` field without changing the
-public `annotate_variants()` interface.
+ClinGen evidence remains the final annotation phase. It can be added under the
+existing `sources` field without changing the public `annotate_variants()`
+interface.
 
-Run live Ensembl VEP, MyVariant.info, and ClinGen connectivity checks
+Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks
 separately from the offline test suite:
 
 ```powershell
