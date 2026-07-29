@@ -6,6 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.prioritization import (
+    PrioritizationError,
+    prioritize_variants,
+)
 from backend.vcf_processing import (
     VCFProcessingError,
     normalize_vcf,
@@ -14,6 +18,7 @@ from backend.vcf_processing import (
     process_vcf,
     validate_vcf,
 )
+from config import settings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -407,3 +412,129 @@ class TestVCFProcessing:
         )
 
         assert result == output_path.resolve()
+
+
+class TestPrioritization:
+    @staticmethod
+    def _variant(
+        position: int,
+        *,
+        filter_value: str | None = "PASS",
+        quality: float | None = 50.0,
+    ) -> dict[str, str | int | float | None]:
+        """Build a standardized variant for prioritization tests."""
+        return {
+            "chrom": "1",
+            "pos": position,
+            "ref": "A",
+            "alt": "G",
+            "qual": quality,
+            "filter": filter_value,
+            "genotype": None,
+        }
+
+    def test_empty_input_returns_empty_list(self) -> None:
+        assert prioritize_variants([], top_n=5, seed=1) == []
+
+    def test_input_smaller_than_top_n_keeps_every_variant(self) -> None:
+        variants = [
+            self._variant(100),
+            self._variant(200),
+        ]
+
+        candidates = prioritize_variants(
+            variants,
+            top_n=5,
+            seed=7,
+        )
+
+        assert {item["pos"] for item in candidates} == {100, 200}
+
+    def test_large_input_returns_exact_candidate_count(self) -> None:
+        variants = [
+            self._variant(position)
+            for position in range(1, 101)
+        ]
+
+        candidates = prioritize_variants(
+            variants,
+            top_n=10,
+            seed=42,
+        )
+
+        assert len(candidates) == 10
+        assert len({item["pos"] for item in candidates}) == 10
+
+    def test_same_seed_produces_same_random_selection(self) -> None:
+        variants = [
+            self._variant(position)
+            for position in range(1, 51)
+        ]
+
+        first_result = prioritize_variants(
+            variants,
+            top_n=8,
+            seed=123,
+        )
+        second_result = prioritize_variants(
+            variants,
+            top_n=8,
+            seed=123,
+        )
+
+        assert first_result == second_result
+
+    def test_default_candidate_count_comes_from_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(settings, "TOP_VARIANTS", 3)
+        variants = (
+            self._variant(position)
+            for position in range(1, 20)
+        )
+
+        candidates = prioritize_variants(variants, seed=5)
+
+        assert len(candidates) == 3
+
+    def test_filter_and_missing_quality_do_not_affect_random_mvp(
+        self,
+    ) -> None:
+        variants = [
+            self._variant(
+                100,
+                filter_value="LowQual",
+                quality=None,
+            ),
+            self._variant(200),
+        ]
+
+        candidates = prioritize_variants(
+            variants,
+            top_n=2,
+            seed=1,
+        )
+
+        assert {item["pos"] for item in candidates} == {100, 200}
+
+    @pytest.mark.parametrize("top_n", [0, -1, 1.5, True])
+    def test_invalid_top_n_is_rejected(self, top_n: object) -> None:
+        with pytest.raises(
+            PrioritizationError,
+            match="positive integer",
+        ):
+            prioritize_variants(
+                [self._variant(100)],
+                top_n=top_n,  # type: ignore[arg-type]
+            )
+
+    def test_missing_alt_field_is_rejected(self) -> None:
+        variant = self._variant(100)
+        del variant["alt"]
+
+        with pytest.raises(
+            PrioritizationError,
+            match="missing: alt",
+        ):
+            prioritize_variants([variant], top_n=1)

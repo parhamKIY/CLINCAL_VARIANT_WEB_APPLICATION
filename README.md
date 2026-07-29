@@ -15,6 +15,8 @@ Clinical variant interpretation MVP built with Python and Streamlit.
   matching reference FASTA.
 - The public VCF processing entry point returns an iterator so large files
   can flow into prioritization without being fully loaded into memory.
+- MVP prioritization uses bounded-memory uniform random selection.
+- Candidate count defaults to `TOP_VARIANTS` and can be overridden per call.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
 The two current files under `data/samples/` are Ensembl reference VCFs.
@@ -63,3 +65,15 @@ or representation normalization is required. It needs:
 `bcftools` is not installed in the current Windows environment, so the
 normalization command is implemented and error-tested but has not yet
 been executed against a reference FASTA.
+
+## Temporary prioritization strategy
+
+`backend/prioritization.py` currently uses reservoir sampling. This keeps
+memory usage bounded while giving each parsed variant an equal chance of
+selection.
+
+Random selection is only an MVP placeholder. It is not a clinically valid
+ranking algorithm. The pipeline calls only `prioritize_variants()`, so the
+internal strategy can later be replaced with configurable frequency,
+functional-impact, phenotype, gene-disease, and inheritance scoring without
+changing the pipeline interface.
