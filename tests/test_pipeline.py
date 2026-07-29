@@ -57,15 +57,40 @@ class FakeResponse:
 class FakeSession:
     """Return queued responses or exceptions without network access."""
 
-    def __init__(self, responses: list[object]) -> None:
+    def __init__(
+        self,
+        responses: list[object],
+        *,
+        get_responses: list[object] | None = None,
+    ) -> None:
         self.responses = list(responses)
+        self.get_responses = list(get_responses or [])
         self.calls: list[dict[str, object]] = []
+        self.post_calls: list[dict[str, object]] = []
+        self.get_calls: list[dict[str, object]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
-        self.calls.append({"url": url, **kwargs})
+        call = {"method": "POST", "url": url, **kwargs}
+        self.calls.append(call)
+        self.post_calls.append(call)
         response = self.responses.pop(0)
 
+        if isinstance(response, Exception):
+            raise response
+
+        assert isinstance(response, FakeResponse)
+        return response
+
+    def get(self, url: str, **kwargs: object) -> FakeResponse:
+        call = {"method": "GET", "url": url, **kwargs}
+        self.calls.append(call)
+        self.get_calls.append(call)
+
+        if not self.get_responses:
+            return FakeResponse(404, {"error": "not found"})
+
+        response = self.get_responses.pop(0)
         if isinstance(response, Exception):
             raise response
 
@@ -629,6 +654,35 @@ class TestAnnotation:
             ],
         }
 
+    @staticmethod
+    def _myvariant_response(
+        variant_id: str = "chr1:g.100A>G",
+    ) -> dict[str, object]:
+        """Build an exact MyVariant response with population evidence."""
+        return {
+            "_id": variant_id,
+            "dbsnp": {
+                "rsid": "rs123",
+                "gene": {"symbol": "GENE1"},
+                "alleles": [
+                    {
+                        "allele": "A",
+                        "freq": {"gnomad": 0.996},
+                    },
+                    {
+                        "allele": "G",
+                        "freq": {
+                            "1000g": 0.004,
+                            "gnomad": 0.003,
+                        },
+                    },
+                ],
+            },
+            "gnomad_exome": {"af": {"af": 0.001}},
+            "gnomad_genome": {"af": 0.002},
+            "exac": {"af": 0.0005},
+        }
+
     def test_successful_vep_response_is_standardized(self) -> None:
         session = FakeSession(
             [
@@ -654,13 +708,228 @@ class TestAnnotation:
         assert annotations[0]["protein_change"] == "ENSP000001:p.Lys34Arg"
         assert annotations[0]["sources"]["vep"]["status"] == "success"
         assert "input" not in annotations[0]["sources"]["vep"]
-        assert session.calls[0]["params"] == {
+        assert session.post_calls[0]["params"] == {
             "canonical": 1,
             "hgvs": 1,
             "pick_allele_gene": 1,
             "protein": 1,
             "mane": 1,
         }
+
+    def test_successful_myvariant_response_is_standardized(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        myvariant = annotation["sources"]["myvariant"]
+        assert myvariant == {
+            "status": "success",
+            "variant_id": "chr1:g.100A>G",
+            "rsid": "rs123",
+            "gene": "GENE1",
+            "population_frequencies": {
+                "gnomad_exome": 0.001,
+                "gnomad_genome": 0.002,
+                "exac": 0.0005,
+                "dbsnp_1000g": 0.004,
+                "dbsnp_gnomad": 0.003,
+            },
+            "max_population_frequency": 0.004,
+        }
+        assert annotation["population_frequency"] == 0.004
+        assert "dbsnp" not in myvariant
+        assert session.get_calls[0]["params"] == {
+            "assembly": "hg38",
+            "fields": (
+                "_id,dbsnp.rsid,dbsnp.gene.symbol,dbsnp.alleles,"
+                "dbnsfp.genename,cadd.gene.genename,gnomad_exome.af,"
+                "gnomad_genome.af,exac.af"
+            ),
+        }
+        assert session.get_calls[0]["url"].endswith(
+            "/variant/chr1%3Ag.100A%3EG"
+        )
+        assert annotation["references"][-1]["source"] == "MyVariant.info"
+        assert annotation["references"][-1]["url"].endswith(
+            "chr1%3Ag.100A%3EG?assembly=hg38"
+        )
+
+    def test_myvariant_uses_explicit_grch37_assembly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.annotation.settings.GENOME_ASSEMBLY",
+            "GRCh37",
+        )
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [self._vep_response(assembly="GRCh37")],
+                )
+            ],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["assembly"] == "GRCh37"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert session.get_calls[0]["params"]["assembly"] == "hg19"
+
+    def test_myvariant_rejects_non_exact_record(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(
+                    200,
+                    self._myvariant_response("chr1:g.100A>T"),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "error"
+        assert annotation["population_frequency"] is None
+        assert "does not exactly match" in annotation["warnings"][-1]
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_warning"),
+        [
+            (ValueError("invalid JSON"), "invalid JSON"),
+            ([], "unexpected response structure"),
+        ],
+    )
+    def test_myvariant_invalid_response_is_isolated(
+        self,
+        payload: object,
+        expected_warning: str,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "error"
+        assert expected_warning in annotation["warnings"][-1]
+
+    def test_myvariant_timeout_is_retried_then_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                requests.Timeout("temporary timeout"),
+                FakeResponse(200, self._myvariant_response()),
+            ],
+        )
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "backend.annotation.time.sleep",
+            delays.append,
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=1,
+        )[0]
+
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert len(session.get_calls) == 2
+        assert delays == [1.0]
+
+    def test_myvariant_http_500_preserves_vep_evidence(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(500, {"error": "temporary failure"})
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["gene"] == "GENE1"
+        assert annotation["sources"]["myvariant"]["status"] == "error"
+        assert "HTTP 500" in annotation["warnings"][-1]
+
+    def test_myvariant_404_is_marked_not_found(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(404, {"error": "ID not found"})
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "not_found"
+        assert annotation["population_frequency"] is None
+
+    def test_myvariant_builds_exact_deletion_hgvs(self) -> None:
+        variant = self._variant()
+        variant["ref"] = "AT"
+        variant["alt"] = "A"
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(
+                    200,
+                    self._myvariant_response("chr1:g.101del"),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [variant],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert session.get_calls[0]["url"].endswith(
+            "/variant/chr1%3Ag.101del"
+        )
 
     def test_multiple_candidates_use_one_batch_request(self) -> None:
         session = FakeSession(
@@ -682,8 +951,9 @@ class TestAnnotation:
         )
 
         assert len(annotations) == 2
-        assert len(session.calls) == 1
-        request_json = session.calls[0]["json"]
+        assert len(session.post_calls) == 1
+        assert len(session.get_calls) == 2
+        request_json = session.post_calls[0]["json"]
         assert isinstance(request_json, dict)
         assert len(request_json["variants"]) == 2
 
@@ -709,7 +979,7 @@ class TestAnnotation:
         )
 
         assert len(annotations) == 2
-        assert len(session.calls) == 2
+        assert len(session.post_calls) == 2
 
     def test_timeout_is_retried_then_succeeds(
         self,
@@ -737,7 +1007,7 @@ class TestAnnotation:
         )
 
         assert annotations[0]["sources"]["vep"]["status"] == "success"
-        assert len(session.calls) == 2
+        assert len(session.post_calls) == 2
         assert delays == [1.0]
 
     def test_exhausted_timeout_returns_structured_error(

@@ -1,9 +1,11 @@
 """External variant annotation and evidence standardization."""
 
 import logging
+import math
 import time
 from collections.abc import Iterable, Iterator
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -18,6 +20,23 @@ MAX_VEP_BATCH_SIZE = 200
 MAX_STORED_TRANSCRIPTS = 10
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
+MYVARIANT_ASSEMBLIES = {
+    "GRCh37": "hg19",
+    "GRCh38": "hg38",
+}
+MYVARIANT_FIELDS = ",".join(
+    (
+        "_id",
+        "dbsnp.rsid",
+        "dbsnp.gene.symbol",
+        "dbsnp.alleles",
+        "dbnsfp.genename",
+        "cadd.gene.genename",
+        "gnomad_exome.af",
+        "gnomad_genome.af",
+        "exac.af",
+    )
+)
 IMPACT_PRIORITY = {
     "HIGH": 4,
     "MODERATE": 3,
@@ -243,6 +262,165 @@ def _post_vep_batch(
 
 
 # ---------------------------------------------------------------------------
+# MyVariant.info HTTP client
+# ---------------------------------------------------------------------------
+
+def _normalize_myvariant_chromosome(chromosome: Any) -> str | None:
+    """Convert a VCF chromosome to MyVariant.info's HGVS chromosome form."""
+    normalized = str(chromosome).strip()
+    if normalized.lower().startswith("chr"):
+        normalized = normalized[3:]
+
+    normalized = normalized.upper()
+    if normalized == "M":
+        normalized = "MT"
+
+    if normalized in {"X", "Y", "MT"}:
+        return normalized
+
+    if normalized.isdigit() and 1 <= int(normalized) <= 22:
+        return str(int(normalized))
+
+    return None
+
+
+def _to_myvariant_hgvs(variant: VariantData) -> str | None:
+    """Convert normalized VCF alleles to a genomic HGVS identifier."""
+    chromosome = _normalize_myvariant_chromosome(variant["chrom"])
+    reference = str(variant["ref"]).strip().upper()
+    alternate = str(variant["alt"]).strip().upper()
+
+    if (
+        chromosome is None
+        or not reference
+        or not alternate
+        or not set(reference).issubset({"A", "C", "G", "T"})
+        or not set(alternate).issubset({"A", "C", "G", "T"})
+        or reference == alternate
+    ):
+        return None
+
+    start = int(variant["pos"])
+
+    # Remove shared VCF padding so indels use HGVS coordinates and alleles.
+    while reference and alternate and reference[0] == alternate[0]:
+        reference = reference[1:]
+        alternate = alternate[1:]
+        start += 1
+
+    while reference and alternate and reference[-1] == alternate[-1]:
+        reference = reference[:-1]
+        alternate = alternate[:-1]
+
+    prefix = f"chr{chromosome}:g."
+
+    if not reference and alternate:
+        return f"{prefix}{start - 1}_{start}ins{alternate}"
+
+    if reference and not alternate:
+        end = start + len(reference) - 1
+        location = str(start) if start == end else f"{start}_{end}"
+        return f"{prefix}{location}del"
+
+    if len(reference) == 1 and len(alternate) == 1:
+        return f"{prefix}{start}{reference}>{alternate}"
+
+    end = start + len(reference) - 1
+    location = str(start) if start == end else f"{start}_{end}"
+    return f"{prefix}{location}delins{alternate}"
+
+
+def _get_myvariant(
+    session: requests.Session,
+    variant: VariantData,
+    max_retries: int,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Retrieve one exact MyVariant.info record with bounded retries."""
+    variant_id = _to_myvariant_hgvs(variant)
+    if variant_id is None:
+        return None, None, (
+            "MyVariant.info does not support this chromosome or allele "
+            "representation."
+        )
+
+    encoded_id = quote(variant_id, safe="")
+    endpoint = f"{settings.MYVARIANT_BASE_URL}/variant/{encoded_id}"
+    params = {
+        "assembly": MYVARIANT_ASSEMBLIES[settings.GENOME_ASSEMBLY],
+        "fields": MYVARIANT_FIELDS,
+    }
+
+    for attempt in range(max_retries + 1):
+        response: requests.Response | None = None
+
+        try:
+            response = session.get(
+                endpoint,
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=settings.REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            if attempt >= max_retries:
+                raise AnnotationServiceError(
+                    f"MyVariant.info request failed: {exc}"
+                ) from exc
+
+            LOGGER.warning(
+                "Retrying MyVariant.info after a connection error."
+            )
+            time.sleep(_retry_delay(attempt))
+            continue
+
+        if response.status_code == 404:
+            return None, variant_id, None
+
+        if response.status_code in TRANSIENT_HTTP_STATUSES:
+            if attempt < max_retries:
+                LOGGER.warning(
+                    "Retrying MyVariant.info after HTTP %s.",
+                    response.status_code,
+                )
+                time.sleep(_retry_delay(attempt, response))
+                continue
+
+        if not 200 <= response.status_code < 300:
+            raise AnnotationServiceError(
+                "MyVariant.info returned HTTP "
+                f"{response.status_code}."
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AnnotationServiceError(
+                "MyVariant.info returned invalid JSON."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise AnnotationServiceError(
+                "MyVariant.info returned an unexpected response structure."
+            )
+
+        response_id = payload.get("_id")
+        if (
+            not isinstance(response_id, str)
+            or response_id.upper() != variant_id.upper()
+        ):
+            raise AnnotationServiceError(
+                "MyVariant.info returned a record that does not exactly "
+                "match the requested assembly, chromosome, position, "
+                "REF, and ALT."
+            )
+
+        return payload, variant_id, None
+
+    raise AnnotationServiceError(
+        "MyVariant.info retry loop ended unexpectedly."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Response cleaning and unified evidence output
 # ---------------------------------------------------------------------------
 
@@ -358,6 +536,7 @@ def _base_annotation(
         "consequence": None,
         "impact": None,
         "protein_change": None,
+        "population_frequency": None,
         "sources": {
             "vep": {
                 "status": status,
@@ -365,6 +544,14 @@ def _base_annotation(
                 "transcript_consequences": [],
                 "total_transcript_consequences": 0,
                 "transcripts_truncated": False,
+            },
+            "myvariant": {
+                "status": "pending",
+                "variant_id": None,
+                "rsid": None,
+                "gene": None,
+                "population_frequencies": {},
+                "max_population_frequency": None,
             }
         },
         "references": [
@@ -456,6 +643,185 @@ def _standardize_vep_response(
     return annotation
 
 
+def _iter_source_records(value: Any) -> Iterator[dict[str, Any]]:
+    """Yield dictionary records from a single or repeated source field."""
+    if isinstance(value, dict):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                yield item
+
+
+def _first_nested_string(
+    records: Any,
+    *path: str,
+) -> str | None:
+    """Read the first non-empty string at a nested source path."""
+    for record in _iter_source_records(records):
+        value: Any = record
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+
+def _valid_frequency(value: Any) -> float | None:
+    """Return a finite allele frequency in the inclusive range zero to one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+
+    frequency = float(value)
+    if not math.isfinite(frequency) or not 0.0 <= frequency <= 1.0:
+        return None
+
+    return frequency
+
+
+def _extract_global_frequency(source: Any) -> float | None:
+    """Extract the largest global AF from one MyVariant population source."""
+    frequencies: list[float] = []
+
+    for record in _iter_source_records(source):
+        raw_frequency = record.get("af")
+        if isinstance(raw_frequency, dict):
+            raw_frequency = raw_frequency.get("af")
+
+        frequency = _valid_frequency(raw_frequency)
+        if frequency is not None:
+            frequencies.append(frequency)
+
+    return max(frequencies) if frequencies else None
+
+
+def _extract_dbsnp_frequencies(
+    dbsnp: Any,
+    alternate: str,
+) -> dict[str, float]:
+    """Extract exact-ALT population frequencies from dbSNP aggregation."""
+    frequencies: dict[str, float] = {}
+
+    for record in _iter_source_records(dbsnp):
+        alleles = record.get("alleles")
+        if not isinstance(alleles, list):
+            continue
+
+        for allele in alleles:
+            if (
+                not isinstance(allele, dict)
+                or str(allele.get("allele", "")).upper() != alternate
+                or not isinstance(allele.get("freq"), dict)
+            ):
+                continue
+
+            for source_name, raw_frequency in allele["freq"].items():
+                frequency = _valid_frequency(raw_frequency)
+                if frequency is not None:
+                    frequencies[f"dbsnp_{source_name}"] = frequency
+
+    return frequencies
+
+
+def _standardize_myvariant_response(
+    annotation: AnnotationData,
+    payload: dict[str, Any],
+    variant_id: str,
+) -> None:
+    """Add bounded MyVariant evidence without retaining its raw payload."""
+    dbsnp = payload.get("dbsnp")
+    population_frequencies: dict[str, float] = {}
+
+    for source_name in ("gnomad_exome", "gnomad_genome", "exac"):
+        frequency = _extract_global_frequency(payload.get(source_name))
+        if frequency is not None:
+            population_frequencies[source_name] = frequency
+
+    alternate = str(annotation["variant"]["alt"]).strip().upper()
+    population_frequencies.update(
+        _extract_dbsnp_frequencies(dbsnp, alternate)
+    )
+
+    max_frequency = (
+        max(population_frequencies.values())
+        if population_frequencies
+        else None
+    )
+    gene = (
+        _first_nested_string(dbsnp, "gene", "symbol")
+        or _first_nested_string(payload.get("dbnsfp"), "genename")
+        or _first_nested_string(
+            payload.get("cadd"),
+            "gene",
+            "genename",
+        )
+    )
+
+    annotation["population_frequency"] = max_frequency
+    annotation["sources"]["myvariant"].update(
+        {
+            "status": "success",
+            "variant_id": variant_id,
+            "rsid": _first_nested_string(dbsnp, "rsid"),
+            "gene": gene,
+            "population_frequencies": population_frequencies,
+            "max_population_frequency": max_frequency,
+        }
+    )
+    annotation["references"].append(
+        {
+            "source": "MyVariant.info",
+            "url": (
+                f"{settings.MYVARIANT_BASE_URL}/variant/"
+                f"{quote(variant_id, safe='')}"
+                f"?assembly={MYVARIANT_ASSEMBLIES[settings.GENOME_ASSEMBLY]}"
+            ),
+        }
+    )
+
+
+def _annotate_with_myvariant(
+    annotation: AnnotationData,
+    session: requests.Session,
+    max_retries: int,
+) -> None:
+    """Add isolated MyVariant evidence to one existing VEP annotation."""
+    try:
+        payload, variant_id, unsupported_warning = _get_myvariant(
+            session,
+            annotation["variant"],
+            max_retries,
+        )
+    except AnnotationServiceError as exc:
+        LOGGER.error("MyVariant.info request failed: %s", exc)
+        annotation["sources"]["myvariant"]["status"] = "error"
+        annotation["warnings"].append(str(exc))
+        return
+
+    if unsupported_warning is not None:
+        annotation["sources"]["myvariant"]["status"] = "unsupported"
+        annotation["warnings"].append(unsupported_warning)
+        return
+
+    if payload is None or variant_id is None:
+        annotation["sources"]["myvariant"]["status"] = "not_found"
+        annotation["warnings"].append(
+            "MyVariant.info returned no exact result for this variant."
+        )
+        return
+
+    _standardize_myvariant_response(
+        annotation,
+        payload,
+        variant_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public annotation entry point
 # ---------------------------------------------------------------------------
@@ -467,11 +833,11 @@ def annotate_variants(
     max_retries: int | None = None,
     session: requests.Session | None = None,
 ) -> list[AnnotationData]:
-    """Annotate variants with Ensembl VEP without exposing raw API output.
+    """Annotate variants with VEP and MyVariant without exposing raw output.
 
-    A failed batch produces structured error annotations instead of stopping
-    the complete pipeline. The same output structure can later receive
-    MyVariant, ClinVar, and ClinGen evidence under the ``sources`` field.
+    Each external source fails independently. ClinVar and ClinGen evidence can
+    later be added under the same ``sources`` field without changing this
+    public interface.
     """
     resolved_batch_size = _resolve_batch_size(batch_size)
     resolved_retries = _resolve_retries(max_retries)
@@ -532,6 +898,13 @@ def annotate_variants(
                         response,
                     )
                 )
+
+        for annotation in annotations:
+            _annotate_with_myvariant(
+                annotation,
+                active_session,
+                resolved_retries,
+            )
     finally:
         if owns_session:
             active_session.close()

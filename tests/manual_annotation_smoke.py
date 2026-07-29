@@ -19,14 +19,13 @@ from config import settings
 
 
 DEFAULT_VARIANT = "1:941284:G:A"
-DEFAULT_RSID = "rs571654307"
 CLINGEN_API_URL = "https://ldh.clinicalgenome.org/ldh/srvc"
 
 
 def _parse_arguments() -> argparse.Namespace:
     """Read an optional CHROM:POS:REF:ALT value from the command line."""
     parser = argparse.ArgumentParser(
-        description="Send one live annotation request to Ensembl VEP.",
+        description="Run one live VEP and MyVariant annotation request.",
     )
     parser.add_argument(
         "variant",
@@ -40,8 +39,8 @@ def _parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_vep_connection(variant_text: str) -> None:
-    """Annotate one variant and validate the standardized VEP response."""
+def check_production_annotation(variant_text: str) -> None:
+    """Validate standardized VEP and MyVariant production evidence."""
     variants = parse_manual_variant(variant_text)
     started_at = perf_counter()
     annotations = annotate_variants(variants, batch_size=1)
@@ -54,16 +53,24 @@ def check_vep_connection(variant_text: str) -> None:
 
     annotation = annotations[0]
     vep_result = annotation["sources"]["vep"]
+    myvariant_result = annotation["sources"]["myvariant"]
 
     print(f"Endpoint: {settings.VEP_BASE_URL}")
     print(f"Assembly: {settings.GENOME_ASSEMBLY}")
     print(f"Variant: {variant_text}")
     print(f"Response time: {elapsed_seconds:.2f} seconds")
     print(f"VEP status: {vep_result['status']}")
+    print(f"MyVariant.info status: {myvariant_result['status']}")
 
     if vep_result["status"] != "success":
         warning_text = "; ".join(annotation["warnings"]) or "No details"
         raise RuntimeError(f"VEP annotation failed: {warning_text}")
+
+    if myvariant_result["status"] != "success":
+        warning_text = "; ".join(annotation["warnings"]) or "No details"
+        raise RuntimeError(
+            f"MyVariant.info annotation failed: {warning_text}"
+        )
 
     # Print only the cleaned fields used by the application, not the raw API
     # response, so this smoke test exercises the real production data path.
@@ -72,48 +79,12 @@ def check_vep_connection(variant_text: str) -> None:
     print(f"Consequence: {annotation['consequence'] or 'not available'}")
     print(f"Impact: {annotation['impact'] or 'not available'}")
     print(f"Protein change: {annotation['protein_change'] or 'not available'}")
-
-
-def check_myvariant_connection() -> None:
-    """Query MyVariant.info without treating the first hit as annotation."""
-    endpoint = f"{settings.MYVARIANT_BASE_URL}/query"
-    started_at = perf_counter()
-
-    try:
-        response = requests.get(
-            endpoint,
-            params={
-                "q": DEFAULT_RSID,
-                "fields": "_id,dbsnp.rsid,hg19,hg38",
-                "size": 10,
-            },
-            timeout=settings.REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"MyVariant.info request failed: {exc}"
-        ) from exc
-    except ValueError as exc:
-        raise RuntimeError(
-            "MyVariant.info returned invalid JSON."
-        ) from exc
-
-    elapsed_seconds = perf_counter() - started_at
-    hits = payload.get("hits") if isinstance(payload, dict) else None
-
-    if not isinstance(hits, list) or not hits:
-        raise RuntimeError(
-            "MyVariant.info returned no result for the connectivity query."
-        )
-
-    # This check proves connectivity only. Production annotation must later
-    # match the exact assembly, coordinates, REF, and ALT before using a hit.
-    print(f"Endpoint: {endpoint}")
-    print(f"Query: {DEFAULT_RSID}")
-    print(f"Response time: {elapsed_seconds:.2f} seconds")
-    print(f"MyVariant.info status: success ({len(hits)} hit(s))")
+    print(f"MyVariant.info ID: {myvariant_result['variant_id']}")
+    print(f"dbSNP ID: {myvariant_result['rsid'] or 'not available'}")
+    print(
+        "Population frequency: "
+        f"{annotation['population_frequency'] or 'not available'}"
+    )
 
 
 def check_clingen_connection() -> None:
@@ -168,8 +139,10 @@ def main() -> int:
         return 1
 
     checks = (
-        ("Ensembl VEP", lambda: check_vep_connection(arguments.variant)),
-        ("MyVariant.info", check_myvariant_connection),
+        (
+            "VEP and MyVariant.info",
+            lambda: check_production_annotation(arguments.variant),
+        ),
         ("ClinGen", check_clingen_connection),
     )
     failures: list[str] = []

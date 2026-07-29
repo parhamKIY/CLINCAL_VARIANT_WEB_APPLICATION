@@ -18,7 +18,10 @@ Clinical variant interpretation MVP built with Python and Streamlit.
 - MVP prioritization uses bounded-memory uniform random selection.
 - Candidate count defaults to `TOP_VARIANTS` and can be overridden per call.
 - Annotation phase one connects candidates to Ensembl VEP in bounded batches.
-- VEP output is cleaned into a stable evidence structure before later stages.
+- Annotation phase two queries exact MyVariant.info records and standardizes
+  population-frequency evidence.
+- External-source failures are isolated so evidence from another source is
+  preserved.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
 The two current files under `data/samples/` are Ensembl reference VCFs.
@@ -80,21 +83,23 @@ internal strategy can later be replaced with configurable frequency,
 functional-impact, phenotype, gene-disease, and inheritance scoring without
 changing the pipeline interface.
 
-## Annotation phase one
+## Annotation phases one and two
 
-`backend/annotation.py` currently integrates Ensembl VEP:
+`backend/annotation.py` currently integrates Ensembl VEP and MyVariant.info:
 
 - explicit GRCh37/GRCh38 assembly configuration;
 - POST batching with Ensembl's 200-variant maximum;
+- exact MyVariant chromosome, position, REF, ALT, and assembly matching;
 - request timeout and limited retries for transient failures;
 - structured per-variant error output without stopping the whole pipeline;
 - cleaned transcript, gene, consequence, impact, HGVS protein change, and
   source-reference fields;
+- standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
 - no raw API response is passed to later pipeline stages.
 
-MyVariant, direct ClinVar evidence, and ClinGen evidence remain later
-annotation phases. They can be added under the existing `sources` field
-without changing the public `annotate_variants()` interface.
+Direct ClinVar evidence and ClinGen evidence remain later annotation phases.
+They can be added under the existing `sources` field without changing the
+public `annotate_variants()` interface.
 
 Run live Ensembl VEP, MyVariant.info, and ClinGen connectivity checks
 separately from the offline test suite:
