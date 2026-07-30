@@ -27,6 +27,8 @@ Clinical variant interpretation MVP built with Python and Streamlit.
   claims.
 - External-source failures are isolated so evidence from another source is
   preserved.
+- Stage 6 provides local HPO search, normalization, gene and disease
+  associations, and explainable phenotype scoring for annotated candidates.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
 The two current files under `data/samples/` are Ensembl reference VCFs.
@@ -40,7 +42,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## HPO ontology data
+## Stage 6 phenotype and HPO: complete
 
 Stage 6 uses the official Human Phenotype Ontology OBO release stored at:
 
@@ -84,6 +86,22 @@ Run the retained manual LLM smoke test:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py
+```
+
+Run the complete local Stage 6 phenotype smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_phenotype_smoke.py
+```
+
+Custom phenotype inputs can be supplied when needed:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_phenotype_smoke.py `
+  --query "seizure" `
+  --hpo HP:0001250 `
+  --hpo HP:0001263 `
+  --gene SCN1A
 ```
 
 ## Windows VCF parser decision

@@ -1493,6 +1493,45 @@ class TestPhenotype:
                 associations_path=associations_path,
             )
 
+    def test_stage_6_local_phenotype_flow_end_to_end(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+        disease_path = self._write_hpo_disease_fixture(tmp_path)
+
+        suggestions = search_hpo_terms(
+            "convulsion",
+            ontology_path=ontology_path,
+        )
+        terms = normalize_phenotypes(
+            [suggestions[0]["id"], "HP:0001263"],
+            ontology_path=ontology_path,
+        )
+        genes = get_genes_for_hpo(
+            terms[0]["id"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+        diseases = get_diseases_for_hpo(
+            terms[0]["id"],
+            ontology_path=ontology_path,
+            annotations_path=disease_path,
+        )
+        candidates = match_phenotypes(
+            [{"gene": "SCN1A"}, {"gene": None}],
+            [term["id"] for term in terms],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+
+        assert suggestions[0]["id"] == "HP:0001250"
+        assert genes["genes"] == ["SCN1A", "SCN2A"]
+        assert diseases["disease_count"] == 2
+        assert candidates[0]["phenotype_score"] == 0.5
+        assert candidates[1]["phenotype_score"] == 0.0
+
     def test_hpo_disease_lookup_excludes_negated_and_nonphenotypic_rows(
         self,
         tmp_path: Path,
