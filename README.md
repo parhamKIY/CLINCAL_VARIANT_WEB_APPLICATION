@@ -213,6 +213,24 @@ annotation warnings remain visible without discarding other source results.
 When no phenotypes are supplied, matching is explicitly marked as skipped and
 the annotated candidates continue unchanged to the Evidence Object stage.
 
+Stage 10 step 4 adds the public `run_analysis()` happy path. It builds and
+retains one bounded Evidence Object per enriched candidate, sends only the
+leading candidate's sanitized Evidence Object through the provider-neutral LLM
+boundary, validates the response, and atomically saves its deterministic
+Markdown report. The result then exposes the saved report path and reaches
+100 percent completion. Until clinical prioritization replaces the documented
+random MVP selector, the leading candidate must not be interpreted as a
+clinically ranked result.
+
+Stage 10 step 5 makes `run_analysis()` a frontend-safe execution boundary.
+Expected input, VCF, prioritization, annotation, Evidence Object, LLM, and
+report failures are converted into bounded structured issues without exposing
+exception objects or stack traces. Completed stage outputs remain available,
+later stages are explicitly marked as skipped, and recoverable failures return
+partial results. HPO data or matching failures are recoverable: annotation
+continues into evidence and reporting without phenotype scores. Annotation
+source warnings also remain visible and produce an explicit partial result.
+
 ## Tests
 
 Run the offline test suite:

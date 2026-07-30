@@ -51,6 +51,7 @@ from backend.pipeline import (
     PipelineInputError,
     PipelineResultError,
     create_pipeline_result,
+    run_analysis,
     run_annotation_and_phenotype,
     run_variant_selection,
     validate_analysis_input,
@@ -6254,3 +6255,295 @@ class TestPipelineAnnotationAndPhenotype:
         }
         assert stage_statuses["annotation"] == "warning"
         assert stage_statuses["phenotype"] == "skipped"
+
+
+class TestCompletePipelineHappyPath:
+    """Verify Stage 10 Evidence Object through report integration."""
+
+    @staticmethod
+    def _minimal_interpretation() -> str:
+        return (
+            "## Variant summary\n"
+            "Evidence-based variant summary.\n\n"
+            "## Clinical evidence\n"
+            "Available source evidence was reviewed.\n\n"
+            "## Phenotype correlation\n"
+            "Not available in the supplied evidence.\n\n"
+            "## Interpretation\n"
+            "Evidence-limited interpretation.\n\n"
+            "## Limitations\n"
+            "Unavailable evidence limits interpretation.\n\n"
+            "## References\n"
+            "Not available in the supplied evidence.\n\n"
+            "## Decision-support notice\n"
+            f"{CLINICAL_DECISION_SUPPORT_NOTICE}"
+        )
+
+    def test_analysis_builds_evidence_and_saves_leading_report(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for variant in variants:  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._complete_candidate()
+                candidate["variant"] = dict(variant)
+                annotations.append(candidate)
+            return annotations
+
+        def fake_match(
+            annotations: object,
+            _: object,
+            **__: object,
+        ) -> list[dict[str, object]]:
+            return [
+                dict(annotation)
+                for annotation in annotations  # type: ignore[union-attr]
+            ]
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.match_phenotypes",
+            fake_match,
+        )
+        adapter = FakeLLMAdapter(
+            LLMResponse(
+                content=(
+                    TestClinicalInterpretationValidation
+                    ._valid_markdown()
+                ),
+                model="pipeline-test-model",
+            )
+        )
+        client = LLMClient(adapter)
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="2:166848215:C:T",
+            phenotypes=["HP:0001250", "HP:0001263"],
+            top_n=1,
+            seed=9,
+            annotation_max_retries=0,
+            llm_client=client,
+            report_dir=tmp_path / "reports",
+        )
+
+        assert result["status"] == "success"
+        assert result["current_stage"] == "completed"
+        assert result["progress_percent"] == 100
+        assert len(result["evidence_objects"]) == 1
+        assert result["evidence_objects"][0]["variant"] == {
+            "chrom": "2",
+            "pos": 166848215,
+            "ref": "C",
+            "alt": "T",
+        }
+        assert len(adapter.requests) == 1
+        assert "BEGIN_EVIDENCE_OBJECT_JSON" in (
+            adapter.requests[0].messages[1].content
+        )
+        assert result["report_path"] is not None
+        report_path = Path(result["report_path"])
+        assert report_path.is_file()
+        assert (
+            CLINICAL_DECISION_SUPPORT_NOTICE
+            in report_path.read_text(encoding="utf-8")
+        )
+        assert all(
+            record["status"] == "success"
+            for record in result["stages"]
+        )
+        json.dumps(result, allow_nan=False)
+
+    def test_invalid_input_returns_frontend_safe_error(self) -> None:
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant=None,
+            phenotypes=[],
+        )
+
+        assert result["status"] == "error"
+        assert result["current_stage"] == "input"
+        assert result["errors"] == [
+            {
+                "stage": "input",
+                "code": "invalid_input",
+                "message": (
+                    "Exactly one of vcf_path or manual_variant must "
+                    "be provided."
+                ),
+                "recoverable": False,
+            }
+        ]
+        assert result["stages"][0]["status"] == "error"
+        assert all(
+            record["status"] == "skipped"
+            for record in result["stages"][1:]
+        )
+        json.dumps(result, allow_nan=False)
+
+    def test_llm_failure_retains_evidence_as_partial_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for variant in variants:  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._complete_candidate()
+                candidate["variant"] = dict(variant)
+                annotations.append(candidate)
+            return annotations
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.match_phenotypes",
+            lambda annotations, *_args, **_kwargs: list(annotations),
+        )
+        client = LLMClient(
+            FakeLLMAdapter(
+                LLMTimeoutError("The LLM request timed out.")
+            )
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="2:166848215:C:T",
+            phenotypes=["HP:0001250", "HP:0001263"],
+            top_n=1,
+            seed=4,
+            llm_client=client,
+        )
+
+        assert result["status"] == "partial"
+        assert result["current_stage"] == "llm"
+        assert len(result["evidence_objects"]) == 1
+        assert result["report_path"] is None
+        assert result["errors"] == [
+            {
+                "stage": "llm",
+                "code": "llm_interpretation_failed",
+                "message": "The LLM request timed out.",
+                "recoverable": True,
+            }
+        ]
+        stage_statuses = {
+            record["stage"]: record["status"]
+            for record in result["stages"]
+        }
+        assert stage_statuses["evidence"] == "success"
+        assert stage_statuses["llm"] == "error"
+        assert stage_statuses["report"] == "skipped"
+        json.dumps(result, allow_nan=False)
+
+    def test_phenotype_failure_continues_without_scores(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for variant in variants:  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._complete_candidate()
+                candidate["variant"] = dict(variant)
+                for field in (
+                    "phenotype_score",
+                    "hpo_terms",
+                    "matched_hpo_terms",
+                    "phenotype_match_count",
+                ):
+                    candidate.pop(field)
+                annotations.append(candidate)
+            return annotations
+
+        def unavailable_match(*_: object, **__: object) -> object:
+            raise HPODataError("private ontology path")
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.match_phenotypes",
+            unavailable_match,
+        )
+        client = LLMClient(
+            FakeLLMAdapter(
+                LLMResponse(
+                    content=self._minimal_interpretation(),
+                    model="pipeline-test-model",
+                )
+            )
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="2:166848215:C:T",
+            phenotypes=["HP:0001250"],
+            top_n=1,
+            seed=5,
+            llm_client=client,
+            report_dir=tmp_path / "reports",
+        )
+
+        assert result["status"] == "partial"
+        assert result["current_stage"] == "completed"
+        assert result["evidence_objects"][0][
+            "phenotype_score"
+        ] is None
+        assert result["evidence_objects"][0]["hpo_terms"] == []
+        assert result["report_path"] is not None
+        assert Path(result["report_path"]).is_file()
+        assert result["errors"][0]["stage"] == "phenotype"
+        assert result["errors"][0]["recoverable"] is True
+        assert "private ontology path" not in json.dumps(result)
+        stage_statuses = {
+            record["stage"]: record["status"]
+            for record in result["stages"]
+        }
+        assert stage_statuses["phenotype"] == "warning"
+        assert stage_statuses["report"] == "success"
+
+    def test_unexpected_error_does_not_expose_internal_detail(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_annotation(*_: object, **__: object) -> object:
+            raise RuntimeError("secret internal API detail")
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fail_annotation,
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="2:166848215:C:T",
+            phenotypes=[],
+            top_n=1,
+            seed=6,
+        )
+
+        serialized = json.dumps(result, allow_nan=False)
+        assert result["status"] == "error"
+        assert result["current_stage"] == "annotation"
+        assert result["errors"][0]["code"] == (
+            "unexpected_enrichment_error"
+        )
+        assert "secret internal API detail" not in serialized
+        assert "traceback" not in serialized.casefold()

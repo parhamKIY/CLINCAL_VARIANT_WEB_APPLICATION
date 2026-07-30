@@ -9,10 +9,31 @@ from typing import Literal, TypedDict, cast
 
 import requests
 
-from backend.annotation import annotate_variants
-from backend.phenotype import match_phenotypes
-from backend.prioritization import prioritize_variants
-from backend.vcf_processing import VariantData, process_vcf
+from backend.annotation import AnnotationError, annotate_variants
+from backend.llm import LLMClient, LLMError
+from backend.phenotype import (
+    HPODataError,
+    PhenotypeError,
+    match_phenotypes,
+)
+from backend.prioritization import (
+    PrioritizationError,
+    prioritize_variants,
+)
+from backend.report import (
+    ClinicalInterpretationError,
+    ClinicalReportError,
+    EvidenceObjectError,
+    build_clinical_report,
+    build_evidence_objects,
+    generate_clinical_interpretation,
+    save_clinical_report,
+)
+from backend.vcf_processing import (
+    VCFProcessingError,
+    VariantData,
+    process_vcf,
+)
 
 
 PIPELINE_SCHEMA_VERSION = "1.0"
@@ -532,6 +553,112 @@ def _set_stage(
     }
 
 
+def _append_warning(
+    result: PipelineResult,
+    message: str,
+) -> None:
+    """Append one unique warning without exceeding the public bound."""
+
+    normalized = " ".join(message.split())
+    if (
+        not normalized
+        or normalized in result["warnings"]
+        or len(result["warnings"]) >= MAX_PIPELINE_WARNINGS
+    ):
+        return
+    result["warnings"].append(normalized)
+
+
+def _record_issue(
+    result: PipelineResult,
+    *,
+    stage: str,
+    code: str,
+    message: str,
+    recoverable: bool,
+) -> None:
+    """Retain one sanitized structured issue for frontend display."""
+
+    normalized = " ".join(message.split())
+    if not normalized:
+        normalized = "The pipeline stage could not be completed."
+    issue: PipelineIssue = {
+        "stage": stage,
+        "code": code,
+        "message": normalized[:500],
+        "recoverable": recoverable,
+    }
+    if (
+        issue not in result["errors"]
+        and len(result["errors"]) < MAX_PIPELINE_ERRORS
+    ):
+        result["errors"].append(issue)
+    if recoverable:
+        _append_warning(result, issue["message"])
+
+
+def _finish_failed_stage(
+    result: PipelineResult,
+    *,
+    stage: str,
+    code: str,
+    message: str,
+    recoverable: bool,
+) -> PipelineResult:
+    """Finalize a stopped pipeline while preserving completed outputs."""
+
+    normalized_message = " ".join(message.split())[:500]
+    if not normalized_message:
+        normalized_message = (
+            "The pipeline stage could not be completed."
+        )
+    _record_issue(
+        result,
+        stage=stage,
+        code=code,
+        message=normalized_message,
+        recoverable=recoverable,
+    )
+    _set_stage(
+        result,
+        stage,
+        "error",
+        progress_percent=100,
+        message=normalized_message,
+    )
+    failed_index = PIPELINE_STAGE_ORDER.index(stage)
+    for later_stage in PIPELINE_STAGE_ORDER[failed_index + 1:]:
+        record = result["stages"][
+            PIPELINE_STAGE_ORDER.index(later_stage)
+        ]
+        if record["status"] in {"pending", "running"}:
+            _set_stage(
+                result,
+                later_stage,
+                "skipped",
+                progress_percent=0,
+                message=f"Skipped because {stage} did not complete.",
+            )
+
+    has_retained_output = any(
+        result[field]
+        for field in (
+            "variants",
+            "candidates",
+            "annotations",
+            "phenotype_results",
+            "evidence_objects",
+        )
+    )
+    result["status"] = (
+        "partial"
+        if recoverable and has_retained_output
+        else "error"
+    )
+    result["current_stage"] = stage
+    return validate_pipeline_result(result)
+
+
 def _process_and_prioritize(
     request: AnalysisInput,
     result: PipelineResult,
@@ -649,12 +776,9 @@ def _retain_annotation_warnings(
             if (
                 not isinstance(warning, str)
                 or not warning.strip()
-                or warning in result["warnings"]
             ):
                 continue
-            if len(result["warnings"]) >= MAX_PIPELINE_WARNINGS:
-                return
-            result["warnings"].append(warning.strip())
+            _append_warning(result, warning)
 
 
 def _annotate_and_match(
@@ -734,29 +858,149 @@ def _annotate_and_match(
             progress_percent=0,
             message="Matching annotated genes to HPO phenotypes.",
         )
-        phenotype_results = match_phenotypes(
-            result["annotations"],
-            request["phenotypes"],
-            ontology_path=ontology_path,
-            associations_path=associations_path,
-        )
-        result["phenotype_results"] = [
-            dict(candidate)
-            for candidate in phenotype_results
-        ]
-        _set_stage(
-            result,
-            "phenotype",
-            "success",
-            progress_percent=100,
-            message=(
-                "Attached phenotype scores to "
-                f"{len(result['phenotype_results'])} candidates."
-            ),
-        )
+        try:
+            phenotype_results = match_phenotypes(
+                result["annotations"],
+                request["phenotypes"],
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+            )
+        except (PhenotypeError, HPODataError):
+            message = (
+                "Phenotype matching was unavailable; annotated "
+                "candidates continued without phenotype scores."
+            )
+            result["phenotype_results"] = [
+                dict(annotation)
+                for annotation in result["annotations"]
+            ]
+            _record_issue(
+                result,
+                stage="phenotype",
+                code="phenotype_matching_unavailable",
+                message=message,
+                recoverable=True,
+            )
+            _set_stage(
+                result,
+                "phenotype",
+                "warning",
+                progress_percent=100,
+                message=message,
+            )
+        else:
+            result["phenotype_results"] = [
+                dict(candidate)
+                for candidate in phenotype_results
+            ]
+            _set_stage(
+                result,
+                "phenotype",
+                "success",
+                progress_percent=100,
+                message=(
+                    "Attached phenotype scores to "
+                    f"{len(result['phenotype_results'])} candidates."
+                ),
+            )
 
     result["current_stage"] = "evidence"
     result["progress_percent"] = 60
+
+
+def _build_evidence_and_report(
+    result: PipelineResult,
+    *,
+    llm_client: LLMClient | None,
+    report_dir: str | Path | None,
+) -> None:
+    """Build all Evidence Objects and report the leading candidate."""
+
+    result["current_stage"] = "evidence"
+    result["progress_percent"] = 65
+    _set_stage(
+        result,
+        "evidence",
+        "running",
+        progress_percent=0,
+        message="Building bounded Evidence Objects.",
+    )
+    evidence_objects = build_evidence_objects(
+        result["phenotype_results"]
+    )
+    if not evidence_objects:
+        raise PipelineError(
+            "Evidence Object construction produced no candidates."
+        )
+    result["evidence_objects"] = [
+        dict(evidence)
+        for evidence in evidence_objects
+    ]
+    _set_stage(
+        result,
+        "evidence",
+        "success",
+        progress_percent=100,
+        message=f"Built {len(evidence_objects)} Evidence Objects.",
+    )
+
+    leading_evidence = evidence_objects[0]
+    result["current_stage"] = "llm"
+    result["progress_percent"] = 75
+    _set_stage(
+        result,
+        "llm",
+        "running",
+        progress_percent=0,
+        message="Interpreting the leading candidate.",
+    )
+    interpretation = generate_clinical_interpretation(
+        leading_evidence,
+        client=llm_client,
+    )
+    _set_stage(
+        result,
+        "llm",
+        "success",
+        progress_percent=100,
+        message=(
+            "Generated an evidence-bound interpretation for the "
+            "leading candidate."
+        ),
+    )
+
+    result["current_stage"] = "report"
+    result["progress_percent"] = 90
+    _set_stage(
+        result,
+        "report",
+        "running",
+        progress_percent=0,
+        message="Building and saving the clinical report.",
+    )
+    report = build_clinical_report(
+        leading_evidence,
+        interpretation,
+    )
+    report_path = save_clinical_report(
+        report,
+        report_dir=report_dir,
+    )
+    result["report_path"] = str(report_path)
+    _set_stage(
+        result,
+        "report",
+        "success",
+        progress_percent=100,
+        message="Saved the leading-candidate clinical report.",
+    )
+    result["status"] = (
+        "partial"
+        if result["warnings"] or result["errors"]
+        else "success"
+    )
+    result["current_stage"] = "completed"
+    result["progress_percent"] = 100
 
 
 def run_variant_selection(
@@ -831,6 +1075,168 @@ def run_annotation_and_phenotype(
     return validate_pipeline_result(result)
 
 
+def run_analysis(
+    vcf_path: str | Path | None,
+    phenotypes: list[str] | tuple[str, ...],
+    manual_variant: str | None = None,
+    *,
+    top_n: int | None = None,
+    seed: int | None = None,
+    sample_name: str | None = None,
+    max_variants: int | None = None,
+    annotation_batch_size: int | None = None,
+    annotation_max_retries: int | None = None,
+    annotation_session: requests.Session | None = None,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+    llm_client: LLMClient | None = None,
+    report_dir: str | Path | None = None,
+) -> PipelineResult:
+    """Run Stage 10 with retained progress and frontend-safe failures."""
+
+    result = create_pipeline_result()
+    try:
+        request = validate_analysis_input(
+            vcf_path=vcf_path,
+            manual_variant=manual_variant,
+            phenotypes=phenotypes,
+        )
+    except PipelineInputError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="input",
+            code="invalid_input",
+            message=str(exc),
+            recoverable=False,
+        )
+
+    try:
+        _process_and_prioritize(
+            request,
+            result,
+            top_n=top_n,
+            seed=seed,
+            sample_name=sample_name,
+            max_variants=max_variants,
+        )
+    except VCFProcessingError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="vcf_processing",
+            code="vcf_processing_failed",
+            message=str(exc),
+            recoverable=False,
+        )
+    except PrioritizationError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="prioritization",
+            code="prioritization_failed",
+            message=str(exc),
+            recoverable=False,
+        )
+    except PipelineError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="vcf_processing",
+            code="no_variants",
+            message=str(exc),
+            recoverable=False,
+        )
+    except Exception:
+        return _finish_failed_stage(
+            result,
+            stage=result["current_stage"],
+            code="unexpected_processing_error",
+            message=(
+                "Variant processing stopped because of an unexpected "
+                "internal error."
+            ),
+            recoverable=False,
+        )
+
+    try:
+        _annotate_and_match(
+            request,
+            result,
+            annotation_batch_size=annotation_batch_size,
+            annotation_max_retries=annotation_max_retries,
+            annotation_session=annotation_session,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+    except AnnotationError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="annotation",
+            code="annotation_failed",
+            message=str(exc),
+            recoverable=True,
+        )
+    except Exception:
+        return _finish_failed_stage(
+            result,
+            stage=result["current_stage"],
+            code="unexpected_enrichment_error",
+            message=(
+                "Candidate enrichment stopped because of an unexpected "
+                "internal error."
+            ),
+            recoverable=False,
+        )
+
+    try:
+        _build_evidence_and_report(
+            result,
+            llm_client=llm_client,
+            report_dir=report_dir,
+        )
+    except EvidenceObjectError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="evidence",
+            code="evidence_object_failed",
+            message=str(exc),
+            recoverable=False,
+        )
+    except (LLMError, ClinicalInterpretationError) as exc:
+        return _finish_failed_stage(
+            result,
+            stage="llm",
+            code="llm_interpretation_failed",
+            message=str(exc),
+            recoverable=True,
+        )
+    except ClinicalReportError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="report",
+            code="report_generation_failed",
+            message=str(exc),
+            recoverable=True,
+        )
+    except PipelineError as exc:
+        return _finish_failed_stage(
+            result,
+            stage="evidence",
+            code="evidence_object_failed",
+            message=str(exc),
+            recoverable=False,
+        )
+    except Exception:
+        return _finish_failed_stage(
+            result,
+            stage=result["current_stage"],
+            code="unexpected_pipeline_error",
+            message=(
+                "Analysis stopped because of an unexpected internal "
+                "error."
+            ),
+            recoverable=False,
+        )
+    return validate_pipeline_result(result)
+
+
 __all__ = [
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
@@ -848,6 +1254,7 @@ __all__ = [
     "PipelineStageStatus",
     "PipelineStatus",
     "create_pipeline_result",
+    "run_analysis",
     "run_annotation_and_phenotype",
     "run_variant_selection",
     "validate_analysis_input",
