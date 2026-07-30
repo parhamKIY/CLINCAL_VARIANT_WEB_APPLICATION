@@ -51,6 +51,7 @@ from backend.pipeline import (
     PipelineInputError,
     PipelineResultError,
     create_pipeline_result,
+    run_annotation_and_phenotype,
     run_variant_selection,
     validate_analysis_input,
     validate_pipeline_result,
@@ -6129,3 +6130,127 @@ class TestPipelineVariantSelection:
                 top_n=3,
                 seed=1,
             )
+
+
+class TestPipelineAnnotationAndPhenotype:
+    """Verify Stage 10 candidate enrichment through HPO matching."""
+
+    @staticmethod
+    def _annotation(
+        variant: dict[str, object],
+        *,
+        warning: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "variant": dict(variant),
+            "assembly": "GRCh38",
+            "gene": "SCN1A",
+            "gene_id": "ENSG00000144285",
+            "transcript": "ENST00000303395",
+            "consequence": "missense_variant",
+            "impact": "MODERATE",
+            "protein_change": "ENSP00000303540:p.Ala100Thr",
+            "population_frequency": 0.0001,
+            "sources": {},
+            "references": [],
+            "warnings": [warning] if warning else [],
+        }
+
+    def test_candidates_flow_through_annotation_and_hpo_matching(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        received: list[dict[str, object]] = []
+
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            received.extend(
+                dict(variant)
+                for variant in variants  # type: ignore[union-attr]
+            )
+            return [
+                self._annotation(variant)
+                for variant in received
+            ]
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+
+        result = run_annotation_and_phenotype(
+            vcf_path=None,
+            manual_variant="2:166848215:C:T",
+            phenotypes=["HP:0001250"],
+            top_n=1,
+            seed=3,
+            annotation_max_retries=0,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+
+        assert received == result["candidates"]
+        assert len(result["annotations"]) == 1
+        assert result["phenotype_results"][0][
+            "matched_hpo_terms"
+        ] == ["HP:0001250"]
+        assert result["phenotype_results"][0][
+            "phenotype_score"
+        ] == 1.0
+        assert result["status"] == "running"
+        assert result["current_stage"] == "evidence"
+        assert result["progress_percent"] == 60
+        stage_statuses = {
+            record["stage"]: record["status"]
+            for record in result["stages"]
+        }
+        assert stage_statuses["annotation"] == "success"
+        assert stage_statuses["phenotype"] == "success"
+        assert stage_statuses["evidence"] == "pending"
+
+    def test_empty_phenotypes_skip_matching_without_losing_candidates(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            return [
+                self._annotation(
+                    dict(variant),
+                    warning="ClinVar evidence was unavailable.",
+                )
+                for variant in variants  # type: ignore[union-attr]
+            ]
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+
+        result = run_annotation_and_phenotype(
+            vcf_path=None,
+            manual_variant="2:166848215:C:T",
+            phenotypes=[],
+            top_n=1,
+            seed=3,
+        )
+
+        assert result["phenotype_results"] == result["annotations"]
+        assert result["warnings"] == [
+            "ClinVar evidence was unavailable."
+        ]
+        stage_statuses = {
+            record["stage"]: record["status"]
+            for record in result["stages"]
+        }
+        assert stage_statuses["annotation"] == "warning"
+        assert stage_statuses["phenotype"] == "skipped"

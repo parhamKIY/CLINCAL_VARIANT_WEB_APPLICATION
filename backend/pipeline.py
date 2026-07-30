@@ -7,6 +7,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
+import requests
+
+from backend.annotation import annotate_variants
+from backend.phenotype import match_phenotypes
 from backend.prioritization import prioritize_variants
 from backend.vcf_processing import VariantData, process_vcf
 
@@ -631,6 +635,130 @@ def _process_and_prioritize(
     result["progress_percent"] = 30
 
 
+def _retain_annotation_warnings(
+    result: PipelineResult,
+    annotations: list[dict[str, object]],
+) -> None:
+    """Copy unique annotation warnings into the bounded pipeline result."""
+
+    for annotation in annotations:
+        warnings = annotation.get("warnings", [])
+        if not isinstance(warnings, list):
+            continue
+        for warning in warnings:
+            if (
+                not isinstance(warning, str)
+                or not warning.strip()
+                or warning in result["warnings"]
+            ):
+                continue
+            if len(result["warnings"]) >= MAX_PIPELINE_WARNINGS:
+                return
+            result["warnings"].append(warning.strip())
+
+
+def _annotate_and_match(
+    request: AnalysisInput,
+    result: PipelineResult,
+    *,
+    annotation_batch_size: int | None,
+    annotation_max_retries: int | None,
+    annotation_session: requests.Session | None,
+    ontology_path: str | Path | None,
+    associations_path: str | Path | None,
+) -> None:
+    """Enrich selected candidates and attach optional HPO scores."""
+
+    result["current_stage"] = "annotation"
+    result["progress_percent"] = 35
+    _set_stage(
+        result,
+        "annotation",
+        "running",
+        progress_percent=0,
+        message="Annotating selected candidates.",
+    )
+    annotations = annotate_variants(
+        result["candidates"],
+        batch_size=annotation_batch_size,
+        max_retries=annotation_max_retries,
+        session=annotation_session,
+    )
+    result["annotations"] = [
+        dict(annotation)
+        for annotation in annotations
+    ]
+    _retain_annotation_warnings(result, result["annotations"])
+    annotation_status: PipelineStageStatus = (
+        "warning"
+        if any(
+            annotation.get("warnings")
+            for annotation in result["annotations"]
+        )
+        else "success"
+    )
+    _set_stage(
+        result,
+        "annotation",
+        annotation_status,
+        progress_percent=100,
+        message=(
+            f"Annotated {len(result['annotations'])} candidates"
+            + (
+                " with source warnings."
+                if annotation_status == "warning"
+                else "."
+            )
+        ),
+    )
+
+    result["current_stage"] = "phenotype"
+    result["progress_percent"] = 50
+    if not request["phenotypes"]:
+        result["phenotype_results"] = [
+            dict(annotation)
+            for annotation in result["annotations"]
+        ]
+        _set_stage(
+            result,
+            "phenotype",
+            "skipped",
+            progress_percent=100,
+            message="No HPO phenotypes were supplied.",
+        )
+    else:
+        _set_stage(
+            result,
+            "phenotype",
+            "running",
+            progress_percent=0,
+            message="Matching annotated genes to HPO phenotypes.",
+        )
+        phenotype_results = match_phenotypes(
+            result["annotations"],
+            request["phenotypes"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+        result["phenotype_results"] = [
+            dict(candidate)
+            for candidate in phenotype_results
+        ]
+        _set_stage(
+            result,
+            "phenotype",
+            "success",
+            progress_percent=100,
+            message=(
+                "Attached phenotype scores to "
+                f"{len(result['phenotype_results'])} candidates."
+            ),
+        )
+
+    result["current_stage"] = "evidence"
+    result["progress_percent"] = 60
+
+
 def run_variant_selection(
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
@@ -660,6 +788,49 @@ def run_variant_selection(
     return validate_pipeline_result(result)
 
 
+def run_annotation_and_phenotype(
+    vcf_path: str | Path | None,
+    phenotypes: list[str] | tuple[str, ...],
+    manual_variant: str | None = None,
+    *,
+    top_n: int | None = None,
+    seed: int | None = None,
+    sample_name: str | None = None,
+    max_variants: int | None = None,
+    annotation_batch_size: int | None = None,
+    annotation_max_retries: int | None = None,
+    annotation_session: requests.Session | None = None,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+) -> PipelineResult:
+    """Run Stage 10 through annotation and optional HPO matching."""
+
+    request = validate_analysis_input(
+        vcf_path=vcf_path,
+        manual_variant=manual_variant,
+        phenotypes=phenotypes,
+    )
+    result = create_pipeline_result()
+    _process_and_prioritize(
+        request,
+        result,
+        top_n=top_n,
+        seed=seed,
+        sample_name=sample_name,
+        max_variants=max_variants,
+    )
+    _annotate_and_match(
+        request,
+        result,
+        annotation_batch_size=annotation_batch_size,
+        annotation_max_retries=annotation_max_retries,
+        annotation_session=annotation_session,
+        ontology_path=ontology_path,
+        associations_path=associations_path,
+    )
+    return validate_pipeline_result(result)
+
+
 __all__ = [
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
@@ -677,6 +848,7 @@ __all__ = [
     "PipelineStageStatus",
     "PipelineStatus",
     "create_pipeline_result",
+    "run_annotation_and_phenotype",
     "run_variant_selection",
     "validate_analysis_input",
     "validate_pipeline_result",

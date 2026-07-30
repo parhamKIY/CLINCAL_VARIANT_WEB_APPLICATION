@@ -206,6 +206,13 @@ The total parsed count and truncation state remain explicit, candidate output
 is copied into the pipeline result, and successful processing advances the
 stable progress contract to the annotation stage.
 
+Stage 10 step 3 connects selected candidates to the existing Ensembl VEP,
+MyVariant.info, NCBI ClinVar, and ClinGen/GenCC annotation boundary, then
+passes the standardized annotations into HPO gene matching. Source-level
+annotation warnings remain visible without discarding other source results.
+When no phenotypes are supplied, matching is explicitly marked as skipped and
+the annotated candidates continue unchanged to the Evidence Object stage.
+
 ## Tests
 
 Run the offline test suite:
