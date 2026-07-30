@@ -102,8 +102,13 @@ SDK or construct provider-specific request payloads.
 
 Provider selection and connection values are centralized in `.env` through
 `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT`.
-The default provider adapter and its HTTP implementation are intentionally
-reserved for Stage 8 step 2.
+Stage 8 step 2 implements the `openai_compatible` adapter using a non-streaming
+`/chat/completions` request. It applies the configured timeout, uses
+deterministic temperature by default, converts provider output into the
+standard response contract, and maps authentication, permission, rate-limit,
+timeout, connection, HTTP, malformed JSON, and malformed response failures to
+the public error hierarchy. Changing between OpenAI-compatible services now
+requires only changing the `.env` base URL, API key, and model.
 
 ## Tests
 
@@ -113,7 +118,7 @@ Run the offline test suite:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Run the retained manual LLM smoke test:
+Run a live request through the production LLM boundary:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py

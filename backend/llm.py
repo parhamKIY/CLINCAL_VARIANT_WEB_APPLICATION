@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
+
+import requests
+
+from config import settings
 
 
 LLMRole = Literal["system", "user", "assistant"]
@@ -206,6 +212,194 @@ class LLMAdapter(Protocol):
         """Generate one standardized response."""
 
 
+class LLMHTTPSession(Protocol):
+    """Minimal HTTP dependency used by provider adapters."""
+
+    def post(
+        self,
+        url: str,
+        **kwargs: object,
+    ) -> requests.Response:
+        """Send one HTTP POST request."""
+
+
+class OpenAICompatibleAdapter:
+    """Translate the neutral contract to OpenAI-compatible chat HTTP."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: int | float,
+        session: LLMHTTPSession | None = None,
+    ) -> None:
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise LLMConfigurationError(
+                "LLM base URL must be a non-empty string."
+            )
+        parsed_url = urlsplit(base_url.strip())
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.netloc
+        ):
+            raise LLMConfigurationError(
+                "LLM base URL must be a valid HTTP or HTTPS URL."
+            )
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise LLMConfigurationError(
+                "LLM API key must be a non-empty string."
+            )
+        if not isinstance(model, str) or not model.strip():
+            raise LLMConfigurationError(
+                "LLM model must be a non-empty string."
+            )
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not isfinite(timeout)
+            or timeout <= 0
+        ):
+            raise LLMConfigurationError(
+                "LLM timeout must be a positive finite number."
+            )
+
+        self._endpoint = (
+            f"{base_url.strip().rstrip('/')}/chat/completions"
+        )
+        self._api_key = api_key.strip()
+        self._model = model.strip()
+        self._timeout = timeout
+        self._session = session or requests
+
+    def generate(self, request: LLMRequest) -> LLMResponse:
+        """Execute and standardize one non-streaming chat completion."""
+
+        payload = {
+            "model": self._model,
+            "messages": [
+                {
+                    "role": message.role,
+                    "content": message.content,
+                }
+                for message in request.messages
+            ],
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": False,
+        }
+
+        try:
+            response = self._session.post(
+                self._endpoint,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=self._timeout,
+            )
+        except requests.Timeout as exc:
+            raise LLMTimeoutError(
+                "The LLM provider request timed out."
+            ) from exc
+        except requests.RequestException as exc:
+            raise LLMRequestError(
+                "Could not connect to the LLM provider."
+            ) from exc
+
+        self._raise_for_status(response)
+
+        try:
+            response_data = response.json()
+        except (requests.JSONDecodeError, ValueError) as exc:
+            raise LLMResponseError(
+                "The LLM provider returned invalid JSON."
+            ) from exc
+
+        return self._parse_response(response_data)
+
+    @staticmethod
+    def _raise_for_status(response: requests.Response) -> None:
+        status_code = response.status_code
+
+        if 200 <= status_code < 300:
+            return
+        if status_code in {401, 403}:
+            raise LLMAuthenticationError(
+                "The LLM provider rejected the configured credentials "
+                f"or permissions (HTTP {status_code})."
+            )
+        if status_code == 429:
+            raise LLMRateLimitError(
+                "The LLM provider rate limit was exceeded (HTTP 429)."
+            )
+
+        raise LLMRequestError(
+            f"The LLM provider returned HTTP {status_code}."
+        )
+
+    def _parse_response(
+        self,
+        response_data: object,
+    ) -> LLMResponse:
+        if not isinstance(response_data, Mapping):
+            raise LLMResponseError(
+                "The LLM provider response must be a JSON object."
+            )
+
+        choices = response_data.get("choices")
+        if (
+            not isinstance(choices, list)
+            or not choices
+            or not isinstance(choices[0], Mapping)
+        ):
+            raise LLMResponseError(
+                "The LLM provider response has no valid choices."
+            )
+
+        message = choices[0].get("message")
+        if not isinstance(message, Mapping):
+            raise LLMResponseError(
+                "The LLM provider response has no valid message."
+            )
+
+        content = message.get("content")
+        model = response_data.get("model", self._model)
+        finish_reason = choices[0].get("finish_reason")
+        usage = self._parse_usage(response_data.get("usage"))
+
+        return LLMResponse(
+            content=content,  # type: ignore[arg-type]
+            model=model,  # type: ignore[arg-type]
+            finish_reason=finish_reason,  # type: ignore[arg-type]
+            usage=usage,
+        )
+
+    @staticmethod
+    def _parse_usage(usage_data: object) -> LLMUsage | None:
+        if usage_data is None:
+            return None
+        if not isinstance(usage_data, Mapping):
+            raise LLMResponseError(
+                "The LLM provider usage value must be a JSON object."
+            )
+
+        return LLMUsage(
+            input_tokens=usage_data.get(
+                "prompt_tokens",
+                usage_data.get("input_tokens"),
+            ),
+            output_tokens=usage_data.get(
+                "completion_tokens",
+                usage_data.get("output_tokens"),
+            ),
+            total_tokens=usage_data.get("total_tokens"),
+        )
+
+
 class LLMClient:
     """Single application-facing gateway around an internal adapter."""
 
@@ -240,10 +434,21 @@ class LLMClient:
 
 
 def get_default_llm_client() -> LLMClient:
-    """Resolve the configured adapter in Stage 8 step 2."""
+    """Build the client selected entirely through central settings."""
 
-    raise LLMConfigurationError(
-        "The default LLM provider adapter is not configured."
+    if settings.LLM_PROVIDER != "openai_compatible":
+        raise LLMConfigurationError(
+            f"Unsupported LLM_PROVIDER '{settings.LLM_PROVIDER}'. "
+            "Supported provider protocol: openai_compatible."
+        )
+
+    return LLMClient(
+        OpenAICompatibleAdapter(
+            base_url=settings.LLM_BASE_URL,
+            api_key=settings.LLM_API_KEY,
+            model=settings.LLM_MODEL,
+            timeout=settings.LLM_TIMEOUT,
+        )
     )
 
 
@@ -308,6 +513,7 @@ __all__ = [
     "LLMTimeoutError",
     "LLMUsage",
     "LLMValidationError",
+    "OpenAICompatibleAdapter",
     "call_llm",
     "get_default_llm_client",
 ]

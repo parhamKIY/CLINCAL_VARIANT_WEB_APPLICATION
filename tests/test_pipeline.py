@@ -15,14 +15,18 @@ from backend.annotation import (
     annotate_variants,
 )
 from backend.llm import (
+    LLMAuthenticationError,
     LLMClient,
     LLMConfigurationError,
+    LLMRateLimitError,
     LLMRequest,
     LLMRequestError,
     LLMResponse,
     LLMResponseError,
+    LLMTimeoutError,
     LLMUsage,
     LLMValidationError,
+    OpenAICompatibleAdapter,
     call_llm,
 )
 from backend.phenotype import (
@@ -4034,10 +4038,19 @@ class TestLLMContract:
         assert request.temperature == 0.1
         assert request.max_tokens == 400
 
-    def test_missing_default_adapter_is_explicit(self) -> None:
+    def test_unsupported_default_provider_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "LLM_PROVIDER",
+            "native_provider",
+        )
+
         with pytest.raises(
             LLMConfigurationError,
-            match="default LLM provider adapter",
+            match="Unsupported LLM_PROVIDER",
         ):
             call_llm(
                 "System instructions.",
@@ -4177,4 +4190,364 @@ class TestLLMContract:
             LLMResponse(
                 content=" ",
                 model="test-model",
+            )
+
+    def test_openai_compatible_request_and_response_mapping(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "model": "returned-model",
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Clinical summary",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 41,
+                            "completion_tokens": 12,
+                            "total_tokens": 53,
+                        },
+                    },
+                )
+            ]
+        )
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1/",
+                api_key="test-secret",
+                model="configured-model",
+                timeout=17,
+                session=session,
+            )
+        )
+
+        result = call_llm(
+            "Use only validated evidence.",
+            '{"schema_version":"1.0"}',
+            temperature=0.0,
+            max_tokens=700,
+            client=client,
+        )
+
+        assert result == LLMResponse(
+            content="Clinical summary",
+            model="returned-model",
+            finish_reason="stop",
+            usage=LLMUsage(
+                input_tokens=41,
+                output_tokens=12,
+                total_tokens=53,
+            ),
+        )
+        assert len(session.post_calls) == 1
+        call = session.post_calls[0]
+        assert call["url"] == (
+            "https://llm.example/v1/chat/completions"
+        )
+        assert call["timeout"] == 17
+        assert call["headers"] == {
+            "Authorization": "Bearer test-secret",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        assert call["json"] == {
+            "model": "configured-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Use only validated evidence.",
+                },
+                {
+                    "role": "user",
+                    "content": '{"schema_version":"1.0"}',
+                },
+            ],
+            "temperature": 0.0,
+            "max_tokens": 700,
+            "stream": False,
+        }
+
+    def test_default_client_uses_central_settings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "OK",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    },
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_PROVIDER",
+            "openai_compatible",
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_BASE_URL",
+            "https://configured.example/v1",
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_API_KEY",
+            "configured-secret",
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_MODEL",
+            "configured-model",
+        )
+        monkeypatch.setattr(settings, "LLM_TIMEOUT", 23)
+        monkeypatch.setattr(requests, "post", session.post)
+
+        result = call_llm(
+            "System",
+            "Reply OK",
+            max_tokens=8,
+        )
+
+        assert result.content == "OK"
+        assert result.model == "configured-model"
+        assert session.post_calls[0]["url"] == (
+            "https://configured.example/v1/chat/completions"
+        )
+        assert session.post_calls[0]["timeout"] == 23
+
+    @pytest.mark.parametrize(
+        ("status_code", "error_type", "message"),
+        [
+            (
+                401,
+                LLMAuthenticationError,
+                "credentials or permissions",
+            ),
+            (
+                403,
+                LLMAuthenticationError,
+                "credentials or permissions",
+            ),
+            (
+                429,
+                LLMRateLimitError,
+                "rate limit",
+            ),
+            (
+                500,
+                LLMRequestError,
+                "HTTP 500",
+            ),
+        ],
+    )
+    def test_http_failures_are_standardized(
+        self,
+        status_code: int,
+        error_type: type[Exception],
+        message: str,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    status_code,
+                    {
+                        "error": {
+                            "message": (
+                                "secret and clinical data "
+                                "must not be exposed"
+                            )
+                        }
+                    },
+                )
+            ]
+        )
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1",
+                api_key="test-secret",
+                model="test-model",
+                timeout=10,
+                session=session,
+            )
+        )
+
+        with pytest.raises(error_type, match=message) as exc_info:
+            call_llm(
+                "System",
+                "Evidence",
+                client=client,
+            )
+
+        assert "test-secret" not in str(exc_info.value)
+        assert "clinical data" not in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("failure", "error_type", "message"),
+        [
+            (
+                requests.Timeout("slow"),
+                LLMTimeoutError,
+                "timed out",
+            ),
+            (
+                requests.ConnectionError("offline"),
+                LLMRequestError,
+                "Could not connect",
+            ),
+        ],
+    )
+    def test_network_failures_are_standardized(
+        self,
+        failure: requests.RequestException,
+        error_type: type[Exception],
+        message: str,
+    ) -> None:
+        session = FakeSession([failure])
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1",
+                api_key="test-secret",
+                model="test-model",
+                timeout=10,
+                session=session,
+            )
+        )
+
+        with pytest.raises(error_type, match=message):
+            call_llm(
+                "System",
+                "Evidence",
+                client=client,
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            (
+                ValueError("not JSON"),
+                "invalid JSON",
+            ),
+            (
+                [],
+                "JSON object",
+            ),
+            (
+                {},
+                "valid choices",
+            ),
+            (
+                {"choices": [{}]},
+                "valid message",
+            ),
+            (
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                            }
+                        }
+                    ]
+                },
+                "response content",
+            ),
+            (
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Summary",
+                            }
+                        }
+                    ],
+                    "usage": [],
+                },
+                "usage value",
+            ),
+        ],
+    )
+    def test_malformed_provider_responses_are_rejected(
+        self,
+        payload: object,
+        message: str,
+    ) -> None:
+        session = FakeSession([FakeResponse(200, payload)])
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1",
+                api_key="test-secret",
+                model="test-model",
+                timeout=10,
+                session=session,
+            )
+        )
+
+        with pytest.raises(LLMResponseError, match=message):
+            call_llm(
+                "System",
+                "Evidence",
+                client=client,
+            )
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {"base_url": "not-a-url"},
+                "valid HTTP or HTTPS URL",
+            ),
+            (
+                {"api_key": " "},
+                "API key",
+            ),
+            (
+                {"model": ""},
+                "model",
+            ),
+            (
+                {"timeout": 0},
+                "timeout",
+            ),
+            (
+                {"timeout": float("inf")},
+                "timeout",
+            ),
+        ],
+    )
+    def test_invalid_adapter_configuration_is_rejected(
+        self,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        arguments: dict[str, object] = {
+            "base_url": "https://llm.example/v1",
+            "api_key": "test-secret",
+            "model": "test-model",
+            "timeout": 10,
+        }
+        arguments.update(overrides)
+
+        with pytest.raises(
+            LLMConfigurationError,
+            match=message,
+        ):
+            OpenAICompatibleAdapter(
+                **arguments,  # type: ignore[arg-type]
             )
