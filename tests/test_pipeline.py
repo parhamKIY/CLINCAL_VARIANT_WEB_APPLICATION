@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
+from streamlit.testing.v1 import AppTest
 
 from backend.annotation import (
     AnnotationError,
@@ -6646,4 +6647,28 @@ class TestCompletePipelineHappyPath:
         assert all(
             stage["status"] == "success"
             for stage in result["stages"]
+        )
+
+
+class TestFrontendFoundation:
+    """Verify the Stage 11 Streamlit application shell."""
+
+    def test_app_shell_renders_without_exceptions(self) -> None:
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        assert not app.exception
+        assert [title.value for title in app.title] == [
+            "Clinical Variant Interpretation"
+        ]
+        assert any(
+            "clinical decision support only"
+            in warning.value.casefold()
+            for warning in app.warning
+        )
+        assert any(
+            "Frontend foundation is ready"
+            in info.value
+            for info in app.info
         )

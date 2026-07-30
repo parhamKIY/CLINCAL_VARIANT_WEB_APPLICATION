@@ -1,0 +1,62 @@
+:root {
+    --cv-navy: #17324d;
+    --cv-blue: #2b6f93;
+    --cv-cyan: #dff3f5;
+    --cv-line: #d7e2e8;
+    --cv-surface: #f7fafb;
+}
+
+.stApp {
+    background:
+        radial-gradient(circle at 92% 4%, #e8f6f7 0, transparent 28rem),
+        #ffffff;
+}
+
+.block-container {
+    max-width: 1180px;
+    padding-top: 2.5rem;
+    padding-bottom: 4rem;
+}
+
+h1,
+h2,
+h3 {
+    color: var(--cv-navy);
+    letter-spacing: -0.02em;
+}
+
+.workflow-step {
+    min-height: 5.25rem;
+    padding: 0.9rem 0.7rem;
+    border: 1px solid var(--cv-line);
+    border-radius: 0.8rem;
+    background: rgba(247, 250, 251, 0.88);
+    color: var(--cv-navy);
+    text-align: center;
+    box-shadow: 0 0.25rem 1rem rgba(23, 50, 77, 0.05);
+}
+
+.workflow-number {
+    display: block;
+    width: 1.7rem;
+    height: 1.7rem;
+    margin: 0 auto 0.45rem;
+    border-radius: 999px;
+    background: var(--cv-cyan);
+    color: var(--cv-blue);
+    font-size: 0.82rem;
+    font-weight: 700;
+    line-height: 1.7rem;
+}
+
+@media (max-width: 760px) {
+    .block-container {
+        padding-top: 1.3rem;
+    }
+
+    .workflow-step {
+        min-height: 4.6rem;
+        padding: 0.7rem 0.3rem;
+        font-size: 0.75rem;
+    }
+}

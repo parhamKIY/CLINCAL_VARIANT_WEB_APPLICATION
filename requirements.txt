@@ -1,4 +1,5 @@
 pytest
 python-dotenv
 requests
+streamlit
 vcfpy

@@ -239,6 +239,21 @@ only remote services. A live `--pipeline` smoke mode exercises the same public
 the saved report. Stage 10 is complete; the temporary random prioritizer
 remains the documented non-clinical MVP limitation.
 
+## Stage 11 Streamlit frontend: in progress
+
+Stage 11 step 1 establishes the presentation-only Streamlit boundary. The
+root `app.py` delegates rendering to `frontend/ui.py`, which configures the
+page, loads local responsive styles, displays the clinical decision-support
+notice, and presents the analysis workflow without duplicating backend logic.
+The frontend imports centralized settings and will call only the public
+pipeline boundary in later steps.
+
+Run the frontend:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
 ## Tests
 
 Run the offline test suite:
