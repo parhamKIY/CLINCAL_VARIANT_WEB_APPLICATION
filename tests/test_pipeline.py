@@ -6839,6 +6839,44 @@ class TestFrontendReportViewer:
 class TestFrontendFoundation:
     """Verify the Stage 11 Streamlit shell and input controls."""
 
+    def test_hpo_update_control_uses_coordinated_backend(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = 0
+
+        def fake_update_hpo_data() -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            return {
+                "current_version": "hp/releases/2026-07-01",
+                "active_term_count": 19_842,
+            }
+
+        monkeypatch.setattr(
+            "frontend.ui.update_hpo_data",
+            fake_update_hpo_data,
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        update_button = next(
+            button
+            for button in app.button
+            if button.label == "Update HPO data"
+        )
+        update_button.click().run(timeout=10)
+
+        assert not app.exception
+        assert calls == 1
+        assert any(
+            "HPO data updated to hp/releases/2026-07-01 "
+            "(19,842 active terms)."
+            in message.value
+            for message in app.success
+        )
+
     def test_app_shell_renders_without_exceptions(self) -> None:
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")

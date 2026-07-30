@@ -239,10 +239,10 @@ only remote services. A live `--pipeline` smoke mode exercises the same public
 the saved report. Stage 10 is complete; the temporary random prioritizer
 remains the documented non-clinical MVP limitation.
 
-## Stage 11 Streamlit frontend: in progress
+## Stage 11 Streamlit frontend: complete
 
-Stage 11 steps 1 through 5 establish the Streamlit execution and result
-presentation boundary. The root `app.py` delegates rendering to
+Stage 11 establishes the complete Streamlit execution and result-presentation
+boundary. The root `app.py` delegates rendering to
 `frontend/ui.py`, which configures the
 page, loads local responsive styles, displays the clinical decision-support
 notice, and presents the analysis workflow without duplicating backend logic.
@@ -258,6 +258,15 @@ without exposing VCF genotype fields or raw provider payloads. A generated
 Markdown clinical report is loaded only from the configured `REPORT_DIR`,
 rendered in the application, and offered as a bounded download without
 exposing its server path.
+
+Stage 11 step 6 completes the frontend with automated application tests and
+interactive browser verification. The verified paths cover VCF and manual
+input selection, empty-input validation, local HPO search and phenotype
+selection, the coordinated HPO update control, pipeline result persistence,
+candidate and evidence presentation, safe report rendering and download, and
+responsive layouts without horizontal overflow at desktop, tablet, and mobile
+widths. Remote annotation and LLM calls remain outside the offline UI test
+suite and must be checked separately with the live Stage 10 smoke mode.
 
 Run the frontend:
 
