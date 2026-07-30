@@ -52,6 +52,8 @@ data/hpo/phenotype.hpoa
 
 The local loader keeps only active term IDs, alternate IDs, and names in its
 lookup index. Obsolete, malformed, and unknown terms are not accepted.
+`search_hpo_terms()` provides deterministic local suggestions from canonical
+names, synonyms, or HPO identifiers for physician-entered phenotype phrases.
 The phenotype-to-gene loader validates the official table, deduplicates gene
 symbols, and returns a deterministic gene list for each existing HPO term.
 The disease-annotation loader returns unique disease identifiers and names

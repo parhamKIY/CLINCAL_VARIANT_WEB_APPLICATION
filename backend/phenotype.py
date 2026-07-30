@@ -19,6 +19,9 @@ from config import settings
 
 
 HPO_ID_PATTERN = re.compile(r"HP:[0-9]{7}")
+HPO_SYNONYM_PATTERN = re.compile(
+    r'^"((?:[^"\\]|\\.)*)"\s+[A-Z]+\s+'
+)
 HPO_RELEASE_PATTERN = re.compile(
     r"hp/releases/([0-9]{4}-[0-9]{2}-[0-9]{2})"
 )
@@ -70,6 +73,15 @@ class HPOTerm(TypedDict):
 
     id: str
     name: str
+
+
+class HPOSearchCandidate(TypedDict):
+    """One ontology-backed suggestion for physician-entered text."""
+
+    id: str
+    name: str
+    matched_label: str
+    match_type: str
 
 
 class HPOUpdateResult(TypedDict):
@@ -292,6 +304,205 @@ def lookup_hpo_term(
         "id": term["id"],
         "name": term["name"],
     }
+
+
+def _normalize_hpo_search_text(value: str) -> str:
+    """Normalize human-entered phenotype text for local matching."""
+    return " ".join(
+        re.sub(r"[^\w]+", " ", value.casefold()).split()
+    )
+
+
+def _decode_hpo_synonym(value: str, hpo_id: str) -> str:
+    """Extract one quoted synonym from an OBO synonym field."""
+    match = HPO_SYNONYM_PATTERN.match(value)
+    if match is None:
+        raise HPODataError(
+            f"HPO ontology term {hpo_id} has a malformed synonym."
+        )
+    return re.sub(r"\\(.)", r"\1", match.group(1)).strip()
+
+
+@lru_cache(maxsize=4)
+def _load_hpo_search_index(
+    ontology_path: Path,
+) -> tuple[tuple[HPOTerm, tuple[str, ...]], ...]:
+    """Load canonical active terms and searchable synonyms from OBO."""
+    ontology_index = _load_hpo_index(ontology_path)
+    entries: list[tuple[HPOTerm, tuple[str, ...]]] = []
+    identifier: str | None = None
+    synonyms: list[str] = []
+    in_term = False
+
+    def store_current_term() -> None:
+        if identifier is None:
+            return
+        term = ontology_index.get(identifier)
+        if term is None or term["id"] != identifier:
+            return
+        unique_synonyms = tuple(
+            sorted(
+                {
+                    synonym
+                    for synonym in synonyms
+                    if synonym
+                    and synonym.casefold() != term["name"].casefold()
+                },
+                key=lambda synonym: synonym.casefold(),
+            )
+        )
+        entries.append((term, unique_synonyms))
+
+    try:
+        with ontology_path.open("r", encoding="utf-8") as ontology_file:
+            for raw_line in ontology_file:
+                line = raw_line.strip()
+                if line == "[Term]":
+                    if in_term:
+                        store_current_term()
+                    in_term = True
+                    identifier = None
+                    synonyms = []
+                    continue
+                if line.startswith("["):
+                    if in_term:
+                        store_current_term()
+                    in_term = False
+                    continue
+                if not in_term:
+                    continue
+
+                field, separator, value = line.partition(":")
+                if not separator:
+                    continue
+                value = value.strip()
+                if field == "id":
+                    identifier = value
+                elif field == "synonym" and identifier is not None:
+                    synonyms.append(
+                        _decode_hpo_synonym(value, identifier)
+                    )
+
+            if in_term:
+                store_current_term()
+    except (OSError, UnicodeError) as exc:
+        raise HPODataError(
+            f"Unable to read HPO ontology: {ontology_path}."
+        ) from exc
+
+    entries.sort(
+        key=lambda entry: (
+            entry[0]["name"].casefold(),
+            entry[0]["id"],
+        )
+    )
+    return tuple(entries)
+
+
+def search_hpo_terms(
+    text: str,
+    *,
+    limit: int = 10,
+    ontology_path: str | Path | None = None,
+) -> list[HPOSearchCandidate]:
+    """Return deterministic local HPO suggestions for one text phrase."""
+    if not isinstance(text, str):
+        raise PhenotypeError(
+            "Phenotype search text must be a string."
+        )
+    query = _normalize_hpo_search_text(text)
+    if not query:
+        raise PhenotypeError(
+            "Phenotype search text must not be empty."
+        )
+    if len(text) > 200:
+        raise PhenotypeError(
+            "Phenotype search text must not exceed 200 characters."
+        )
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise PhenotypeError("HPO search limit must be an integer.")
+    if not 1 <= limit <= 50:
+        raise PhenotypeError(
+            "HPO search limit must be between 1 and 50."
+        )
+
+    resolved_path = (
+        Path(ontology_path)
+        if ontology_path is not None
+        else settings.HPO_DATA_DIR / HPO_ONTOLOGY_FILENAME
+    ).resolve()
+    stripped_text = text.strip()
+    if HPO_ID_PATTERN.fullmatch(stripped_text) is not None:
+        term = lookup_hpo_term(
+            stripped_text,
+            ontology_path=resolved_path,
+        )
+        return [
+            {
+                "id": term["id"],
+                "name": term["name"],
+                "matched_label": stripped_text,
+                "match_type": "id",
+            }
+        ]
+
+    query_tokens = set(query.split())
+    ranked: list[
+        tuple[int, int, str, str, HPOSearchCandidate]
+    ] = []
+
+    for term, synonyms in _load_hpo_search_index(resolved_path):
+        best_match: tuple[int, int, str, str] | None = None
+        for match_type, label in (
+            ("name", term["name"]),
+            *(("synonym", synonym) for synonym in synonyms),
+        ):
+            normalized_label = _normalize_hpo_search_text(label)
+            if normalized_label == query:
+                rank = 0 if match_type == "name" else 1
+            elif normalized_label.startswith(query):
+                rank = 2 if match_type == "name" else 3
+            elif query in normalized_label:
+                rank = 4 if match_type == "name" else 5
+            elif query_tokens.issubset(set(normalized_label.split())):
+                rank = 6 if match_type == "name" else 7
+            else:
+                continue
+
+            candidate_rank = (
+                rank,
+                abs(len(normalized_label) - len(query)),
+                label.casefold(),
+                label,
+            )
+            if best_match is None or candidate_rank < best_match:
+                best_match = candidate_rank
+
+        if best_match is None:
+            continue
+        rank, length_difference, _, matched_label = best_match
+        candidate: HPOSearchCandidate = {
+            "id": term["id"],
+            "name": term["name"],
+            "matched_label": matched_label,
+            "match_type": (
+                "name"
+                if matched_label == term["name"]
+                else "synonym"
+            ),
+        }
+        ranked.append(
+            (
+                rank,
+                length_difference,
+                term["name"].casefold(),
+                term["id"],
+                candidate,
+            )
+        )
+
+    ranked.sort(key=lambda item: item[:4])
+    return [item[4] for item in ranked[:limit]]
 
 
 @lru_cache(maxsize=4)
@@ -780,6 +991,7 @@ def _perform_hpo_update(
                 "Unable to install the downloaded HPO ontology."
             ) from exc
         _load_hpo_index.cache_clear()
+        _load_hpo_search_index.cache_clear()
 
         return {
             "status": "updated",
@@ -795,6 +1007,7 @@ def _perform_hpo_update(
         }
     finally:
         _load_hpo_index.cache_clear()
+        _load_hpo_search_index.cache_clear()
         try:
             temporary_path.unlink(missing_ok=True)
         except OSError:
@@ -1189,6 +1402,7 @@ def _perform_hpo_data_update(
             ) from exc
 
         _load_hpo_index.cache_clear()
+        _load_hpo_search_index.cache_clear()
         _load_hpo_gene_index.cache_clear()
         _load_hpo_disease_index.cache_clear()
         return {
@@ -1219,6 +1433,7 @@ def _perform_hpo_data_update(
         }
     finally:
         _load_hpo_index.cache_clear()
+        _load_hpo_search_index.cache_clear()
         _load_hpo_gene_index.cache_clear()
         _load_hpo_disease_index.cache_clear()
         for temporary_path in (

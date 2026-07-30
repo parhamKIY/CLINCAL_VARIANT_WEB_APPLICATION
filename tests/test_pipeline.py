@@ -18,6 +18,7 @@ from backend.phenotype import (
     get_diseases_for_hpo,
     get_genes_for_hpo,
     lookup_hpo_term,
+    search_hpo_terms,
     update_hpo_data,
     update_hpo_ontology,
     validate_hpo_id,
@@ -736,10 +737,13 @@ class TestPhenotype:
                 "id: HP:0001250\n"
                 "name: Seizure\n"
                 "alt_id: HP:0001275\n"
+                'synonym: "Convulsion" EXACT []\n'
+                'synonym: "Seizures" EXACT []\n'
                 "\n"
                 "[Term]\n"
                 "id: HP:0001263\n"
                 "name: Global developmental delay\n"
+                'synonym: "Global delay" RELATED []\n'
                 "\n"
                 "[Term]\n"
                 "id: HP:0009999\n"
@@ -1031,6 +1035,106 @@ class TestPhenotype:
         with pytest.raises(HPODataError, match="has no name"):
             lookup_hpo_term(
                 "HP:0001250",
+                ontology_path=ontology_path,
+            )
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            (
+                "seizure",
+                {
+                    "id": "HP:0001250",
+                    "name": "Seizure",
+                    "matched_label": "Seizure",
+                    "match_type": "name",
+                },
+            ),
+            (
+                "convulsion",
+                {
+                    "id": "HP:0001250",
+                    "name": "Seizure",
+                    "matched_label": "Convulsion",
+                    "match_type": "synonym",
+                },
+            ),
+            (
+                "global develop",
+                {
+                    "id": "HP:0001263",
+                    "name": "Global developmental delay",
+                    "matched_label": "Global developmental delay",
+                    "match_type": "name",
+                },
+            ),
+        ],
+    )
+    def test_hpo_text_search_returns_ranked_ontology_candidates(
+        self,
+        tmp_path: Path,
+        query: str,
+        expected: dict[str, str],
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        assert search_hpo_terms(
+            query,
+            ontology_path=ontology_path,
+        )[0] == expected
+
+    def test_hpo_text_search_returns_empty_for_unknown_phrase(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        assert search_hpo_terms(
+            "unrelated phrase",
+            ontology_path=ontology_path,
+        ) == []
+
+    def test_hpo_text_search_accepts_an_hpo_identifier(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        assert search_hpo_terms(
+            "HP:0001275",
+            ontology_path=ontology_path,
+        ) == [
+            {
+                "id": "HP:0001250",
+                "name": "Seizure",
+                "matched_label": "HP:0001275",
+                "match_type": "id",
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        ("text", "limit"),
+        [
+            ("", 10),
+            ("   ", 10),
+            (None, 10),
+            ("seizure", 0),
+            ("seizure", 51),
+            ("seizure", True),
+        ],
+    )
+    def test_invalid_hpo_text_search_input_is_rejected(
+        self,
+        tmp_path: Path,
+        text: object,
+        limit: object,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError):
+            search_hpo_terms(
+                text,  # type: ignore[arg-type]
+                limit=limit,  # type: ignore[arg-type]
                 ontology_path=ontology_path,
             )
 
