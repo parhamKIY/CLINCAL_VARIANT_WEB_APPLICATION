@@ -188,6 +188,24 @@ composition, rendering, idempotent storage, sensitive-field exclusion, and
 failure before file creation. The live `--report` smoke mode performs the same
 path with bundled synthetic evidence and saves the result under `REPORT_DIR`.
 
+## Stage 10 complete pipeline integration: in progress
+
+Stage 10 step 1 defines the public analysis-input and frontend-result contracts
+in `backend/pipeline.py`. Exactly one VCF path or manual variant is accepted,
+while phenotype selections are bounded and normalized without touching the
+filesystem. The versioned result retains variants, candidates, annotations,
+phenotype results, Evidence Objects, report path, warnings, and structured
+errors. Stable stage ordering and progress states are JSON-safe and exclude
+exception objects and stack traces.
+
+Stage 10 step 2 connects mutually exclusive VCF or manual input to the existing
+streaming VCF processor and bounded MVP prioritizer. The complete processed
+stream is evaluated by reservoir sampling, while only the first 100 parsed
+variants are retained for frontend display to prevent unbounded memory use.
+The total parsed count and truncation state remain explicit, candidate output
+is copied into the pipeline result, and successful processing advances the
+stable progress contract to the annotation stage.
+
 ## Tests
 
 Run the offline test suite:

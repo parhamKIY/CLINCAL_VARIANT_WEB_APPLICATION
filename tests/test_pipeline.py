@@ -44,6 +44,17 @@ from backend.phenotype import (
     update_hpo_ontology,
     validate_hpo_id,
 )
+from backend.pipeline import (
+    PIPELINE_SCHEMA_VERSION,
+    PIPELINE_STAGE_ORDER,
+    PipelineError,
+    PipelineInputError,
+    PipelineResultError,
+    create_pipeline_result,
+    run_variant_selection,
+    validate_analysis_input,
+    validate_pipeline_result,
+)
 from backend.prioritization import (
     PrioritizationError,
     prioritize_variants,
@@ -5764,3 +5775,357 @@ class TestStage9EndToEnd:
             )
 
         assert list(tmp_path.iterdir()) == []
+
+
+class TestPipelineContract:
+    """Verify the Stage 10 public input and result boundaries."""
+
+    def test_vcf_analysis_input_is_normalized(self) -> None:
+        result = validate_analysis_input(
+            vcf_path=Path("samples/patient.vcf"),
+            phenotypes=("HP:0001250", "HP:0001263"),
+        )
+
+        assert result == {
+            "input_mode": "vcf",
+            "vcf_path": str(Path("samples/patient.vcf")),
+            "manual_variant": None,
+            "phenotypes": [
+                "HP:0001250",
+                "HP:0001263",
+            ],
+        }
+
+    def test_manual_analysis_input_is_normalized(self) -> None:
+        result = validate_analysis_input(
+            vcf_path=None,
+            manual_variant="  2:166848215:C:T  ",
+            phenotypes=[],
+        )
+
+        assert result == {
+            "input_mode": "manual",
+            "vcf_path": None,
+            "manual_variant": "2:166848215:C:T",
+            "phenotypes": [],
+        }
+
+    @pytest.mark.parametrize(
+        ("vcf_path", "manual_variant", "message"),
+        [
+            (None, None, "Exactly one"),
+            (
+                "sample.vcf",
+                "2:166848215:C:T",
+                "Exactly one",
+            ),
+            (" ", None, "vcf_path must be a non-empty string"),
+            (
+                None,
+                " ",
+                "manual_variant must be a non-empty string",
+            ),
+        ],
+    )
+    def test_exactly_one_variant_source_is_required(
+        self,
+        vcf_path: object,
+        manual_variant: object,
+        message: str,
+    ) -> None:
+        with pytest.raises(
+            PipelineInputError,
+            match=message,
+        ):
+            validate_analysis_input(
+                vcf_path=vcf_path,  # type: ignore[arg-type]
+                manual_variant=manual_variant,  # type: ignore[arg-type]
+                phenotypes=[],
+            )
+
+    @pytest.mark.parametrize(
+        "phenotypes",
+        [
+            "HP:0001250",
+            ["HP:0001250", "HP:0001250"],
+            ["HP:0001250", ""],
+            ["HP:0001250", "\n"],
+        ],
+    )
+    def test_invalid_phenotype_collection_is_rejected(
+        self,
+        phenotypes: object,
+    ) -> None:
+        with pytest.raises(PipelineInputError):
+            validate_analysis_input(
+                vcf_path="sample.vcf",
+                phenotypes=phenotypes,  # type: ignore[arg-type]
+            )
+
+    def test_empty_pipeline_result_has_stable_contract(self) -> None:
+        result = create_pipeline_result()
+
+        assert result["schema_version"] == PIPELINE_SCHEMA_VERSION
+        assert result["status"] == "pending"
+        assert result["current_stage"] == "input"
+        assert result["progress_percent"] == 0
+        assert [
+            record["stage"]
+            for record in result["stages"]
+        ] == list(PIPELINE_STAGE_ORDER)
+        assert all(
+            record["status"] == "pending"
+            for record in result["stages"]
+        )
+        assert result["report_path"] is None
+        assert result["errors"] == []
+        json.dumps(result, allow_nan=False)
+
+    @pytest.mark.parametrize(
+        ("path", "value", "message"),
+        [
+            (
+                ("status",),
+                "finished",
+                "status is unsupported",
+            ),
+            (
+                ("current_stage",),
+                "unknown",
+                "current_stage is unsupported",
+            ),
+            (
+                ("progress_percent",),
+                101,
+                "integer from 0 to 100",
+            ),
+            (
+                ("progress_percent",),
+                True,
+                "integer from 0 to 100",
+            ),
+            (
+                ("stages", 0, "status"),
+                "invalid",
+                "status is unsupported",
+            ),
+            (
+                ("stages", 0, "progress_percent"),
+                -1,
+                "integer from 0 to 100",
+            ),
+        ],
+    )
+    def test_invalid_pipeline_state_is_rejected(
+        self,
+        path: tuple[object, ...],
+        value: object,
+        message: str,
+    ) -> None:
+        result = create_pipeline_result()
+        target: object = result
+        for key in path[:-1]:
+            if isinstance(key, int):
+                assert isinstance(target, list)
+                target = target[key]
+            else:
+                assert isinstance(target, dict)
+                target = target[key]
+        final_key = path[-1]
+        assert isinstance(target, dict)
+        target[final_key] = value
+
+        with pytest.raises(PipelineResultError, match=message):
+            validate_pipeline_result(result)
+
+    def test_stage_order_is_fixed(self) -> None:
+        result = create_pipeline_result()
+        result["stages"][0], result["stages"][1] = (
+            result["stages"][1],
+            result["stages"][0],
+        )
+
+        with pytest.raises(
+            PipelineResultError,
+            match="required stage order",
+        ):
+            validate_pipeline_result(result)
+
+    def test_frontend_error_cannot_contain_exception_object(
+        self,
+    ) -> None:
+        result = create_pipeline_result()
+        result["errors"] = [
+            {
+                "stage": "annotation",
+                "code": "annotation_failed",
+                "message": ValueError("internal stack detail"),
+                "recoverable": True,
+            }
+        ]
+
+        with pytest.raises(
+            PipelineResultError,
+            match="message must be a non-empty string",
+        ):
+            validate_pipeline_result(result)
+
+    def test_valid_partial_result_is_json_safe(self) -> None:
+        result = create_pipeline_result()
+        result["status"] = "partial"
+        result["current_stage"] = "annotation"
+        result["progress_percent"] = 45
+        result["variant_count"] = 1
+        result["variants"] = [
+            {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+            }
+        ]
+        result["warnings"] = ["ClinVar evidence was unavailable."]
+        result["errors"] = [
+            {
+                "stage": "annotation",
+                "code": "clinvar_unavailable",
+                "message": "ClinVar evidence was unavailable.",
+                "recoverable": True,
+            }
+        ]
+
+        validated = validate_pipeline_result(result)
+
+        assert validated is result
+        json.dumps(validated, allow_nan=False)
+
+
+class TestPipelineVariantSelection:
+    """Verify Stage 10 input processing through prioritization."""
+
+    def test_manual_input_flows_to_candidates(self) -> None:
+        result = run_variant_selection(
+            vcf_path=None,
+            manual_variant="chr2:166848215:c:t,g",
+            phenotypes=["HP:0001250"],
+            top_n=10,
+            seed=7,
+        )
+
+        assert result["status"] == "running"
+        assert result["current_stage"] == "annotation"
+        assert result["progress_percent"] == 30
+        assert result["variant_count"] == 2
+        assert result["variants_truncated"] is False
+        assert {
+            variant["alt"]
+            for variant in result["variants"]
+        } == {"T", "G"}
+        assert {
+            candidate["alt"]
+            for candidate in result["candidates"]
+        } == {"T", "G"}
+        stage_statuses = {
+            record["stage"]: record["status"]
+            for record in result["stages"]
+        }
+        assert stage_statuses["input"] == "success"
+        assert stage_statuses["vcf_processing"] == "success"
+        assert stage_statuses["prioritization"] == "success"
+        assert stage_statuses["annotation"] == "pending"
+
+    def test_vcf_stream_flows_to_bounded_candidates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            "1\t100\t.\tA\tG,T\t99\tPASS\t.\n"
+            "2\t200\t.\tC\tT\t50\tPASS\t.\n",
+        )
+
+        result = run_variant_selection(
+            vcf_path=path,
+            manual_variant=None,
+            phenotypes=[],
+            top_n=2,
+            seed=11,
+        )
+
+        assert result["variant_count"] == 3
+        assert len(result["variants"]) == 3
+        assert len(result["candidates"]) == 2
+        assert all(
+            {"chrom", "pos", "ref", "alt"}.issubset(candidate)
+            for candidate in result["candidates"]
+        )
+        assert result["warnings"] == []
+
+    def test_selection_seed_is_reproducible(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        records = "".join(
+            (
+                f"1\t{position}\t.\tA\tG\t.\tPASS\t.\n"
+            )
+            for position in range(100, 110)
+        )
+        path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            f"{records}",
+        )
+
+        first = run_variant_selection(
+            path,
+            [],
+            top_n=3,
+            seed=42,
+        )
+        second = run_variant_selection(
+            path,
+            [],
+            top_n=3,
+            seed=42,
+        )
+
+        assert first["candidates"] == second["candidates"]
+
+    def test_large_stream_retains_only_bounded_preview(self) -> None:
+        alternates = ",".join("T" for _ in range(105))
+
+        result = run_variant_selection(
+            vcf_path=None,
+            manual_variant=f"2:166848215:C:{alternates}",
+            phenotypes=[],
+            top_n=3,
+            seed=1,
+        )
+
+        assert result["variant_count"] == 105
+        assert len(result["variants"]) == 100
+        assert result["variants_truncated"] is True
+        assert len(result["candidates"]) == 3
+        assert "complete processed stream" in result["warnings"][0]
+
+    def test_empty_vcf_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        )
+
+        with pytest.raises(
+            PipelineError,
+            match="produced no variants",
+        ):
+            run_variant_selection(
+                path,
+                [],
+                top_n=3,
+                seed=1,
+            )
