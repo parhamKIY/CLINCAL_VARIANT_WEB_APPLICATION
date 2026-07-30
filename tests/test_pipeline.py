@@ -19,6 +19,7 @@ from backend.phenotype import (
     get_diseases_for_hpo,
     get_genes_for_hpo,
     lookup_hpo_term,
+    match_phenotypes,
     normalize_phenotypes,
     search_hpo_terms,
     update_hpo_data,
@@ -1388,6 +1389,106 @@ class TestPhenotype:
             calculate_hpo_similarity(
                 ["HP:0001250"],
                 gene,  # type: ignore[arg-type]
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+            )
+
+    def test_phenotype_scores_are_added_to_candidate_annotations(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+        annotations = [
+            {
+                "variant": {
+                    "chrom": "1",
+                    "pos": 100,
+                    "ref": "A",
+                    "alt": "G",
+                },
+                "gene": "SCN1A",
+            },
+            {
+                "variant": {
+                    "chrom": "2",
+                    "pos": 200,
+                    "ref": "C",
+                    "alt": "T",
+                },
+                "gene": "DDX3X",
+            },
+            {
+                "variant": {
+                    "chrom": "3",
+                    "pos": 300,
+                    "ref": "G",
+                    "alt": "A",
+                },
+                "gene": None,
+            },
+        ]
+
+        results = match_phenotypes(
+            annotations,
+            ["HP:0001250", "HP:0001263"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+
+        assert results[0]["phenotype_score"] == 0.5
+        assert results[0]["matched_hpo_terms"] == ["HP:0001250"]
+        assert results[0]["phenotype_match_count"] == 1
+        assert results[1]["phenotype_score"] == 0.0
+        assert results[2]["phenotype_score"] == 0.0
+        assert results[2]["matched_hpo_terms"] == []
+        assert all(
+            result["hpo_terms"]
+            == ["HP:0001250", "HP:0001263"]
+            for result in results
+        )
+        assert "phenotype_score" not in annotations[0]
+
+    def test_phenotype_matching_accepts_an_annotation_generator(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        results = match_phenotypes(
+            ({"gene": "SCN1A", "rank": rank} for rank in range(2)),
+            ["HP:0001250"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+
+        assert [result["phenotype_score"] for result in results] == [
+            1.0,
+            1.0,
+        ]
+
+    @pytest.mark.parametrize(
+        "annotations",
+        [
+            None,
+            "annotations",
+            {"gene": "SCN1A"},
+            [{"gene": "SCN1A"}, None],
+        ],
+    )
+    def test_invalid_annotation_collection_is_rejected(
+        self,
+        tmp_path: Path,
+        annotations: object,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError):
+            match_phenotypes(
+                annotations,  # type: ignore[arg-type]
+                ["HP:0001250"],
                 ontology_path=ontology_path,
                 associations_path=associations_path,
             )

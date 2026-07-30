@@ -60,6 +60,8 @@ The phenotype-to-gene loader validates the official table, deduplicates gene
 symbols, and returns a deterministic gene list for each existing HPO term.
 `calculate_hpo_similarity()` provides an explainable MVP score: the fraction
 of the patient's unique HPO terms that are directly associated with a gene.
+`match_phenotypes()` adds that score, the canonical patient terms, and the
+matched terms to each annotated candidate without modifying source evidence.
 The disease-annotation loader returns unique disease identifiers and names
 while excluding negated findings and non-phenotypic annotation branches.
 

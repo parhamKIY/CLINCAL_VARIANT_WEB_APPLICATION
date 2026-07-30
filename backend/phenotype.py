@@ -7,11 +7,12 @@ import re
 import shutil
 import tempfile
 from collections import Counter
+from collections.abc import Iterable
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import requests
 
@@ -721,6 +722,73 @@ def calculate_hpo_similarity(
             4,
         ),
     }
+
+
+def match_phenotypes(
+    annotations: Iterable[dict[str, Any]],
+    hpo_ids: list[str] | tuple[str, ...],
+    *,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Attach explainable phenotype scores to annotated candidates."""
+    if isinstance(annotations, (str, bytes, dict)):
+        raise PhenotypeError(
+            "Annotations must be an iterable of dictionaries."
+        )
+    try:
+        iterator = iter(annotations)
+    except TypeError as exc:
+        raise PhenotypeError(
+            "Annotations must be an iterable of dictionaries."
+        ) from exc
+
+    terms = normalize_phenotypes(
+        hpo_ids,
+        ontology_path=ontology_path,
+    )
+    canonical_hpo_ids = [term["id"] for term in terms]
+    matched_annotations: list[dict[str, Any]] = []
+
+    for index, annotation in enumerate(iterator):
+        if not isinstance(annotation, dict):
+            raise PhenotypeError(
+                f"Annotation at index {index} must be a dictionary."
+            )
+
+        scored_annotation = dict(annotation)
+        gene = annotation.get("gene")
+        if not isinstance(gene, str) or not gene.strip():
+            scored_annotation.update(
+                {
+                    "hpo_terms": list(canonical_hpo_ids),
+                    "matched_hpo_terms": [],
+                    "phenotype_match_count": 0,
+                    "phenotype_score": 0.0,
+                }
+            )
+            matched_annotations.append(scored_annotation)
+            continue
+
+        similarity = calculate_hpo_similarity(
+            canonical_hpo_ids,
+            gene,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+        scored_annotation.update(
+            {
+                "hpo_terms": similarity["hpo_terms"],
+                "matched_hpo_terms": similarity[
+                    "matched_hpo_terms"
+                ],
+                "phenotype_match_count": similarity["match_count"],
+                "phenotype_score": similarity["phenotype_score"],
+            }
+        )
+        matched_annotations.append(scored_annotation)
+
+    return matched_annotations
 
 
 @lru_cache(maxsize=4)
