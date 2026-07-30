@@ -241,12 +241,15 @@ remains the documented non-clinical MVP limitation.
 
 ## Stage 11 Streamlit frontend: in progress
 
-Stage 11 step 1 establishes the presentation-only Streamlit boundary. The
+Stage 11 steps 1 and 2 establish the presentation-only Streamlit boundary. The
 root `app.py` delegates rendering to `frontend/ui.py`, which configures the
 page, loads local responsive styles, displays the clinical decision-support
 notice, and presents the analysis workflow without duplicating backend logic.
-The frontend imports centralized settings and will call only the public
-pipeline boundary in later steps.
+The interface now accepts either a `.vcf`/`.vcf.gz` upload or a manual
+`CHROM:POS:REF:ALT` variant, supports local HPO term search and phenotype
+selection, and exposes the coordinated HPO dataset update operation. Input
+submission currently validates and prepares a frontend summary; step 3 will
+connect it to the public pipeline boundary.
 
 Run the frontend:
 

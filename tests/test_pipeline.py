@@ -6651,7 +6651,7 @@ class TestCompletePipelineHappyPath:
 
 
 class TestFrontendFoundation:
-    """Verify the Stage 11 Streamlit application shell."""
+    """Verify the Stage 11 Streamlit shell and input controls."""
 
     def test_app_shell_renders_without_exceptions(self) -> None:
         app = AppTest.from_file(
@@ -6667,8 +6667,104 @@ class TestFrontendFoundation:
             in warning.value.casefold()
             for warning in app.warning
         )
+        assert [control.value for control in app.segmented_control] == [
+            "VCF upload"
+        ]
+        assert [uploader.label for uploader in app.file_uploader] == [
+            "VCF file"
+        ]
         assert any(
-            "Frontend foundation is ready"
-            in info.value
-            for info in app.info
+            field.label == "Search HPO terms"
+            for field in app.text_input
+        )
+        assert any(
+            button.label == "Analyze variant"
+            for button in app.button
+        )
+
+    def test_missing_vcf_is_rejected_before_pipeline_execution(
+        self,
+    ) -> None:
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        analyze_button = next(
+            button
+            for button in app.button
+            if button.label == "Analyze variant"
+        )
+        analyze_button.click().run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            "Upload a .vcf or .vcf.gz file"
+            in error.value
+            for error in app.error
+        )
+        assert not app.success
+
+    def test_manual_variant_can_be_prepared(self) -> None:
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        app.segmented_control[0].set_value("Manual variant").run(
+            timeout=10
+        )
+        variant_field = next(
+            field
+            for field in app.text_input
+            if field.label == "Variant"
+        )
+        variant_field.set_value("1:941284:G:A").run(timeout=10)
+        analyze_button = next(
+            button
+            for button in app.button
+            if button.label == "Analyze variant"
+        )
+        analyze_button.click().run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            "Input package prepared: 1:941284:G:A"
+            in success.value
+            for success in app.success
+        )
+
+    def test_local_hpo_search_adds_selected_phenotype(self) -> None:
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        search_field = next(
+            field
+            for field in app.text_input
+            if field.label == "Search HPO terms"
+        )
+        search_field.set_value("seizure").run(timeout=10)
+        search_button = next(
+            button
+            for button in app.button
+            if button.label == "Search"
+        )
+        search_button.click().run(timeout=30)
+
+        assert app.selectbox[0].options[0] == (
+            "HP:0001250 — Seizure"
+        )
+        app.selectbox[0].select("HP:0001250 — Seizure").run(
+            timeout=10
+        )
+        add_button = next(
+            button
+            for button in app.button
+            if button.label == "Add phenotype"
+        )
+        add_button.click().run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            "**HP:0001250** — Seizure" in markdown.value
+            for markdown in app.markdown
         )
