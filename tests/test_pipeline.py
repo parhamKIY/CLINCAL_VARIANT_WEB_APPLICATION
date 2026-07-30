@@ -11,6 +11,10 @@ from backend.annotation import (
     AnnotationError,
     annotate_variants,
 )
+from backend.phenotype import (
+    PhenotypeError,
+    validate_hpo_id,
+)
 from backend.prioritization import (
     PrioritizationError,
     prioritize_variants,
@@ -654,6 +658,43 @@ class TestPrioritization:
             match="missing: alt",
         ):
             prioritize_variants([variant], top_n=1)
+
+
+class TestPhenotype:
+    """Verify the Stage 6 phenotype input contract."""
+
+    @pytest.mark.parametrize(
+        ("hpo_id", "expected"),
+        [
+            ("HP:0001250", "HP:0001250"),
+            ("  HP:0001263  ", "HP:0001263"),
+        ],
+    )
+    def test_valid_hpo_id_is_returned_in_canonical_form(
+        self,
+        hpo_id: str,
+        expected: str,
+    ) -> None:
+        assert validate_hpo_id(hpo_id) == expected
+
+    @pytest.mark.parametrize(
+        "hpo_id",
+        [
+            "",
+            "   ",
+            "hp:0001250",
+            "HP:001250",
+            "HP:00012500",
+            "HP0001250",
+            "HP:00012A0",
+            "MP:0001250",
+            None,
+            1250,
+        ],
+    )
+    def test_invalid_hpo_id_is_rejected(self, hpo_id: object) -> None:
+        with pytest.raises(PhenotypeError):
+            validate_hpo_id(hpo_id)  # type: ignore[arg-type]
 
 
 class TestAnnotation:
