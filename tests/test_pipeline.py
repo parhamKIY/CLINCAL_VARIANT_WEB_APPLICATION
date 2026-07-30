@@ -14,6 +14,17 @@ from backend.annotation import (
     AnnotationError,
     annotate_variants,
 )
+from backend.llm import (
+    LLMClient,
+    LLMConfigurationError,
+    LLMRequest,
+    LLMRequestError,
+    LLMResponse,
+    LLMResponseError,
+    LLMUsage,
+    LLMValidationError,
+    call_llm,
+)
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
@@ -228,6 +239,23 @@ class FakeSession:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeLLMAdapter:
+    """Record provider-neutral requests without network access."""
+
+    def __init__(
+        self,
+        result: object,
+    ) -> None:
+        self.result = result
+        self.requests: list[LLMRequest] = []
+
+    def generate(self, request: LLMRequest) -> object:
+        self.requests.append(request)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
 
 
 def _write_vcf(
@@ -3960,3 +3988,193 @@ class TestEvidenceObject:
             match="must be null when no HPO terms",
         ):
             validate_evidence_object(evidence)
+
+
+class TestLLMContract:
+    """Verify the provider-neutral Stage 8 boundary."""
+
+    def test_call_builds_standard_request_and_response(self) -> None:
+        response = LLMResponse(
+            content="Evidence-based summary.",
+            model="test-model",
+            finish_reason="stop",
+            usage=LLMUsage(
+                input_tokens=25,
+                output_tokens=8,
+                total_tokens=33,
+            ),
+        )
+        adapter = FakeLLMAdapter(response)
+        client = LLMClient(adapter)
+
+        result = call_llm(
+            "Use only the supplied evidence.",
+            '{"gene": "SCN1A"}',
+            temperature=0.1,
+            max_tokens=400,
+            client=client,
+        )
+
+        assert result is response
+        assert len(adapter.requests) == 1
+        request = adapter.requests[0]
+        assert [
+            (message.role, message.content)
+            for message in request.messages
+        ] == [
+            (
+                "system",
+                "Use only the supplied evidence.",
+            ),
+            (
+                "user",
+                '{"gene": "SCN1A"}',
+            ),
+        ]
+        assert request.temperature == 0.1
+        assert request.max_tokens == 400
+
+    def test_missing_default_adapter_is_explicit(self) -> None:
+        with pytest.raises(
+            LLMConfigurationError,
+            match="default LLM provider adapter",
+        ):
+            call_llm(
+                "System instructions.",
+                "Validated evidence.",
+            )
+
+    @pytest.mark.parametrize(
+        ("system_prompt", "user_prompt"),
+        [
+            ("", "Evidence"),
+            ("   ", "Evidence"),
+            ("Instructions", ""),
+            ("Instructions", "\n\t"),
+        ],
+    )
+    def test_empty_prompts_are_rejected(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> None:
+        with pytest.raises(
+            LLMValidationError,
+            match="non-empty string",
+        ):
+            call_llm(
+                system_prompt,
+                user_prompt,
+            )
+
+    @pytest.mark.parametrize(
+        "temperature",
+        [
+            -0.01,
+            2.01,
+            float("nan"),
+            float("inf"),
+            True,
+        ],
+    )
+    def test_invalid_temperature_is_rejected(
+        self,
+        temperature: object,
+    ) -> None:
+        with pytest.raises(
+            LLMValidationError,
+            match="temperature",
+        ):
+            call_llm(
+                "Instructions",
+                "Evidence",
+                temperature=temperature,  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.parametrize(
+        "max_tokens",
+        [
+            0,
+            -1,
+            1.5,
+            True,
+        ],
+    )
+    def test_invalid_token_limit_is_rejected(
+        self,
+        max_tokens: object,
+    ) -> None:
+        with pytest.raises(
+            LLMValidationError,
+            match="max_tokens",
+        ):
+            call_llm(
+                "Instructions",
+                "Evidence",
+                max_tokens=max_tokens,  # type: ignore[arg-type]
+            )
+
+    def test_adapter_must_return_standard_response(self) -> None:
+        client = LLMClient(
+            FakeLLMAdapter(
+                {"content": "provider-specific payload"}
+            )
+        )
+
+        with pytest.raises(
+            LLMResponseError,
+            match="LLMResponse",
+        ):
+            call_llm(
+                "Instructions",
+                "Evidence",
+                client=client,
+            )
+
+    def test_unexpected_adapter_error_is_standardized(self) -> None:
+        client = LLMClient(
+            FakeLLMAdapter(
+                OSError("provider connection failed")
+            )
+        )
+
+        with pytest.raises(
+            LLMRequestError,
+            match="provider request failed",
+        ) as exc_info:
+            call_llm(
+                "Instructions",
+                "Evidence",
+                client=client,
+            )
+
+        assert isinstance(exc_info.value.__cause__, OSError)
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            LLMUsage(),
+            None,
+        ],
+    )
+    def test_response_usage_is_optional(
+        self,
+        usage: LLMUsage | None,
+    ) -> None:
+        response = LLMResponse(
+            content="Summary",
+            model="test-model",
+            usage=usage,
+        )
+
+        assert response.usage is usage
+
+    def test_invalid_response_content_is_rejected(self) -> None:
+        with pytest.raises(
+            LLMResponseError,
+            match="response content",
+        ):
+            LLMResponse(
+                content=" ",
+                model="test-model",
+            )

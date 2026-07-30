@@ -91,6 +91,20 @@ truncation warnings, and enforces a 64 KiB serialized-size ceiling. Automated
 boundary integration and a complete local smoke test verify the Stage 5,
 Stage 6, and Stage 7 handoff without exposing genotype or raw source payloads.
 
+## Stage 8 LLM interpretation: in progress
+
+`backend/llm.py` is the only application-facing LLM boundary. Stage 8 step 1
+defines immutable provider-neutral request, response, message, and token-usage
+contracts; a single `LLMClient`; the public `call_llm()` function; and
+standard configuration, validation, request, authentication, rate-limit,
+timeout, and response errors. Application modules must not import a provider
+SDK or construct provider-specific request payloads.
+
+Provider selection and connection values are centralized in `.env` through
+`LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_TIMEOUT`.
+The default provider adapter and its HTTP implementation are intentionally
+reserved for Stage 8 step 2.
+
 ## Tests
 
 Run the offline test suite:

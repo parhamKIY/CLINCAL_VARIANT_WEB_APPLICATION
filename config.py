@@ -108,6 +108,11 @@ class Settings:
     # LLM service
     # ------------------------------------------------------------------
 
+    LLM_PROVIDER: str = os.getenv(
+        "LLM_PROVIDER",
+        "openai_compatible",
+    ).strip().casefold()
+
     LLM_BASE_URL: str = _get_required_env(
         "LLM_BASE_URL"
     ).rstrip("/")
@@ -118,6 +123,11 @@ class Settings:
 
     LLM_MODEL: str = _get_required_env(
         "LLM_MODEL"
+    )
+
+    LLM_TIMEOUT: int = _get_positive_int(
+        "LLM_TIMEOUT",
+        30,
     )
 
     # ------------------------------------------------------------------
@@ -313,6 +323,11 @@ class Settings:
         if not cls.APP_NAME:
             raise RuntimeError(
                 "APP_NAME cannot be empty."
+            )
+
+        if not cls.LLM_PROVIDER:
+            raise RuntimeError(
+                "LLM_PROVIDER cannot be empty."
             )
 
         if cls.GENOME_ASSEMBLY not in {"GRCh37", "GRCh38"}:
