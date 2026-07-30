@@ -48,6 +48,7 @@ from backend.prioritization import (
     prioritize_variants,
 )
 from backend.report import (
+    CLINICAL_DECISION_SUPPORT_NOTICE,
     CLINICAL_INTERPRETATION_MAX_TOKENS,
     CLINICAL_INTERPRETATION_SYSTEM_PROMPT,
     EVIDENCE_SCHEMA_VERSION,
@@ -4618,7 +4619,12 @@ class TestLLMContract:
         assert "Preserve uncertainty" in system_prompt
         assert "Do not independently assign an ACMG/AMP" in system_prompt
         assert "Do not make a definitive diagnosis" in system_prompt
-        assert "qualified healthcare professional" in system_prompt
+        assert "Do not translate, expand, or define an HPO" in system_prompt
+        assert "Do not mention patient history, family history" in system_prompt
+        assert (
+            CLINICAL_DECISION_SUPPORT_NOTICE
+            in prompt["user_prompt"]
+        )
 
     def test_prompt_injection_text_remains_untrusted_data(
         self,

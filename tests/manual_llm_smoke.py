@@ -1,5 +1,7 @@
 """Live smoke test for the production provider-neutral LLM boundary."""
 
+import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -10,7 +12,89 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.llm import call_llm
+from backend.report import (
+    CLINICAL_DECISION_SUPPORT_NOTICE,
+    generate_clinical_interpretation,
+)
 from config import settings
+
+
+REQUIRED_INTERPRETATION_HEADINGS = (
+    "## Variant summary",
+    "## Clinical evidence",
+    "## Phenotype correlation",
+    "## Interpretation",
+    "## Limitations",
+    "## References",
+    "## Decision-support notice",
+)
+
+
+def _synthetic_evidence_object() -> dict[str, object]:
+    """Return non-identifying evidence for the live clinical smoke test."""
+
+    return {
+        "schema_version": "1.0",
+        "variant": {
+            "chrom": "2",
+            "pos": 166848215,
+            "ref": "C",
+            "alt": "T",
+        },
+        "assembly": "GRCh38",
+        "gene": "SCN1A",
+        "gene_id": "ENSG00000144285",
+        "transcript": "ENST00000303395",
+        "consequence": "missense_variant",
+        "impact": "MODERATE",
+        "protein_change": "ENSP00000303540:p.Arg1645Cys",
+        "population_frequency": 0.00001,
+        "clinvar_accession": "VCV000012345.1",
+        "clinvar_significance": "Pathogenic",
+        "clinvar_review_status": "reviewed by expert panel",
+        "clinvar_conditions": [
+            "Developmental and epileptic encephalopathy",
+        ],
+        "clingen_curations": [
+            {
+                "disease": (
+                    "Developmental and epileptic encephalopathy"
+                ),
+                "disease_id": "MONDO:0100062",
+                "classification": "Definitive",
+                "mode_of_inheritance": "Autosomal dominant",
+                "pmids": ["12345678"],
+                "report_url": (
+                    "https://search.clinicalgenome.org/"
+                    "kb/gene-validity/example"
+                ),
+            }
+        ],
+        "phenotype_score": 0.5,
+        "hpo_terms": [
+            "HP:0001250",
+            "HP:0001263",
+        ],
+        "matched_hpo_terms": ["HP:0001250"],
+        "source_statuses": {
+            "vep": "success",
+            "myvariant": "success",
+            "clinvar": "success",
+            "clingen": "success",
+        },
+        "references": [
+            {
+                "source": "NCBI ClinVar",
+                "url": (
+                    "https://www.ncbi.nlm.nih.gov/"
+                    "clinvar/variation/12345/"
+                ),
+            }
+        ],
+        "warnings": [
+            "Synthetic evidence for software testing only.",
+        ],
+    }
 
 
 def check_configuration() -> None:
@@ -43,11 +127,102 @@ def check_llm_connection() -> None:
     print(f"Response model: {response.model}")
 
 
+def check_clinical_interpretation() -> None:
+    """Generate and inspect one interpretation from synthetic evidence."""
+
+    evidence = _synthetic_evidence_object()
+    response = generate_clinical_interpretation(evidence)
+    content = response.content.strip()
+    missing_headings = [
+        heading
+        for heading in REQUIRED_INTERPRETATION_HEADINGS
+        if heading not in content
+    ]
+    if missing_headings:
+        raise RuntimeError(
+            "Clinical interpretation omitted required headings: "
+            f"{', '.join(missing_headings)}."
+        )
+    if CLINICAL_DECISION_SUPPORT_NOTICE not in content:
+        raise RuntimeError(
+            "Clinical interpretation changed the required "
+            "decision-support notice."
+        )
+
+    forbidden_expansions = {
+        "family history",
+        "seizure",
+    }
+    detected_expansions = {
+        phrase
+        for phrase in forbidden_expansions
+        if phrase.casefold() in content.casefold()
+    }
+    if detected_expansions:
+        raise RuntimeError(
+            "Clinical interpretation added facts absent from the "
+            "synthetic Evidence Object: "
+            f"{', '.join(sorted(detected_expansions))}."
+        )
+
+    allowed_urls = {
+        reference["url"]
+        for reference in evidence["references"]
+    }
+    allowed_urls.update(
+        curation["report_url"]
+        for curation in evidence["clingen_curations"]
+        if curation["report_url"] is not None
+    )
+    returned_urls = {
+        url.rstrip(".,;:")
+        for url in re.findall(r"https?://[^\s<>\])]+", content)
+    }
+    unsupported_urls = returned_urls - allowed_urls
+    if unsupported_urls:
+        raise RuntimeError(
+            "Clinical interpretation introduced unsupported URLs: "
+            f"{', '.join(sorted(unsupported_urls))}."
+        )
+
+    print("Clinical interpretation: OK")
+    print(f"Response model: {response.model}")
+    print("--- Interpretation output ---")
+    print(content)
+    print("--- End interpretation output ---")
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse manual smoke-test options."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Test configuration, basic LLM connectivity, or the live "
+            "clinical interpretation path."
+        )
+    )
+    parser.add_argument(
+        "--config-only",
+        action="store_true",
+        help="Validate configuration without making an LLM request.",
+    )
+    parser.add_argument(
+        "--clinical",
+        action="store_true",
+        help="Interpret a bundled synthetic Evidence Object.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
     """Run configuration validation and one live LLM request."""
+    arguments = parse_arguments()
+
     try:
         check_configuration()
-        if "--config-only" not in sys.argv:
+        if arguments.clinical:
+            check_clinical_interpretation()
+        elif not arguments.config_only:
             check_llm_connection()
     except RuntimeError as exc:
         print(f"Smoke test failed: {exc}", file=sys.stderr)

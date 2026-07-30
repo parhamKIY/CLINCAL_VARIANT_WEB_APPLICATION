@@ -91,7 +91,7 @@ truncation warnings, and enforces a 64 KiB serialized-size ceiling. Automated
 boundary integration and a complete local smoke test verify the Stage 5,
 Stage 6, and Stage 7 handoff without exposing genotype or raw source payloads.
 
-## Stage 8 LLM interpretation: in progress
+## Stage 8 LLM interpretation: complete
 
 `backend/llm.py` is the only application-facing LLM boundary. Stage 8 step 1
 defines immutable provider-neutral request, response, message, and token-usage
@@ -128,6 +128,24 @@ invalid evidence before network access, provider authentication, rate-limit,
 timeout, request and response failures, partial source evidence, and rejection
 of provider-specific response payloads.
 
+Stage 8 step 5 provides configuration-only, basic live connectivity, and full
+synthetic clinical-interpretation smoke modes in `tests/manual_llm_smoke.py`.
+The clinical mode sends no raw VCF, genotype, patient identifier, or real
+patient record. It verifies all required interpretation sections and rejects
+URLs and selected identifier expansions that were not present in the supplied
+Evidence Object. It also requires the fixed clinical decision-support notice.
+
+For another OpenAI-compatible service, restart the application after changing
+only these `.env` values:
+
+```env
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://provider.example/v1
+LLM_API_KEY=your-api-key
+LLM_MODEL=model-name
+LLM_TIMEOUT=30
+```
+
 ## Tests
 
 Run the offline test suite:
@@ -140,6 +158,18 @@ Run a live request through the production LLM boundary:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py
+```
+
+Run the complete live Stage 8 interpretation using bundled synthetic evidence:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_llm_smoke.py --clinical
+```
+
+Validate configuration without sending an LLM request:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_llm_smoke.py --config-only
 ```
 
 Run the complete local Stage 6 phenotype smoke test:
