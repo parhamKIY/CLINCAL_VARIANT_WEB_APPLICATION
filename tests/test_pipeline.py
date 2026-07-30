@@ -1,6 +1,7 @@
 """Tests for the clinical variant processing pipeline."""
 
 import gzip
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,10 @@ from backend.annotation import (
     annotate_variants,
 )
 from backend.phenotype import (
+    HPODataError,
     PhenotypeError,
+    lookup_hpo_term,
+    update_hpo_ontology,
     validate_hpo_id,
 )
 from backend.prioritization import (
@@ -56,6 +60,48 @@ class FakeResponse:
         if isinstance(self._payload, ValueError):
             raise self._payload
         return self._payload
+
+
+class FakeDownloadResponse:
+    """Stream deterministic bytes for offline ontology update tests."""
+
+    def __init__(
+        self,
+        status_code: int,
+        content: bytes,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.content = content
+        self.headers = headers or {
+            "Content-Length": str(len(content)),
+        }
+        self.closed = False
+
+    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
+        for offset in range(0, len(self.content), chunk_size):
+            yield self.content[offset:offset + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeDownloadSession:
+    """Record one mocked HPO ontology download request."""
+
+    def __init__(
+        self,
+        response: FakeDownloadResponse | requests.RequestException,
+    ) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    def get(self, url: str, **kwargs: object) -> FakeDownloadResponse:
+        self.calls.append({"url": url, **kwargs})
+        if isinstance(self.response, requests.RequestException):
+            raise self.response
+        return self.response
 
 
 class FakeSession:
@@ -663,6 +709,49 @@ class TestPrioritization:
 class TestPhenotype:
     """Verify the Stage 6 phenotype input contract."""
 
+    @staticmethod
+    def _write_hpo_fixture(tmp_path: Path) -> Path:
+        """Write a minimal ontology without requiring network access."""
+        ontology_path = tmp_path / "hp.obo"
+        ontology_path.write_text(
+            (
+                "format-version: 1.2\n"
+                "\n"
+                "[Term]\n"
+                "id: HP:0001250\n"
+                "name: Seizure\n"
+                "alt_id: HP:0001275\n"
+                "\n"
+                "[Term]\n"
+                "id: HP:0001263\n"
+                "name: Global developmental delay\n"
+                "\n"
+                "[Term]\n"
+                "id: HP:0009999\n"
+                "name: obsolete Example phenotype\n"
+                "is_obsolete: true\n"
+            ),
+            encoding="utf-8",
+        )
+        return ontology_path
+
+    @staticmethod
+    def _hpo_release(
+        version: str,
+        *,
+        hpo_id: str = "HP:0001250",
+        name: str = "Seizure",
+    ) -> bytes:
+        """Build a minimal versioned ontology download."""
+        return (
+            "format-version: 1.2\n"
+            f"data-version: hp/releases/{version}\n"
+            "\n"
+            "[Term]\n"
+            f"id: {hpo_id}\n"
+            f"name: {name}\n"
+        ).encode("utf-8")
+
     @pytest.mark.parametrize(
         ("hpo_id", "expected"),
         [
@@ -695,6 +784,282 @@ class TestPhenotype:
     def test_invalid_hpo_id_is_rejected(self, hpo_id: object) -> None:
         with pytest.raises(PhenotypeError):
             validate_hpo_id(hpo_id)  # type: ignore[arg-type]
+
+    def test_existing_hpo_term_is_returned(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        assert lookup_hpo_term(
+            "HP:0001250",
+            ontology_path=ontology_path,
+        ) == {
+            "id": "HP:0001250",
+            "name": "Seizure",
+        }
+
+    def test_alternate_hpo_id_resolves_to_canonical_term(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        assert lookup_hpo_term(
+            "HP:0001275",
+            ontology_path=ontology_path,
+        ) == {
+            "id": "HP:0001250",
+            "name": "Seizure",
+        }
+
+    @pytest.mark.parametrize(
+        "hpo_id",
+        ["HP:0008888", "HP:0009999"],
+    )
+    def test_unknown_or_obsolete_hpo_term_is_rejected(
+        self,
+        tmp_path: Path,
+        hpo_id: str,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError, match="not found"):
+            lookup_hpo_term(
+                hpo_id,
+                ontology_path=ontology_path,
+            )
+
+    def test_missing_hpo_ontology_is_reported(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(HPODataError, match="Unable to open"):
+            lookup_hpo_term(
+                "HP:0001250",
+                ontology_path=tmp_path / "missing.obo",
+            )
+
+    def test_malformed_hpo_ontology_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = tmp_path / "hp.obo"
+        ontology_path.write_text(
+            "[Term]\nid: HP:0001250\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(HPODataError, match="has no name"):
+            lookup_hpo_term(
+                "HP:0001250",
+                ontology_path=ontology_path,
+            )
+
+    def test_hpo_update_installs_newer_valid_release(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        previous_content = self._hpo_release("2026-01-01")
+        ontology_path.write_bytes(previous_content)
+        assert lookup_hpo_term(
+            "HP:0001250",
+            ontology_path=ontology_path,
+        )["name"] == "Seizure"
+
+        response = FakeDownloadResponse(
+            200,
+            self._hpo_release(
+                "2026-02-01",
+                hpo_id="HP:0001263",
+                name="Global developmental delay",
+            ),
+        )
+        session = FakeDownloadSession(response)
+
+        result = update_hpo_ontology(
+            ontology_path=ontology_path,
+            source_url="https://example.test/hp.obo",
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result == {
+            "status": "updated",
+            "previous_version": "hp/releases/2026-01-01",
+            "current_version": "hp/releases/2026-02-01",
+            "active_term_count": 1,
+            "lookup_id_count": 1,
+            "backup_path": str(
+                ontology_path.with_suffix(".previous.obo")
+            ),
+        }
+        assert ontology_path.with_suffix(
+            ".previous.obo"
+        ).read_bytes() == previous_content
+        assert lookup_hpo_term(
+            "HP:0001263",
+            ontology_path=ontology_path,
+        )["name"] == "Global developmental delay"
+        with pytest.raises(PhenotypeError, match="not found"):
+            lookup_hpo_term(
+                "HP:0001250",
+                ontology_path=ontology_path,
+            )
+        assert response.closed is True
+        assert session.calls[0] == {
+            "url": "https://example.test/hp.obo",
+            "headers": {"Accept": "text/plain"},
+            "stream": True,
+            "timeout": settings.REQUEST_TIMEOUT,
+        }
+
+    def test_hpo_update_skips_installed_release(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        installed_content = self._hpo_release("2026-02-01")
+        ontology_path.write_bytes(installed_content)
+        session = FakeDownloadSession(
+            FakeDownloadResponse(
+                200,
+                self._hpo_release(
+                    "2026-02-01",
+                    hpo_id="HP:0001263",
+                    name="Global developmental delay",
+                ),
+            )
+        )
+
+        result = update_hpo_ontology(
+            ontology_path=ontology_path,
+            source_url="https://example.test/hp.obo",
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "unchanged"
+        assert result["previous_version"] == (
+            "hp/releases/2026-02-01"
+        )
+        assert ontology_path.read_bytes() == installed_content
+        assert not ontology_path.with_suffix(".previous.obo").exists()
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            FakeDownloadResponse(503, b"service unavailable"),
+            FakeDownloadResponse(
+                200,
+                (
+                    b"format-version: 1.2\n"
+                    b"data-version: hp/releases/2026-02-01\n"
+                    b"\n[Term]\nid: HP:0001263\n"
+                ),
+            ),
+        ],
+    )
+    def test_failed_hpo_update_preserves_installed_release(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        response: FakeDownloadResponse,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        installed_content = self._hpo_release("2026-01-01")
+        ontology_path.write_bytes(installed_content)
+        session = FakeDownloadSession(response)
+
+        with pytest.raises(HPODataError):
+            update_hpo_ontology(
+                ontology_path=ontology_path,
+                source_url="https://example.test/hp.obo",
+                session=session,  # type: ignore[arg-type]
+            )
+
+        assert ontology_path.read_bytes() == installed_content
+        assert not ontology_path.with_suffix(".previous.obo").exists()
+        assert list(tmp_path.glob("*.download")) == []
+
+    def test_hpo_update_rejects_release_downgrade(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        installed_content = self._hpo_release("2026-02-01")
+        ontology_path.write_bytes(installed_content)
+        session = FakeDownloadSession(
+            FakeDownloadResponse(
+                200,
+                self._hpo_release("2026-01-01"),
+            )
+        )
+
+        with pytest.raises(HPODataError, match="older"):
+            update_hpo_ontology(
+                ontology_path=ontology_path,
+                source_url="https://example.test/hp.obo",
+                session=session,  # type: ignore[arg-type]
+            )
+
+        assert ontology_path.read_bytes() == installed_content
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            requests.Timeout("temporary timeout"),
+            FakeDownloadResponse(
+                200,
+                b"oversized",
+                headers={"Content-Length": str(51 * 1024 * 1024)},
+            ),
+        ],
+    )
+    def test_hpo_download_failure_leaves_installed_file_unchanged(
+        self,
+        tmp_path: Path,
+        response: FakeDownloadResponse | requests.RequestException,
+    ) -> None:
+        ontology_path = tmp_path / "hp.obo"
+        installed_content = self._hpo_release("2026-02-01")
+        ontology_path.write_bytes(installed_content)
+        session = FakeDownloadSession(response)
+
+        with pytest.raises(HPODataError):
+            update_hpo_ontology(
+                ontology_path=ontology_path,
+                source_url="https://example.test/hp.obo",
+                session=session,  # type: ignore[arg-type]
+            )
+
+        assert ontology_path.read_bytes() == installed_content
+        assert list(tmp_path.glob("*.download")) == []
+
+    def test_hpo_update_requires_https(self, tmp_path: Path) -> None:
+        with pytest.raises(HPODataError, match="HTTPS"):
+            update_hpo_ontology(
+                ontology_path=tmp_path / "hp.obo",
+                source_url="http://example.test/hp.obo",
+            )
 
 
 class TestAnnotation:

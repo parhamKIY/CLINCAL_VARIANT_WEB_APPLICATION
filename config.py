@@ -144,6 +144,11 @@ class Settings:
         "https://genome-euro.ucsc.edu/cgi-bin/hubApi",
     ).strip().rstrip("/")
 
+    HPO_ONTOLOGY_URL: str = os.getenv(
+        "HPO_ONTOLOGY_URL",
+        "https://purl.obolibrary.org/obo/hp.obo",
+    ).strip()
+
     # Genome assembly must remain explicit when coordinates are sent to
     # external annotation services.
     GENOME_ASSEMBLY: str = _get_required_env(
@@ -234,6 +239,7 @@ class Settings:
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
+            "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
         }
 
         for name, value in url_settings.items():
@@ -247,6 +253,11 @@ class Settings:
                     f"Environment variable '{name}' must be a valid "
                     "HTTP or HTTPS URL."
                 )
+
+        if urlsplit(cls.HPO_ONTOLOGY_URL).scheme != "https":
+            raise RuntimeError(
+                "HPO_ONTOLOGY_URL must use HTTPS."
+            )
 
         if not cls.APP_NAME:
             raise RuntimeError(
