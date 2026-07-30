@@ -56,6 +56,7 @@ MAX_HPO_DISEASE_ANNOTATIONS_BYTES = 75 * 1024 * 1024
 MIN_HPO_ACTIVE_TERMS = 10_000
 MIN_HPO_GENE_ASSOCIATION_TERMS = 10_000
 MIN_HPO_DISEASE_ANNOTATION_TERMS = 10_000
+MAX_PATIENT_HPO_TERMS = 50
 HPO_DOWNLOAD_CHUNK_SIZE = 64 * 1024
 _HPO_UPDATE_LOCK = Lock()
 
@@ -503,6 +504,40 @@ def search_hpo_terms(
 
     ranked.sort(key=lambda item: item[:4])
     return [item[4] for item in ranked[:limit]]
+
+
+def normalize_phenotypes(
+    hpo_ids: list[str] | tuple[str, ...],
+    *,
+    ontology_path: str | Path | None = None,
+) -> list[HPOTerm]:
+    """Validate and canonicalize a patient's selected HPO terms."""
+    if not isinstance(hpo_ids, (list, tuple)):
+        raise PhenotypeError(
+            "Phenotypes must be provided as a list of HPO IDs."
+        )
+    if not hpo_ids:
+        raise PhenotypeError(
+            "At least one HPO phenotype must be provided."
+        )
+    if len(hpo_ids) > MAX_PATIENT_HPO_TERMS:
+        raise PhenotypeError(
+            "No more than 50 HPO phenotypes may be provided."
+        )
+
+    normalized_terms: list[HPOTerm] = []
+    seen_ids: set[str] = set()
+    for hpo_id in hpo_ids:
+        term = lookup_hpo_term(
+            hpo_id,
+            ontology_path=ontology_path,
+        )
+        if term["id"] in seen_ids:
+            continue
+        seen_ids.add(term["id"])
+        normalized_terms.append(term)
+
+    return normalized_terms
 
 
 @lru_cache(maxsize=4)

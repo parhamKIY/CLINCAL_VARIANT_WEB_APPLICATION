@@ -18,6 +18,7 @@ from backend.phenotype import (
     get_diseases_for_hpo,
     get_genes_for_hpo,
     lookup_hpo_term,
+    normalize_phenotypes,
     search_hpo_terms,
     update_hpo_data,
     update_hpo_ontology,
@@ -1135,6 +1136,78 @@ class TestPhenotype:
             search_hpo_terms(
                 text,  # type: ignore[arg-type]
                 limit=limit,  # type: ignore[arg-type]
+                ontology_path=ontology_path,
+            )
+
+    def test_multiple_hpo_terms_are_canonicalized_and_deduplicated(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        assert normalize_phenotypes(
+            [
+                " HP:0001250 ",
+                "HP:0001263",
+                "HP:0001275",
+                "HP:0001263",
+            ],
+            ontology_path=ontology_path,
+        ) == [
+            {
+                "id": "HP:0001250",
+                "name": "Seizure",
+            },
+            {
+                "id": "HP:0001263",
+                "name": "Global developmental delay",
+            },
+        ]
+
+    @pytest.mark.parametrize(
+        "phenotypes",
+        [
+            [],
+            (),
+            "HP:0001250",
+            None,
+            {"hpo_id": "HP:0001250"},
+        ],
+    )
+    def test_invalid_phenotype_collection_is_rejected(
+        self,
+        tmp_path: Path,
+        phenotypes: object,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError):
+            normalize_phenotypes(
+                phenotypes,  # type: ignore[arg-type]
+                ontology_path=ontology_path,
+            )
+
+    def test_too_many_phenotypes_are_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError, match="No more than 50"):
+            normalize_phenotypes(
+                ["HP:0001250"] * 51,
+                ontology_path=ontology_path,
+            )
+
+    def test_unknown_term_in_phenotype_collection_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError, match="not found"):
+            normalize_phenotypes(
+                ["HP:0001250", "HP:9999999"],
                 ontology_path=ontology_path,
             )
 
