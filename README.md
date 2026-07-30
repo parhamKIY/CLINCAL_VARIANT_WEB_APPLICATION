@@ -74,6 +74,16 @@ installation, rejects downgrades, preserves the previous files, and rolls back
 a partial installation. This keeps phenotype terms, gene associations, and
 disease annotations release-compatible.
 
+## Stage 7 evidence object: in progress
+
+`backend/report.py` defines the versioned `EvidenceObject` contract and its
+validation boundary. The schema keeps only standardized variant, annotation,
+clinical, phenotype, provenance, and warning fields. Exact-field validation
+rejects raw VCF fields, raw API payloads, and unapproved personal data, while
+missing evidence remains explicit through `None`, empty lists, and source
+statuses. Converting Stage 5 and Stage 6 candidates into this schema is the
+next implementation step.
+
 ## Tests
 
 Run the offline test suite:

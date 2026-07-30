@@ -1,6 +1,8 @@
 """Tests for the clinical variant processing pipeline."""
 
 import gzip
+import json
+from copy import deepcopy
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +31,11 @@ from backend.phenotype import (
 from backend.prioritization import (
     PrioritizationError,
     prioritize_variants,
+)
+from backend.report import (
+    EVIDENCE_SCHEMA_VERSION,
+    EvidenceObjectError,
+    validate_evidence_object,
 )
 from backend.vcf_processing import (
     VCFProcessingError,
@@ -3385,3 +3392,206 @@ class TestAnnotation:
             match="missing: alt",
         ):
             annotate_variants([variant], max_retries=0)
+
+
+class TestEvidenceObject:
+    """Verify the Stage 7 evidence schema and validation boundary."""
+
+    @staticmethod
+    def _complete_evidence_object() -> dict[str, object]:
+        return {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "variant": {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+            },
+            "assembly": "GRCh38",
+            "gene": "SCN1A",
+            "gene_id": "ENSG00000144285",
+            "transcript": "ENST00000303395",
+            "consequence": "missense_variant",
+            "impact": "MODERATE",
+            "protein_change": "ENSP00000303540:p.Arg1645Cys",
+            "population_frequency": 0.00001,
+            "clinvar_accession": "VCV000012345.1",
+            "clinvar_significance": "Pathogenic",
+            "clinvar_review_status": "reviewed by expert panel",
+            "clinvar_conditions": [
+                "Developmental and epileptic encephalopathy",
+            ],
+            "clingen_curations": [
+                {
+                    "disease": (
+                        "Developmental and epileptic encephalopathy"
+                    ),
+                    "disease_id": "MONDO:0100062",
+                    "classification": "Definitive",
+                    "mode_of_inheritance": "Autosomal dominant",
+                    "pmids": ["12345678"],
+                    "report_url": (
+                        "https://search.clinicalgenome.org/"
+                        "kb/gene-validity/example"
+                    ),
+                }
+            ],
+            "phenotype_score": 0.5,
+            "hpo_terms": [
+                "HP:0001250",
+                "HP:0001263",
+            ],
+            "matched_hpo_terms": ["HP:0001250"],
+            "source_statuses": {
+                "vep": "success",
+                "myvariant": "success",
+                "clinvar": "success",
+                "clingen": "success",
+            },
+            "references": [
+                {
+                    "source": "NCBI ClinVar",
+                    "url": (
+                        "https://www.ncbi.nlm.nih.gov/"
+                        "clinvar/variation/12345/"
+                    ),
+                }
+            ],
+            "warnings": [],
+        }
+
+    def test_complete_evidence_object_is_valid_and_json_safe(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+
+        assert validate_evidence_object(evidence) == evidence
+        assert json.loads(json.dumps(evidence)) == evidence
+
+    def test_explicitly_missing_evidence_is_valid(self) -> None:
+        evidence = self._complete_evidence_object()
+        for field in (
+            "gene",
+            "gene_id",
+            "transcript",
+            "consequence",
+            "impact",
+            "protein_change",
+            "population_frequency",
+            "clinvar_accession",
+            "clinvar_significance",
+            "clinvar_review_status",
+            "phenotype_score",
+        ):
+            evidence[field] = None
+        evidence["clinvar_conditions"] = []
+        evidence["clingen_curations"] = []
+        evidence["hpo_terms"] = []
+        evidence["matched_hpo_terms"] = []
+        evidence["references"] = []
+        evidence["source_statuses"] = {
+            "vep": "not_found",
+            "myvariant": "not_found",
+            "clinvar": "not_found",
+            "clingen": "not_applicable",
+        }
+
+        assert validate_evidence_object(evidence) == evidence
+
+    def test_missing_required_evidence_field_is_rejected(self) -> None:
+        evidence = self._complete_evidence_object()
+        del evidence["phenotype_score"]
+
+        with pytest.raises(EvidenceObjectError, match="missing"):
+            validate_evidence_object(evidence)
+
+    def test_raw_vcf_or_personal_fields_are_rejected(self) -> None:
+        evidence = self._complete_evidence_object()
+        variant = evidence["variant"]
+        assert isinstance(variant, dict)
+        variant["genotype"] = "0/1"
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="unsupported fields: genotype",
+        ):
+            validate_evidence_object(evidence)
+
+    @pytest.mark.parametrize(
+        ("path", "value", "message"),
+        [
+            (
+                ("assembly",),
+                "hg38",
+                "GRCh37 or GRCh38",
+            ),
+            (
+                ("population_frequency",),
+                float("nan"),
+                "finite number",
+            ),
+            (
+                ("phenotype_score",),
+                1.1,
+                "finite number",
+            ),
+            (
+                ("hpo_terms",),
+                ["HP:123"],
+                "canonical",
+            ),
+            (
+                ("source_statuses", "clinvar"),
+                "unknown",
+                "unsupported status",
+            ),
+            (
+                ("references", 0, "url"),
+                "not-a-url",
+                "absolute HTTP",
+            ),
+        ],
+    )
+    def test_invalid_evidence_values_are_rejected(
+        self,
+        path: tuple[object, ...],
+        value: object,
+        message: str,
+    ) -> None:
+        evidence = deepcopy(self._complete_evidence_object())
+        target: object = evidence
+        for key in path[:-1]:
+            if isinstance(key, int):
+                assert isinstance(target, list)
+                target = target[key]
+            else:
+                assert isinstance(target, dict)
+                target = target[key]
+        final_key = path[-1]
+        if isinstance(final_key, int):
+            assert isinstance(target, list)
+            target[final_key] = value
+        else:
+            assert isinstance(target, dict)
+            target[final_key] = value
+
+        with pytest.raises(EvidenceObjectError, match=message):
+            validate_evidence_object(evidence)
+
+    def test_matched_hpo_terms_must_be_patient_terms(self) -> None:
+        evidence = self._complete_evidence_object()
+        evidence["matched_hpo_terms"] = ["HP:0000707"]
+
+        with pytest.raises(EvidenceObjectError, match="subset"):
+            validate_evidence_object(evidence)
+
+    def test_phenotype_score_requires_patient_hpo_terms(self) -> None:
+        evidence = self._complete_evidence_object()
+        evidence["hpo_terms"] = []
+        evidence["matched_hpo_terms"] = []
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="must be null when no HPO terms",
+        ):
+            validate_evidence_object(evidence)
