@@ -63,15 +63,18 @@ class FakeSession:
         *,
         get_responses: list[object] | None = None,
         clinvar_responses: list[object] | None = None,
+        clingen_responses: list[object] | None = None,
     ) -> None:
         self.responses = list(responses)
         self.get_responses = list(get_responses or [])
         self.clinvar_responses = list(clinvar_responses or [])
+        self.clingen_responses = list(clingen_responses or [])
         self.calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
         self.get_calls: list[dict[str, object]] = []
         self.myvariant_get_calls: list[dict[str, object]] = []
         self.clinvar_get_calls: list[dict[str, object]] = []
+        self.clingen_get_calls: list[dict[str, object]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
@@ -91,10 +94,29 @@ class FakeSession:
         self.calls.append(call)
         self.get_calls.append(call)
 
+        is_clingen = url == (
+            f"{settings.CLINGEN_BASE_URL}/getData/track"
+        )
         is_clinvar = url.endswith(
             ("/esearch.fcgi", "/esummary.fcgi")
         )
-        if is_clinvar:
+        if is_clingen:
+            self.clingen_get_calls.append(call)
+            if not self.clingen_responses:
+                params = kwargs.get("params", {})
+                assert isinstance(params, dict)
+                return FakeResponse(
+                    200,
+                    {
+                        "genome": params.get("genome", "hg38"),
+                        "track": "genCC",
+                        "chrom": params.get("chrom", "chr1"),
+                        "genCC": [],
+                        "itemsReturned": 0,
+                    },
+                )
+            response = self.clingen_responses.pop(0)
+        elif is_clinvar:
             self.clinvar_get_calls.append(call)
             if not self.clinvar_responses:
                 return FakeResponse(
@@ -780,6 +802,57 @@ class TestAnnotation:
             }
         }
 
+    @staticmethod
+    def _clingen_response(
+        *,
+        gene: str = "GENE1",
+        submitter: str = "ClinGen",
+        genome: str = "hg38",
+        chrom: str = "chr1",
+        records: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """Build a UCSC GenCC track response."""
+        gencc_records = records
+        if gencc_records is None:
+            gencc_records = [
+                {
+                    "chrom": chrom,
+                    "chromStart": 50,
+                    "chromEnd": 150,
+                    "sgc_id": "SGC-000001",
+                    "gene_curie": "HGNC:1",
+                    "gene_symbol": gene,
+                    "disease_curie": "MONDO:0000001",
+                    "disease_title": "Example disease",
+                    "classification_curie": "GENCC:100001",
+                    "classification_title": "Definitive",
+                    "moi_curie": "HP:0000006",
+                    "moi_title": "Autosomal dominant inheritance",
+                    "submitter_curie": "GENCC:000102",
+                    "submitter_title": submitter,
+                    "sub_date": "2025-01-02T00:00:00.000000Z",
+                    "sub_public_report_url": (
+                        "https://search.clinicalgenome.org/kb/"
+                        "gene-validity/CGGV:assertion_example"
+                    ),
+                    "sub_assertion_criteria_url": (
+                        "https://clinicalgenome.org/docs/example-sop/"
+                    ),
+                    "sub_submission_id": (
+                        "11111111-2222-3333-4444-555555555555"
+                    ),
+                    "sub_pmids": "12345678, 23456789",
+                }
+            ]
+
+        return {
+            "genome": genome,
+            "track": "genCC",
+            "chrom": chrom,
+            "genCC": gencc_records,
+            "itemsReturned": len(gencc_records),
+        }
+
     def test_successful_vep_response_is_standardized(self) -> None:
         session = FakeSession(
             [
@@ -1285,6 +1358,264 @@ class TestAnnotation:
         assert annotation["sources"]["clinvar"]["status"] == "not_found"
         assert len(session.clinvar_get_calls) == 1
 
+    def test_successful_clingen_response_is_standardized(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clingen = annotation["sources"]["clingen"]
+        assert clingen["status"] == "success"
+        assert clingen["data_provider"] == "UCSC GenCC"
+        assert clingen["query_gene"] == "GENE1"
+        assert clingen["gene"] == "GENE1"
+        assert clingen["gene_id"] == "HGNC:1"
+        assert clingen["curation_count"] == 1
+        assert clingen["curations_truncated"] is False
+        assert clingen["curations"] == [
+            {
+                "curation_id": "SGC-000001",
+                "disease": "Example disease",
+                "disease_id": "MONDO:0000001",
+                "classification": "Definitive",
+                "classification_id": "GENCC:100001",
+                "mode_of_inheritance": (
+                    "Autosomal dominant inheritance"
+                ),
+                "mode_of_inheritance_id": "HP:0000006",
+                "classification_date": (
+                    "2025-01-02T00:00:00.000000Z"
+                ),
+                "submitter": "ClinGen",
+                "criteria_url": (
+                    "https://clinicalgenome.org/docs/example-sop/"
+                ),
+                "submission_id": (
+                    "11111111-2222-3333-4444-555555555555"
+                ),
+                "pmids": ["12345678", "23456789"],
+                "report_url": (
+                    "https://search.clinicalgenome.org/kb/"
+                    "gene-validity/CGGV:assertion_example"
+                ),
+            }
+        ]
+        assert session.clingen_get_calls[0]["params"] == {
+            "genome": "hg38",
+            "track": "genCC",
+            "chrom": "chr1",
+            "start": 99,
+            "end": 100,
+        }
+        assert "raw" not in clingen
+        assert annotation["references"][-1]["source"] == (
+            "ClinGen Gene-Disease Validity via UCSC GenCC"
+        )
+
+    def test_clingen_uses_explicit_grch37_coordinates(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.annotation.settings.GENOME_ASSEMBLY",
+            "GRCh37",
+        )
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [self._vep_response(assembly="GRCh37")],
+                )
+            ],
+            clingen_responses=[
+                FakeResponse(
+                    200,
+                    self._clingen_response(genome="hg19"),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["clingen"]["status"] == "success"
+        assert session.clingen_get_calls[0]["params"] == {
+            "genome": "hg19",
+            "track": "genCC",
+            "chrom": "chr1",
+            "start": 99,
+            "end": 100,
+        }
+
+    def test_clingen_rejects_non_exact_gene_match(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(
+                    200,
+                    self._clingen_response(gene="GENE10"),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["clingen"]["status"] == "not_found"
+        assert annotation["sources"]["clingen"]["curations"] == []
+
+    def test_clingen_rejects_other_gencc_submitters(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(
+                    200,
+                    self._clingen_response(submitter="PanelApp Australia"),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["clingen"]["status"] == "not_found"
+        assert annotation["sources"]["clingen"]["curations"] == []
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_warning"),
+        [
+            (ValueError("invalid JSON"), "invalid JSON"),
+            ({"track": "genCC", "genCC": []}, "unexpected response structure"),
+            (
+                {"error": "track not found"},
+                "API error",
+            ),
+        ],
+    )
+    def test_clingen_invalid_response_is_isolated(
+        self,
+        payload: object,
+        expected_warning: str,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+            clingen_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert annotation["sources"]["clingen"]["status"] == "error"
+        assert any(
+            expected_warning in warning
+            for warning in annotation["warnings"]
+        )
+
+    def test_clingen_timeout_is_retried_then_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                requests.Timeout("temporary timeout"),
+                FakeResponse(200, self._clingen_response()),
+            ],
+        )
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "backend.annotation.time.sleep",
+            delays.append,
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=1,
+        )[0]
+
+        assert annotation["sources"]["clingen"]["status"] == "success"
+        assert len(session.clingen_get_calls) == 2
+        assert delays == [1.0]
+
+    def test_clingen_http_500_preserves_other_sources(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+            clingen_responses=[
+                FakeResponse(500, {"error": "temporary failure"})
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert annotation["sources"]["clingen"]["status"] == "error"
+        assert any(
+            "HTTP 500" in warning
+            for warning in annotation["warnings"]
+        )
+
+    def test_clingen_is_not_queried_without_a_gene(self) -> None:
+        vep_response = self._vep_response()
+        vep_response["transcript_consequences"] = []
+        session = FakeSession(
+            [FakeResponse(200, [vep_response])],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["clingen"]["status"] == (
+            "not_applicable"
+        )
+        assert session.clingen_get_calls == []
+
     def test_multiple_candidates_use_one_batch_request(self) -> None:
         session = FakeSession(
             [
@@ -1308,6 +1639,7 @@ class TestAnnotation:
         assert len(session.post_calls) == 1
         assert len(session.myvariant_get_calls) == 2
         assert len(session.clinvar_get_calls) == 2
+        assert len(session.clingen_get_calls) == 2
         request_json = session.post_calls[0]["json"]
         assert isinstance(request_json, dict)
         assert len(request_json["variants"]) == 2

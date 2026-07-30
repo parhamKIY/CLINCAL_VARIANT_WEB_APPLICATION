@@ -2,6 +2,7 @@
 
 import logging
 import math
+import re
 import time
 from collections.abc import Iterable, Iterator
 from threading import Lock
@@ -22,6 +23,8 @@ MAX_STORED_TRANSCRIPTS = 10
 MAX_CLINVAR_SEARCH_RESULTS = 20
 MAX_CLINVAR_CONDITIONS = 10
 MAX_CLINVAR_ACCESSIONS = 20
+MAX_CLINGEN_CURATIONS = 25
+MAX_CLINGEN_PMIDS = 50
 CLINVAR_REQUEST_INTERVAL = 0.34
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
@@ -106,6 +109,11 @@ CLINVAR_REFSEQ_VERSIONS = {
         "Y": 10,
         "MT": 1,
     },
+}
+CLINGEN_GENE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CLINGEN_UCSC_ASSEMBLIES = {
+    "GRCh37": "hg19",
+    "GRCh38": "hg38",
 }
 IMPACT_PRIORITY = {
     "HIGH": 4,
@@ -848,6 +856,162 @@ def _get_clinvar(
 
 
 # ---------------------------------------------------------------------------
+# ClinGen evidence through the UCSC GenCC track
+# ---------------------------------------------------------------------------
+
+def _select_clingen_gene(annotation: AnnotationData) -> str | None:
+    """Select one unambiguous gene symbol from standardized source fields."""
+    candidates = (
+        annotation.get("gene"),
+        annotation.get("sources", {}).get("myvariant", {}).get("gene"),
+        annotation.get("sources", {}).get("clinvar", {}).get("gene"),
+    )
+
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+
+        symbol = candidate.strip()
+        if CLINGEN_GENE_SYMBOL_PATTERN.fullmatch(symbol):
+            return symbol
+
+    return None
+
+
+def _to_clingen_ucsc_region(
+    variant: VariantData,
+) -> tuple[str, int, int] | None:
+    """Convert a 1-based VCF variant into a bounded UCSC query interval."""
+    chromosome = _normalize_chromosome(variant.get("chrom"))
+    position = variant.get("pos")
+    reference = variant.get("ref")
+
+    if (
+        chromosome is None
+        or not isinstance(position, int)
+        or isinstance(position, bool)
+        or position < 1
+        or not isinstance(reference, str)
+        or not reference.strip()
+    ):
+        return None
+
+    ucsc_chromosome = "chrM" if chromosome == "MT" else f"chr{chromosome}"
+    start = position - 1
+    end = start + max(len(reference.strip()), 1)
+    return ucsc_chromosome, start, end
+
+
+def _get_clingen_gene_validity(
+    session: requests.Session,
+    variant: VariantData,
+    gene: str,
+    max_retries: int,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Retrieve exact ClinGen-submitted claims from UCSC's GenCC track."""
+    region = _to_clingen_ucsc_region(variant)
+    if region is None:
+        return None, (
+            "ClinGen evidence does not support this chromosome or "
+            "coordinate representation."
+        )
+
+    chromosome, start, end = region
+    assembly = CLINGEN_UCSC_ASSEMBLIES[settings.GENOME_ASSEMBLY]
+    endpoint = f"{settings.CLINGEN_BASE_URL}/getData/track"
+    params = {
+        "genome": assembly,
+        "track": "genCC",
+        "chrom": chromosome,
+        "start": start,
+        "end": end,
+    }
+
+    for attempt in range(max_retries + 1):
+        response: requests.Response | None = None
+
+        try:
+            response = session.get(
+                endpoint,
+                params=params,
+                headers={"Accept": "application/json"},
+                timeout=settings.REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            if attempt >= max_retries:
+                raise AnnotationServiceError(
+                    f"UCSC GenCC request failed: {exc}"
+                ) from exc
+
+            LOGGER.warning(
+                "Retrying UCSC GenCC after a connection error."
+            )
+            time.sleep(_retry_delay(attempt))
+            continue
+
+        if response.status_code in TRANSIENT_HTTP_STATUSES:
+            if attempt < max_retries:
+                LOGGER.warning(
+                    "Retrying UCSC GenCC after HTTP %s.",
+                    response.status_code,
+                )
+                time.sleep(_retry_delay(attempt, response))
+                continue
+
+        if not 200 <= response.status_code < 300:
+            raise AnnotationServiceError(
+                "UCSC GenCC returned HTTP "
+                f"{response.status_code}."
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AnnotationServiceError(
+                "UCSC GenCC returned invalid JSON."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise AnnotationServiceError(
+                "UCSC GenCC returned an unexpected response structure."
+            )
+
+        if payload.get("error"):
+            raise AnnotationServiceError(
+                "UCSC GenCC returned an API error."
+            )
+
+        records = payload.get("genCC")
+        if (
+            payload.get("genome") != assembly
+            or payload.get("track") != "genCC"
+            or payload.get("chrom") != chromosome
+            or not isinstance(records, list)
+            or any(
+                not isinstance(item, dict)
+                for item in records
+            )
+        ):
+            raise AnnotationServiceError(
+                "UCSC GenCC returned an unexpected response structure."
+            )
+
+        exact_matches = [
+            item
+            for item in records
+            if isinstance(item.get("gene_symbol"), str)
+            and item["gene_symbol"].strip().casefold() == gene.casefold()
+            and isinstance(item.get("submitter_title"), str)
+            and item["submitter_title"].strip().casefold() == "clingen"
+        ]
+        return exact_matches, None
+
+    raise AnnotationServiceError(
+        "UCSC GenCC retry loop ended unexpectedly."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Response cleaning and unified evidence output
 # ---------------------------------------------------------------------------
 
@@ -995,6 +1159,16 @@ def _base_annotation(
                 "conditions_truncated": False,
                 "scv_accessions": [],
                 "rcv_accessions": [],
+            },
+            "clingen": {
+                "status": "pending",
+                "data_provider": "UCSC GenCC",
+                "query_gene": None,
+                "gene": None,
+                "gene_id": None,
+                "curations": [],
+                "curation_count": 0,
+                "curations_truncated": False,
             }
         },
         "references": [
@@ -1465,6 +1639,164 @@ def _annotate_with_clinvar(
     )
 
 
+def _optional_clingen_string(value: Any) -> str | None:
+    """Return a stripped ClinGen scalar or None."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _standardize_clingen_response(
+    annotation: AnnotationData,
+    records: list[dict[str, Any]],
+    query_gene: str,
+) -> None:
+    """Add bounded ClinGen-submitted GenCC validity evidence."""
+    curations: list[dict[str, Any]] = []
+    reference_urls: list[str] = []
+
+    for record in records[:MAX_CLINGEN_CURATIONS]:
+        gene = _optional_clingen_string(record.get("gene_symbol"))
+        submitter = _optional_clingen_string(record.get("submitter_title"))
+        classification = _optional_clingen_string(
+            record.get("classification_title")
+        )
+        disease = _optional_clingen_string(record.get("disease_title"))
+        if (
+            gene is None
+            or gene.casefold() != query_gene.casefold()
+            or submitter is None
+            or submitter.casefold() != "clingen"
+            or classification is None
+            or disease is None
+        ):
+            raise AnnotationServiceError(
+                "UCSC GenCC returned an incomplete validity claim."
+            )
+
+        curation_id = (
+            _optional_clingen_string(record.get("sgc_id"))
+            or _optional_clingen_string(record.get("sub_submission_id"))
+        )
+        report_url = _optional_clingen_string(
+            record.get("sub_public_report_url")
+        )
+        raw_pmids = _optional_clingen_string(record.get("sub_pmids"))
+        pmids = list(
+            dict.fromkeys(
+                value.strip()
+                for value in (raw_pmids or "").split(",")
+                if value.strip().isdigit()
+            )
+        )[:MAX_CLINGEN_PMIDS]
+        curations.append(
+            {
+                "curation_id": curation_id,
+                "disease": disease,
+                "disease_id": _optional_clingen_string(
+                    record.get("disease_curie")
+                ),
+                "classification": classification,
+                "classification_id": _optional_clingen_string(
+                    record.get("classification_curie")
+                ),
+                "mode_of_inheritance": _optional_clingen_string(
+                    record.get("moi_title")
+                ),
+                "mode_of_inheritance_id": _optional_clingen_string(
+                    record.get("moi_curie")
+                ),
+                "classification_date": _optional_clingen_string(
+                    record.get("sub_date")
+                ),
+                "submitter": submitter,
+                "criteria_url": _optional_clingen_string(
+                    record.get("sub_assertion_criteria_url")
+                ),
+                "submission_id": _optional_clingen_string(
+                    record.get("sub_submission_id")
+                ),
+                "pmids": pmids,
+                "report_url": report_url,
+            }
+        )
+        if report_url is not None:
+            reference_urls.append(report_url)
+
+    clingen = annotation["sources"]["clingen"]
+    clingen.update(
+        {
+            "status": "success",
+            "query_gene": query_gene,
+            "gene": _optional_clingen_string(records[0].get("gene_symbol")),
+            "gene_id": _optional_clingen_string(
+                records[0].get("gene_curie")
+            ),
+            "curations": curations,
+            "curation_count": len(records),
+            "curations_truncated": len(records) > len(curations),
+        }
+    )
+
+    for report_url in reference_urls:
+        annotation["references"].append(
+            {
+                "source": (
+                    "ClinGen Gene-Disease Validity via UCSC GenCC"
+                ),
+                "url": report_url,
+            }
+        )
+
+
+def _annotate_with_clingen(
+    annotation: AnnotationData,
+    session: requests.Session,
+    max_retries: int,
+) -> None:
+    """Add isolated ClinGen gene-disease validity evidence."""
+    gene = _select_clingen_gene(annotation)
+    if gene is None:
+        annotation["sources"]["clingen"]["status"] = "not_applicable"
+        annotation["warnings"].append(
+            "ClinGen was not queried because no unambiguous gene symbol "
+            "was available."
+        )
+        return
+
+    annotation["sources"]["clingen"]["query_gene"] = gene
+
+    try:
+        records, unsupported_warning = _get_clingen_gene_validity(
+            session,
+            annotation["variant"],
+            gene,
+            max_retries,
+        )
+        if unsupported_warning is not None:
+            annotation["sources"]["clingen"]["status"] = "unsupported"
+            annotation["warnings"].append(unsupported_warning)
+            return
+
+        if records is None or not records:
+            annotation["sources"]["clingen"]["status"] = "not_found"
+            annotation["warnings"].append(
+                "UCSC GenCC returned no exact ClinGen validity claims "
+                f"for {gene} at this locus."
+            )
+            return
+
+        _standardize_clingen_response(
+            annotation,
+            records,
+            gene,
+        )
+    except AnnotationServiceError as exc:
+        LOGGER.error("UCSC GenCC request failed: %s", exc)
+        annotation["sources"]["clingen"]["status"] = "error"
+        annotation["warnings"].append(str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Public annotation entry point
 # ---------------------------------------------------------------------------
@@ -1476,10 +1808,10 @@ def annotate_variants(
     max_retries: int | None = None,
     session: requests.Session | None = None,
 ) -> list[AnnotationData]:
-    """Annotate with VEP, MyVariant, and ClinVar without exposing raw output.
+    """Annotate with VEP, MyVariant, ClinVar, and ClinGen evidence.
 
-    Each external source fails independently. ClinGen evidence can later be
-    added under the same ``sources`` field without changing this interface.
+    Each external source fails independently and raw source payloads are not
+    retained in the returned standardized evidence.
     """
     resolved_batch_size = _resolve_batch_size(batch_size)
     resolved_retries = _resolve_retries(max_retries)
@@ -1548,6 +1880,11 @@ def annotate_variants(
                 resolved_retries,
             )
             _annotate_with_clinvar(
+                annotation,
+                active_session,
+                resolved_retries,
+            )
+            _annotate_with_clingen(
                 annotation,
                 active_session,
                 resolved_retries,

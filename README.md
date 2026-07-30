@@ -22,6 +22,9 @@ Clinical variant interpretation MVP built with Python and Streamlit.
   population-frequency evidence.
 - Annotation phase three queries NCBI ClinVar directly and standardizes
   germline classification and review evidence.
+- Annotation phase four queries ClinGen-submitted GenCC records through
+  the UCSC European REST API and standardizes exact gene-disease validity
+  claims.
 - External-source failures are isolated so evidence from another source is
   preserved.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
@@ -85,10 +88,10 @@ internal strategy can later be replaced with configurable frequency,
 functional-impact, phenotype, gene-disease, and inheritance scoring without
 changing the pipeline interface.
 
-## Annotation phases one through three
+## Annotation phases one through four
 
-`backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info, and
-NCBI ClinVar:
+`backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info,
+NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 
 - explicit GRCh37/GRCh38 assembly configuration;
 - POST batching with Ensembl's 200-variant maximum;
@@ -103,14 +106,13 @@ NCBI ClinVar:
 - standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
 - standardized ClinVar VCV/RCV/SCV accessions, germline clinical
   significance, review status, evaluation date, and conditions;
+- exact UCSC assembly, coordinate, ClinGen submitter, and gene-symbol
+  matching with standardized disease, classification, inheritance,
+  criteria URL, PMID, and report fields;
 - no raw API response is passed to later pipeline stages.
 
-ClinGen evidence remains the final annotation phase. It can be added under the
-existing `sources` field without changing the public `annotate_variants()`
-interface.
-
 Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks
-separately from the offline test suite:
+through the production annotation path:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_annotation_smoke.py

@@ -139,6 +139,11 @@ class Settings:
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
     ).strip().rstrip("/")
 
+    CLINGEN_BASE_URL: str = os.getenv(
+        "CLINGEN_BASE_URL",
+        "https://genome-euro.ucsc.edu/cgi-bin/hubApi",
+    ).strip().rstrip("/")
+
     # Genome assembly must remain explicit when coordinates are sent to
     # external annotation services.
     GENOME_ASSEMBLY: str = _get_required_env(
@@ -228,6 +233,7 @@ class Settings:
             "VEP_BASE_URL": cls.VEP_BASE_URL,
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
+            "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
         }
 
         for name, value in url_settings.items():
