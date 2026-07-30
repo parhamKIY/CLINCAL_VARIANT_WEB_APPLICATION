@@ -35,6 +35,8 @@ from backend.prioritization import (
 from backend.report import (
     EVIDENCE_SCHEMA_VERSION,
     EvidenceObjectError,
+    build_evidence_object,
+    build_evidence_objects,
     validate_evidence_object,
 )
 from backend.vcf_processing import (
@@ -3460,6 +3462,106 @@ class TestEvidenceObject:
             "warnings": [],
         }
 
+    @staticmethod
+    def _complete_candidate() -> dict[str, object]:
+        return {
+            "variant": {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+                "qual": 99.0,
+                "filter": "PASS",
+                "genotype": "0/1",
+            },
+            "assembly": "GRCh38",
+            "gene": "SCN1A",
+            "gene_id": "ENSG00000144285",
+            "transcript": "ENST00000303395",
+            "consequence": "missense_variant",
+            "impact": "MODERATE",
+            "protein_change": "ENSP00000303540:p.Arg1645Cys",
+            "population_frequency": 0.00001,
+            "sources": {
+                "vep": {
+                    "status": "success",
+                    "raw_internal_detail": "not copied",
+                },
+                "myvariant": {
+                    "status": "success",
+                    "variant_id": "chr2:g.166848215C>T",
+                },
+                "clinvar": {
+                    "status": "success",
+                    "accession": "VCV000012345",
+                    "accession_version": "VCV000012345.1",
+                    "clinical_significance": "Pathogenic",
+                    "review_status": "reviewed by expert panel",
+                    "conditions": [
+                        {
+                            "name": (
+                                "Developmental and epileptic "
+                                "encephalopathy"
+                            ),
+                            "identifiers": [
+                                {
+                                    "source": "MONDO",
+                                    "id": "0100062",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "clingen": {
+                    "status": "success",
+                    "curations": [
+                        {
+                            "curation_id": "CGGV:example",
+                            "disease": (
+                                "Developmental and epileptic "
+                                "encephalopathy"
+                            ),
+                            "disease_id": "MONDO:0100062",
+                            "classification": "Definitive",
+                            "classification_id": "GENCC:100001",
+                            "mode_of_inheritance": "Autosomal dominant",
+                            "mode_of_inheritance_id": "HP:0000006",
+                            "classification_date": "2026-01-01",
+                            "submitter": "ClinGen",
+                            "criteria_url": (
+                                "https://clinicalgenome.org/criteria/"
+                            ),
+                            "submission_id": "GENCC:submission",
+                            "pmids": ["12345678"],
+                            "report_url": (
+                                "https://search.clinicalgenome.org/"
+                                "kb/gene-validity/example"
+                            ),
+                        }
+                    ],
+                },
+            },
+            "phenotype_score": 0.5,
+            "hpo_terms": [
+                "HP:0001250",
+                "HP:0001263",
+            ],
+            "matched_hpo_terms": ["HP:0001250"],
+            "phenotype_match_count": 1,
+            "references": [
+                {
+                    "source": "NCBI ClinVar",
+                    "url": (
+                        "https://www.ncbi.nlm.nih.gov/"
+                        "clinvar/variation/12345/"
+                    ),
+                    "raw_internal_detail": "not copied",
+                }
+            ],
+            "warnings": [],
+            "raw_api_payload": {"not": "copied"},
+        }
+
     def test_complete_evidence_object_is_valid_and_json_safe(
         self,
     ) -> None:
@@ -3467,6 +3569,116 @@ class TestEvidenceObject:
 
         assert validate_evidence_object(evidence) == evidence
         assert json.loads(json.dumps(evidence)) == evidence
+
+    def test_complete_candidate_is_mapped_to_evidence_schema(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        original_candidate = deepcopy(candidate)
+
+        evidence = build_evidence_object(candidate)
+
+        assert evidence == self._complete_evidence_object()
+        assert candidate == original_candidate
+        assert "genotype" not in evidence["variant"]
+        assert "raw_api_payload" not in evidence
+        assert "raw_internal_detail" not in evidence["references"][0]
+
+    def test_missing_clinvar_and_phenotype_are_explicitly_mapped(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        candidate.pop("phenotype_score")
+        candidate.pop("hpo_terms")
+        candidate.pop("matched_hpo_terms")
+        candidate.pop("phenotype_match_count")
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        assert isinstance(clinvar, dict)
+        clinvar.update(
+            {
+                "status": "not_found",
+                "accession": None,
+                "accession_version": None,
+                "clinical_significance": None,
+                "review_status": None,
+                "conditions": [],
+            }
+        )
+
+        evidence = build_evidence_object(candidate)
+
+        assert evidence["clinvar_accession"] is None
+        assert evidence["clinvar_significance"] is None
+        assert evidence["clinvar_conditions"] == []
+        assert evidence["phenotype_score"] is None
+        assert evidence["hpo_terms"] == []
+        assert evidence["matched_hpo_terms"] == []
+
+    def test_candidate_iterable_is_mapped_in_input_order(self) -> None:
+        first = self._complete_candidate()
+        second = deepcopy(first)
+        second_variant = second["variant"]
+        assert isinstance(second_variant, dict)
+        second_variant["pos"] = 166848216
+
+        evidence_objects = build_evidence_objects(
+            candidate for candidate in (first, second)
+        )
+
+        assert [
+            evidence["variant"]["pos"]
+            for evidence in evidence_objects
+        ] == [166848215, 166848216]
+
+    def test_duplicate_candidate_metadata_is_deduplicated(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        references = candidate["references"]
+        warnings = candidate["warnings"]
+        assert isinstance(references, list)
+        assert isinstance(warnings, list)
+        references.append(deepcopy(references[0]))
+        warnings.extend(["Temporary source warning", "Temporary source warning"])
+
+        evidence = build_evidence_object(candidate)
+
+        assert len(evidence["references"]) == 1
+        assert evidence["warnings"] == ["Temporary source warning"]
+
+    def test_incomplete_candidate_phenotype_is_rejected(self) -> None:
+        candidate = self._complete_candidate()
+        candidate.pop("matched_hpo_terms")
+
+        with pytest.raises(EvidenceObjectError, match="incomplete"):
+            build_evidence_object(candidate)
+
+    def test_candidate_match_count_must_match_terms(self) -> None:
+        candidate = self._complete_candidate()
+        candidate["phenotype_match_count"] = 2
+
+        with pytest.raises(EvidenceObjectError, match="match_count"):
+            build_evidence_object(candidate)
+
+    @pytest.mark.parametrize(
+        "candidates",
+        [
+            None,
+            "candidate",
+            {"gene": "SCN1A"},
+            [None],
+        ],
+    )
+    def test_invalid_candidate_collection_is_rejected(
+        self,
+        candidates: object,
+    ) -> None:
+        with pytest.raises(EvidenceObjectError):
+            build_evidence_objects(
+                candidates,  # type: ignore[arg-type]
+            )
 
     def test_explicitly_missing_evidence_is_valid(self) -> None:
         evidence = self._complete_evidence_object()

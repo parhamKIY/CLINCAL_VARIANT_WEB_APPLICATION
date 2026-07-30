@@ -3,7 +3,8 @@
 import json
 import math
 import re
-from typing import TypedDict, cast
+from collections.abc import Iterable
+from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
 
@@ -95,6 +96,7 @@ EVIDENCE_CLINGEN_FIELDS = frozenset(
 EVIDENCE_SOURCE_STATUS_FIELDS = frozenset(
     EvidenceSourceStatuses.__required_keys__
 )
+EVIDENCE_SOURCE_NAMES = ("vep", "myvariant", "clinvar", "clingen")
 
 
 def _validate_exact_fields(
@@ -397,3 +399,258 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         ) from exc
 
     return cast(EvidenceObject, value)
+
+
+def _require_candidate_mapping(
+    value: object,
+    path: str,
+) -> dict[str, Any]:
+    """Return one candidate mapping with a field-specific error."""
+    if not isinstance(value, dict):
+        raise EvidenceObjectError(f"{path} must be a dictionary.")
+    return value
+
+
+def _deduplicate_strings(
+    values: object,
+    path: str,
+) -> list[str]:
+    """Copy a string list while preserving its first-seen order."""
+    if not isinstance(values, list):
+        raise EvidenceObjectError(f"{path} must be a list.")
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        text = _validate_required_string(value, f"{path}[{index}]")
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _map_clinvar_conditions(clinvar: dict[str, Any]) -> list[str]:
+    """Reduce standardized ClinVar condition objects to unique names."""
+    raw_conditions = clinvar.get("conditions", [])
+    if not isinstance(raw_conditions, list):
+        raise EvidenceObjectError(
+            "candidate.sources.clinvar.conditions must be a list."
+        )
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for index, condition in enumerate(raw_conditions):
+        path = f"candidate.sources.clinvar.conditions[{index}]"
+        condition_data = _require_candidate_mapping(condition, path)
+        name = _validate_required_string(
+            condition_data.get("name"),
+            f"{path}.name",
+        )
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _map_clingen_curations(
+    clingen: dict[str, Any],
+) -> list[EvidenceClinGenCuration]:
+    """Select compact ClinGen fields from standardized GenCC evidence."""
+    raw_curations = clingen.get("curations", [])
+    if not isinstance(raw_curations, list):
+        raise EvidenceObjectError(
+            "candidate.sources.clingen.curations must be a list."
+        )
+
+    curations: list[EvidenceClinGenCuration] = []
+    for index, curation in enumerate(raw_curations):
+        path = f"candidate.sources.clingen.curations[{index}]"
+        curation_data = _require_candidate_mapping(curation, path)
+        pmids = _deduplicate_strings(
+            curation_data.get("pmids", []),
+            f"{path}.pmids",
+        )
+        curations.append(
+            {
+                "disease": curation_data.get("disease"),
+                "disease_id": curation_data.get("disease_id"),
+                "classification": curation_data.get(
+                    "classification"
+                ),
+                "mode_of_inheritance": curation_data.get(
+                    "mode_of_inheritance"
+                ),
+                "pmids": pmids,
+                "report_url": curation_data.get("report_url"),
+            }
+        )
+    return curations
+
+
+def _map_references(candidate: dict[str, Any]) -> list[EvidenceReference]:
+    """Copy and deduplicate source references without raw metadata."""
+    raw_references = candidate.get("references", [])
+    if not isinstance(raw_references, list):
+        raise EvidenceObjectError("candidate.references must be a list.")
+
+    references: list[EvidenceReference] = []
+    seen: set[tuple[str, str]] = set()
+    for index, reference in enumerate(raw_references):
+        path = f"candidate.references[{index}]"
+        reference_data = _require_candidate_mapping(reference, path)
+        source = _validate_required_string(
+            reference_data.get("source"),
+            f"{path}.source",
+        )
+        url = _validate_url(
+            reference_data.get("url"),
+            f"{path}.url",
+        )
+        key = (source, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        references.append({"source": source, "url": url})
+    return references
+
+
+def _map_phenotype(
+    candidate: dict[str, Any],
+) -> tuple[float | None, list[str], list[str]]:
+    """Map an optional complete Stage 6 phenotype result."""
+    phenotype_fields = {
+        "phenotype_score",
+        "hpo_terms",
+        "matched_hpo_terms",
+    }
+    present_fields = phenotype_fields.intersection(candidate)
+    if not present_fields:
+        return None, [], []
+    if present_fields != phenotype_fields:
+        missing = phenotype_fields - present_fields
+        raise EvidenceObjectError(
+            "Candidate has an incomplete phenotype result; missing: "
+            f"{', '.join(sorted(missing))}."
+        )
+
+    raw_hpo_terms = candidate["hpo_terms"]
+    raw_matched_hpo_terms = candidate["matched_hpo_terms"]
+    if not isinstance(raw_hpo_terms, list):
+        raise EvidenceObjectError("candidate.hpo_terms must be a list.")
+    if not isinstance(raw_matched_hpo_terms, list):
+        raise EvidenceObjectError(
+            "candidate.matched_hpo_terms must be a list."
+        )
+    hpo_terms = list(raw_hpo_terms)
+    matched_hpo_terms = list(raw_matched_hpo_terms)
+    match_count = candidate.get("phenotype_match_count")
+    if match_count is not None and (
+        isinstance(match_count, bool)
+        or not isinstance(match_count, int)
+        or match_count != len(matched_hpo_terms)
+    ):
+        raise EvidenceObjectError(
+            "candidate.phenotype_match_count must equal the number of "
+            "matched HPO terms."
+        )
+    return (
+        candidate["phenotype_score"],
+        hpo_terms,
+        matched_hpo_terms,
+    )
+
+
+def build_evidence_object(candidate: object) -> EvidenceObject:
+    """Convert one Stage 5/6 candidate to the Stage 7 schema."""
+    candidate_data = _require_candidate_mapping(candidate, "candidate")
+    variant = _require_candidate_mapping(
+        candidate_data.get("variant"),
+        "candidate.variant",
+    )
+    sources = _require_candidate_mapping(
+        candidate_data.get("sources"),
+        "candidate.sources",
+    )
+    source_payloads = {
+        source: _require_candidate_mapping(
+            sources.get(source),
+            f"candidate.sources.{source}",
+        )
+        for source in EVIDENCE_SOURCE_NAMES
+    }
+    clinvar = source_payloads["clinvar"]
+    clingen = source_payloads["clingen"]
+    phenotype_score, hpo_terms, matched_hpo_terms = _map_phenotype(
+        candidate_data
+    )
+
+    clinvar_accession = (
+        clinvar.get("accession_version")
+        or clinvar.get("accession")
+    )
+    evidence: EvidenceObject = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "variant": {
+            "chrom": variant.get("chrom"),
+            "pos": variant.get("pos"),
+            "ref": variant.get("ref"),
+            "alt": variant.get("alt"),
+        },
+        "assembly": candidate_data.get("assembly"),
+        "gene": candidate_data.get("gene"),
+        "gene_id": candidate_data.get("gene_id"),
+        "transcript": candidate_data.get("transcript"),
+        "consequence": candidate_data.get("consequence"),
+        "impact": candidate_data.get("impact"),
+        "protein_change": candidate_data.get("protein_change"),
+        "population_frequency": candidate_data.get(
+            "population_frequency"
+        ),
+        "clinvar_accession": clinvar_accession,
+        "clinvar_significance": clinvar.get(
+            "clinical_significance"
+        ),
+        "clinvar_review_status": clinvar.get("review_status"),
+        "clinvar_conditions": _map_clinvar_conditions(clinvar),
+        "clingen_curations": _map_clingen_curations(clingen),
+        "phenotype_score": phenotype_score,
+        "hpo_terms": hpo_terms,
+        "matched_hpo_terms": matched_hpo_terms,
+        "source_statuses": {
+            source: payload.get("status")
+            for source, payload in source_payloads.items()
+        },
+        "references": _map_references(candidate_data),
+        "warnings": _deduplicate_strings(
+            candidate_data.get("warnings", []),
+            "candidate.warnings",
+        ),
+    }
+    return validate_evidence_object(evidence)
+
+
+def build_evidence_objects(
+    candidates: Iterable[dict[str, Any]],
+) -> list[EvidenceObject]:
+    """Convert an iterable of candidates without mutating its items."""
+    if isinstance(candidates, (str, bytes, dict)):
+        raise EvidenceObjectError(
+            "Candidates must be an iterable of dictionaries."
+        )
+    try:
+        iterator = iter(candidates)
+    except TypeError as exc:
+        raise EvidenceObjectError(
+            "Candidates must be an iterable of dictionaries."
+        ) from exc
+
+    evidence_objects: list[EvidenceObject] = []
+    for index, candidate in enumerate(iterator):
+        try:
+            evidence_objects.append(build_evidence_object(candidate))
+        except EvidenceObjectError as exc:
+            raise EvidenceObjectError(
+                f"Candidate at index {index} is invalid: {exc}"
+            ) from exc
+    return evidence_objects

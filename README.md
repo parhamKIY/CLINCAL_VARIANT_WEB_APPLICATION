@@ -81,8 +81,11 @@ validation boundary. The schema keeps only standardized variant, annotation,
 clinical, phenotype, provenance, and warning fields. Exact-field validation
 rejects raw VCF fields, raw API payloads, and unapproved personal data, while
 missing evidence remains explicit through `None`, empty lists, and source
-statuses. Converting Stage 5 and Stage 6 candidates into this schema is the
-next implementation step.
+statuses. `build_evidence_object()` and `build_evidence_objects()` now convert
+Stage 5 and Stage 6 candidates into that contract without mutating the source
+objects. They deliberately select only approved fields and reduce nested
+ClinVar and ClinGen evidence to compact representations. Applying final field
+limits and sanitization is the next implementation step.
 
 ## Tests
 
