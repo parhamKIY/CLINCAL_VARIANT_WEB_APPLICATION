@@ -110,6 +110,16 @@ timeout, connection, HTTP, malformed JSON, and malformed response failures to
 the public error hierarchy. Changing between OpenAI-compatible services now
 requires only changing the `.env` base URL, API key, and model.
 
+Stage 8 step 3 adds a versioned clinical-interpretation prompt builder in
+`backend/report.py`. It accepts only a complete Stage 7 Evidence Object,
+validates and sanitizes it again, serializes it deterministically as bounded
+JSON, and places it between explicit data delimiters. The fixed system rules
+prohibit outside medical knowledge, invented evidence, independent ACMG/AMP
+classification, definitive diagnosis, treatment advice, and unsupported
+citations. They require explicit uncertainty, source attribution, limitations,
+and qualified professional review. Values inside the Evidence Object are
+treated as untrusted data rather than instructions.
+
 ## Tests
 
 Run the offline test suite:
