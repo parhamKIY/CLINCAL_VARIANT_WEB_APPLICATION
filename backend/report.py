@@ -13,8 +13,10 @@ from backend.llm import LLMClient, LLMResponse, call_llm
 
 EVIDENCE_SCHEMA_VERSION = "1.0"
 INTERPRETATION_PROMPT_VERSION = "1.1"
+CLINICAL_REPORT_SCHEMA_VERSION = "1.0"
 CLINICAL_INTERPRETATION_MAX_TOKENS = 1200
 HPO_ID_PATTERN = re.compile(r"HP:[0-9]{7}")
+VERSION_PATTERN = re.compile(r"[1-9][0-9]*\.[0-9]+")
 GENOME_ASSEMBLIES = {"GRCh37", "GRCh38"}
 SOURCE_STATUS_VALUES = {
     "pending",
@@ -35,6 +37,7 @@ MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
 MAX_EVIDENCE_ALLELE_LENGTH = 10_000
 MAX_EVIDENCE_TEXT_LENGTH = 500
 MAX_EVIDENCE_URL_LENGTH = 2_048
+MAX_CLINICAL_REPORT_REFERENCES = 50
 
 CLINICAL_DECISION_SUPPORT_NOTICE = (
     "AI-generated decision-support summary based only on the supplied "
@@ -71,6 +74,10 @@ adding other clinical claims.
 
 class EvidenceObjectError(ValueError):
     """Raised when an evidence object violates the Stage 7 contract."""
+
+
+class ClinicalReportError(ValueError):
+    """Raised when a report violates the Stage 9 contract."""
 
 
 class EvidenceVariant(TypedDict):
@@ -142,6 +149,41 @@ class ClinicalInterpretationPrompt(TypedDict):
     user_prompt: str
 
 
+class ClinicalReportSections(TypedDict):
+    """Ordered narrative sections in the final clinical report."""
+
+    case_summary: str
+    variant_summary: str
+    gene_and_consequence: str
+    clinical_evidence: str
+    phenotype_correlation: str
+    interpretation: str
+    limitations: str
+
+
+class ClinicalReportReference(TypedDict):
+    """One traceable report citation without provider-specific payloads."""
+
+    source: str
+    identifier: str | None
+    url: str | None
+
+
+class ClinicalReport(TypedDict):
+    """Versioned, JSON-safe contract for a rendered Stage 9 report."""
+
+    schema_version: str
+    source_evidence_schema_version: str
+    interpretation_prompt_version: str
+    llm_model: str | None
+    assembly: str
+    variant: EvidenceVariant
+    sections: ClinicalReportSections
+    references: list[ClinicalReportReference]
+    warnings: list[str]
+    disclaimer: str
+
+
 EVIDENCE_OBJECT_FIELDS = frozenset(EvidenceObject.__required_keys__)
 EVIDENCE_VARIANT_FIELDS = frozenset(EvidenceVariant.__required_keys__)
 EVIDENCE_REFERENCE_FIELDS = frozenset(EvidenceReference.__required_keys__)
@@ -152,6 +194,24 @@ EVIDENCE_SOURCE_STATUS_FIELDS = frozenset(
     EvidenceSourceStatuses.__required_keys__
 )
 EVIDENCE_SOURCE_NAMES = ("vep", "myvariant", "clinvar", "clingen")
+CLINICAL_REPORT_FIELDS = frozenset(ClinicalReport.__required_keys__)
+CLINICAL_REPORT_SECTION_FIELDS = frozenset(
+    ClinicalReportSections.__required_keys__
+)
+CLINICAL_REPORT_REFERENCE_FIELDS = frozenset(
+    ClinicalReportReference.__required_keys__
+)
+CLINICAL_REPORT_SECTION_ORDER = (
+    ("case_summary", "Case Summary"),
+    ("variant_summary", "Variant Summary"),
+    ("gene_and_consequence", "Gene and Consequence"),
+    ("clinical_evidence", "Clinical Evidence"),
+    ("phenotype_correlation", "Phenotype Correlation"),
+    ("interpretation", "Interpretation"),
+    ("limitations", "Limitations"),
+    ("references", "References"),
+    ("disclaimer", "Medical Disclaimer"),
+)
 
 
 def _validate_exact_fields(
@@ -461,6 +521,215 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         ) from exc
 
     return cast(EvidenceObject, value)
+
+
+def _report_exact_fields(
+    value: dict[object, object],
+    expected_fields: frozenset[str],
+    path: str,
+) -> None:
+    """Validate exact Stage 9 fields without exposing Evidence errors."""
+
+    actual_fields = set(value)
+    missing_fields = expected_fields - actual_fields
+    extra_fields = actual_fields - expected_fields
+    if missing_fields:
+        raise ClinicalReportError(
+            f"{path} is missing required fields: "
+            f"{', '.join(sorted(missing_fields))}."
+        )
+    if extra_fields:
+        raise ClinicalReportError(
+            f"{path} contains unsupported fields: "
+            f"{', '.join(sorted(str(field) for field in extra_fields))}."
+        )
+
+
+def _report_required_text(value: object, path: str) -> str:
+    """Return one non-empty report string."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ClinicalReportError(
+            f"{path} must be a non-empty string."
+        )
+    return value
+
+
+def _validate_report_variant(value: object) -> None:
+    """Validate the report allele and reject raw VCF sample fields."""
+
+    if not isinstance(value, dict):
+        raise ClinicalReportError(
+            "report.variant must be a dictionary."
+        )
+    _report_exact_fields(
+        value,
+        EVIDENCE_VARIANT_FIELDS,
+        "report.variant",
+    )
+    _report_required_text(value["chrom"], "report.variant.chrom")
+    if (
+        isinstance(value["pos"], bool)
+        or not isinstance(value["pos"], int)
+        or value["pos"] <= 0
+    ):
+        raise ClinicalReportError(
+            "report.variant.pos must be a positive integer."
+        )
+    _report_required_text(value["ref"], "report.variant.ref")
+    _report_required_text(value["alt"], "report.variant.alt")
+
+
+def _validate_report_references(value: object) -> None:
+    """Validate bounded report citations with source provenance."""
+
+    if not isinstance(value, list):
+        raise ClinicalReportError(
+            "report.references must be a list."
+        )
+    if len(value) > MAX_CLINICAL_REPORT_REFERENCES:
+        raise ClinicalReportError(
+            "report.references exceeds the maximum of "
+            f"{MAX_CLINICAL_REPORT_REFERENCES}."
+        )
+
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for index, reference in enumerate(value):
+        path = f"report.references[{index}]"
+        if not isinstance(reference, dict):
+            raise ClinicalReportError(
+                f"{path} must be a dictionary."
+            )
+        _report_exact_fields(
+            reference,
+            CLINICAL_REPORT_REFERENCE_FIELDS,
+            path,
+        )
+        source = _report_required_text(
+            reference["source"],
+            f"{path}.source",
+        )
+        identifier = reference["identifier"]
+        url = reference["url"]
+        if identifier is not None:
+            identifier = _report_required_text(
+                identifier,
+                f"{path}.identifier",
+            )
+        if url is not None:
+            try:
+                url = _validate_url(url, f"{path}.url")
+            except EvidenceObjectError as exc:
+                raise ClinicalReportError(str(exc)) from exc
+        if identifier is None and url is None:
+            raise ClinicalReportError(
+                f"{path} must provide an identifier, a URL, or both."
+            )
+
+        key = (source, identifier, url)
+        if key in seen:
+            raise ClinicalReportError(
+                "report.references must not contain duplicates."
+            )
+        seen.add(key)
+
+
+def validate_clinical_report(value: object) -> ClinicalReport:
+    """Validate one complete, render-ready Stage 9 report object."""
+
+    if not isinstance(value, dict):
+        raise ClinicalReportError(
+            "Clinical report must be a dictionary."
+        )
+    _report_exact_fields(
+        value,
+        CLINICAL_REPORT_FIELDS,
+        "report",
+    )
+
+    if value["schema_version"] != CLINICAL_REPORT_SCHEMA_VERSION:
+        raise ClinicalReportError(
+            "report.schema_version must be "
+            f"{CLINICAL_REPORT_SCHEMA_VERSION}."
+        )
+    if value["source_evidence_schema_version"] != EVIDENCE_SCHEMA_VERSION:
+        raise ClinicalReportError(
+            "report.source_evidence_schema_version must be "
+            f"{EVIDENCE_SCHEMA_VERSION}."
+        )
+    prompt_version = _report_required_text(
+        value["interpretation_prompt_version"],
+        "report.interpretation_prompt_version",
+    )
+    if VERSION_PATTERN.fullmatch(prompt_version) is None:
+        raise ClinicalReportError(
+            "report.interpretation_prompt_version must use major.minor "
+            "format."
+        )
+    if value["llm_model"] is not None:
+        _report_required_text(
+            value["llm_model"],
+            "report.llm_model",
+        )
+    if value["assembly"] not in GENOME_ASSEMBLIES:
+        raise ClinicalReportError(
+            "report.assembly must be GRCh37 or GRCh38."
+        )
+
+    _validate_report_variant(value["variant"])
+    sections = value["sections"]
+    if not isinstance(sections, dict):
+        raise ClinicalReportError(
+            "report.sections must be a dictionary."
+        )
+    _report_exact_fields(
+        sections,
+        CLINICAL_REPORT_SECTION_FIELDS,
+        "report.sections",
+    )
+    for key, title in CLINICAL_REPORT_SECTION_ORDER:
+        if key in CLINICAL_REPORT_SECTION_FIELDS:
+            _report_required_text(
+                sections[key],
+                f"report.sections.{key}",
+            )
+
+    _validate_report_references(value["references"])
+    warnings = value["warnings"]
+    if not isinstance(warnings, list):
+        raise ClinicalReportError(
+            "report.warnings must be a list."
+        )
+    validated_warnings = [
+        _report_required_text(
+            warning,
+            f"report.warnings[{index}]",
+        )
+        for index, warning in enumerate(warnings)
+    ]
+    if len(validated_warnings) > MAX_EVIDENCE_WARNINGS:
+        raise ClinicalReportError(
+            "report.warnings exceeds the maximum of "
+            f"{MAX_EVIDENCE_WARNINGS}."
+        )
+    if len(set(validated_warnings)) != len(validated_warnings):
+        raise ClinicalReportError(
+            "report.warnings must not contain duplicates."
+        )
+    if value["disclaimer"] != CLINICAL_DECISION_SUPPORT_NOTICE:
+        raise ClinicalReportError(
+            "report.disclaimer must equal the approved medical "
+            "disclaimer."
+        )
+
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ClinicalReportError(
+            "Clinical report must be JSON serializable."
+        ) from exc
+
+    return cast(ClinicalReport, value)
 
 
 def _sanitize_text(

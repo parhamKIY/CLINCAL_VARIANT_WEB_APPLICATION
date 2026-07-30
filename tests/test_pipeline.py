@@ -51,6 +51,8 @@ from backend.report import (
     CLINICAL_DECISION_SUPPORT_NOTICE,
     CLINICAL_INTERPRETATION_MAX_TOKENS,
     CLINICAL_INTERPRETATION_SYSTEM_PROMPT,
+    CLINICAL_REPORT_SCHEMA_VERSION,
+    CLINICAL_REPORT_SECTION_ORDER,
     EVIDENCE_SCHEMA_VERSION,
     INTERPRETATION_PROMPT_VERSION,
     MAX_EVIDENCE_CLINGEN_CURATIONS,
@@ -59,12 +61,14 @@ from backend.report import (
     MAX_EVIDENCE_PMIDS_PER_CURATION,
     MAX_EVIDENCE_REFERENCES,
     MAX_EVIDENCE_WARNINGS,
+    ClinicalReportError,
     EvidenceObjectError,
     build_clinical_interpretation_prompt,
     build_evidence_object,
     build_evidence_objects,
     generate_clinical_interpretation,
     sanitize_evidence_object,
+    validate_clinical_report,
     validate_evidence_object,
 )
 from backend.vcf_processing import (
@@ -4832,3 +4836,195 @@ class TestLLMContract:
                 TestEvidenceObject._complete_evidence_object(),
                 client=LLMClient(adapter),
             )
+
+
+class TestClinicalReportContract:
+    """Verify the render-ready Stage 9 report boundary."""
+
+    @staticmethod
+    def _complete_report() -> dict[str, object]:
+        return {
+            "schema_version": CLINICAL_REPORT_SCHEMA_VERSION,
+            "source_evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+            "interpretation_prompt_version": (
+                INTERPRETATION_PROMPT_VERSION
+            ),
+            "llm_model": "test-model",
+            "assembly": "GRCh38",
+            "variant": {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+            },
+            "sections": {
+                "case_summary": "HPO terms: HP:0001250.",
+                "variant_summary": "GRCh38 2:166848215 C>T.",
+                "gene_and_consequence": (
+                    "SCN1A; missense_variant; MODERATE."
+                ),
+                "clinical_evidence": (
+                    "ClinVar classification: Pathogenic."
+                ),
+                "phenotype_correlation": "Phenotype score: 0.5.",
+                "interpretation": (
+                    "Evidence-limited interpretation."
+                ),
+                "limitations": (
+                    "Synthetic evidence for software testing only."
+                ),
+            },
+            "references": [
+                {
+                    "source": "NCBI ClinVar",
+                    "identifier": "VCV000012345.1",
+                    "url": (
+                        "https://www.ncbi.nlm.nih.gov/"
+                        "clinvar/variation/12345/"
+                    ),
+                },
+                {
+                    "source": "PubMed",
+                    "identifier": "PMID:12345678",
+                    "url": None,
+                },
+            ],
+            "warnings": [],
+            "disclaimer": CLINICAL_DECISION_SUPPORT_NOTICE,
+        }
+
+    def test_complete_report_contract_is_valid(self) -> None:
+        report = self._complete_report()
+        original = deepcopy(report)
+
+        result = validate_clinical_report(report)
+
+        assert result is report
+        assert report == original
+        assert [
+            title
+            for _, title in CLINICAL_REPORT_SECTION_ORDER
+        ] == [
+            "Case Summary",
+            "Variant Summary",
+            "Gene and Consequence",
+            "Clinical Evidence",
+            "Phenotype Correlation",
+            "Interpretation",
+            "Limitations",
+            "References",
+            "Medical Disclaimer",
+        ]
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            (
+                "schema_version",
+                "2.0",
+                "schema_version",
+            ),
+            (
+                "source_evidence_schema_version",
+                "2.0",
+                "source_evidence_schema_version",
+            ),
+            (
+                "interpretation_prompt_version",
+                "version-one",
+                "major.minor",
+            ),
+            (
+                "llm_model",
+                "",
+                "llm_model",
+            ),
+            (
+                "assembly",
+                "hg38",
+                "GRCh37 or GRCh38",
+            ),
+            (
+                "disclaimer",
+                "Modified disclaimer",
+                "approved medical disclaimer",
+            ),
+        ],
+    )
+    def test_invalid_report_metadata_is_rejected(
+        self,
+        field: str,
+        value: object,
+        message: str,
+    ) -> None:
+        report = self._complete_report()
+        report[field] = value
+
+        with pytest.raises(ClinicalReportError, match=message):
+            validate_clinical_report(report)
+
+    def test_missing_or_extra_sections_are_rejected(self) -> None:
+        missing = self._complete_report()
+        missing_sections = missing["sections"]
+        assert isinstance(missing_sections, dict)
+        del missing_sections["limitations"]
+
+        with pytest.raises(
+            ClinicalReportError,
+            match="missing required fields: limitations",
+        ):
+            validate_clinical_report(missing)
+
+        extra = self._complete_report()
+        extra_sections = extra["sections"]
+        assert isinstance(extra_sections, dict)
+        extra_sections["patient_name"] = "Not allowed"
+
+        with pytest.raises(
+            ClinicalReportError,
+            match="unsupported fields: patient_name",
+        ):
+            validate_clinical_report(extra)
+
+    def test_raw_vcf_fields_are_rejected_from_report(self) -> None:
+        report = self._complete_report()
+        variant = report["variant"]
+        assert isinstance(variant, dict)
+        variant["genotype"] = "0/1"
+
+        with pytest.raises(
+            ClinicalReportError,
+            match="unsupported fields: genotype",
+        ):
+            validate_clinical_report(report)
+
+    def test_report_reference_requires_provenance_target(
+        self,
+    ) -> None:
+        report = self._complete_report()
+        report["references"] = [
+            {
+                "source": "Unknown",
+                "identifier": None,
+                "url": None,
+            }
+        ]
+
+        with pytest.raises(
+            ClinicalReportError,
+            match="identifier, a URL, or both",
+        ):
+            validate_clinical_report(report)
+
+    def test_duplicate_report_metadata_is_rejected(self) -> None:
+        report = self._complete_report()
+        report["warnings"] = [
+            "Source unavailable.",
+            "Source unavailable.",
+        ]
+
+        with pytest.raises(
+            ClinicalReportError,
+            match="warnings must not contain duplicates",
+        ):
+            validate_clinical_report(report)

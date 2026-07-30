@@ -146,6 +146,17 @@ LLM_MODEL=model-name
 LLM_TIMEOUT=30
 ```
 
+## Stage 9 clinical report generation: in progress
+
+Stage 9 step 1 defines a versioned, JSON-safe `ClinicalReport` contract in
+`backend/report.py`. It fixes the nine-section display order for case summary,
+variant summary, gene and consequence, clinical evidence, phenotype
+correlation, interpretation, limitations, references, and medical disclaimer.
+Exact-field validation excludes raw VCF sample fields and unapproved patient
+data. The contract records evidence and prompt versions, model provenance,
+assembly, the minimal variant, bounded traceable references, warnings, and the
+approved medical disclaimer without adding timestamps or storage concerns.
+
 ## Tests
 
 Run the offline test suite:
