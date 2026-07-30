@@ -88,7 +88,7 @@ internal strategy can later be replaced with configurable frequency,
 functional-impact, phenotype, gene-disease, and inheritance scoring without
 changing the pipeline interface.
 
-## Annotation phases one through four
+## Stage 5 annotation: complete
 
 `backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info,
 NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
@@ -109,6 +109,7 @@ NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 - exact UCSC assembly, coordinate, ClinGen submitter, and gene-symbol
   matching with standardized disease, classification, inheritance,
   criteria URL, PMID, and report fields;
+- unified multi-source output with independent failure isolation;
 - no raw API response is passed to later pipeline stages.
 
 Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks

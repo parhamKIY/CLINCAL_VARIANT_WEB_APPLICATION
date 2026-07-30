@@ -1616,6 +1616,127 @@ class TestAnnotation:
         )
         assert session.clingen_get_calls == []
 
+    def test_unified_multi_source_annotation_is_complete_and_clean(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert set(annotation) == {
+            "variant",
+            "assembly",
+            "gene",
+            "gene_id",
+            "transcript",
+            "consequence",
+            "impact",
+            "protein_change",
+            "population_frequency",
+            "sources",
+            "references",
+            "warnings",
+        }
+        assert {
+            source: evidence["status"]
+            for source, evidence in annotation["sources"].items()
+        } == {
+            "vep": "success",
+            "myvariant": "success",
+            "clinvar": "success",
+            "clingen": "success",
+        }
+        assert annotation["gene"] == "GENE1"
+        assert annotation["consequence"] == "missense_variant"
+        assert annotation["population_frequency"] == 0.004
+        assert (
+            annotation["sources"]["clinvar"]["clinical_significance"]
+            == "Pathogenic"
+        )
+        assert (
+            annotation["sources"]["clinvar"]["review_status"]
+            == "reviewed by expert panel"
+        )
+        assert (
+            annotation["sources"]["clingen"]["curations"][0][
+                "classification"
+            ]
+            == "Definitive"
+        )
+        assert {
+            reference["source"]
+            for reference in annotation["references"]
+        } == {
+            "Ensembl VEP",
+            "MyVariant.info",
+            "NCBI ClinVar",
+            "ClinGen Gene-Disease Validity via UCSC GenCC",
+        }
+        assert annotation["warnings"] == []
+
+        assert "input" not in annotation["sources"]["vep"]
+        assert "dbsnp" not in annotation["sources"]["myvariant"]
+        assert (
+            "germline_classification"
+            not in annotation["sources"]["clinvar"]
+        )
+        assert "genCC" not in annotation["sources"]["clingen"]
+
+    def test_vep_failure_preserves_other_source_evidence(self) -> None:
+        session = FakeSession(
+            [FakeResponse(500, {"error": "temporary failure"})],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "error"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert annotation["sources"]["clingen"]["status"] == "success"
+        assert annotation["population_frequency"] == 0.004
+        assert (
+            annotation["sources"]["clinvar"]["clinical_significance"]
+            == "Pathogenic"
+        )
+        assert (
+            annotation["sources"]["clingen"]["curation_count"]
+            == 1
+        )
+        assert any(
+            "Ensembl VEP returned HTTP 500" in warning
+            for warning in annotation["warnings"]
+        )
+
     def test_multiple_candidates_use_one_batch_request(self) -> None:
         session = FakeSession(
             [
