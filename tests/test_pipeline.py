@@ -3743,6 +3743,48 @@ class TestEvidenceObject:
             for evidence in evidence_objects
         ] == [166848215, 166848216]
 
+    def test_stage_5_and_6_candidate_flows_into_stage_7(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        candidate = self._complete_candidate()
+        for field in (
+            "phenotype_score",
+            "hpo_terms",
+            "matched_hpo_terms",
+            "phenotype_match_count",
+        ):
+            candidate.pop(field)
+
+        scored_candidate = match_phenotypes(
+            [candidate],
+            ["HP:0001250", "HP:0001263"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )[0]
+        evidence = build_evidence_object(scored_candidate)
+
+        assert evidence["schema_version"] == "1.0"
+        assert evidence["variant"] == {
+            "chrom": "2",
+            "pos": 166848215,
+            "ref": "C",
+            "alt": "T",
+        }
+        assert evidence["gene"] == "SCN1A"
+        assert evidence["phenotype_score"] == 0.5
+        assert evidence["matched_hpo_terms"] == ["HP:0001250"]
+        assert evidence["clinvar_significance"] == "Pathogenic"
+        assert evidence["clingen_curations"][0][
+            "classification"
+        ] == "Definitive"
+        assert "genotype" not in evidence["variant"]
+        assert "sources" not in evidence
+
     def test_duplicate_candidate_metadata_is_deduplicated(
         self,
     ) -> None:

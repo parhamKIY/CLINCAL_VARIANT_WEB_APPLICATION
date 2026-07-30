@@ -74,7 +74,7 @@ installation, rejects downgrades, preserves the previous files, and rolls back
 a partial installation. This keeps phenotype terms, gene associations, and
 disease annotations release-compatible.
 
-## Stage 7 evidence object: in progress
+## Stage 7 evidence object: complete
 
 `backend/report.py` defines the versioned `EvidenceObject` contract and its
 validation boundary. The schema keeps only standardized variant, annotation,
@@ -87,8 +87,9 @@ objects. They deliberately select only approved fields and reduce nested
 ClinVar and ClinGen evidence to compact representations.
 `sanitize_evidence_object()` removes control characters, normalizes
 whitespace, bounds nested evidence and provenance lists, records visible
-truncation warnings, and enforces a 64 KiB serialized-size ceiling. Final
-end-to-end validation and documentation are the next implementation step.
+truncation warnings, and enforces a 64 KiB serialized-size ceiling. Automated
+boundary integration and a complete local smoke test verify the Stage 5,
+Stage 6, and Stage 7 handoff without exposing genotype or raw source payloads.
 
 ## Tests
 
@@ -108,6 +109,12 @@ Run the complete local Stage 6 phenotype smoke test:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_phenotype_smoke.py
+```
+
+Run the complete local Stage 7 Evidence Object smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_evidence_smoke.py
 ```
 
 Custom phenotype inputs can be supplied when needed:
