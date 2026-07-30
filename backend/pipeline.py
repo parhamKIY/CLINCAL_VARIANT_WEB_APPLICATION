@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from copy import deepcopy
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
@@ -143,6 +144,9 @@ class PipelineResult(TypedDict):
     report_path: str | None
     warnings: list[str]
     errors: list[PipelineIssue]
+
+
+PipelineProgressCallback = Callable[[PipelineResult], None]
 
 
 ANALYSIS_INPUT_FIELDS = frozenset(AnalysisInput.__required_keys__)
@@ -534,6 +538,21 @@ def validate_pipeline_result(value: object) -> PipelineResult:
     return cast(PipelineResult, value)
 
 
+def _notify_progress(
+    result: PipelineResult,
+    callback: PipelineProgressCallback | None,
+) -> None:
+    """Send an isolated valid snapshot without affecting execution."""
+
+    if callback is None:
+        return
+    snapshot = validate_pipeline_result(deepcopy(result))
+    try:
+        callback(snapshot)
+    except Exception:
+        return
+
+
 def _set_stage(
     result: PipelineResult,
     stage: str,
@@ -604,6 +623,7 @@ def _finish_failed_stage(
     code: str,
     message: str,
     recoverable: bool,
+    progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Finalize a stopped pipeline while preserving completed outputs."""
 
@@ -656,7 +676,9 @@ def _finish_failed_stage(
         else "error"
     )
     result["current_stage"] = stage
-    return validate_pipeline_result(result)
+    validated = validate_pipeline_result(result)
+    _notify_progress(validated, progress_callback)
+    return validated
 
 
 def _process_and_prioritize(
@@ -667,6 +689,7 @@ def _process_and_prioritize(
     seed: int | None,
     sample_name: str | None,
     max_variants: int | None,
+    progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Stream standardized variants into bounded candidate selection."""
 
@@ -687,6 +710,7 @@ def _process_and_prioritize(
         progress_percent=0,
         message="Processing standardized variants.",
     )
+    _notify_progress(result, progress_callback)
 
     variant_stream = process_vcf(
         vcf_path=request["vcf_path"],
@@ -717,6 +741,7 @@ def _process_and_prioritize(
         progress_percent=0,
         message="Selecting bounded MVP candidates.",
     )
+    _notify_progress(result, progress_callback)
     candidates = prioritize_variants(
         track_variants(),
         top_n=top_n,
@@ -760,6 +785,7 @@ def _process_and_prioritize(
     )
     result["current_stage"] = "annotation"
     result["progress_percent"] = 30
+    _notify_progress(result, progress_callback)
 
 
 def _retain_annotation_warnings(
@@ -790,6 +816,7 @@ def _annotate_and_match(
     annotation_session: requests.Session | None,
     ontology_path: str | Path | None,
     associations_path: str | Path | None,
+    progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Enrich selected candidates and attach optional HPO scores."""
 
@@ -802,6 +829,7 @@ def _annotate_and_match(
         progress_percent=0,
         message="Annotating selected candidates.",
     )
+    _notify_progress(result, progress_callback)
     annotations = annotate_variants(
         result["candidates"],
         batch_size=annotation_batch_size,
@@ -858,6 +886,7 @@ def _annotate_and_match(
             progress_percent=0,
             message="Matching annotated genes to HPO phenotypes.",
         )
+        _notify_progress(result, progress_callback)
         try:
             phenotype_results = match_phenotypes(
                 result["annotations"],
@@ -906,6 +935,7 @@ def _annotate_and_match(
 
     result["current_stage"] = "evidence"
     result["progress_percent"] = 60
+    _notify_progress(result, progress_callback)
 
 
 def _build_evidence_and_report(
@@ -913,6 +943,7 @@ def _build_evidence_and_report(
     *,
     llm_client: LLMClient | None,
     report_dir: str | Path | None,
+    progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Build all Evidence Objects and report the leading candidate."""
 
@@ -925,6 +956,7 @@ def _build_evidence_and_report(
         progress_percent=0,
         message="Building bounded Evidence Objects.",
     )
+    _notify_progress(result, progress_callback)
     evidence_objects = build_evidence_objects(
         result["phenotype_results"]
     )
@@ -954,6 +986,7 @@ def _build_evidence_and_report(
         progress_percent=0,
         message="Interpreting the leading candidate.",
     )
+    _notify_progress(result, progress_callback)
     interpretation = generate_clinical_interpretation(
         leading_evidence,
         client=llm_client,
@@ -978,6 +1011,7 @@ def _build_evidence_and_report(
         progress_percent=0,
         message="Building and saving the clinical report.",
     )
+    _notify_progress(result, progress_callback)
     report = build_clinical_report(
         leading_evidence,
         interpretation,
@@ -1001,6 +1035,7 @@ def _build_evidence_and_report(
     )
     result["current_stage"] = "completed"
     result["progress_percent"] = 100
+    _notify_progress(result, progress_callback)
 
 
 def run_variant_selection(
@@ -1091,6 +1126,7 @@ def run_analysis(
     associations_path: str | Path | None = None,
     llm_client: LLMClient | None = None,
     report_dir: str | Path | None = None,
+    progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Run Stage 10 with retained progress and frontend-safe failures."""
 
@@ -1108,7 +1144,20 @@ def run_analysis(
             code="invalid_input",
             message=str(exc),
             recoverable=False,
+            progress_callback=progress_callback,
         )
+
+    result["status"] = "running"
+    result["current_stage"] = "input"
+    result["progress_percent"] = 5
+    _set_stage(
+        result,
+        "input",
+        "running",
+        progress_percent=0,
+        message="Validating analysis input.",
+    )
+    _notify_progress(result, progress_callback)
 
     try:
         _process_and_prioritize(
@@ -1118,6 +1167,7 @@ def run_analysis(
             seed=seed,
             sample_name=sample_name,
             max_variants=max_variants,
+            progress_callback=progress_callback,
         )
     except VCFProcessingError as exc:
         return _finish_failed_stage(
@@ -1126,6 +1176,7 @@ def run_analysis(
             code="vcf_processing_failed",
             message=str(exc),
             recoverable=False,
+            progress_callback=progress_callback,
         )
     except PrioritizationError as exc:
         return _finish_failed_stage(
@@ -1134,6 +1185,7 @@ def run_analysis(
             code="prioritization_failed",
             message=str(exc),
             recoverable=False,
+            progress_callback=progress_callback,
         )
     except PipelineError as exc:
         return _finish_failed_stage(
@@ -1142,6 +1194,7 @@ def run_analysis(
             code="no_variants",
             message=str(exc),
             recoverable=False,
+            progress_callback=progress_callback,
         )
     except Exception:
         return _finish_failed_stage(
@@ -1153,6 +1206,7 @@ def run_analysis(
                 "internal error."
             ),
             recoverable=False,
+            progress_callback=progress_callback,
         )
 
     try:
@@ -1164,6 +1218,7 @@ def run_analysis(
             annotation_session=annotation_session,
             ontology_path=ontology_path,
             associations_path=associations_path,
+            progress_callback=progress_callback,
         )
     except AnnotationError as exc:
         return _finish_failed_stage(
@@ -1172,6 +1227,7 @@ def run_analysis(
             code="annotation_failed",
             message=str(exc),
             recoverable=True,
+            progress_callback=progress_callback,
         )
     except Exception:
         return _finish_failed_stage(
@@ -1183,6 +1239,7 @@ def run_analysis(
                 "internal error."
             ),
             recoverable=False,
+            progress_callback=progress_callback,
         )
 
     try:
@@ -1190,6 +1247,7 @@ def run_analysis(
             result,
             llm_client=llm_client,
             report_dir=report_dir,
+            progress_callback=progress_callback,
         )
     except EvidenceObjectError as exc:
         return _finish_failed_stage(
@@ -1198,6 +1256,7 @@ def run_analysis(
             code="evidence_object_failed",
             message=str(exc),
             recoverable=False,
+            progress_callback=progress_callback,
         )
     except (LLMError, ClinicalInterpretationError) as exc:
         return _finish_failed_stage(
@@ -1206,6 +1265,7 @@ def run_analysis(
             code="llm_interpretation_failed",
             message=str(exc),
             recoverable=True,
+            progress_callback=progress_callback,
         )
     except ClinicalReportError as exc:
         return _finish_failed_stage(
@@ -1214,6 +1274,7 @@ def run_analysis(
             code="report_generation_failed",
             message=str(exc),
             recoverable=True,
+            progress_callback=progress_callback,
         )
     except PipelineError as exc:
         return _finish_failed_stage(
@@ -1222,6 +1283,7 @@ def run_analysis(
             code="evidence_object_failed",
             message=str(exc),
             recoverable=False,
+            progress_callback=progress_callback,
         )
     except Exception:
         return _finish_failed_stage(
@@ -1233,6 +1295,7 @@ def run_analysis(
                 "error."
             ),
             recoverable=False,
+            progress_callback=progress_callback,
         )
     return validate_pipeline_result(result)
 
@@ -1248,6 +1311,7 @@ __all__ = [
     "PipelineError",
     "PipelineInputError",
     "PipelineIssue",
+    "PipelineProgressCallback",
     "PipelineResult",
     "PipelineResultError",
     "PipelineStageRecord",

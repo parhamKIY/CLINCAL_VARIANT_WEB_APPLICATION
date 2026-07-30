@@ -50,6 +50,8 @@ from backend.pipeline import (
     PIPELINE_STAGE_ORDER,
     PipelineError,
     PipelineInputError,
+    PipelineProgressCallback,
+    PipelineResult,
     PipelineResultError,
     create_pipeline_result,
     run_analysis,
@@ -104,6 +106,7 @@ from backend.vcf_processing import (
     validate_vcf,
 )
 from config import settings
+from frontend.execution import execute_analysis as execute_frontend_analysis
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -6614,6 +6617,11 @@ class TestCompletePipelineHappyPath:
                 )
             )
         )
+        progress_snapshots: list[PipelineResult] = []
+
+        def capture_progress(snapshot: PipelineResult) -> None:
+            progress_snapshots.append(snapshot)
+            snapshot["warnings"].append("callback-only mutation")
 
         result = run_analysis(
             vcf_path=None,
@@ -6627,6 +6635,7 @@ class TestCompletePipelineHappyPath:
             associations_path=associations_path,
             llm_client=client,
             report_dir=tmp_path / "reports",
+            progress_callback=capture_progress,
         )
 
         assert result["status"] == "success"
@@ -6648,6 +6657,80 @@ class TestCompletePipelineHappyPath:
             stage["status"] == "success"
             for stage in result["stages"]
         )
+        assert [
+            snapshot["progress_percent"]
+            for snapshot in progress_snapshots
+        ] == sorted(
+            snapshot["progress_percent"]
+            for snapshot in progress_snapshots
+        )
+        assert {
+            snapshot["current_stage"]
+            for snapshot in progress_snapshots
+        } == {*PIPELINE_STAGE_ORDER, "completed"}
+        assert "callback-only mutation" not in result["warnings"]
+
+
+class TestFrontendExecution:
+    """Verify safe bridging from uploads to the public pipeline."""
+
+    def test_vcf_upload_uses_a_cleaned_temporary_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        upload_directory = tmp_path / "uploads"
+        monkeypatch.setattr(
+            settings,
+            "UPLOAD_DIR",
+            upload_directory,
+        )
+        observed: dict[str, object] = {}
+        expected = create_pipeline_result()
+
+        def fake_run_analysis(
+            *,
+            vcf_path: str | Path | None,
+            manual_variant: str | None,
+            phenotypes: list[str],
+            progress_callback: PipelineProgressCallback | None,
+        ) -> PipelineResult:
+            assert vcf_path is not None
+            temporary_path = Path(vcf_path)
+            observed["path"] = temporary_path
+            observed["contents"] = temporary_path.read_bytes()
+            observed["manual_variant"] = manual_variant
+            observed["phenotypes"] = phenotypes
+            observed["callback"] = progress_callback
+            return expected
+
+        monkeypatch.setattr(
+            "frontend.execution.run_analysis",
+            fake_run_analysis,
+        )
+        callback = lambda _: None
+        uploaded = SimpleNamespace(
+            name="../../patient.vcf.gz",
+            getvalue=lambda: b"compressed-vcf",
+        )
+
+        result = execute_frontend_analysis(
+            uploaded_vcf=uploaded,
+            manual_variant=None,
+            phenotypes=["HP:0001250"],
+            progress_callback=callback,
+        )
+
+        assert result is expected
+        assert observed["contents"] == b"compressed-vcf"
+        assert observed["manual_variant"] is None
+        assert observed["phenotypes"] == ["HP:0001250"]
+        assert observed["callback"] is callback
+        temporary_path = observed["path"]
+        assert isinstance(temporary_path, Path)
+        assert temporary_path.name == "input.vcf.gz"
+        assert not temporary_path.exists()
+        assert list(upload_directory.iterdir()) == []
 
 
 class TestFrontendFoundation:
@@ -6704,7 +6787,45 @@ class TestFrontendFoundation:
         )
         assert not app.success
 
-    def test_manual_variant_can_be_prepared(self) -> None:
+    def test_manual_variant_executes_pipeline(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        received: dict[str, object] = {}
+
+        def fake_execute_analysis(
+            *,
+            uploaded_vcf: object,
+            manual_variant: str | None,
+            phenotypes: list[str],
+            progress_callback: PipelineProgressCallback,
+        ) -> PipelineResult:
+            received.update(
+                {
+                    "uploaded_vcf": uploaded_vcf,
+                    "manual_variant": manual_variant,
+                    "phenotypes": phenotypes,
+                }
+            )
+            result = create_pipeline_result()
+            result["status"] = "success"
+            result["current_stage"] = "completed"
+            result["progress_percent"] = 100
+            for stage in result["stages"]:
+                stage.update(
+                    {
+                        "status": "success",
+                        "progress_percent": 100,
+                        "message": f"{stage['stage']} completed.",
+                    }
+                )
+            progress_callback(result)
+            return result
+
+        monkeypatch.setattr(
+            "frontend.ui.execute_analysis",
+            fake_execute_analysis,
+        )
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")
         ).run(timeout=10)
@@ -6726,10 +6847,13 @@ class TestFrontendFoundation:
         analyze_button.click().run(timeout=10)
 
         assert not app.exception
-        assert any(
-            "Input package prepared: 1:941284:G:A"
-            in success.value
-            for success in app.success
+        assert received == {
+            "uploaded_vcf": None,
+            "manual_variant": "1:941284:G:A",
+            "phenotypes": [],
+        }
+        assert app.session_state["pipeline_result"]["status"] == (
+            "success"
         )
 
     def test_local_hpo_search_adds_selected_phenotype(self) -> None:
