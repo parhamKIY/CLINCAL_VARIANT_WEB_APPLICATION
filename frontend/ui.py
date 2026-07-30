@@ -18,6 +18,7 @@ from frontend.execution import (
     UploadedVCF,
     execute_analysis,
 )
+from frontend.results import render_analysis_results
 
 
 PAGE_TITLE = "Clinical Variant Interpretation"
@@ -75,6 +76,7 @@ def _clear_analysis_result() -> None:
     """Discard an earlier result when analysis inputs change."""
 
     st.session_state[PIPELINE_RESULT_KEY] = None
+    st.session_state.pop("selected_evidence_object", None)
 
 
 def _load_styles() -> None:
@@ -407,7 +409,9 @@ def _render_pipeline_status(result: PipelineResult) -> None:
     _render_pipeline_issues(result)
 
 
-def _execute_submission(submission: AnalysisSubmission) -> None:
+def _execute_submission(
+    submission: AnalysisSubmission,
+) -> PipelineResult | None:
     """Run the complete pipeline with live progress feedback."""
 
     st.subheader("Analysis status")
@@ -477,7 +481,7 @@ def _execute_submission(submission: AnalysisSubmission) -> None:
         )
         status.error(str(exc))
         st.session_state[PIPELINE_RESULT_KEY] = None
-        return
+        return None
     except Exception:
         status.update(
             label="Analysis could not complete",
@@ -488,7 +492,7 @@ def _execute_submission(submission: AnalysisSubmission) -> None:
             "An unexpected internal error stopped the analysis."
         )
         st.session_state[PIPELINE_RESULT_KEY] = None
-        return
+        return None
 
     st.session_state[PIPELINE_RESULT_KEY] = result
     progress_bar.progress(
@@ -498,6 +502,7 @@ def _execute_submission(submission: AnalysisSubmission) -> None:
     label, state, expanded = _result_status(result)
     status.update(label=label, state=state, expanded=expanded)
     _render_pipeline_issues(result)
+    return result
 
 
 def render_app() -> None:
@@ -531,12 +536,16 @@ def render_app() -> None:
     _render_hpo_picker()
     st.divider()
 
+    pipeline_result: PipelineResult | None = None
     if submission is not None:
-        _execute_submission(submission)
+        pipeline_result = _execute_submission(submission)
     elif st.session_state[PIPELINE_RESULT_KEY] is not None:
-        _render_pipeline_status(
-            cast(
-                PipelineResult,
-                st.session_state[PIPELINE_RESULT_KEY],
-            )
+        pipeline_result = cast(
+            PipelineResult,
+            st.session_state[PIPELINE_RESULT_KEY],
         )
+        _render_pipeline_status(pipeline_result)
+
+    if pipeline_result is not None:
+        st.divider()
+        render_analysis_results(pipeline_result)

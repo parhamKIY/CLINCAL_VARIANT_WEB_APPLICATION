@@ -107,6 +107,11 @@ from backend.vcf_processing import (
 )
 from config import settings
 from frontend.execution import execute_analysis as execute_frontend_analysis
+from frontend.results import (
+    build_annotation_rows,
+    build_candidate_rows,
+    build_phenotype_rows,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -6733,6 +6738,39 @@ class TestFrontendExecution:
         assert list(upload_directory.iterdir()) == []
 
 
+class TestFrontendResults:
+    """Verify bounded, privacy-aware result transformations."""
+
+    def test_result_rows_exclude_raw_and_genotype_fields(self) -> None:
+        annotation = TestEvidenceObject._complete_candidate()
+        variant = annotation["variant"]
+        assert isinstance(variant, dict)
+
+        candidate_rows = build_candidate_rows([variant])
+        annotation_rows = build_annotation_rows([annotation])
+        phenotype_rows = build_phenotype_rows([annotation])
+
+        assert candidate_rows == [
+            {
+                "Variant": "2:166848215:C:T",
+                "Chromosome": "2",
+                "Position": 166848215,
+                "Reference": "C",
+                "Alternate": "T",
+                "Quality": 99.0,
+                "Filter": "PASS",
+            }
+        ]
+        assert "genotype" not in candidate_rows[0]
+        assert "raw_api_payload" not in annotation_rows[0]
+        assert annotation_rows[0]["Gene"] == "SCN1A"
+        assert annotation_rows[0]["ClinVar accession"] == (
+            "VCV000012345.1"
+        )
+        assert phenotype_rows[0]["Phenotype score"] == 0.5
+        assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"
+
+
 class TestFrontendFoundation:
     """Verify the Stage 11 Streamlit shell and input controls."""
 
@@ -6819,6 +6857,17 @@ class TestFrontendFoundation:
                         "message": f"{stage['stage']} completed.",
                     }
                 )
+            annotation = TestEvidenceObject._complete_candidate()
+            variant = annotation["variant"]
+            assert isinstance(variant, dict)
+            result["variant_count"] = 1
+            result["variants"] = [dict(variant)]
+            result["candidates"] = [dict(variant)]
+            result["annotations"] = [annotation]
+            result["phenotype_results"] = [annotation]
+            result["evidence_objects"] = [
+                TestEvidenceObject._complete_evidence_object()
+            ]
             progress_callback(result)
             return result
 
@@ -6855,6 +6904,27 @@ class TestFrontendFoundation:
         assert app.session_state["pipeline_result"]["status"] == (
             "success"
         )
+        assert any(
+            subheader.value == "Analysis results"
+            for subheader in app.subheader
+        )
+        assert {
+            metric.label: metric.value
+            for metric in app.metric
+        } == {
+            "Processed variants": "1",
+            "Candidates": "1",
+            "Annotations": "1",
+            "Evidence Objects": "1",
+            "Gene": "SCN1A",
+            "Population frequency": "1e-05",
+            "Phenotype score": "50%",
+            "VEP": "Success",
+            "MyVariant.info": "Success",
+            "ClinVar": "Success",
+            "ClinGen/GenCC": "Success",
+        }
+        assert len(app.dataframe) == 6
 
     def test_local_hpo_search_adds_selected_phenotype(self) -> None:
         app = AppTest.from_file(
