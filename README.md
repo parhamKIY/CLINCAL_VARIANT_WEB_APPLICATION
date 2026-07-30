@@ -241,9 +241,9 @@ remains the documented non-clinical MVP limitation.
 
 ## Stage 11 Streamlit frontend: in progress
 
-Stage 11 steps 1 through 4 establish the Streamlit execution and result
-presentation boundary. The
-root `app.py` delegates rendering to `frontend/ui.py`, which configures the
+Stage 11 steps 1 through 5 establish the Streamlit execution and result
+presentation boundary. The root `app.py` delegates rendering to
+`frontend/ui.py`, which configures the
 page, loads local responsive styles, displays the clinical decision-support
 notice, and presents the analysis workflow without duplicating backend logic.
 The interface now accepts either a `.vcf`/`.vcf.gz` upload or a manual
@@ -254,7 +254,10 @@ stage-by-stage progress, retains frontend-safe completion or error state across
 reruns, and removes temporary uploaded VCF data after execution. The result
 dashboard displays bounded candidates, standardized annotations, optional HPO
 scores, sanitized Evidence Objects, source statuses, references, and warnings
-without exposing VCF genotype fields or raw provider payloads.
+without exposing VCF genotype fields or raw provider payloads. A generated
+Markdown clinical report is loaded only from the configured `REPORT_DIR`,
+rendered in the application, and offered as a bounded download without
+exposing its server path.
 
 Run the frontend:
 

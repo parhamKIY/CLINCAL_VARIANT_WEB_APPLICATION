@@ -112,6 +112,10 @@ from frontend.results import (
     build_candidate_rows,
     build_phenotype_rows,
 )
+from frontend.report_viewer import (
+    ReportViewerError,
+    load_report_document,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -6771,6 +6775,67 @@ class TestFrontendResults:
         assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"
 
 
+class TestFrontendReportViewer:
+    """Verify secure generated-report loading."""
+
+    def test_markdown_report_loads_with_download_bytes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = report_directory / "clinical-report.md"
+        report_text = "# Clinical report\n\nEvidence-based summary."
+        report_path.write_text(report_text, encoding="utf-8")
+
+        document = load_report_document(
+            report_path,
+            report_dir=report_directory,
+        )
+
+        assert document.filename == "clinical-report.md"
+        assert document.markdown == report_text
+        assert document.data == report_path.read_bytes()
+
+    def test_report_outside_configured_directory_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        outside_report = tmp_path / "outside.md"
+        outside_report.write_text("# Outside", encoding="utf-8")
+
+        with pytest.raises(
+            ReportViewerError,
+            match="not an approved Markdown file",
+        ):
+            load_report_document(
+                outside_report,
+                report_dir=report_directory,
+            )
+
+    def test_oversized_report_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        oversized_report = report_directory / "oversized.md"
+        oversized_report.write_bytes(
+            b"x" * (MAX_CLINICAL_REPORT_MARKDOWN_BYTES + 1)
+        )
+
+        with pytest.raises(
+            ReportViewerError,
+            match="exceeds the display size limit",
+        ):
+            load_report_document(
+                oversized_report,
+                report_dir=report_directory,
+            )
+
+
 class TestFrontendFoundation:
     """Verify the Stage 11 Streamlit shell and input controls."""
 
@@ -6827,9 +6892,22 @@ class TestFrontendFoundation:
 
     def test_manual_variant_executes_pipeline(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         received: dict[str, object] = {}
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = report_directory / "clinical-report.md"
+        report_path.write_text(
+            "# Clinical report\n\nEvidence-based summary.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            settings,
+            "REPORT_DIR",
+            report_directory,
+        )
 
         def fake_execute_analysis(
             *,
@@ -6868,6 +6946,7 @@ class TestFrontendFoundation:
             result["evidence_objects"] = [
                 TestEvidenceObject._complete_evidence_object()
             ]
+            result["report_path"] = str(report_path)
             progress_callback(result)
             return result
 
@@ -6925,6 +7004,13 @@ class TestFrontendFoundation:
             "ClinGen/GenCC": "Success",
         }
         assert len(app.dataframe) == 6
+        assert [button.label for button in app.get("download_button")] == [
+            "Download Markdown report"
+        ]
+        assert any(
+            "Evidence-based summary." in markdown.value
+            for markdown in app.markdown
+        )
 
     def test_local_hpo_search_adds_selected_phenotype(self) -> None:
         app = AppTest.from_file(

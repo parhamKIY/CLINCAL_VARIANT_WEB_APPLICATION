@@ -19,6 +19,7 @@ from frontend.execution import (
     execute_analysis,
 )
 from frontend.results import render_analysis_results
+from frontend.report_viewer import render_report_viewer
 
 
 PAGE_TITLE = "Clinical Variant Interpretation"
@@ -549,3 +550,5 @@ def render_app() -> None:
     if pipeline_result is not None:
         st.divider()
         render_analysis_results(pipeline_result)
+        st.divider()
+        render_report_viewer(pipeline_result)
