@@ -1826,6 +1826,26 @@ def save_clinical_report(
     return target
 
 
+def generate_and_save_clinical_report(
+    evidence_object: object,
+    *,
+    client: LLMClient | None = None,
+    report_dir: str | Path | None = None,
+) -> Path:
+    """Run the complete Stage 7-to-9 interpretation and storage path."""
+
+    evidence = sanitize_evidence_object(evidence_object)
+    response = generate_clinical_interpretation(
+        evidence,
+        client=client,
+    )
+    report = build_clinical_report(evidence, response)
+    return save_clinical_report(
+        report,
+        report_dir=report_dir,
+    )
+
+
 def _require_candidate_mapping(
     value: object,
     path: str,

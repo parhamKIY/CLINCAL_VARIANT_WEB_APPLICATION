@@ -146,7 +146,7 @@ LLM_MODEL=model-name
 LLM_TIMEOUT=30
 ```
 
-## Stage 9 clinical report generation: in progress
+## Stage 9 clinical report generation: complete
 
 Stage 9 step 1 defines a versioned, JSON-safe `ClinicalReport` contract in
 `backend/report.py`. It fixes the nine-section display order for case summary,
@@ -181,6 +181,13 @@ different pre-existing file is never replaced. Paths cannot escape the report
 directory, output size is bounded, and failed publication removes temporary
 files.
 
+Stage 9 step 5 provides `generate_and_save_clinical_report()` as the complete
+Evidence Object to saved-report boundary for the future pipeline. Offline
+integration tests cover candidate conversion, LLM interpretation, validation,
+composition, rendering, idempotent storage, sensitive-field exclusion, and
+failure before file creation. The live `--report` smoke mode performs the same
+path with bundled synthetic evidence and saves the result under `REPORT_DIR`.
+
 ## Tests
 
 Run the offline test suite:
@@ -199,6 +206,12 @@ Run the complete live Stage 8 interpretation using bundled synthetic evidence:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py --clinical
+```
+
+Run the complete live Stage 9 report workflow and save its Markdown output:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_llm_smoke.py --report
 ```
 
 Validate configuration without sending an LLM request:

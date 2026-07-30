@@ -12,6 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.llm import call_llm
 from backend.report import (
+    CLINICAL_REPORT_SECTION_ORDER,
+    generate_and_save_clinical_report,
     generate_clinical_interpretation,
     validate_and_sanitize_clinical_interpretation,
 )
@@ -149,6 +151,56 @@ def check_clinical_interpretation() -> None:
     print("--- End interpretation output ---")
 
 
+def check_clinical_report() -> None:
+    """Generate, validate, render, and save one synthetic live report."""
+
+    report_path = generate_and_save_clinical_report(
+        _synthetic_evidence_object()
+    )
+    markdown = report_path.read_text(encoding="utf-8")
+    headings = [
+        line.removeprefix("## ")
+        for line in markdown.splitlines()
+        if line.startswith("## ")
+    ]
+    expected_headings = [
+        title
+        for _, title in CLINICAL_REPORT_SECTION_ORDER
+    ]
+    if headings != expected_headings:
+        raise RuntimeError(
+            "Saved clinical report has an invalid section order."
+        )
+
+    forbidden_expansions = {
+        "family history",
+        "seizure",
+    }
+    detected_expansions = {
+        phrase
+        for phrase in forbidden_expansions
+        if phrase.casefold() in markdown.casefold()
+    }
+    if detected_expansions:
+        raise RuntimeError(
+            "Saved clinical report added facts absent from the "
+            "synthetic Evidence Object: "
+            f"{', '.join(sorted(detected_expansions))}."
+        )
+    if report_path.parent != settings.REPORT_DIR.resolve():
+        raise RuntimeError(
+            "Saved clinical report escaped the configured report "
+            "directory."
+        )
+
+    print("Clinical report: OK")
+    print(f"Saved report: {report_path}")
+    print(f"Saved bytes: {len(markdown.encode('utf-8'))}")
+    print("--- Report output ---")
+    print(markdown.rstrip())
+    print("--- End report output ---")
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse manual smoke-test options."""
 
@@ -158,15 +210,21 @@ def parse_arguments() -> argparse.Namespace:
             "clinical interpretation path."
         )
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--config-only",
         action="store_true",
         help="Validate configuration without making an LLM request.",
     )
-    parser.add_argument(
+    modes.add_argument(
         "--clinical",
         action="store_true",
         help="Interpret a bundled synthetic Evidence Object.",
+    )
+    modes.add_argument(
+        "--report",
+        action="store_true",
+        help="Generate and save a complete synthetic clinical report.",
     )
     return parser.parse_args()
 
@@ -177,7 +235,9 @@ def main() -> int:
 
     try:
         check_configuration()
-        if arguments.clinical:
+        if arguments.report:
+            check_clinical_report()
+        elif arguments.clinical:
             check_clinical_interpretation()
         elif not arguments.config_only:
             check_llm_connection()

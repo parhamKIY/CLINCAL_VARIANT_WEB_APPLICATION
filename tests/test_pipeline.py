@@ -73,6 +73,7 @@ from backend.report import (
     build_evidence_object,
     build_evidence_objects,
     generate_clinical_interpretation,
+    generate_and_save_clinical_report,
     render_clinical_report_markdown,
     save_clinical_report,
     sanitize_evidence_object,
@@ -5677,6 +5678,88 @@ class TestClinicalReportStorage:
         ):
             save_clinical_report(
                 report,
+                report_dir=tmp_path,
+            )
+
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestStage9EndToEnd:
+    """Verify the complete offline Evidence-to-report handoff."""
+
+    def test_candidate_evidence_to_saved_report(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        candidate = TestEvidenceObject._complete_candidate()
+        evidence = build_evidence_object(candidate)
+        original = deepcopy(evidence)
+        adapter = FakeLLMAdapter(
+            TestClinicalReportComposition._response()
+        )
+
+        path = generate_and_save_clinical_report(
+            evidence,
+            client=LLMClient(adapter),
+            report_dir=tmp_path,
+        )
+        markdown = path.read_text(encoding="utf-8")
+
+        assert evidence == original
+        assert len(adapter.requests) == 1
+        assert path.parent == tmp_path.resolve()
+        assert "## Case Summary" in markdown
+        assert "## Medical Disclaimer" in markdown
+        assert "VCV000012345.1" in markdown
+        assert "HP:0001250" in markdown
+        assert "genotype" not in markdown
+        assert "raw_internal_detail" not in markdown
+        assert "patient_name" not in markdown
+
+    def test_repeated_end_to_end_run_is_idempotent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        evidence = build_evidence_object(
+            TestEvidenceObject._complete_candidate()
+        )
+        adapter = FakeLLMAdapter(
+            TestClinicalReportComposition._response()
+        )
+        client = LLMClient(adapter)
+
+        first = generate_and_save_clinical_report(
+            evidence,
+            client=client,
+            report_dir=tmp_path,
+        )
+        second = generate_and_save_clinical_report(
+            evidence,
+            client=client,
+            report_dir=tmp_path,
+        )
+
+        assert first == second
+        assert len(adapter.requests) == 2
+        assert len(list(tmp_path.glob("*.md"))) == 1
+
+    def test_llm_failure_creates_no_report(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        adapter = FakeLLMAdapter(
+            LLMTimeoutError("synthetic timeout")
+        )
+
+        with pytest.raises(
+            LLMTimeoutError,
+            match="synthetic timeout",
+        ):
+            generate_and_save_clinical_report(
+                build_evidence_object(
+                    TestEvidenceObject._complete_candidate()
+                ),
+                client=LLMClient(adapter),
                 report_dir=tmp_path,
             )
 
