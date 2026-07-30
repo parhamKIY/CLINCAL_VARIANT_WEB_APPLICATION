@@ -173,6 +173,14 @@ limitations narratives come from the LLM. References are normalized and
 deduplicated, missing evidence is explicit, evidence values are Markdown
 escaped, and nested unsafe headings, code fences, or raw HTML are rejected.
 
+Stage 9 step 4 saves rendered reports as deterministic UTF-8 Markdown under the
+configured `REPORT_DIR`. Filenames contain bounded assembly and variant slugs
+plus a SHA-256 content identifier. Publication uses a fully written temporary
+file and an atomic no-overwrite link, so repeated saves are idempotent while a
+different pre-existing file is never replaced. Paths cannot escape the report
+directory, output size is bounded, and failed publication removes temporary
+files.
+
 ## Tests
 
 Run the offline test suite:

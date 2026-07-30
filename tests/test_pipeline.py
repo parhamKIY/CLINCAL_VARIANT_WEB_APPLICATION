@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import os
 from copy import deepcopy
 from collections.abc import Iterator
 from pathlib import Path
@@ -62,8 +63,10 @@ from backend.report import (
     MAX_EVIDENCE_PMIDS_PER_CURATION,
     MAX_EVIDENCE_REFERENCES,
     MAX_EVIDENCE_WARNINGS,
+    MAX_CLINICAL_REPORT_MARKDOWN_BYTES,
     ClinicalInterpretationError,
     ClinicalReportError,
+    ClinicalReportStorageError,
     EvidenceObjectError,
     build_clinical_interpretation_prompt,
     build_clinical_report,
@@ -71,6 +74,7 @@ from backend.report import (
     build_evidence_objects,
     generate_clinical_interpretation,
     render_clinical_report_markdown,
+    save_clinical_report,
     sanitize_evidence_object,
     validate_and_sanitize_clinical_interpretation,
     validate_clinical_report,
@@ -5445,6 +5449,7 @@ class TestClinicalReportComposition:
             TestEvidenceObject._complete_evidence_object(),
             self._response(),
         )
+        report["warnings"] = ["Synthetic report warning."]
 
         markdown = render_clinical_report_markdown(report)
         headings = [
@@ -5463,6 +5468,8 @@ class TestClinicalReportComposition:
         assert "- Report schema: 1.0" in markdown
         assert "- LLM model: test-model" in markdown
         assert "PMID:12345678" in markdown
+        assert "### Report warnings" in markdown
+        assert "Synthetic report warning." in markdown
         assert markdown.endswith(
             f"{CLINICAL_DECISION_SUPPORT_NOTICE}\n"
         )
@@ -5505,3 +5512,172 @@ class TestClinicalReportComposition:
             match="unsafe Markdown",
         ):
             render_clinical_report_markdown(report)
+
+
+class TestClinicalReportStorage:
+    """Verify safe deterministic Stage 9 Markdown persistence."""
+
+    @staticmethod
+    def _report() -> dict[str, object]:
+        return build_clinical_report(
+            TestEvidenceObject._complete_evidence_object(),
+            TestClinicalReportComposition._response(),
+        )
+
+    def test_report_is_saved_idempotently_as_utf8(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report = self._report()
+
+        first = save_clinical_report(
+            report,
+            report_dir=tmp_path / "reports",
+        )
+        second = save_clinical_report(
+            deepcopy(report),
+            report_dir=tmp_path / "reports",
+        )
+
+        assert first == second
+        assert first.parent == (tmp_path / "reports").resolve()
+        assert first.suffix == ".md"
+        assert first.name.startswith(
+            "clinical-report-grch38-2-166848215-c-t-"
+        )
+        assert first.read_text(encoding="utf-8") == (
+            render_clinical_report_markdown(report)
+        )
+        assert list(first.parent.glob("*.md")) == [first]
+        assert list(first.parent.glob("*.tmp")) == []
+
+    def test_changed_report_uses_a_different_content_hash(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        first_report = self._report()
+        second_report = deepcopy(first_report)
+        sections = second_report["sections"]
+        assert isinstance(sections, dict)
+        sections["interpretation"] = (
+            "A different evidence-limited interpretation."
+        )
+
+        first = save_clinical_report(
+            first_report,
+            report_dir=tmp_path,
+        )
+        second = save_clinical_report(
+            second_report,
+            report_dir=tmp_path,
+        )
+
+        assert first != second
+        assert len(list(tmp_path.glob("*.md"))) == 2
+
+    def test_deterministic_path_collision_never_overwrites(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report = self._report()
+        target = save_clinical_report(
+            report,
+            report_dir=tmp_path,
+        )
+        target.write_text(
+            "tampered content\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(
+            ClinicalReportStorageError,
+            match="different file already exists",
+        ):
+            save_clinical_report(
+                report,
+                report_dir=tmp_path,
+            )
+
+        assert target.read_text(encoding="utf-8") == (
+            "tampered content\n"
+        )
+
+    def test_invalid_report_directory_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        destination = tmp_path / "not-a-directory"
+        destination.write_text("file", encoding="utf-8")
+
+        with pytest.raises(
+            ClinicalReportStorageError,
+            match="directory could not be prepared",
+        ):
+            save_clinical_report(
+                self._report(),
+                report_dir=destination,
+            )
+
+    def test_publish_failure_cleans_temporary_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_link(
+            source: object,
+            destination: object,
+        ) -> None:
+            raise PermissionError("blocked")
+
+        monkeypatch.setattr(os, "link", fail_link)
+
+        with pytest.raises(
+            ClinicalReportStorageError,
+            match="could not be saved",
+        ):
+            save_clinical_report(
+                self._report(),
+                report_dir=tmp_path,
+            )
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_filename_cannot_escape_report_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report = self._report()
+        variant = report["variant"]
+        assert isinstance(variant, dict)
+        variant["chrom"] = "../../outside"
+
+        target = save_clinical_report(
+            report,
+            report_dir=tmp_path / "reports",
+        )
+
+        assert target.parent == (tmp_path / "reports").resolve()
+        assert ".." not in target.name
+        assert not (tmp_path / "outside").exists()
+
+    def test_oversized_markdown_is_not_saved(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report = self._report()
+        sections = report["sections"]
+        assert isinstance(sections, dict)
+        sections["interpretation"] = (
+            "x" * (MAX_CLINICAL_REPORT_MARKDOWN_BYTES + 1)
+        )
+
+        with pytest.raises(
+            ClinicalReportStorageError,
+            match="maximum size",
+        ):
+            save_clinical_report(
+                report,
+                report_dir=tmp_path,
+            )
+
+        assert list(tmp_path.iterdir()) == []

@@ -1,14 +1,19 @@
 """Evidence-object contracts for downstream interpretation and reporting."""
 
+import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 import unicodedata
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
 from backend.llm import LLMClient, LLMResponse, call_llm
+from config import settings
 
 
 EVIDENCE_SCHEMA_VERSION = "1.0"
@@ -40,6 +45,7 @@ MAX_EVIDENCE_URL_LENGTH = 2_048
 MAX_CLINICAL_REPORT_REFERENCES = 50
 MAX_CLINICAL_INTERPRETATION_CHARS = 32_000
 MAX_CLINICAL_INTERPRETATION_SECTION_CHARS = 8_000
+MAX_CLINICAL_REPORT_MARKDOWN_BYTES = 256 * 1024
 
 CLINICAL_DECISION_SUPPORT_NOTICE = (
     "AI-generated decision-support summary based only on the supplied "
@@ -84,6 +90,10 @@ class ClinicalReportError(ValueError):
 
 class ClinicalInterpretationError(ValueError):
     """Raised when LLM interpretation text fails Stage 9 validation."""
+
+
+class ClinicalReportStorageError(ClinicalReportError):
+    """Raised when a clinical report cannot be stored safely."""
 
 
 class EvidenceVariant(TypedDict):
@@ -1485,20 +1495,6 @@ def _build_limitations(
             f"- {_markdown_value(source)}: "
             f"{_markdown_value(evidence['source_statuses'][source])}"
         )
-    if evidence["warnings"]:
-        lines.extend(["", "### Evidence warnings"])
-        lines.extend(
-            f"- {_markdown_value(warning)}"
-            for warning in evidence["warnings"]
-        )
-    else:
-        lines.extend(
-            [
-                "",
-                "### Evidence warnings",
-                "- No evidence warnings were supplied.",
-            ]
-        )
     return "\n".join(lines)
 
 
@@ -1676,7 +1672,158 @@ def render_clinical_report_markdown(report_object: object) -> str:
             lines.append(report["disclaimer"])
         else:
             lines.append(sections[key])
+            if key == "limitations" and report["warnings"]:
+                lines.extend(["", "### Report warnings"])
+                lines.extend(
+                    f"- {_markdown_value(warning)}"
+                    for warning in report["warnings"]
+                )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _report_filename(report: ClinicalReport) -> str:
+    """Build a bounded deterministic filename from report content."""
+
+    canonical_json = json.dumps(
+        report,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(canonical_json).hexdigest()[:16]
+
+    def slug(value: object, maximum: int) -> str:
+        normalized = unicodedata.normalize("NFKD", str(value))
+        ascii_value = normalized.encode(
+            "ascii",
+            errors="ignore",
+        ).decode("ascii")
+        safe = re.sub(
+            r"[^A-Za-z0-9]+",
+            "-",
+            ascii_value,
+        ).strip("-").lower()
+        return (safe or "unknown")[:maximum].rstrip("-")
+
+    variant = report["variant"]
+    components = (
+        slug(report["assembly"], 12),
+        slug(variant["chrom"], 20),
+        str(variant["pos"]),
+        slug(variant["ref"], 16),
+        slug(variant["alt"], 16),
+        digest,
+    )
+    return f"clinical-report-{'-'.join(components)}.md"
+
+
+def _read_existing_report(
+    target: Path,
+    expected_markdown: str,
+) -> bool:
+    """Return true for an identical file and reject unsafe collisions."""
+
+    if not target.exists() and not target.is_symlink():
+        return False
+    if target.is_symlink() or not target.is_file():
+        raise ClinicalReportStorageError(
+            "The deterministic report target is not a regular file."
+        )
+    try:
+        existing_markdown = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ClinicalReportStorageError(
+            "The existing clinical report could not be read."
+        ) from exc
+    if existing_markdown != expected_markdown:
+        raise ClinicalReportStorageError(
+            "A different file already exists at the deterministic "
+            "clinical report path."
+        )
+    return True
+
+
+def save_clinical_report(
+    report_object: object,
+    *,
+    report_dir: str | Path | None = None,
+) -> Path:
+    """Atomically save deterministic UTF-8 Markdown without overwriting."""
+
+    report = validate_clinical_report(report_object)
+    markdown = render_clinical_report_markdown(report)
+    if (
+        len(markdown.encode("utf-8"))
+        > MAX_CLINICAL_REPORT_MARKDOWN_BYTES
+    ):
+        raise ClinicalReportStorageError(
+            "Rendered clinical report exceeds the maximum size of "
+            f"{MAX_CLINICAL_REPORT_MARKDOWN_BYTES} bytes."
+        )
+
+    destination = Path(
+        settings.REPORT_DIR
+        if report_dir is None
+        else report_dir
+    ).expanduser()
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        destination = destination.resolve(strict=True)
+    except OSError as exc:
+        raise ClinicalReportStorageError(
+            "The clinical report directory could not be prepared."
+        ) from exc
+    if not destination.is_dir():
+        raise ClinicalReportStorageError(
+            "The clinical report destination must be a directory."
+        )
+
+    target = destination / _report_filename(report)
+    if target.parent != destination:
+        raise ClinicalReportStorageError(
+            "The clinical report path escaped its destination directory."
+        )
+    if _read_existing_report(target, markdown):
+        return target
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=".clinical-report-",
+            suffix=".tmp",
+            dir=destination,
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(markdown)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+            temporary_path = Path(temporary_file.name)
+
+        try:
+            os.link(temporary_path, target)
+        except FileExistsError:
+            if not _read_existing_report(target, markdown):
+                raise ClinicalReportStorageError(
+                    "The clinical report target could not be published."
+                )
+    except ClinicalReportStorageError:
+        raise
+    except OSError as exc:
+        raise ClinicalReportStorageError(
+            "The clinical report could not be saved."
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return target
 
 
 def _require_candidate_mapping(
