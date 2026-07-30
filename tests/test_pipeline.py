@@ -34,9 +34,16 @@ from backend.prioritization import (
 )
 from backend.report import (
     EVIDENCE_SCHEMA_VERSION,
+    MAX_EVIDENCE_CLINGEN_CURATIONS,
+    MAX_EVIDENCE_CLINVAR_CONDITIONS,
+    MAX_EVIDENCE_HPO_TERMS,
+    MAX_EVIDENCE_PMIDS_PER_CURATION,
+    MAX_EVIDENCE_REFERENCES,
+    MAX_EVIDENCE_WARNINGS,
     EvidenceObjectError,
     build_evidence_object,
     build_evidence_objects,
+    sanitize_evidence_object,
     validate_evidence_object,
 )
 from backend.vcf_processing import (
@@ -3583,6 +3590,110 @@ class TestEvidenceObject:
         assert "genotype" not in evidence["variant"]
         assert "raw_api_payload" not in evidence
         assert "raw_internal_detail" not in evidence["references"][0]
+
+    def test_evidence_text_is_sanitized_without_mutating_input(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+        evidence["clinvar_significance"] = "  Pathogenic\n\tclassification "
+        evidence["clinvar_conditions"] = ["  Neurologic\n condition  "]
+        evidence["warnings"] = ["  Temporary\r\nsource warning  "]
+        original_evidence = deepcopy(evidence)
+
+        cleaned = sanitize_evidence_object(evidence)
+
+        assert cleaned["clinvar_significance"] == (
+            "Pathogenic classification"
+        )
+        assert cleaned["clinvar_conditions"] == [
+            "Neurologic condition"
+        ]
+        assert cleaned["warnings"] == ["Temporary source warning"]
+        assert evidence == original_evidence
+
+    def test_evidence_lists_are_bounded_with_visible_warnings(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+        evidence["clinvar_conditions"] = [
+            f"Condition {index}"
+            for index in range(
+                MAX_EVIDENCE_CLINVAR_CONDITIONS + 2
+            )
+        ]
+        base_curation = evidence["clingen_curations"][0]
+        assert isinstance(base_curation, dict)
+        evidence["clingen_curations"] = []
+        for index in range(MAX_EVIDENCE_CLINGEN_CURATIONS + 2):
+            curation = deepcopy(base_curation)
+            curation["disease"] = f"Disease {index}"
+            curation["pmids"] = [
+                str(10_000_000 + pmid)
+                for pmid in range(
+                    MAX_EVIDENCE_PMIDS_PER_CURATION + 3
+                )
+            ]
+            evidence["clingen_curations"].append(curation)
+        evidence["references"] = [
+            {
+                "source": f"Source {index}",
+                "url": f"https://example.test/reference/{index}",
+            }
+            for index in range(MAX_EVIDENCE_REFERENCES + 2)
+        ]
+        evidence["warnings"] = [
+            f"Source warning {index}"
+            for index in range(MAX_EVIDENCE_WARNINGS + 5)
+        ]
+
+        cleaned = sanitize_evidence_object(evidence)
+
+        assert len(cleaned["clinvar_conditions"]) == (
+            MAX_EVIDENCE_CLINVAR_CONDITIONS
+        )
+        assert len(cleaned["clingen_curations"]) == (
+            MAX_EVIDENCE_CLINGEN_CURATIONS
+        )
+        assert all(
+            len(curation["pmids"])
+            == MAX_EVIDENCE_PMIDS_PER_CURATION
+            for curation in cleaned["clingen_curations"]
+        )
+        assert len(cleaned["references"]) == MAX_EVIDENCE_REFERENCES
+        assert len(cleaned["warnings"]) == MAX_EVIDENCE_WARNINGS
+        assert any(
+            "truncated" in warning
+            for warning in cleaned["warnings"]
+        )
+
+    def test_candidate_conversion_applies_text_sanitization(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        candidate["warnings"] = ["  Remote\n service warning  "]
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        assert isinstance(clinvar, dict)
+        clinvar["clinical_significance"] = "  Pathogenic\t "
+
+        evidence = build_evidence_object(candidate)
+
+        assert evidence["clinvar_significance"] == "Pathogenic"
+        assert evidence["warnings"] == ["Remote service warning"]
+
+    def test_more_than_maximum_patient_hpo_terms_are_rejected(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+        evidence["hpo_terms"] = [
+            f"HP:{index:07d}"
+            for index in range(1, MAX_EVIDENCE_HPO_TERMS + 2)
+        ]
+        evidence["matched_hpo_terms"] = []
+
+        with pytest.raises(EvidenceObjectError, match="maximum"):
+            sanitize_evidence_object(evidence)
 
     def test_missing_clinvar_and_phenotype_are_explicitly_mapped(
         self,

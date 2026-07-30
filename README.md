@@ -84,8 +84,11 @@ missing evidence remains explicit through `None`, empty lists, and source
 statuses. `build_evidence_object()` and `build_evidence_objects()` now convert
 Stage 5 and Stage 6 candidates into that contract without mutating the source
 objects. They deliberately select only approved fields and reduce nested
-ClinVar and ClinGen evidence to compact representations. Applying final field
-limits and sanitization is the next implementation step.
+ClinVar and ClinGen evidence to compact representations.
+`sanitize_evidence_object()` removes control characters, normalizes
+whitespace, bounds nested evidence and provenance lists, records visible
+truncation warnings, and enforces a 64 KiB serialized-size ceiling. Final
+end-to-end validation and documentation are the next implementation step.
 
 ## Tests
 

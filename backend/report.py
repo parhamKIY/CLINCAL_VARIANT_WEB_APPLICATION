@@ -3,6 +3,7 @@
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Iterable
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
@@ -19,6 +20,17 @@ SOURCE_STATUS_VALUES = {
     "unsupported",
     "error",
 }
+MAX_EVIDENCE_HPO_TERMS = 50
+MAX_EVIDENCE_CLINVAR_CONDITIONS = 10
+MAX_EVIDENCE_CLINGEN_CURATIONS = 10
+MAX_EVIDENCE_PMIDS_PER_CURATION = 20
+MAX_EVIDENCE_REFERENCES = 25
+MAX_EVIDENCE_WARNINGS = 20
+MAX_EVIDENCE_SERIALIZED_BYTES = 64 * 1024
+MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
+MAX_EVIDENCE_ALLELE_LENGTH = 10_000
+MAX_EVIDENCE_TEXT_LENGTH = 500
+MAX_EVIDENCE_URL_LENGTH = 2_048
 
 
 class EvidenceObjectError(ValueError):
@@ -176,6 +188,13 @@ def _validate_probability(
 def _validate_url(value: object, path: str) -> str:
     """Validate one absolute HTTP(S) provenance URL."""
     url = _validate_required_string(value, path)
+    if (
+        len(url) > MAX_EVIDENCE_URL_LENGTH
+        or any(character.isspace() for character in url)
+    ):
+        raise EvidenceObjectError(
+            f"{path} must be an absolute HTTP(S) URL."
+        )
     try:
         parsed = urlsplit(url)
     except ValueError as exc:
@@ -399,6 +418,308 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         ) from exc
 
     return cast(EvidenceObject, value)
+
+
+def _sanitize_text(
+    value: str,
+    *,
+    max_length: int,
+    path: str,
+    truncate: bool,
+) -> str:
+    """Remove control characters, collapse whitespace, and bound text."""
+    without_controls = "".join(
+        " "
+        if unicodedata.category(character).startswith("C")
+        else character
+        for character in value
+    )
+    cleaned = " ".join(without_controls.split())
+    if not cleaned:
+        raise EvidenceObjectError(
+            f"{path} must contain visible text."
+        )
+    if len(cleaned) <= max_length:
+        return cleaned
+    if not truncate:
+        raise EvidenceObjectError(
+            f"{path} exceeds the maximum length of {max_length}."
+        )
+    return cleaned[: max_length - 3].rstrip() + "..."
+
+
+def _sanitize_optional_text(
+    value: str | None,
+    *,
+    max_length: int,
+    path: str,
+    truncate: bool = False,
+) -> str | None:
+    """Sanitize one explicit optional string."""
+    if value is None:
+        return None
+    return _sanitize_text(
+        value,
+        max_length=max_length,
+        path=path,
+        truncate=truncate,
+    )
+
+
+def _unique_in_order(values: Iterable[str]) -> list[str]:
+    """Return first-seen unique values without changing their order."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def sanitize_evidence_object(value: object) -> EvidenceObject:
+    """Return a bounded, control-character-free evidence copy."""
+    evidence = validate_evidence_object(value)
+    system_warnings: list[str] = []
+
+    variant = evidence["variant"]
+    clean_variant: EvidenceVariant = {
+        "chrom": _sanitize_text(
+            variant["chrom"],
+            max_length=32,
+            path="evidence.variant.chrom",
+            truncate=False,
+        ),
+        "pos": variant["pos"],
+        "ref": _sanitize_text(
+            variant["ref"],
+            max_length=MAX_EVIDENCE_ALLELE_LENGTH,
+            path="evidence.variant.ref",
+            truncate=False,
+        ),
+        "alt": _sanitize_text(
+            variant["alt"],
+            max_length=MAX_EVIDENCE_ALLELE_LENGTH,
+            path="evidence.variant.alt",
+            truncate=False,
+        ),
+    }
+
+    clean_conditions = _unique_in_order(
+        _sanitize_text(
+            condition,
+            max_length=MAX_EVIDENCE_TEXT_LENGTH,
+            path=f"evidence.clinvar_conditions[{index}]",
+            truncate=True,
+        )
+        for index, condition in enumerate(
+            evidence["clinvar_conditions"]
+        )
+    )
+    if len(clean_conditions) > MAX_EVIDENCE_CLINVAR_CONDITIONS:
+        system_warnings.append(
+            "ClinVar conditions were truncated in the Evidence Object."
+        )
+        clean_conditions = clean_conditions[
+            :MAX_EVIDENCE_CLINVAR_CONDITIONS
+        ]
+
+    raw_curations = evidence["clingen_curations"]
+    if len(raw_curations) > MAX_EVIDENCE_CLINGEN_CURATIONS:
+        system_warnings.append(
+            "ClinGen curations were truncated in the Evidence Object."
+        )
+    clean_curations: list[EvidenceClinGenCuration] = []
+    pmids_truncated = False
+    for index, curation in enumerate(
+        raw_curations[:MAX_EVIDENCE_CLINGEN_CURATIONS]
+    ):
+        pmids = curation["pmids"]
+        if len(pmids) > MAX_EVIDENCE_PMIDS_PER_CURATION:
+            pmids_truncated = True
+        clean_curations.append(
+            {
+                "disease": _sanitize_text(
+                    curation["disease"],
+                    max_length=MAX_EVIDENCE_TEXT_LENGTH,
+                    path=(
+                        "evidence.clingen_curations"
+                        f"[{index}].disease"
+                    ),
+                    truncate=True,
+                ),
+                "disease_id": _sanitize_optional_text(
+                    curation["disease_id"],
+                    max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+                    path=(
+                        "evidence.clingen_curations"
+                        f"[{index}].disease_id"
+                    ),
+                ),
+                "classification": _sanitize_text(
+                    curation["classification"],
+                    max_length=MAX_EVIDENCE_TEXT_LENGTH,
+                    path=(
+                        "evidence.clingen_curations"
+                        f"[{index}].classification"
+                    ),
+                    truncate=True,
+                ),
+                "mode_of_inheritance": _sanitize_optional_text(
+                    curation["mode_of_inheritance"],
+                    max_length=MAX_EVIDENCE_TEXT_LENGTH,
+                    path=(
+                        "evidence.clingen_curations"
+                        f"[{index}].mode_of_inheritance"
+                    ),
+                    truncate=True,
+                ),
+                "pmids": list(
+                    pmids[:MAX_EVIDENCE_PMIDS_PER_CURATION]
+                ),
+                "report_url": curation["report_url"],
+            }
+        )
+    if pmids_truncated:
+        system_warnings.append(
+            "ClinGen PMID lists were truncated in the Evidence Object."
+        )
+
+    clean_references: list[EvidenceReference] = []
+    seen_references: set[tuple[str, str]] = set()
+    for index, reference in enumerate(evidence["references"]):
+        clean_source = _sanitize_text(
+            reference["source"],
+            max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+            path=f"evidence.references[{index}].source",
+            truncate=True,
+        )
+        reference_key = (clean_source, reference["url"])
+        if reference_key in seen_references:
+            continue
+        seen_references.add(reference_key)
+        clean_references.append(
+            {
+                "source": clean_source,
+                "url": reference["url"],
+            }
+        )
+    if len(clean_references) > MAX_EVIDENCE_REFERENCES:
+        system_warnings.append(
+            "References were truncated in the Evidence Object."
+        )
+        clean_references = clean_references[:MAX_EVIDENCE_REFERENCES]
+
+    clean_original_warnings = _unique_in_order(
+        _sanitize_text(
+            warning,
+            max_length=MAX_EVIDENCE_TEXT_LENGTH,
+            path=f"evidence.warnings[{index}]",
+            truncate=True,
+        )
+        for index, warning in enumerate(evidence["warnings"])
+    )
+    clean_system_warnings = _unique_in_order(system_warnings)
+    available_warning_slots = (
+        MAX_EVIDENCE_WARNINGS - len(clean_system_warnings)
+    )
+    if len(clean_original_warnings) > available_warning_slots:
+        truncation_warning = (
+            "Warnings were truncated in the Evidence Object."
+        )
+        if truncation_warning not in clean_system_warnings:
+            clean_system_warnings.append(truncation_warning)
+        available_warning_slots = (
+            MAX_EVIDENCE_WARNINGS - len(clean_system_warnings)
+        )
+    clean_warnings = (
+        clean_system_warnings
+        + clean_original_warnings[:available_warning_slots]
+    )
+
+    hpo_terms = list(evidence["hpo_terms"])
+    if len(hpo_terms) > MAX_EVIDENCE_HPO_TERMS:
+        raise EvidenceObjectError(
+            "evidence.hpo_terms exceeds the maximum of "
+            f"{MAX_EVIDENCE_HPO_TERMS}."
+        )
+
+    clean_evidence: EvidenceObject = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "variant": clean_variant,
+        "assembly": evidence["assembly"],
+        "gene": _sanitize_optional_text(
+            evidence["gene"],
+            max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+            path="evidence.gene",
+        ),
+        "gene_id": _sanitize_optional_text(
+            evidence["gene_id"],
+            max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+            path="evidence.gene_id",
+        ),
+        "transcript": _sanitize_optional_text(
+            evidence["transcript"],
+            max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+            path="evidence.transcript",
+        ),
+        "consequence": _sanitize_optional_text(
+            evidence["consequence"],
+            max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+            path="evidence.consequence",
+        ),
+        "impact": _sanitize_optional_text(
+            evidence["impact"],
+            max_length=32,
+            path="evidence.impact",
+        ),
+        "protein_change": _sanitize_optional_text(
+            evidence["protein_change"],
+            max_length=MAX_EVIDENCE_TEXT_LENGTH,
+            path="evidence.protein_change",
+        ),
+        "population_frequency": evidence["population_frequency"],
+        "clinvar_accession": _sanitize_optional_text(
+            evidence["clinvar_accession"],
+            max_length=MAX_EVIDENCE_IDENTIFIER_LENGTH,
+            path="evidence.clinvar_accession",
+        ),
+        "clinvar_significance": _sanitize_optional_text(
+            evidence["clinvar_significance"],
+            max_length=MAX_EVIDENCE_TEXT_LENGTH,
+            path="evidence.clinvar_significance",
+            truncate=True,
+        ),
+        "clinvar_review_status": _sanitize_optional_text(
+            evidence["clinvar_review_status"],
+            max_length=MAX_EVIDENCE_TEXT_LENGTH,
+            path="evidence.clinvar_review_status",
+            truncate=True,
+        ),
+        "clinvar_conditions": clean_conditions,
+        "clingen_curations": clean_curations,
+        "phenotype_score": evidence["phenotype_score"],
+        "hpo_terms": hpo_terms,
+        "matched_hpo_terms": list(evidence["matched_hpo_terms"]),
+        "source_statuses": dict(evidence["source_statuses"]),
+        "references": clean_references,
+        "warnings": clean_warnings,
+    }
+    clean_evidence = validate_evidence_object(clean_evidence)
+    serialized_size = len(
+        json.dumps(
+            clean_evidence,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    if serialized_size > MAX_EVIDENCE_SERIALIZED_BYTES:
+        raise EvidenceObjectError(
+            "Evidence object exceeds the maximum serialized size of "
+            f"{MAX_EVIDENCE_SERIALIZED_BYTES} bytes."
+        )
+    return clean_evidence
 
 
 def _require_candidate_mapping(
@@ -627,7 +948,7 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             "candidate.warnings",
         ),
     }
-    return validate_evidence_object(evidence)
+    return sanitize_evidence_object(evidence)
 
 
 def build_evidence_objects(
