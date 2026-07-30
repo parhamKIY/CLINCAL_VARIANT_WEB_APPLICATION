@@ -66,9 +66,11 @@ from backend.report import (
     ClinicalReportError,
     EvidenceObjectError,
     build_clinical_interpretation_prompt,
+    build_clinical_report,
     build_evidence_object,
     build_evidence_objects,
     generate_clinical_interpretation,
+    render_clinical_report_markdown,
     sanitize_evidence_object,
     validate_and_sanitize_clinical_interpretation,
     validate_clinical_report,
@@ -5252,3 +5254,254 @@ class TestClinicalInterpretationValidation:
                 response,
                 TestEvidenceObject._complete_evidence_object(),
             )
+
+
+class TestClinicalReportComposition:
+    """Verify deterministic Stage 9 report composition and rendering."""
+
+    @staticmethod
+    def _response() -> LLMResponse:
+        return LLMResponse(
+            content=(
+                TestClinicalInterpretationValidation._valid_markdown()
+            ),
+            model="test-model",
+        )
+
+    def test_complete_report_is_composed_without_mutation(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        original = deepcopy(evidence)
+
+        report = build_clinical_report(
+            evidence,
+            self._response(),
+        )
+
+        assert evidence == original
+        assert report["schema_version"] == "1.0"
+        assert report["llm_model"] == "test-model"
+        assert report["assembly"] == "GRCh38"
+        assert report["variant"] == evidence["variant"]
+        assert report["variant"] is not evidence["variant"]
+        sections = report["sections"]
+        assert "HP:0001250" in sections["case_summary"]
+        assert "2:166848215 C>T" in sections["variant_summary"]
+        assert "SCN1A" in sections["gene_and_consequence"]
+        assert "Pathogenic" in sections["clinical_evidence"]
+        assert "0.5" in sections["phenotype_correlation"]
+        assert (
+            sections["interpretation"]
+            == "Evidence-limited interpretation."
+        )
+        assert "Synthetic evidence" in sections["limitations"]
+        assert report["disclaimer"] == (
+            CLINICAL_DECISION_SUPPORT_NOTICE
+        )
+
+    def test_deterministic_sections_do_not_copy_llm_summaries(
+        self,
+    ) -> None:
+        response = self._response()
+        response = LLMResponse(
+            content=response.content.replace(
+                "ClinVar reports Pathogenic.",
+                "UNTRUSTED LLM CLINICAL SUMMARY.",
+            ).replace(
+                "Matched term: HP:0001250; phenotype score: 0.5.",
+                "UNTRUSTED LLM PHENOTYPE SUMMARY.",
+            ),
+            model=response.model,
+        )
+
+        report = build_clinical_report(
+            TestEvidenceObject._complete_evidence_object(),
+            response,
+        )
+
+        assert (
+            "UNTRUSTED LLM CLINICAL SUMMARY"
+            not in report["sections"]["clinical_evidence"]
+        )
+        assert (
+            "UNTRUSTED LLM PHENOTYPE SUMMARY"
+            not in report["sections"]["phenotype_correlation"]
+        )
+
+    def test_missing_evidence_is_explicit_in_report(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        for field in (
+            "gene",
+            "gene_id",
+            "transcript",
+            "consequence",
+            "impact",
+            "protein_change",
+            "population_frequency",
+            "clinvar_accession",
+            "clinvar_significance",
+            "clinvar_review_status",
+            "phenotype_score",
+        ):
+            evidence[field] = None
+        evidence["clinvar_conditions"] = []
+        evidence["clingen_curations"] = []
+        evidence["hpo_terms"] = []
+        evidence["matched_hpo_terms"] = []
+        evidence["references"] = []
+        evidence["source_statuses"] = {
+            "vep": "not_found",
+            "myvariant": "not_found",
+            "clinvar": "not_found",
+            "clingen": "not_found",
+        }
+        response = LLMResponse(
+            content=(
+                self._response().content
+                .replace(
+                    " with ClinVar accession VCV000012345.1",
+                    "",
+                )
+                .replace(
+                    "ClinVar reports Pathogenic. ClinGen provides "
+                    "PMID: 12345678.",
+                    "Not available in the supplied evidence.",
+                )
+                .replace(
+                    "Matched term: HP:0001250; phenotype score: 0.5.",
+                    "Not available in the supplied evidence.",
+                )
+                .replace(
+                    (
+                        "https://www.ncbi.nlm.nih.gov/"
+                        "clinvar/variation/12345/\n"
+                        "https://search.clinicalgenome.org/"
+                        "kb/gene-validity/example"
+                    ),
+                    "Not available in the supplied evidence.",
+                )
+            ),
+            model="test-model",
+        )
+
+        report = build_clinical_report(evidence, response)
+
+        assert "Not available" in report["sections"]["case_summary"]
+        assert "Not available" in report["sections"][
+            "gene_and_consequence"
+        ]
+        assert "Not available" in report["sections"][
+            "clinical_evidence"
+        ]
+        assert report["references"] == []
+
+    def test_references_are_normalized_and_deduplicated(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        curations = evidence["clingen_curations"]
+        assert isinstance(curations, list)
+        curations.append(deepcopy(curations[0]))
+
+        report = build_clinical_report(
+            evidence,
+            self._response(),
+        )
+
+        assert report["references"] == [
+            {
+                "source": "NCBI ClinVar",
+                "identifier": None,
+                "url": (
+                    "https://www.ncbi.nlm.nih.gov/"
+                    "clinvar/variation/12345/"
+                ),
+            },
+            {
+                "source": "NCBI ClinVar",
+                "identifier": "VCV000012345.1",
+                "url": None,
+            },
+            {
+                "source": "ClinGen",
+                "identifier": "MONDO:0100062",
+                "url": (
+                    "https://search.clinicalgenome.org/"
+                    "kb/gene-validity/example"
+                ),
+            },
+            {
+                "source": "PubMed",
+                "identifier": "PMID:12345678",
+                "url": None,
+            },
+        ]
+
+    def test_markdown_renderer_uses_fixed_section_order(
+        self,
+    ) -> None:
+        report = build_clinical_report(
+            TestEvidenceObject._complete_evidence_object(),
+            self._response(),
+        )
+
+        markdown = render_clinical_report_markdown(report)
+        headings = [
+            line.removeprefix("## ")
+            for line in markdown.splitlines()
+            if line.startswith("## ")
+        ]
+
+        assert headings == [
+            title
+            for _, title in CLINICAL_REPORT_SECTION_ORDER
+        ]
+        assert markdown.startswith(
+            "# Clinical Variant Interpretation Report\n"
+        )
+        assert "- Report schema: 1.0" in markdown
+        assert "- LLM model: test-model" in markdown
+        assert "PMID:12345678" in markdown
+        assert markdown.endswith(
+            f"{CLINICAL_DECISION_SUPPORT_NOTICE}\n"
+        )
+
+    def test_report_composition_and_rendering_are_deterministic(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+
+        first = render_clinical_report_markdown(
+            build_clinical_report(evidence, self._response())
+        )
+        second = render_clinical_report_markdown(
+            build_clinical_report(
+                deepcopy(evidence),
+                self._response(),
+            )
+        )
+
+        assert first == second
+
+    def test_evidence_values_are_markdown_escaped(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        evidence["gene"] = "SCN1A *untrusted*"
+
+        report = build_clinical_report(evidence, self._response())
+        markdown = render_clinical_report_markdown(report)
+
+        assert "SCN1A \\*untrusted\\*" in markdown
+        assert "SCN1A *untrusted*" not in markdown
+
+    def test_renderer_rejects_nested_unsafe_headings(self) -> None:
+        report = TestClinicalReportContract._complete_report()
+        sections = report["sections"]
+        assert isinstance(sections, dict)
+        sections["interpretation"] = "## Injected section"
+
+        with pytest.raises(
+            ClinicalReportError,
+            match="unsafe Markdown",
+        ):
+            render_clinical_report_markdown(report)

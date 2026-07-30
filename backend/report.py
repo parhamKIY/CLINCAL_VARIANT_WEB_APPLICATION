@@ -1341,6 +1341,344 @@ def generate_clinical_interpretation(
     )
 
 
+def _markdown_value(value: object) -> str:
+    """Escape one evidence-derived scalar for safe Markdown prose."""
+
+    if value is None:
+        return "Not available in the supplied evidence."
+    text = str(value)
+    for character in ("\\", "`", "*", "_", "[", "]", "<", ">"):
+        text = text.replace(character, f"\\{character}")
+    return text
+
+
+def _format_probability(value: float | None) -> str:
+    """Format one evidence probability without inventing precision."""
+
+    if value is None:
+        return "Not available in the supplied evidence."
+    return format(value, ".8g")
+
+
+def _format_string_list(values: list[str]) -> str:
+    """Format a bounded evidence list or an explicit missing value."""
+
+    if not values:
+        return "Not available in the supplied evidence."
+    return ", ".join(_markdown_value(value) for value in values)
+
+
+def _build_case_summary(evidence: EvidenceObject) -> str:
+    """Summarize only the case-level phenotype identifiers available."""
+
+    return (
+        "- Provided HPO terms: "
+        f"{_format_string_list(evidence['hpo_terms'])}\n"
+        "- Matched HPO terms: "
+        f"{_format_string_list(evidence['matched_hpo_terms'])}"
+    )
+
+
+def _build_variant_summary(evidence: EvidenceObject) -> str:
+    """Render a deterministic assembly-specific allele summary."""
+
+    variant = evidence["variant"]
+    return (
+        f"- Assembly: {_markdown_value(evidence['assembly'])}\n"
+        "- Variant: "
+        f"{_markdown_value(variant['chrom'])}:"
+        f"{variant['pos']} "
+        f"{_markdown_value(variant['ref'])}>"
+        f"{_markdown_value(variant['alt'])}\n"
+        "- Population frequency: "
+        f"{_format_probability(evidence['population_frequency'])}"
+    )
+
+
+def _build_gene_and_consequence(evidence: EvidenceObject) -> str:
+    """Render gene and transcript annotations without inference."""
+
+    return (
+        f"- Gene: {_markdown_value(evidence['gene'])}\n"
+        f"- Gene ID: {_markdown_value(evidence['gene_id'])}\n"
+        f"- Transcript: {_markdown_value(evidence['transcript'])}\n"
+        f"- Consequence: {_markdown_value(evidence['consequence'])}\n"
+        f"- Impact: {_markdown_value(evidence['impact'])}\n"
+        f"- Protein change: {_markdown_value(evidence['protein_change'])}"
+    )
+
+
+def _build_clinical_evidence(evidence: EvidenceObject) -> str:
+    """Render ClinVar and ClinGen facts directly from the evidence."""
+
+    lines = [
+        "### ClinVar",
+        (
+            "- Accession: "
+            f"{_markdown_value(evidence['clinvar_accession'])}"
+        ),
+        (
+            "- Clinical significance: "
+            f"{_markdown_value(evidence['clinvar_significance'])}"
+        ),
+        (
+            "- Review status: "
+            f"{_markdown_value(evidence['clinvar_review_status'])}"
+        ),
+        (
+            "- Conditions: "
+            f"{_format_string_list(evidence['clinvar_conditions'])}"
+        ),
+        "",
+        "### ClinGen",
+    ]
+    if not evidence["clingen_curations"]:
+        lines.append("- Not available in the supplied evidence.")
+        return "\n".join(lines)
+
+    for curation in evidence["clingen_curations"]:
+        curation_parts = [
+            f"Disease: {_markdown_value(curation['disease'])}",
+            (
+                "Disease ID: "
+                f"{_markdown_value(curation['disease_id'])}"
+            ),
+            (
+                "Classification: "
+                f"{_markdown_value(curation['classification'])}"
+            ),
+            (
+                "Mode of inheritance: "
+                f"{_markdown_value(curation['mode_of_inheritance'])}"
+            ),
+        ]
+        lines.append(f"- {'; '.join(curation_parts)}")
+    return "\n".join(lines)
+
+
+def _build_phenotype_correlation(evidence: EvidenceObject) -> str:
+    """Render the Stage 6 score and exact matching HPO identifiers."""
+
+    return (
+        "- Phenotype score: "
+        f"{_format_probability(evidence['phenotype_score'])}\n"
+        "- Provided HPO terms: "
+        f"{_format_string_list(evidence['hpo_terms'])}\n"
+        "- Matched HPO terms: "
+        f"{_format_string_list(evidence['matched_hpo_terms'])}"
+    )
+
+
+def _build_limitations(
+    evidence: EvidenceObject,
+    interpretation: ValidatedClinicalInterpretation,
+) -> str:
+    """Combine validated LLM limitations with explicit source status."""
+
+    lines = [
+        interpretation["sections"]["limitations"],
+        "",
+        "### Evidence source availability",
+    ]
+    for source in EVIDENCE_SOURCE_NAMES:
+        lines.append(
+            f"- {_markdown_value(source)}: "
+            f"{_markdown_value(evidence['source_statuses'][source])}"
+        )
+    if evidence["warnings"]:
+        lines.extend(["", "### Evidence warnings"])
+        lines.extend(
+            f"- {_markdown_value(warning)}"
+            for warning in evidence["warnings"]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "### Evidence warnings",
+                "- No evidence warnings were supplied.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _build_report_references(
+    evidence: EvidenceObject,
+) -> tuple[list[ClinicalReportReference], bool]:
+    """Normalize and bound evidence citations for the final report."""
+
+    references: list[ClinicalReportReference] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+
+    def add(
+        source: str,
+        identifier: str | None,
+        url: str | None,
+    ) -> None:
+        key = (source, identifier, url)
+        if key in seen or (identifier is None and url is None):
+            return
+        seen.add(key)
+        references.append(
+            {
+                "source": source,
+                "identifier": identifier,
+                "url": url,
+            }
+        )
+
+    for reference in evidence["references"]:
+        add(reference["source"], None, reference["url"])
+    if evidence["clinvar_accession"] is not None:
+        add(
+            "NCBI ClinVar",
+            evidence["clinvar_accession"],
+            None,
+        )
+    for curation in evidence["clingen_curations"]:
+        add(
+            "ClinGen",
+            curation["disease_id"],
+            curation["report_url"],
+        )
+        for pmid in curation["pmids"]:
+            add("PubMed", f"PMID:{pmid}", None)
+
+    truncated = len(references) > MAX_CLINICAL_REPORT_REFERENCES
+    return (
+        references[:MAX_CLINICAL_REPORT_REFERENCES],
+        truncated,
+    )
+
+
+def build_clinical_report(
+    evidence_object: object,
+    interpretation_response: object,
+) -> ClinicalReport:
+    """Compose a validated report from evidence and approved LLM output."""
+
+    evidence = sanitize_evidence_object(evidence_object)
+    interpretation = validate_and_sanitize_clinical_interpretation(
+        interpretation_response,
+        evidence,
+    )
+    references, references_truncated = _build_report_references(
+        evidence
+    )
+    warnings: list[str] = []
+    if references_truncated:
+        warnings.append(
+            "Report references were truncated to "
+            f"{MAX_CLINICAL_REPORT_REFERENCES} entries."
+        )
+    for warning in evidence["warnings"]:
+        if warning not in warnings:
+            warnings.append(warning)
+        if len(warnings) == MAX_EVIDENCE_WARNINGS:
+            break
+
+    report: ClinicalReport = {
+        "schema_version": CLINICAL_REPORT_SCHEMA_VERSION,
+        "source_evidence_schema_version": evidence["schema_version"],
+        "interpretation_prompt_version": (
+            INTERPRETATION_PROMPT_VERSION
+        ),
+        "llm_model": interpretation["model"],
+        "assembly": evidence["assembly"],
+        "variant": dict(evidence["variant"]),
+        "sections": {
+            "case_summary": _build_case_summary(evidence),
+            "variant_summary": _build_variant_summary(evidence),
+            "gene_and_consequence": _build_gene_and_consequence(
+                evidence
+            ),
+            "clinical_evidence": _build_clinical_evidence(evidence),
+            "phenotype_correlation": _build_phenotype_correlation(
+                evidence
+            ),
+            "interpretation": interpretation["sections"][
+                "interpretation"
+            ],
+            "limitations": _build_limitations(
+                evidence,
+                interpretation,
+            ),
+        },
+        "references": references,
+        "warnings": warnings,
+        "disclaimer": CLINICAL_DECISION_SUPPORT_NOTICE,
+    }
+    return validate_clinical_report(report)
+
+
+def _render_report_references(
+    references: list[ClinicalReportReference],
+) -> str:
+    """Render normalized report references in deterministic order."""
+
+    if not references:
+        return "- Not available in the supplied evidence."
+
+    lines: list[str] = []
+    for reference in references:
+        parts = [_markdown_value(reference["source"])]
+        if reference["identifier"] is not None:
+            parts.append(_markdown_value(reference["identifier"]))
+        if reference["url"] is not None:
+            parts.append(_markdown_value(reference["url"]))
+        lines.append(f"- {' — '.join(parts)}")
+    return "\n".join(lines)
+
+
+def render_clinical_report_markdown(report_object: object) -> str:
+    """Render one validated ClinicalReport as deterministic Markdown."""
+
+    report = validate_clinical_report(report_object)
+    sections = report["sections"]
+    for key in CLINICAL_REPORT_SECTION_FIELDS:
+        content = sections[key]
+        if (
+            "```" in content
+            or re.search(r"<[^>\n]+>", content)
+            or re.search(r"^#{1,2}[ \t]+", content, re.MULTILINE)
+        ):
+            raise ClinicalReportError(
+                f"report.sections.{key} contains unsafe Markdown."
+            )
+
+    model = (
+        _markdown_value(report["llm_model"])
+        if report["llm_model"] is not None
+        else "Not available in the supplied evidence."
+    )
+    lines = [
+        "# Clinical Variant Interpretation Report",
+        "",
+        f"- Report schema: {report['schema_version']}",
+        (
+            "- Evidence schema: "
+            f"{report['source_evidence_schema_version']}"
+        ),
+        (
+            "- Interpretation prompt: "
+            f"{report['interpretation_prompt_version']}"
+        ),
+        f"- LLM model: {model}",
+        f"- Assembly: {_markdown_value(report['assembly'])}",
+    ]
+    for key, title in CLINICAL_REPORT_SECTION_ORDER:
+        lines.extend(["", f"## {title}", ""])
+        if key == "references":
+            lines.append(
+                _render_report_references(report["references"])
+            )
+        elif key == "disclaimer":
+            lines.append(report["disclaimer"])
+        else:
+            lines.append(sections[key])
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _require_candidate_mapping(
     value: object,
     path: str,

@@ -165,6 +165,14 @@ and PMID identifiers that are absent from the validated Evidence Object. The
 live `--clinical` smoke mode now passes provider output through this same
 production validator.
 
+Stage 9 step 3 composes the validated `ClinicalReport` and renders deterministic
+Markdown. Case, variant, gene, consequence, clinical evidence, phenotype,
+source status, warnings, references, and disclaimer content are built directly
+from the sanitized Evidence Object. Only the validated interpretation and
+limitations narratives come from the LLM. References are normalized and
+deduplicated, missing evidence is explicit, evidence values are Markdown
+escaped, and nested unsafe headings, code fences, or raw HTML are rejected.
+
 ## Tests
 
 Run the offline test suite:
