@@ -58,6 +58,8 @@ names, synonyms, or HPO identifiers for physician-entered phenotype phrases.
 IDs, removes canonical duplicates, and preserves the user's selection order.
 The phenotype-to-gene loader validates the official table, deduplicates gene
 symbols, and returns a deterministic gene list for each existing HPO term.
+`calculate_hpo_similarity()` provides an explainable MVP score: the fraction
+of the patient's unique HPO terms that are directly associated with a gene.
 The disease-annotation loader returns unique disease identifiers and names
 while excluding negated findings and non-phenotypic annotation branches.
 

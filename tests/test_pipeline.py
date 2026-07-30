@@ -15,6 +15,7 @@ from backend.annotation import (
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
+    calculate_hpo_similarity,
     get_diseases_for_hpo,
     get_genes_for_hpo,
     lookup_hpo_term,
@@ -1301,6 +1302,92 @@ class TestPhenotype:
         with pytest.raises(HPODataError):
             get_genes_for_hpo(
                 "HP:0001250",
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+            )
+
+    @pytest.mark.parametrize(
+        ("gene", "expected_match_count", "expected_score"),
+        [
+            ("scn1a", 1, 0.5),
+            ("DDX3X", 0, 0.0),
+        ],
+    )
+    def test_gene_similarity_uses_patient_hpo_overlap(
+        self,
+        tmp_path: Path,
+        gene: str,
+        expected_match_count: int,
+        expected_score: float,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        result = calculate_hpo_similarity(
+            ["HP:0001250", "HP:0001263"],
+            gene,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )
+
+        assert result["hpo_terms"] == [
+            "HP:0001250",
+            "HP:0001263",
+        ]
+        assert result["match_count"] == expected_match_count
+        assert result["phenotype_score"] == expected_score
+
+    def test_gene_similarity_deduplicates_terms_and_can_score_one(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+        with associations_path.open("a", encoding="utf-8") as file:
+            file.write(
+                "HP:0001263\tGlobal developmental delay"
+                "\t6323\tSCN1A\tOMIM:607208\n"
+            )
+
+        assert calculate_hpo_similarity(
+            [
+                "HP:0001250",
+                "HP:0001275",
+                "HP:0001263",
+            ],
+            "SCN1A",
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        ) == {
+            "hpo_terms": [
+                "HP:0001250",
+                "HP:0001263",
+            ],
+            "gene": "SCN1A",
+            "matched_hpo_terms": [
+                "HP:0001250",
+                "HP:0001263",
+            ],
+            "match_count": 2,
+            "phenotype_score": 1.0,
+        }
+
+    @pytest.mark.parametrize(
+        "gene",
+        ["", "   ", "SCN 1A", "SCN1A!", None],
+    )
+    def test_invalid_gene_similarity_input_is_rejected(
+        self,
+        tmp_path: Path,
+        gene: object,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError):
+            calculate_hpo_similarity(
+                ["HP:0001250"],
+                gene,  # type: ignore[arg-type]
                 ontology_path=ontology_path,
                 associations_path=associations_path,
             )

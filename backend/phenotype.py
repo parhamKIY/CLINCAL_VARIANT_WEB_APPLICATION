@@ -104,6 +104,16 @@ class HPOGeneResult(TypedDict):
     gene_count: int
 
 
+class HPOGeneSimilarityResult(TypedDict):
+    """Explainable exact-overlap phenotype score for one gene."""
+
+    hpo_terms: list[str]
+    gene: str
+    matched_hpo_terms: list[str]
+    match_count: int
+    phenotype_score: float
+
+
 class HPODisease(TypedDict):
     """Minimal disease association exposed to later stages."""
 
@@ -644,6 +654,72 @@ def get_genes_for_hpo(
         "hpo_term": term,
         "genes": genes,
         "gene_count": len(genes),
+    }
+
+
+def calculate_hpo_similarity(
+    hpo_ids: list[str] | tuple[str, ...],
+    gene: str,
+    *,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+) -> HPOGeneSimilarityResult:
+    """Score exact HPO overlap between a patient and one gene."""
+    if not isinstance(gene, str):
+        raise PhenotypeError("Gene symbol must be a string.")
+    requested_gene = gene.strip()
+    if not requested_gene:
+        raise PhenotypeError("Gene symbol must not be empty.")
+    if (
+        len(requested_gene) > 64
+        or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*",
+            requested_gene,
+        )
+        is None
+    ):
+        raise PhenotypeError("Gene symbol has an invalid format.")
+
+    terms = normalize_phenotypes(
+        hpo_ids,
+        ontology_path=ontology_path,
+    )
+    resolved_associations_path = (
+        Path(associations_path)
+        if associations_path is not None
+        else (
+            settings.HPO_DATA_DIR
+            / HPO_GENE_ASSOCIATIONS_FILENAME
+        )
+    ).resolve()
+    gene_index = _load_hpo_gene_index(resolved_associations_path)
+    requested_gene_key = requested_gene.casefold()
+    canonical_gene = requested_gene.upper()
+    matched_hpo_terms: list[str] = []
+
+    for term in terms:
+        matching_gene = next(
+            (
+                gene_symbol
+                for gene_symbol in gene_index.get(term["id"], ())
+                if gene_symbol.casefold() == requested_gene_key
+            ),
+            None,
+        )
+        if matching_gene is None:
+            continue
+        canonical_gene = matching_gene
+        matched_hpo_terms.append(term["id"])
+
+    return {
+        "hpo_terms": [term["id"] for term in terms],
+        "gene": canonical_gene,
+        "matched_hpo_terms": matched_hpo_terms,
+        "match_count": len(matched_hpo_terms),
+        "phenotype_score": round(
+            len(matched_hpo_terms) / len(terms),
+            4,
+        ),
     }
 
 
