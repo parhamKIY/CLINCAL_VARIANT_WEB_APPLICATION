@@ -149,6 +149,16 @@ class Settings:
         "https://purl.obolibrary.org/obo/hp.obo",
     ).strip()
 
+    HPO_GENE_ASSOCIATIONS_URL_TEMPLATE: str = os.getenv(
+        "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE",
+        (
+            "https://github.com/obophenotype/"
+            "human-phenotype-ontology/releases/download/"
+            "v{release}/"
+            "phenotype_to_genes.txt"
+        ),
+    ).strip()
+
     # Genome assembly must remain explicit when coordinates are sent to
     # external annotation services.
     GENOME_ASSEMBLY: str = _get_required_env(
@@ -240,6 +250,9 @@ class Settings:
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
             "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
+            "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (
+                cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
+            ),
         }
 
         for name, value in url_settings.items():
@@ -257,6 +270,19 @@ class Settings:
         if urlsplit(cls.HPO_ONTOLOGY_URL).scheme != "https":
             raise RuntimeError(
                 "HPO_ONTOLOGY_URL must use HTTPS."
+            )
+
+        if (
+            urlsplit(
+                cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
+            ).scheme
+            != "https"
+            or "{release}"
+            not in cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
+        ):
+            raise RuntimeError(
+                "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE must use HTTPS "
+                "and contain {release}."
             )
 
         if not cls.APP_NAME:

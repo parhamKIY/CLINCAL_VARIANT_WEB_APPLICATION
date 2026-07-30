@@ -15,7 +15,9 @@ from backend.annotation import (
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
+    get_genes_for_hpo,
     lookup_hpo_term,
+    update_hpo_data,
     update_hpo_ontology,
     validate_hpo_id,
 )
@@ -92,16 +94,28 @@ class FakeDownloadSession:
 
     def __init__(
         self,
-        response: FakeDownloadResponse | requests.RequestException,
+        response: (
+            FakeDownloadResponse
+            | requests.RequestException
+            | list[
+                FakeDownloadResponse
+                | requests.RequestException
+            ]
+        ),
     ) -> None:
-        self.response = response
+        self.responses = (
+            list(response)
+            if isinstance(response, list)
+            else [response]
+        )
         self.calls: list[dict[str, object]] = []
 
     def get(self, url: str, **kwargs: object) -> FakeDownloadResponse:
         self.calls.append({"url": url, **kwargs})
-        if isinstance(self.response, requests.RequestException):
-            raise self.response
-        return self.response
+        response = self.responses.pop(0)
+        if isinstance(response, requests.RequestException):
+            raise response
+        return response
 
 
 class FakeSession:
@@ -752,6 +766,41 @@ class TestPhenotype:
             f"name: {name}\n"
         ).encode("utf-8")
 
+    @staticmethod
+    def _write_hpo_gene_fixture(tmp_path: Path) -> Path:
+        """Write a minimal official-format phenotype-to-gene table."""
+        associations_path = tmp_path / "phenotype_to_genes.txt"
+        associations_path.write_text(
+            (
+                "hpo_id\thpo_name\tncbi_gene_id\tgene_symbol"
+                "\tdisease_id\n"
+                "HP:0001250\tSeizure\t6323\tSCN1A"
+                "\tOMIM:607208\n"
+                "HP:0001250\tSeizure\t6323\tSCN1A"
+                "\tORPHA:33069\n"
+                "HP:0001250\tSeizure\t6326\tSCN2A"
+                "\tOMIM:613721\n"
+            ),
+            encoding="utf-8",
+        )
+        return associations_path
+
+    @staticmethod
+    def _hpo_gene_release(
+        *,
+        hpo_id: str = "HP:0001250",
+        hpo_name: str = "Seizure",
+        ncbi_gene_id: str = "6323",
+        gene_symbol: str = "SCN1A",
+    ) -> bytes:
+        """Build a minimal phenotype-to-gene release asset."""
+        return (
+            "hpo_id\thpo_name\tncbi_gene_id\tgene_symbol"
+            "\tdisease_id\n"
+            f"{hpo_id}\t{hpo_name}\t{ncbi_gene_id}"
+            f"\t{gene_symbol}\tOMIM:607208\n"
+        ).encode("utf-8")
+
     @pytest.mark.parametrize(
         ("hpo_id", "expected"),
         [
@@ -854,6 +903,100 @@ class TestPhenotype:
             lookup_hpo_term(
                 "HP:0001250",
                 ontology_path=ontology_path,
+            )
+
+    def test_hpo_gene_lookup_is_deduplicated_and_sorted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        assert get_genes_for_hpo(
+            "HP:0001250",
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        ) == {
+            "hpo_term": {
+                "id": "HP:0001250",
+                "name": "Seizure",
+            },
+            "genes": ["SCN1A", "SCN2A"],
+            "gene_count": 2,
+        }
+
+    def test_valid_hpo_without_gene_association_returns_empty_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        assert get_genes_for_hpo(
+            "HP:0001263",
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        ) == {
+            "hpo_term": {
+                "id": "HP:0001263",
+                "name": "Global developmental delay",
+            },
+            "genes": [],
+            "gene_count": 0,
+        }
+
+    def test_unknown_hpo_is_rejected_before_gene_lookup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError, match="not found"):
+            get_genes_for_hpo(
+                "HP:9999999",
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+            )
+
+    def test_missing_hpo_gene_associations_are_reported(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(HPODataError, match="Unable to open"):
+            get_genes_for_hpo(
+                "HP:0001250",
+                ontology_path=ontology_path,
+                associations_path=tmp_path / "missing.txt",
+            )
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "unexpected\theader\n",
+            (
+                "hpo_id\thpo_name\tncbi_gene_id\tgene_symbol"
+                "\tdisease_id\n"
+                "HP:0001250\tSeizure\t6323\tSCN1A\n"
+            ),
+        ],
+    )
+    def test_malformed_hpo_gene_associations_are_rejected(
+        self,
+        tmp_path: Path,
+        content: str,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = tmp_path / "phenotype_to_genes.txt"
+        associations_path.write_text(content, encoding="utf-8")
+
+        with pytest.raises(HPODataError):
+            get_genes_for_hpo(
+                "HP:0001250",
+                ontology_path=ontology_path,
+                associations_path=associations_path,
             )
 
     def test_hpo_update_installs_newer_valid_release(
@@ -1059,6 +1202,215 @@ class TestPhenotype:
             update_hpo_ontology(
                 ontology_path=tmp_path / "hp.obo",
                 source_url="http://example.test/hp.obo",
+            )
+
+    def test_coordinated_hpo_data_update_installs_matching_release(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_GENE_ASSOCIATION_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        associations_path = tmp_path / "phenotype_to_genes.txt"
+        old_ontology = self._hpo_release("2026-01-01")
+        old_associations = self._hpo_gene_release()
+        ontology_path.write_bytes(old_ontology)
+        associations_path.write_bytes(old_associations)
+        assert get_genes_for_hpo(
+            "HP:0001250",
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )["genes"] == ["SCN1A"]
+
+        new_ontology = self._hpo_release(
+            "2026-02-01",
+            hpo_id="HP:0001263",
+            name="Global developmental delay",
+        )
+        new_associations = self._hpo_gene_release(
+            hpo_id="HP:0001263",
+            hpo_name="Global developmental delay",
+            ncbi_gene_id="1654",
+            gene_symbol="DDX3X",
+        )
+        session = FakeDownloadSession(
+            [
+                FakeDownloadResponse(200, new_ontology),
+                FakeDownloadResponse(200, new_associations),
+            ]
+        )
+
+        result = update_hpo_data(
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            ontology_source_url="https://example.test/hp.obo",
+            association_url_template=(
+                "https://example.test/v{release}/"
+                "phenotype_to_genes.txt"
+            ),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result == {
+            "status": "updated",
+            "previous_version": "hp/releases/2026-01-01",
+            "current_version": "hp/releases/2026-02-01",
+            "active_term_count": 1,
+            "ontology_lookup_id_count": 1,
+            "association_term_count": 1,
+            "associated_gene_count": 1,
+            "ontology_backup_path": str(
+                ontology_path.with_suffix(".previous.obo")
+            ),
+            "associations_backup_path": str(
+                associations_path.with_suffix(".previous.txt")
+            ),
+        }
+        assert ontology_path.with_suffix(
+            ".previous.obo"
+        ).read_bytes() == old_ontology
+        assert associations_path.with_suffix(
+            ".previous.txt"
+        ).read_bytes() == old_associations
+        assert get_genes_for_hpo(
+            "HP:0001263",
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+        )["genes"] == ["DDX3X"]
+        with pytest.raises(PhenotypeError, match="not found"):
+            get_genes_for_hpo(
+                "HP:0001250",
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+            )
+        assert session.calls[1]["url"] == (
+            "https://example.test/v2026-02-01/"
+            "phenotype_to_genes.txt"
+        )
+
+    def test_coordinated_hpo_data_update_detects_no_changes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_GENE_ASSOCIATION_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        associations_path = tmp_path / "phenotype_to_genes.txt"
+        ontology_content = self._hpo_release("2026-02-01")
+        association_content = self._hpo_gene_release()
+        ontology_path.write_bytes(ontology_content)
+        associations_path.write_bytes(association_content)
+        session = FakeDownloadSession(
+            [
+                FakeDownloadResponse(200, ontology_content),
+                FakeDownloadResponse(200, association_content),
+            ]
+        )
+
+        result = update_hpo_data(
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            ontology_source_url="https://example.test/hp.obo",
+            association_url_template=(
+                "https://example.test/v{release}/"
+                "phenotype_to_genes.txt"
+            ),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "unchanged"
+        assert result["ontology_backup_path"] is None
+        assert result["associations_backup_path"] is None
+
+    @pytest.mark.parametrize(
+        "association_response",
+        [
+            FakeDownloadResponse(503, b"service unavailable"),
+            FakeDownloadResponse(
+                200,
+                (
+                    b"hpo_id\thpo_name\tncbi_gene_id\tgene_symbol"
+                    b"\tdisease_id\n"
+                    b"HP:0001263\tGlobal developmental delay"
+                    b"\t1654\tDDX3X\tOMIM:300958\n"
+                ),
+            ),
+        ],
+    )
+    def test_failed_coordinated_update_preserves_both_files(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        association_response: FakeDownloadResponse,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_ACTIVE_TERMS",
+            1,
+        )
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_GENE_ASSOCIATION_TERMS",
+            1,
+        )
+        ontology_path = tmp_path / "hp.obo"
+        associations_path = tmp_path / "phenotype_to_genes.txt"
+        old_ontology = self._hpo_release("2026-01-01")
+        old_associations = self._hpo_gene_release()
+        ontology_path.write_bytes(old_ontology)
+        associations_path.write_bytes(old_associations)
+        session = FakeDownloadSession(
+            [
+                FakeDownloadResponse(
+                    200,
+                    self._hpo_release("2026-02-01"),
+                ),
+                association_response,
+            ]
+        )
+
+        with pytest.raises(HPODataError):
+            update_hpo_data(
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+                ontology_source_url="https://example.test/hp.obo",
+                association_url_template=(
+                    "https://example.test/v{release}/"
+                    "phenotype_to_genes.txt"
+                ),
+                session=session,  # type: ignore[arg-type]
+            )
+
+        assert ontology_path.read_bytes() == old_ontology
+        assert associations_path.read_bytes() == old_associations
+        assert list(tmp_path.glob("*.download")) == []
+
+    def test_coordinated_hpo_update_requires_release_template(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(HPODataError, match=r"\{release\}"):
+            update_hpo_data(
+                ontology_path=tmp_path / "hp.obo",
+                associations_path=(
+                    tmp_path / "phenotype_to_genes.txt"
+                ),
+                ontology_source_url="https://example.test/hp.obo",
+                association_url_template=(
+                    "https://example.test/phenotype_to_genes.txt"
+                ),
             )
 
 

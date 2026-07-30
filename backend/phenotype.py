@@ -1,5 +1,7 @@
 """Phenotype and Human Phenotype Ontology input handling."""
 
+import csv
+import hashlib
 import os
 import re
 import shutil
@@ -20,8 +22,18 @@ HPO_RELEASE_PATTERN = re.compile(
     r"hp/releases/([0-9]{4}-[0-9]{2}-[0-9]{2})"
 )
 HPO_ONTOLOGY_FILENAME = "hp.obo"
+HPO_GENE_ASSOCIATIONS_FILENAME = "phenotype_to_genes.txt"
+HPO_GENE_ASSOCIATION_HEADER = (
+    "hpo_id",
+    "hpo_name",
+    "ncbi_gene_id",
+    "gene_symbol",
+    "disease_id",
+)
 MAX_HPO_ONTOLOGY_BYTES = 50 * 1024 * 1024
+MAX_HPO_GENE_ASSOCIATIONS_BYTES = 100 * 1024 * 1024
 MIN_HPO_ACTIVE_TERMS = 10_000
+MIN_HPO_GENE_ASSOCIATION_TERMS = 10_000
 HPO_DOWNLOAD_CHUNK_SIZE = 64 * 1024
 _HPO_UPDATE_LOCK = Lock()
 
@@ -50,6 +62,28 @@ class HPOUpdateResult(TypedDict):
     active_term_count: int
     lookup_id_count: int
     backup_path: str | None
+
+
+class HPOGeneResult(TypedDict):
+    """Standardized phenotype-to-gene lookup result."""
+
+    hpo_term: HPOTerm
+    genes: list[str]
+    gene_count: int
+
+
+class HPODataUpdateResult(TypedDict):
+    """Result of a coordinated ontology and association refresh."""
+
+    status: str
+    previous_version: str | None
+    current_version: str
+    active_term_count: int
+    ontology_lookup_id_count: int
+    association_term_count: int
+    associated_gene_count: int
+    ontology_backup_path: str | None
+    associations_backup_path: str | None
 
 
 def validate_hpo_id(hpo_id: str) -> str:
@@ -223,6 +257,113 @@ def lookup_hpo_term(
     }
 
 
+@lru_cache(maxsize=4)
+def _load_hpo_gene_index(
+    associations_path: Path,
+) -> dict[str, tuple[str, ...]]:
+    """Load a deterministic HPO-to-gene index from the official TSV."""
+    try:
+        association_file = associations_path.open(
+            "r",
+            encoding="utf-8",
+            newline="",
+        )
+    except OSError as exc:
+        raise HPODataError(
+            "Unable to open HPO gene associations: "
+            f"{associations_path}."
+        ) from exc
+
+    genes_by_hpo: dict[str, set[str]] = {}
+    try:
+        with association_file:
+            rows = csv.reader(association_file, delimiter="\t")
+            header = next(rows, None)
+            if tuple(header or ()) != HPO_GENE_ASSOCIATION_HEADER:
+                raise HPODataError(
+                    "HPO gene associations have an unexpected header."
+                )
+
+            for line_number, row in enumerate(rows, start=2):
+                if len(row) != len(HPO_GENE_ASSOCIATION_HEADER):
+                    raise HPODataError(
+                        "HPO gene association row "
+                        f"{line_number} has an unexpected structure."
+                    )
+
+                hpo_id, hpo_name, ncbi_gene_id, gene_symbol, _ = (
+                    value.strip()
+                    for value in row
+                )
+                if HPO_ID_PATTERN.fullmatch(hpo_id) is None:
+                    raise HPODataError(
+                        "HPO gene association row "
+                        f"{line_number} has an invalid HPO ID."
+                    )
+                if (
+                    not hpo_name
+                    or not ncbi_gene_id.isdigit()
+                    or not gene_symbol
+                ):
+                    raise HPODataError(
+                        "HPO gene association row "
+                        f"{line_number} is incomplete."
+                    )
+
+                genes_by_hpo.setdefault(hpo_id, set()).add(
+                    gene_symbol
+                )
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise HPODataError(
+            "Unable to read HPO gene associations: "
+            f"{associations_path}."
+        ) from exc
+
+    if not genes_by_hpo:
+        raise HPODataError(
+            "HPO gene associations contain no records: "
+            f"{associations_path}."
+        )
+
+    return {
+        hpo_id: tuple(sorted(gene_symbols))
+        for hpo_id, gene_symbols in genes_by_hpo.items()
+    }
+
+
+def get_genes_for_hpo(
+    hpo_id: str,
+    *,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+) -> HPOGeneResult:
+    """Return unique genes associated with one existing HPO term."""
+    term = lookup_hpo_term(
+        hpo_id,
+        ontology_path=ontology_path,
+    )
+    resolved_associations_path = (
+        Path(associations_path)
+        if associations_path is not None
+        else (
+            settings.HPO_DATA_DIR
+            / HPO_GENE_ASSOCIATIONS_FILENAME
+        )
+    ).resolve()
+    genes = list(
+        _load_hpo_gene_index(resolved_associations_path).get(
+            term["id"],
+            (),
+        )
+    )
+
+    return {
+        "hpo_term": term,
+        "genes": genes,
+        "gene_count": len(genes),
+    }
+
+
 def _read_hpo_release(
     ontology_path: Path,
     *,
@@ -264,12 +405,15 @@ def _read_hpo_release(
     return None, None
 
 
-def _download_hpo_ontology(
+def _download_hpo_file(
     session: requests.Session,
     source_url: str,
     destination: Path,
+    *,
+    maximum_bytes: int,
+    data_label: str,
 ) -> None:
-    """Stream one bounded ontology download into a temporary file."""
+    """Stream one bounded HPO data download into a temporary file."""
     try:
         response = session.get(
             source_url,
@@ -279,13 +423,13 @@ def _download_hpo_ontology(
         )
     except requests.RequestException as exc:
         raise HPODataError(
-            f"HPO ontology download failed: {exc}"
+            f"{data_label} download failed: {exc}"
         ) from exc
 
     try:
         if not 200 <= response.status_code < 300:
             raise HPODataError(
-                "HPO ontology download returned HTTP "
+                f"{data_label} download returned HTTP "
                 f"{response.status_code}."
             )
 
@@ -295,14 +439,14 @@ def _download_hpo_ontology(
                 content_length = int(raw_content_length)
             except ValueError as exc:
                 raise HPODataError(
-                    "HPO ontology download returned an invalid size."
+                    f"{data_label} download returned an invalid size."
                 ) from exc
             if (
                 content_length < 1
-                or content_length > MAX_HPO_ONTOLOGY_BYTES
+                or content_length > maximum_bytes
             ):
                 raise HPODataError(
-                    "HPO ontology download size is outside the "
+                    f"{data_label} download size is outside the "
                     "allowed range."
                 )
 
@@ -315,27 +459,42 @@ def _download_hpo_ontology(
                     if not chunk:
                         continue
                     downloaded_bytes += len(chunk)
-                    if downloaded_bytes > MAX_HPO_ONTOLOGY_BYTES:
+                    if downloaded_bytes > maximum_bytes:
                         raise HPODataError(
-                            "HPO ontology download exceeded the "
+                            f"{data_label} download exceeded the "
                             "maximum size."
                         )
                     ontology_file.write(chunk)
         except requests.RequestException as exc:
             raise HPODataError(
-                f"HPO ontology download failed: {exc}"
+                f"{data_label} download failed: {exc}"
             ) from exc
         except OSError as exc:
             raise HPODataError(
-                f"Unable to save HPO ontology: {destination}."
+                f"Unable to save {data_label}: {destination}."
             ) from exc
 
         if downloaded_bytes == 0:
             raise HPODataError(
-                "HPO ontology download was empty."
+                f"{data_label} download was empty."
             )
     finally:
         response.close()
+
+
+def _download_hpo_ontology(
+    session: requests.Session,
+    source_url: str,
+    destination: Path,
+) -> None:
+    """Stream one bounded ontology download into a temporary file."""
+    _download_hpo_file(
+        session,
+        source_url,
+        destination,
+        maximum_bytes=MAX_HPO_ONTOLOGY_BYTES,
+        data_label="HPO ontology",
+    )
 
 
 def _perform_hpo_update(
@@ -473,6 +632,369 @@ def update_hpo_ontology(
                 active_session,
                 resolved_url,
                 resolved_path,
+            )
+    finally:
+        if owns_session:
+            active_session.close()
+
+
+def _sha256_file(path: Path) -> str:
+    """Return a streaming SHA-256 digest for one local data file."""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as data_file:
+            for chunk in iter(
+                lambda: data_file.read(HPO_DOWNLOAD_CHUNK_SIZE),
+                b"",
+            ):
+                digest.update(chunk)
+    except OSError as exc:
+        raise HPODataError(
+            f"Unable to verify HPO data file: {path}."
+        ) from exc
+    return digest.hexdigest()
+
+
+def _same_file_content(
+    installed_path: Path,
+    downloaded_path: Path,
+) -> bool:
+    """Compare two HPO data files without loading either fully."""
+    if not installed_path.exists():
+        return False
+    try:
+        if (
+            installed_path.stat().st_size
+            != downloaded_path.stat().st_size
+        ):
+            return False
+    except OSError as exc:
+        raise HPODataError(
+            "Unable to inspect installed HPO data."
+        ) from exc
+    return _sha256_file(installed_path) == _sha256_file(
+        downloaded_path
+    )
+
+
+def _create_hpo_temporary_file(
+    parent: Path,
+    suffix: str,
+) -> Path:
+    """Create one closed temporary file beside its install target."""
+    parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=parent,
+        prefix=".hpo-",
+        suffix=suffix,
+    )
+    os.close(file_descriptor)
+    return Path(temporary_name)
+
+
+def _backup_hpo_file(
+    path: Path,
+    backup_path: Path,
+) -> Path | None:
+    """Create a recoverable backup when an installed file exists."""
+    if not path.exists():
+        return None
+    try:
+        shutil.copy2(path, backup_path)
+    except OSError as exc:
+        raise HPODataError(
+            f"Unable to back up HPO data file: {path}."
+        ) from exc
+    return backup_path
+
+
+def _restore_hpo_file(
+    path: Path,
+    backup_path: Path | None,
+) -> None:
+    """Restore one target after a coordinated installation failure."""
+    try:
+        if backup_path is None:
+            path.unlink(missing_ok=True)
+        else:
+            shutil.copy2(backup_path, path)
+    except OSError as exc:
+        raise HPODataError(
+            f"Unable to restore HPO data file: {path}."
+        ) from exc
+
+
+def _perform_hpo_data_update(
+    session: requests.Session,
+    ontology_source_url: str,
+    association_url_template: str,
+    ontology_path: Path,
+    associations_path: Path,
+) -> HPODataUpdateResult:
+    """Validate and install one matching ontology and association release."""
+    temporary_ontology = _create_hpo_temporary_file(
+        ontology_path.parent,
+        ".obo.download",
+    )
+    temporary_associations = _create_hpo_temporary_file(
+        associations_path.parent,
+        ".txt.download",
+    )
+
+    try:
+        _download_hpo_ontology(
+            session,
+            ontology_source_url,
+            temporary_ontology,
+        )
+        current_version, current_release_date = _read_hpo_release(
+            temporary_ontology,
+            required=True,
+        )
+        if current_version is None or current_release_date is None:
+            raise HPODataError(
+                "Downloaded HPO ontology has no valid release."
+        )
+
+        release_text = current_release_date.isoformat()
+        try:
+            association_source_url = association_url_template.format(
+                release=release_text
+            )
+        except (KeyError, ValueError) as exc:
+            raise HPODataError(
+                "HPO gene association URL template is invalid."
+            ) from exc
+        if not association_source_url.lower().startswith("https://"):
+            raise HPODataError(
+                "HPO gene association updates require HTTPS."
+            )
+        _download_hpo_file(
+            session,
+            association_source_url,
+            temporary_associations,
+            maximum_bytes=MAX_HPO_GENE_ASSOCIATIONS_BYTES,
+            data_label="HPO gene associations",
+        )
+
+        ontology_index = _load_hpo_index(temporary_ontology)
+        active_term_count = len(
+            {
+                term["id"]
+                for term in ontology_index.values()
+            }
+        )
+        if active_term_count < MIN_HPO_ACTIVE_TERMS:
+            raise HPODataError(
+                "Downloaded HPO ontology has too few active terms."
+            )
+
+        association_index = _load_hpo_gene_index(
+            temporary_associations
+        )
+        if (
+            len(association_index)
+            < MIN_HPO_GENE_ASSOCIATION_TERMS
+        ):
+            raise HPODataError(
+                "Downloaded HPO gene associations contain too few terms."
+            )
+
+        unknown_association_ids = (
+            association_index.keys() - ontology_index.keys()
+        )
+        if unknown_association_ids:
+            example_id = min(unknown_association_ids)
+            raise HPODataError(
+                "HPO gene associations do not match the ontology; "
+                f"unknown term {example_id}."
+            )
+
+        associated_gene_count = len(
+            {
+                gene
+                for genes in association_index.values()
+                for gene in genes
+            }
+        )
+        previous_version: str | None = None
+        previous_release_date: date | None = None
+        if ontology_path.exists():
+            previous_version, previous_release_date = _read_hpo_release(
+                ontology_path,
+                required=False,
+            )
+        if (
+            previous_release_date is not None
+            and current_release_date < previous_release_date
+        ):
+            raise HPODataError(
+                "Downloaded HPO release is older than the installed release."
+            )
+
+        ontology_changed = not _same_file_content(
+            ontology_path,
+            temporary_ontology,
+        )
+        associations_changed = not _same_file_content(
+            associations_path,
+            temporary_associations,
+        )
+        if not ontology_changed and not associations_changed:
+            return {
+                "status": "unchanged",
+                "previous_version": previous_version,
+                "current_version": current_version,
+                "active_term_count": active_term_count,
+                "ontology_lookup_id_count": len(ontology_index),
+                "association_term_count": len(association_index),
+                "associated_gene_count": associated_gene_count,
+                "ontology_backup_path": None,
+                "associations_backup_path": None,
+            }
+
+        ontology_backup = (
+            _backup_hpo_file(
+                ontology_path,
+                ontology_path.with_suffix(".previous.obo"),
+            )
+            if ontology_changed
+            else None
+        )
+        associations_backup = (
+            _backup_hpo_file(
+                associations_path,
+                associations_path.with_suffix(".previous.txt"),
+            )
+            if associations_changed
+            else None
+        )
+
+        ontology_installed = False
+        associations_installed = False
+        try:
+            if ontology_changed:
+                os.replace(temporary_ontology, ontology_path)
+                ontology_installed = True
+            if associations_changed:
+                os.replace(
+                    temporary_associations,
+                    associations_path,
+                )
+                associations_installed = True
+        except OSError as exc:
+            try:
+                if associations_installed:
+                    _restore_hpo_file(
+                        associations_path,
+                        associations_backup,
+                    )
+                if ontology_installed:
+                    _restore_hpo_file(
+                        ontology_path,
+                        ontology_backup,
+                    )
+            except HPODataError as rollback_exc:
+                raise HPODataError(
+                    "Coordinated HPO update failed and rollback "
+                    "was incomplete."
+                ) from rollback_exc
+            raise HPODataError(
+                "Coordinated HPO data installation failed; previous "
+                "files were restored."
+            ) from exc
+
+        _load_hpo_index.cache_clear()
+        _load_hpo_gene_index.cache_clear()
+        return {
+            "status": "updated",
+            "previous_version": previous_version,
+            "current_version": current_version,
+            "active_term_count": active_term_count,
+            "ontology_lookup_id_count": len(ontology_index),
+            "association_term_count": len(association_index),
+            "associated_gene_count": associated_gene_count,
+            "ontology_backup_path": (
+                str(ontology_backup)
+                if ontology_backup is not None
+                else None
+            ),
+            "associations_backup_path": (
+                str(associations_backup)
+                if associations_backup is not None
+                else None
+            ),
+        }
+    finally:
+        _load_hpo_index.cache_clear()
+        _load_hpo_gene_index.cache_clear()
+        for temporary_path in (
+            temporary_ontology,
+            temporary_associations,
+        ):
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def update_hpo_data(
+    *,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+    ontology_source_url: str | None = None,
+    association_url_template: str | None = None,
+    session: requests.Session | None = None,
+) -> HPODataUpdateResult:
+    """Refresh matching HPO ontology and gene-association releases."""
+    resolved_ontology_path = (
+        Path(ontology_path)
+        if ontology_path is not None
+        else settings.HPO_DATA_DIR / HPO_ONTOLOGY_FILENAME
+    ).resolve()
+    resolved_associations_path = (
+        Path(associations_path)
+        if associations_path is not None
+        else (
+            settings.HPO_DATA_DIR
+            / HPO_GENE_ASSOCIATIONS_FILENAME
+        )
+    ).resolve()
+    resolved_ontology_url = (
+        ontology_source_url
+        if ontology_source_url is not None
+        else settings.HPO_ONTOLOGY_URL
+    ).strip()
+    resolved_association_template = (
+        association_url_template
+        if association_url_template is not None
+        else settings.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
+    ).strip()
+    if not resolved_ontology_url.lower().startswith("https://"):
+        raise HPODataError(
+            "HPO ontology updates require an HTTPS source URL."
+        )
+    if (
+        not resolved_association_template.lower().startswith(
+            "https://"
+        )
+        or "{release}" not in resolved_association_template
+    ):
+        raise HPODataError(
+            "HPO gene association URL template must use HTTPS "
+            "and contain {release}."
+        )
+
+    active_session = session or requests.Session()
+    owns_session = session is None
+    try:
+        with _HPO_UPDATE_LOCK:
+            return _perform_hpo_data_update(
+                active_session,
+                resolved_ontology_url,
+                resolved_association_template,
+                resolved_ontology_path,
+                resolved_associations_path,
             )
     finally:
         if owns_session:

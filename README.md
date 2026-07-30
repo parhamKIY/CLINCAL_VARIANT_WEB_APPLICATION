@@ -46,16 +46,19 @@ Stage 6 uses the official Human Phenotype Ontology OBO release stored at:
 
 ```text
 data/hpo/hp.obo
+data/hpo/phenotype_to_genes.txt
 ```
 
 The local loader keeps only active term IDs, alternate IDs, and names in its
 lookup index. Obsolete, malformed, and unknown terms are not accepted.
+The phenotype-to-gene loader validates the official table, deduplicates gene
+symbols, and returns a deterministic gene list for each existing HPO term.
 
-The backend also provides `update_hpo_ontology()` for a future user-triggered
-frontend update button. It downloads through HTTPS into a temporary file,
-validates the release and term count, rejects downgrades, preserves the
-previous release as `data/hpo/hp.previous.obo`, and replaces the active
-ontology only after successful validation.
+The backend provides `update_hpo_data()` for a future user-triggered frontend
+update button. It downloads the ontology and phenotype-to-gene table from the
+same official release, validates both before installation, rejects downgrades,
+preserves both previous files, and rolls back a partial installation. This
+keeps phenotype terms and gene associations release-compatible.
 
 ## Tests
 
