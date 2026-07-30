@@ -48,6 +48,7 @@ from backend.prioritization import (
     prioritize_variants,
 )
 from backend.report import (
+    CLINICAL_INTERPRETATION_MAX_TOKENS,
     CLINICAL_INTERPRETATION_SYSTEM_PROMPT,
     EVIDENCE_SCHEMA_VERSION,
     INTERPRETATION_PROMPT_VERSION,
@@ -61,6 +62,7 @@ from backend.report import (
     build_clinical_interpretation_prompt,
     build_evidence_object,
     build_evidence_objects,
+    generate_clinical_interpretation,
     sanitize_evidence_object,
     validate_evidence_object,
 )
@@ -4682,29 +4684,145 @@ class TestLLMContract:
         assert isinstance(statuses, dict)
         assert statuses["clinvar"] == "not_found"
 
-    def test_medical_prompt_connects_to_provider_neutral_client(
+    def test_medical_interpretation_success_path(
         self,
     ) -> None:
-        prompt = build_clinical_interpretation_prompt(
-            TestEvidenceObject._complete_evidence_object()
-        )
         response = LLMResponse(
             content="Evidence-limited interpretation.",
             model="test-model",
+            finish_reason="stop",
+            usage=LLMUsage(
+                input_tokens=600,
+                output_tokens=100,
+                total_tokens=700,
+            ),
         )
         adapter = FakeLLMAdapter(response)
 
-        result = call_llm(
-            prompt["system_prompt"],
-            prompt["user_prompt"],
-            temperature=0.0,
-            max_tokens=1200,
+        result = generate_clinical_interpretation(
+            TestEvidenceObject._complete_evidence_object(),
             client=LLMClient(adapter),
         )
 
         assert result is response
+        assert len(adapter.requests) == 1
         assert adapter.requests[0].temperature == 0.0
         assert (
-            adapter.requests[0].messages[1].content
-            == prompt["user_prompt"]
+            adapter.requests[0].max_tokens
+            == CLINICAL_INTERPRETATION_MAX_TOKENS
         )
+        assert (
+            adapter.requests[0].messages[0].content
+            == CLINICAL_INTERPRETATION_SYSTEM_PROMPT
+        )
+        supplied_evidence = self._extract_prompt_evidence(
+            adapter.requests[0].messages[1].content
+        )
+        assert (
+            supplied_evidence
+            == TestEvidenceObject._complete_evidence_object()
+        )
+
+    def test_invalid_evidence_stops_before_llm_call(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        del evidence["assembly"]
+        adapter = FakeLLMAdapter(
+            LLMResponse(
+                content="Must not be returned.",
+                model="test-model",
+            )
+        )
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="missing required fields: assembly",
+        ):
+            generate_clinical_interpretation(
+                evidence,
+                client=LLMClient(adapter),
+            )
+
+        assert adapter.requests == []
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            LLMAuthenticationError("authentication failed"),
+            LLMRateLimitError("rate limited"),
+            LLMTimeoutError("timed out"),
+            LLMRequestError("provider unavailable"),
+            LLMResponseError("malformed provider response"),
+        ],
+    )
+    def test_medical_interpretation_propagates_llm_failures(
+        self,
+        failure: Exception,
+    ) -> None:
+        adapter = FakeLLMAdapter(failure)
+
+        with pytest.raises(type(failure), match=str(failure)):
+            generate_clinical_interpretation(
+                TestEvidenceObject._complete_evidence_object(),
+                client=LLMClient(adapter),
+            )
+
+        assert len(adapter.requests) == 1
+
+    def test_source_level_failures_remain_visible_to_llm(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        evidence["clinvar_accession"] = None
+        evidence["clinvar_significance"] = None
+        evidence["clinvar_review_status"] = None
+        evidence["clinvar_conditions"] = []
+        evidence["warnings"] = [
+            "ClinVar request failed; evidence is unavailable."
+        ]
+        statuses = evidence["source_statuses"]
+        assert isinstance(statuses, dict)
+        statuses["clinvar"] = "error"
+        response = LLMResponse(
+            content="Interpretation with explicit limitations.",
+            model="test-model",
+        )
+        adapter = FakeLLMAdapter(response)
+
+        result = generate_clinical_interpretation(
+            evidence,
+            client=LLMClient(adapter),
+        )
+        supplied_evidence = self._extract_prompt_evidence(
+            adapter.requests[0].messages[1].content
+        )
+
+        assert result is response
+        assert supplied_evidence["clinvar_accession"] is None
+        assert supplied_evidence["warnings"] == evidence["warnings"]
+        supplied_statuses = supplied_evidence["source_statuses"]
+        assert isinstance(supplied_statuses, dict)
+        assert supplied_statuses["clinvar"] == "error"
+
+    def test_provider_specific_payload_cannot_escape_adapter(
+        self,
+    ) -> None:
+        adapter = FakeLLMAdapter(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Unvalidated response",
+                        }
+                    }
+                ]
+            }
+        )
+
+        with pytest.raises(
+            LLMResponseError,
+            match="must return an LLMResponse",
+        ):
+            generate_clinical_interpretation(
+                TestEvidenceObject._complete_evidence_object(),
+                client=LLMClient(adapter),
+            )

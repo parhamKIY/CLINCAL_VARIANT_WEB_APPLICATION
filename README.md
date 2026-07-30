@@ -120,6 +120,14 @@ citations. They require explicit uncertainty, source attribution, limitations,
 and qualified professional review. Values inside the Evidence Object are
 treated as untrusted data rather than instructions.
 
+Stage 8 step 4 connects that prompt to the provider-neutral client through
+`generate_clinical_interpretation()`. The production path always validates the
+Evidence Object before making an LLM request and fixes interpretation
+temperature at `0.0`. Automated tests cover successful standardized responses,
+invalid evidence before network access, provider authentication, rate-limit,
+timeout, request and response failures, partial source evidence, and rejection
+of provider-specific response payloads.
+
 ## Tests
 
 Run the offline test suite:

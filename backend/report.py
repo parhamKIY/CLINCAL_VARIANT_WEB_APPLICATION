@@ -8,9 +8,12 @@ from collections.abc import Iterable
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
+from backend.llm import LLMClient, LLMResponse, call_llm
+
 
 EVIDENCE_SCHEMA_VERSION = "1.0"
 INTERPRETATION_PROMPT_VERSION = "1.0"
+CLINICAL_INTERPRETATION_MAX_TOKENS = 1200
 HPO_ID_PATTERN = re.compile(r"HP:[0-9]{7}")
 GENOME_ASSEMBLIES = {"GRCh37", "GRCh38"}
 SOURCE_STATUS_VALUES = {
@@ -788,6 +791,23 @@ def build_clinical_interpretation_prompt(
         "system_prompt": CLINICAL_INTERPRETATION_SYSTEM_PROMPT,
         "user_prompt": user_prompt,
     }
+
+
+def generate_clinical_interpretation(
+    evidence_object: object,
+    *,
+    client: LLMClient | None = None,
+) -> LLMResponse:
+    """Generate one deterministic, evidence-bound LLM interpretation."""
+
+    prompt = build_clinical_interpretation_prompt(evidence_object)
+    return call_llm(
+        prompt["system_prompt"],
+        prompt["user_prompt"],
+        temperature=0.0,
+        max_tokens=CLINICAL_INTERPRETATION_MAX_TOKENS,
+        client=client,
+    )
 
 
 def _require_candidate_mapping(
