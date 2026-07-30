@@ -6547,3 +6547,103 @@ class TestCompletePipelineHappyPath:
         )
         assert "secret internal API detail" not in serialized
         assert "traceback" not in serialized.casefold()
+
+    def test_offline_end_to_end_pipeline_uses_real_stage_boundaries(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        vep_response = TestAnnotation._vep_response()
+        transcripts = vep_response["transcript_consequences"]
+        assert isinstance(transcripts, list)
+        transcript = transcripts[0]
+        assert isinstance(transcript, dict)
+        transcript["gene_symbol"] = "SCN1A"
+        transcript["gene_id"] = "ENSG00000144285"
+
+        myvariant_response = TestAnnotation._myvariant_response()
+        dbsnp = myvariant_response["dbsnp"]
+        assert isinstance(dbsnp, dict)
+        dbsnp["gene"] = {"symbol": "SCN1A"}
+
+        clinvar_summary = (
+            TestAnnotation._clinvar_summary_response()
+        )
+        clinvar_result = clinvar_summary["result"]
+        assert isinstance(clinvar_result, dict)
+        clinvar_record = clinvar_result["123"]
+        assert isinstance(clinvar_record, dict)
+        clinvar_record["gene_sort"] = "SCN1A"
+        clinvar_record["genes"] = [
+            {
+                "symbol": "SCN1A",
+                "geneid": "6323",
+            }
+        ]
+
+        annotation_session = FakeSession(
+            [FakeResponse(200, [vep_response])],
+            get_responses=[
+                FakeResponse(200, myvariant_response)
+            ],
+            clinvar_responses=[
+                FakeResponse(
+                    200,
+                    TestAnnotation._clinvar_search_response(),
+                ),
+                FakeResponse(200, clinvar_summary),
+            ],
+            clingen_responses=[
+                FakeResponse(
+                    200,
+                    TestAnnotation._clingen_response(
+                        gene="SCN1A"
+                    ),
+                )
+            ],
+        )
+        client = LLMClient(
+            FakeLLMAdapter(
+                LLMResponse(
+                    content=self._minimal_interpretation(),
+                    model="pipeline-test-model",
+                )
+            )
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="1:100:A:G",
+            phenotypes=["HP:0001250"],
+            top_n=1,
+            seed=10,
+            annotation_max_retries=0,
+            annotation_session=annotation_session,  # type: ignore[arg-type]
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            llm_client=client,
+            report_dir=tmp_path / "reports",
+        )
+
+        assert result["status"] == "success"
+        assert result["current_stage"] == "completed"
+        assert result["annotations"][0]["gene"] == "SCN1A"
+        assert result["phenotype_results"][0][
+            "phenotype_score"
+        ] == 1.0
+        assert result["evidence_objects"][0][
+            "matched_hpo_terms"
+        ] == ["HP:0001250"]
+        assert result["report_path"] is not None
+        assert Path(result["report_path"]).is_file()
+        assert len(annotation_session.post_calls) == 1
+        assert len(annotation_session.myvariant_get_calls) == 1
+        assert len(annotation_session.clinvar_get_calls) == 2
+        assert len(annotation_session.clingen_get_calls) == 1
+        assert all(
+            stage["status"] == "success"
+            for stage in result["stages"]
+        )

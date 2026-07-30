@@ -188,7 +188,7 @@ composition, rendering, idempotent storage, sensitive-field exclusion, and
 failure before file creation. The live `--report` smoke mode performs the same
 path with bundled synthetic evidence and saves the result under `REPORT_DIR`.
 
-## Stage 10 complete pipeline integration: in progress
+## Stage 10 complete pipeline integration: complete
 
 Stage 10 step 1 defines the public analysis-input and frontend-result contracts
 in `backend/pipeline.py`. Exactly one VCF path or manual variant is accepted,
@@ -231,6 +231,14 @@ partial results. HPO data or matching failures are recoverable: annotation
 continues into evidence and reporting without phenotype scores. Annotation
 source warnings also remain visible and produce an explicit partial result.
 
+Stage 10 step 6 finalizes the integration with a complete offline end-to-end
+test that crosses the real processing, prioritization, annotation,
+phenotype-matching, Evidence Object, LLM, and report boundaries while mocking
+only remote services. A live `--pipeline` smoke mode exercises the same public
+`run_analysis()` entry point with configured production services and verifies
+the saved report. Stage 10 is complete; the temporary random prioritizer
+remains the documented non-clinical MVP limitation.
+
 ## Tests
 
 Run the offline test suite:
@@ -255,6 +263,20 @@ Run the complete live Stage 9 report workflow and save its Markdown output:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py --report
+```
+
+Run the complete live Stage 10 pipeline from manual variant to saved report:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_llm_smoke.py --pipeline
+```
+
+Custom Stage 10 inputs can be supplied when needed:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_llm_smoke.py --pipeline `
+  --variant "1:941284:G:A" `
+  --hpo HP:0001250
 ```
 
 Validate configuration without sending an LLM request:
