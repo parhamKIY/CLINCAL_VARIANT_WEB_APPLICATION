@@ -50,6 +50,7 @@ from backend.prioritization import (
 from backend.report import (
     CLINICAL_DECISION_SUPPORT_NOTICE,
     CLINICAL_INTERPRETATION_MAX_TOKENS,
+    CLINICAL_INTERPRETATION_SECTION_ORDER,
     CLINICAL_INTERPRETATION_SYSTEM_PROMPT,
     CLINICAL_REPORT_SCHEMA_VERSION,
     CLINICAL_REPORT_SECTION_ORDER,
@@ -61,6 +62,7 @@ from backend.report import (
     MAX_EVIDENCE_PMIDS_PER_CURATION,
     MAX_EVIDENCE_REFERENCES,
     MAX_EVIDENCE_WARNINGS,
+    ClinicalInterpretationError,
     ClinicalReportError,
     EvidenceObjectError,
     build_clinical_interpretation_prompt,
@@ -68,6 +70,7 @@ from backend.report import (
     build_evidence_objects,
     generate_clinical_interpretation,
     sanitize_evidence_object,
+    validate_and_sanitize_clinical_interpretation,
     validate_clinical_report,
     validate_evidence_object,
 )
@@ -5028,3 +5031,224 @@ class TestClinicalReportContract:
             match="warnings must not contain duplicates",
         ):
             validate_clinical_report(report)
+
+
+class TestClinicalInterpretationValidation:
+    """Verify Stage 9 validation of untrusted LLM Markdown."""
+
+    @staticmethod
+    def _valid_markdown() -> str:
+        return (
+            "## Variant summary\n"
+            "GRCh38 2:166848215 C>T with ClinVar accession "
+            "VCV000012345.1.\n\n"
+            "## Clinical evidence\n"
+            "ClinVar reports Pathogenic. ClinGen provides PMID: "
+            "12345678.\n\n"
+            "## Phenotype correlation\n"
+            "Matched term: HP:0001250; phenotype score: 0.5.\n\n"
+            "## Interpretation\n"
+            "Evidence-limited interpretation.\n\n"
+            "## Limitations\n"
+            "Synthetic evidence for software testing only.\n\n"
+            "## References\n"
+            "https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/\n"
+            "https://search.clinicalgenome.org/kb/gene-validity/example\n\n"
+            "## Decision-support notice\n"
+            f"{CLINICAL_DECISION_SUPPORT_NOTICE}"
+        )
+
+    def test_valid_interpretation_is_sanitized_and_parsed(
+        self,
+    ) -> None:
+        markdown = self._valid_markdown().replace(
+            "Evidence-limited",
+            "Evidence-limited\t",
+        ).replace("\n", "\r\n")
+        response = LLMResponse(
+            content=markdown,
+            model="test-model",
+        )
+        evidence = TestEvidenceObject._complete_evidence_object()
+        original = deepcopy(evidence)
+
+        result = validate_and_sanitize_clinical_interpretation(
+            response,
+            evidence,
+        )
+
+        assert evidence == original
+        assert result["model"] == "test-model"
+        assert list(result["sections"]) == [
+            key
+            for key, _ in CLINICAL_INTERPRETATION_SECTION_ORDER
+        ]
+        assert (
+            result["sections"]["interpretation"]
+            == "Evidence-limited  interpretation."
+        )
+        assert (
+            result["sections"]["decision_support_notice"]
+            == CLINICAL_DECISION_SUPPORT_NOTICE
+        )
+
+    @pytest.mark.parametrize(
+        ("transform", "message"),
+        [
+            (
+                lambda text: text.replace(
+                    "## Variant summary",
+                    "## Unexpected section",
+                    1,
+                ),
+                "headings must appear exactly once",
+            ),
+            (
+                lambda text: text.replace(
+                    "## Clinical evidence\n"
+                    "ClinVar reports Pathogenic. ClinGen provides "
+                    "PMID: 12345678.\n\n",
+                    "",
+                    1,
+                ),
+                "headings must appear exactly once",
+            ),
+            (
+                lambda text: text.replace(
+                    "## Variant summary",
+                    "Preamble\n## Variant summary",
+                    1,
+                ),
+                "text before",
+            ),
+            (
+                lambda text: text.replace(
+                    "Evidence-limited interpretation.",
+                    "",
+                    1,
+                ),
+                "section 'interpretation' cannot be empty",
+            ),
+            (
+                lambda text: text.replace(
+                    CLINICAL_DECISION_SUPPORT_NOTICE,
+                    "Modified disclaimer.",
+                    1,
+                ),
+                "exact approved",
+            ),
+            (
+                lambda text: text.replace(
+                    "Evidence-limited interpretation.",
+                    "<script>alert(1)</script>",
+                    1,
+                ),
+                "raw HTML",
+            ),
+            (
+                lambda text: text.replace(
+                    "Evidence-limited interpretation.",
+                    "```text\ncontent\n```",
+                    1,
+                ),
+                "code fences",
+            ),
+        ],
+    )
+    def test_invalid_interpretation_structure_is_rejected(
+        self,
+        transform: object,
+        message: str,
+    ) -> None:
+        assert callable(transform)
+        response = LLMResponse(
+            content=transform(self._valid_markdown()),
+            model="test-model",
+        )
+
+        with pytest.raises(
+            ClinicalInterpretationError,
+            match=message,
+        ):
+            validate_and_sanitize_clinical_interpretation(
+                response,
+                TestEvidenceObject._complete_evidence_object(),
+            )
+
+    @pytest.mark.parametrize(
+        ("old", "new", "message"),
+        [
+            (
+                "HP:0001250",
+                "HP:9999999",
+                "HPO identifiers",
+            ),
+            (
+                "VCV000012345.1",
+                "VCV999999999.1",
+                "ClinVar identifiers",
+            ),
+            (
+                "PMID: 12345678",
+                "PMID: 99999999",
+                "PMID identifiers",
+            ),
+            (
+                (
+                    "https://www.ncbi.nlm.nih.gov/"
+                    "clinvar/variation/12345/"
+                ),
+                "https://unsupported.example/reference",
+                "URLs absent",
+            ),
+        ],
+    )
+    def test_unsupported_provenance_is_rejected(
+        self,
+        old: str,
+        new: str,
+        message: str,
+    ) -> None:
+        response = LLMResponse(
+            content=self._valid_markdown().replace(old, new, 1),
+            model="test-model",
+        )
+
+        with pytest.raises(
+            ClinicalInterpretationError,
+            match=message,
+        ):
+            validate_and_sanitize_clinical_interpretation(
+                response,
+                TestEvidenceObject._complete_evidence_object(),
+            )
+
+    def test_non_llm_response_is_rejected(self) -> None:
+        with pytest.raises(
+            ClinicalInterpretationError,
+            match="must be an LLMResponse",
+        ):
+            validate_and_sanitize_clinical_interpretation(
+                {"content": self._valid_markdown()},
+                TestEvidenceObject._complete_evidence_object(),
+            )
+
+    def test_oversized_interpretation_is_rejected(self) -> None:
+        oversized = self._valid_markdown().replace(
+            "Evidence-limited interpretation.",
+            "x" * 33_000,
+            1,
+        )
+        response = LLMResponse(
+            content=oversized,
+            model="test-model",
+        )
+
+        with pytest.raises(
+            ClinicalInterpretationError,
+            match="maximum length",
+        ):
+            validate_and_sanitize_clinical_interpretation(
+                response,
+                TestEvidenceObject._complete_evidence_object(),
+            )

@@ -157,6 +157,14 @@ data. The contract records evidence and prompt versions, model provenance,
 assembly, the minimal variant, bounded traceable references, warnings, and the
 approved medical disclaimer without adding timestamps or storage concerns.
 
+Stage 9 step 2 treats LLM Markdown as untrusted input. It normalizes line
+endings and hidden control characters, enforces the exact seven-section LLM
+output structure and fixed decision-support notice, rejects empty or oversized
+sections, code fences, and raw HTML, and blocks URLs plus HPO, MONDO, ClinVar,
+and PMID identifiers that are absent from the validated Evidence Object. The
+live `--clinical` smoke mode now passes provider output through this same
+production validator.
+
 ## Tests
 
 Run the offline test suite:

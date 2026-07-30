@@ -1,7 +1,6 @@
 """Live smoke test for the production provider-neutral LLM boundary."""
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
@@ -13,21 +12,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.llm import call_llm
 from backend.report import (
-    CLINICAL_DECISION_SUPPORT_NOTICE,
     generate_clinical_interpretation,
+    validate_and_sanitize_clinical_interpretation,
 )
 from config import settings
-
-
-REQUIRED_INTERPRETATION_HEADINGS = (
-    "## Variant summary",
-    "## Clinical evidence",
-    "## Phenotype correlation",
-    "## Interpretation",
-    "## Limitations",
-    "## References",
-    "## Decision-support notice",
-)
 
 
 def _synthetic_evidence_object() -> dict[str, object]:
@@ -133,21 +121,10 @@ def check_clinical_interpretation() -> None:
     evidence = _synthetic_evidence_object()
     response = generate_clinical_interpretation(evidence)
     content = response.content.strip()
-    missing_headings = [
-        heading
-        for heading in REQUIRED_INTERPRETATION_HEADINGS
-        if heading not in content
-    ]
-    if missing_headings:
-        raise RuntimeError(
-            "Clinical interpretation omitted required headings: "
-            f"{', '.join(missing_headings)}."
-        )
-    if CLINICAL_DECISION_SUPPORT_NOTICE not in content:
-        raise RuntimeError(
-            "Clinical interpretation changed the required "
-            "decision-support notice."
-        )
+    validated = validate_and_sanitize_clinical_interpretation(
+        response,
+        evidence,
+    )
 
     forbidden_expansions = {
         "family history",
@@ -165,28 +142,8 @@ def check_clinical_interpretation() -> None:
             f"{', '.join(sorted(detected_expansions))}."
         )
 
-    allowed_urls = {
-        reference["url"]
-        for reference in evidence["references"]
-    }
-    allowed_urls.update(
-        curation["report_url"]
-        for curation in evidence["clingen_curations"]
-        if curation["report_url"] is not None
-    )
-    returned_urls = {
-        url.rstrip(".,;:")
-        for url in re.findall(r"https?://[^\s<>\])]+", content)
-    }
-    unsupported_urls = returned_urls - allowed_urls
-    if unsupported_urls:
-        raise RuntimeError(
-            "Clinical interpretation introduced unsupported URLs: "
-            f"{', '.join(sorted(unsupported_urls))}."
-        )
-
     print("Clinical interpretation: OK")
-    print(f"Response model: {response.model}")
+    print(f"Response model: {validated['model']}")
     print("--- Interpretation output ---")
     print(content)
     print("--- End interpretation output ---")

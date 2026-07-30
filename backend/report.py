@@ -38,6 +38,8 @@ MAX_EVIDENCE_ALLELE_LENGTH = 10_000
 MAX_EVIDENCE_TEXT_LENGTH = 500
 MAX_EVIDENCE_URL_LENGTH = 2_048
 MAX_CLINICAL_REPORT_REFERENCES = 50
+MAX_CLINICAL_INTERPRETATION_CHARS = 32_000
+MAX_CLINICAL_INTERPRETATION_SECTION_CHARS = 8_000
 
 CLINICAL_DECISION_SUPPORT_NOTICE = (
     "AI-generated decision-support summary based only on the supplied "
@@ -78,6 +80,10 @@ class EvidenceObjectError(ValueError):
 
 class ClinicalReportError(ValueError):
     """Raised when a report violates the Stage 9 contract."""
+
+
+class ClinicalInterpretationError(ValueError):
+    """Raised when LLM interpretation text fails Stage 9 validation."""
 
 
 class EvidenceVariant(TypedDict):
@@ -184,6 +190,25 @@ class ClinicalReport(TypedDict):
     disclaimer: str
 
 
+class ClinicalInterpretationSections(TypedDict):
+    """Validated narrative sections returned by the clinical LLM."""
+
+    variant_summary: str
+    clinical_evidence: str
+    phenotype_correlation: str
+    interpretation: str
+    limitations: str
+    references: str
+    decision_support_notice: str
+
+
+class ValidatedClinicalInterpretation(TypedDict):
+    """Sanitized LLM output with model provenance."""
+
+    model: str
+    sections: ClinicalInterpretationSections
+
+
 EVIDENCE_OBJECT_FIELDS = frozenset(EvidenceObject.__required_keys__)
 EVIDENCE_VARIANT_FIELDS = frozenset(EvidenceVariant.__required_keys__)
 EVIDENCE_REFERENCE_FIELDS = frozenset(EvidenceReference.__required_keys__)
@@ -211,6 +236,40 @@ CLINICAL_REPORT_SECTION_ORDER = (
     ("limitations", "Limitations"),
     ("references", "References"),
     ("disclaimer", "Medical Disclaimer"),
+)
+CLINICAL_INTERPRETATION_SECTION_ORDER = (
+    ("variant_summary", "Variant summary"),
+    ("clinical_evidence", "Clinical evidence"),
+    ("phenotype_correlation", "Phenotype correlation"),
+    ("interpretation", "Interpretation"),
+    ("limitations", "Limitations"),
+    ("references", "References"),
+    ("decision_support_notice", "Decision-support notice"),
+)
+CLINICAL_INTERPRETATION_HEADING_PATTERN = re.compile(
+    r"^## ([^\r\n]+)[ \t]*$",
+    re.MULTILINE,
+)
+CLINICAL_INTERPRETATION_URL_PATTERN = re.compile(
+    r"https?://[^\s<>\])]+"
+)
+CLINICAL_INTERPRETATION_IDENTIFIER_PATTERNS = (
+    (
+        "HPO",
+        re.compile(r"\bHP:[0-9]{7}\b"),
+    ),
+    (
+        "MONDO",
+        re.compile(r"\bMONDO:[0-9]+\b"),
+    ),
+    (
+        "ClinVar",
+        re.compile(r"\b(?:VCV|RCV|SCV)[0-9]+(?:\.[0-9]+)?\b"),
+    ),
+    (
+        "PMID",
+        re.compile(r"\bPMID:\s*[0-9]+\b", re.IGNORECASE),
+    ),
 )
 
 
@@ -730,6 +789,196 @@ def validate_clinical_report(value: object) -> ClinicalReport:
         ) from exc
 
     return cast(ClinicalReport, value)
+
+
+def _sanitize_interpretation_markdown(value: str) -> str:
+    """Normalize harmless formatting and remove hidden control characters."""
+
+    normalized = unicodedata.normalize(
+        "NFC",
+        value.replace("\r\n", "\n").replace("\r", "\n"),
+    )
+    cleaned_characters: list[str] = []
+    for character in normalized:
+        if character == "\n":
+            cleaned_characters.append(character)
+        elif character == "\t":
+            cleaned_characters.append(" ")
+        elif unicodedata.category(character).startswith("C"):
+            cleaned_characters.append(" ")
+        else:
+            cleaned_characters.append(character)
+
+    lines = [
+        line.rstrip()
+        for line in "".join(cleaned_characters).split("\n")
+    ]
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    if not cleaned:
+        raise ClinicalInterpretationError(
+            "Clinical interpretation cannot be empty."
+        )
+    if len(cleaned) > MAX_CLINICAL_INTERPRETATION_CHARS:
+        raise ClinicalInterpretationError(
+            "Clinical interpretation exceeds the maximum length of "
+            f"{MAX_CLINICAL_INTERPRETATION_CHARS} characters."
+        )
+    if "```" in cleaned or re.search(r"<[^>\n]+>", cleaned):
+        raise ClinicalInterpretationError(
+            "Clinical interpretation cannot contain code fences or "
+            "raw HTML."
+        )
+    return cleaned
+
+
+def _parse_interpretation_sections(
+    markdown: str,
+) -> ClinicalInterpretationSections:
+    """Extract exact required headings in their approved order."""
+
+    matches = list(
+        CLINICAL_INTERPRETATION_HEADING_PATTERN.finditer(markdown)
+    )
+    expected_titles = [
+        title
+        for _, title in CLINICAL_INTERPRETATION_SECTION_ORDER
+    ]
+    actual_titles = [
+        match.group(1).strip()
+        for match in matches
+    ]
+    if actual_titles != expected_titles:
+        raise ClinicalInterpretationError(
+            "Clinical interpretation headings must appear exactly once "
+            "in the required order: "
+            f"{', '.join(expected_titles)}."
+        )
+    if markdown[:matches[0].start()].strip():
+        raise ClinicalInterpretationError(
+            "Clinical interpretation cannot contain text before its "
+            "first required heading."
+        )
+
+    sections: dict[str, str] = {}
+    for index, (key, _) in enumerate(
+        CLINICAL_INTERPRETATION_SECTION_ORDER
+    ):
+        content_start = matches[index].end()
+        content_end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(markdown)
+        )
+        content = markdown[content_start:content_end].strip()
+        if not content:
+            raise ClinicalInterpretationError(
+                f"Clinical interpretation section '{key}' cannot be "
+                "empty."
+            )
+        if len(content) > MAX_CLINICAL_INTERPRETATION_SECTION_CHARS:
+            raise ClinicalInterpretationError(
+                f"Clinical interpretation section '{key}' exceeds "
+                f"{MAX_CLINICAL_INTERPRETATION_SECTION_CHARS} "
+                "characters."
+            )
+        sections[key] = content
+
+    if (
+        sections["decision_support_notice"]
+        != CLINICAL_DECISION_SUPPORT_NOTICE
+    ):
+        raise ClinicalInterpretationError(
+            "Clinical interpretation must contain the exact approved "
+            "decision-support notice."
+        )
+    return cast(ClinicalInterpretationSections, sections)
+
+
+def _collect_evidence_strings(value: object) -> set[str]:
+    """Collect every explicit string in a sanitized Evidence Object."""
+
+    strings: set[str] = set()
+    if isinstance(value, str):
+        strings.add(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            strings.update(_collect_evidence_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            strings.update(_collect_evidence_strings(item))
+    return strings
+
+
+def _validate_interpretation_provenance(
+    markdown: str,
+    evidence: EvidenceObject,
+) -> None:
+    """Reject traceable identifiers and URLs absent from the evidence."""
+
+    evidence_strings = _collect_evidence_strings(evidence)
+    allowed_urls = {
+        text
+        for text in evidence_strings
+        if text.startswith(("http://", "https://"))
+    }
+    returned_urls = {
+        url.rstrip(".,;:")
+        for url in CLINICAL_INTERPRETATION_URL_PATTERN.findall(
+            markdown
+        )
+    }
+    unsupported_urls = returned_urls - allowed_urls
+    if unsupported_urls:
+        raise ClinicalInterpretationError(
+            "Clinical interpretation contains URLs absent from the "
+            "Evidence Object: "
+            f"{', '.join(sorted(unsupported_urls))}."
+        )
+
+    for label, pattern in CLINICAL_INTERPRETATION_IDENTIFIER_PATTERNS:
+        allowed_identifiers: set[str] = set()
+        for text in evidence_strings:
+            allowed_identifiers.update(
+                match.group(0).replace(" ", "").upper()
+                for match in pattern.finditer(text)
+            )
+            if label == "PMID" and text.isdigit():
+                allowed_identifiers.add(f"PMID:{text}")
+        returned_identifiers = {
+            match.group(0).replace(" ", "").upper()
+            for match in pattern.finditer(markdown)
+        }
+        unsupported_identifiers = (
+            returned_identifiers - allowed_identifiers
+        )
+        if unsupported_identifiers:
+            raise ClinicalInterpretationError(
+                "Clinical interpretation contains "
+                f"{label} identifiers absent from the Evidence Object: "
+                f"{', '.join(sorted(unsupported_identifiers))}."
+            )
+
+
+def validate_and_sanitize_clinical_interpretation(
+    response: object,
+    evidence_object: object,
+) -> ValidatedClinicalInterpretation:
+    """Validate LLM Markdown against structure and evidence provenance."""
+
+    evidence = sanitize_evidence_object(evidence_object)
+    if not isinstance(response, LLMResponse):
+        raise ClinicalInterpretationError(
+            "Clinical interpretation response must be an LLMResponse."
+        )
+
+    markdown = _sanitize_interpretation_markdown(response.content)
+    sections = _parse_interpretation_sections(markdown)
+    _validate_interpretation_provenance(markdown, evidence)
+    return {
+        "model": response.model,
+        "sections": sections,
+    }
 
 
 def _sanitize_text(
