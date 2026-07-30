@@ -159,6 +159,15 @@ class Settings:
         ),
     ).strip()
 
+    HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE: str = os.getenv(
+        "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE",
+        (
+            "https://github.com/obophenotype/"
+            "human-phenotype-ontology/releases/download/"
+            "v{release}/phenotype.hpoa"
+        ),
+    ).strip()
+
     # Genome assembly must remain explicit when coordinates are sent to
     # external annotation services.
     GENOME_ASSEMBLY: str = _get_required_env(
@@ -253,6 +262,9 @@ class Settings:
             "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (
                 cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
             ),
+            "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE": (
+                cls.HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE
+            ),
         }
 
         for name, value in url_settings.items():
@@ -282,6 +294,19 @@ class Settings:
         ):
             raise RuntimeError(
                 "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE must use HTTPS "
+                "and contain {release}."
+            )
+
+        if (
+            urlsplit(
+                cls.HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE
+            ).scheme
+            != "https"
+            or "{release}"
+            not in cls.HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE
+        ):
+            raise RuntimeError(
+                "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE must use HTTPS "
                 "and contain {release}."
             )
 

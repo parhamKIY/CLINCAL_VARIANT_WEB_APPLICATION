@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections import Counter
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +24,7 @@ HPO_RELEASE_PATTERN = re.compile(
 )
 HPO_ONTOLOGY_FILENAME = "hp.obo"
 HPO_GENE_ASSOCIATIONS_FILENAME = "phenotype_to_genes.txt"
+HPO_DISEASE_ANNOTATIONS_FILENAME = "phenotype.hpoa"
 HPO_GENE_ASSOCIATION_HEADER = (
     "hpo_id",
     "hpo_name",
@@ -30,10 +32,27 @@ HPO_GENE_ASSOCIATION_HEADER = (
     "gene_symbol",
     "disease_id",
 )
+HPO_DISEASE_ANNOTATION_HEADER = (
+    "database_id",
+    "disease_name",
+    "qualifier",
+    "hpo_id",
+    "reference",
+    "evidence",
+    "onset",
+    "frequency",
+    "sex",
+    "modifier",
+    "aspect",
+    "biocuration",
+)
+HPO_ANNOTATION_ASPECTS = {"P", "C", "I", "H", "M"}
 MAX_HPO_ONTOLOGY_BYTES = 50 * 1024 * 1024
 MAX_HPO_GENE_ASSOCIATIONS_BYTES = 100 * 1024 * 1024
+MAX_HPO_DISEASE_ANNOTATIONS_BYTES = 75 * 1024 * 1024
 MIN_HPO_ACTIVE_TERMS = 10_000
 MIN_HPO_GENE_ASSOCIATION_TERMS = 10_000
+MIN_HPO_DISEASE_ANNOTATION_TERMS = 10_000
 HPO_DOWNLOAD_CHUNK_SIZE = 64 * 1024
 _HPO_UPDATE_LOCK = Lock()
 
@@ -72,6 +91,21 @@ class HPOGeneResult(TypedDict):
     gene_count: int
 
 
+class HPODisease(TypedDict):
+    """Minimal disease association exposed to later stages."""
+
+    id: str
+    name: str
+
+
+class HPODiseaseResult(TypedDict):
+    """Standardized phenotype-to-disease lookup result."""
+
+    hpo_term: HPOTerm
+    diseases: list[HPODisease]
+    disease_count: int
+
+
 class HPODataUpdateResult(TypedDict):
     """Result of a coordinated ontology and association refresh."""
 
@@ -82,8 +116,11 @@ class HPODataUpdateResult(TypedDict):
     ontology_lookup_id_count: int
     association_term_count: int
     associated_gene_count: int
+    disease_annotation_term_count: int
+    associated_disease_count: int
     ontology_backup_path: str | None
     associations_backup_path: str | None
+    disease_annotations_backup_path: str | None
 
 
 def validate_hpo_id(hpo_id: str) -> str:
@@ -361,6 +398,168 @@ def get_genes_for_hpo(
         "hpo_term": term,
         "genes": genes,
         "gene_count": len(genes),
+    }
+
+
+@lru_cache(maxsize=4)
+def _load_hpo_disease_index(
+    annotations_path: Path,
+) -> dict[str, tuple[HPODisease, ...]]:
+    """Load positive phenotypic-abnormality disease annotations."""
+    try:
+        annotation_file = annotations_path.open(
+            "r",
+            encoding="utf-8",
+            newline="",
+        )
+    except OSError as exc:
+        raise HPODataError(
+            "Unable to open HPO disease annotations: "
+            f"{annotations_path}."
+        ) from exc
+
+    diseases_by_hpo: dict[
+        str,
+        dict[str, Counter[str]],
+    ] = {}
+    try:
+        with annotation_file:
+            data_lines = (
+                line
+                for line in annotation_file
+                if not line.startswith("#")
+            )
+            rows = csv.reader(data_lines, delimiter="\t")
+            header = next(rows, None)
+            if tuple(header or ()) != HPO_DISEASE_ANNOTATION_HEADER:
+                raise HPODataError(
+                    "HPO disease annotations have an unexpected header."
+                )
+
+            for line_number, row in enumerate(rows, start=2):
+                if len(row) != len(HPO_DISEASE_ANNOTATION_HEADER):
+                    raise HPODataError(
+                        "HPO disease annotation row "
+                        f"{line_number} has an unexpected structure."
+                    )
+
+                (
+                    database_id,
+                    disease_name,
+                    qualifier,
+                    hpo_id,
+                    reference,
+                    evidence,
+                    _,
+                    _,
+                    _,
+                    _,
+                    aspect,
+                    biocuration,
+                ) = (value.strip() for value in row)
+                if HPO_ID_PATTERN.fullmatch(hpo_id) is None:
+                    raise HPODataError(
+                        "HPO disease annotation row "
+                        f"{line_number} has an invalid HPO ID."
+                    )
+                if qualifier not in {"", "NOT"}:
+                    raise HPODataError(
+                        "HPO disease annotation row "
+                        f"{line_number} has an invalid qualifier."
+                    )
+                if aspect not in HPO_ANNOTATION_ASPECTS:
+                    raise HPODataError(
+                        "HPO disease annotation row "
+                        f"{line_number} has an invalid aspect."
+                    )
+                if (
+                    not database_id
+                    or not disease_name
+                    or not reference
+                    or not evidence
+                    or not biocuration
+                ):
+                    raise HPODataError(
+                        "HPO disease annotation row "
+                        f"{line_number} is incomplete."
+                    )
+
+                # Negated findings and non-phenotypic branches must not
+                # contribute positive phenotype-to-disease evidence.
+                if qualifier == "NOT" or aspect != "P":
+                    continue
+
+                hpo_diseases = diseases_by_hpo.setdefault(
+                    hpo_id,
+                    {},
+                )
+                hpo_diseases.setdefault(
+                    database_id,
+                    Counter(),
+                )[disease_name] += 1
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise HPODataError(
+            "Unable to read HPO disease annotations: "
+            f"{annotations_path}."
+        ) from exc
+
+    if not diseases_by_hpo:
+        raise HPODataError(
+            "HPO disease annotations contain no positive records: "
+            f"{annotations_path}."
+        )
+
+    return {
+        hpo_id: tuple(
+            {
+                "id": disease_id,
+                "name": min(
+                    name_counts,
+                    key=lambda name: (
+                        -name_counts[name],
+                        name,
+                    ),
+                ),
+            }
+            for disease_id, name_counts in sorted(diseases.items())
+        )
+        for hpo_id, diseases in diseases_by_hpo.items()
+    }
+
+
+def get_diseases_for_hpo(
+    hpo_id: str,
+    *,
+    ontology_path: str | Path | None = None,
+    annotations_path: str | Path | None = None,
+) -> HPODiseaseResult:
+    """Return unique positive disease associations for one HPO term."""
+    term = lookup_hpo_term(
+        hpo_id,
+        ontology_path=ontology_path,
+    )
+    resolved_annotations_path = (
+        Path(annotations_path)
+        if annotations_path is not None
+        else (
+            settings.HPO_DATA_DIR
+            / HPO_DISEASE_ANNOTATIONS_FILENAME
+        )
+    ).resolve()
+    diseases = [
+        {
+            "id": disease["id"],
+            "name": disease["name"],
+        }
+        for disease in _load_hpo_disease_index(
+            resolved_annotations_path
+        ).get(term["id"], ())
+    ]
+
+    return {
+        "hpo_term": term,
+        "diseases": diseases,
+        "disease_count": len(diseases),
     }
 
 
@@ -728,10 +927,12 @@ def _perform_hpo_data_update(
     session: requests.Session,
     ontology_source_url: str,
     association_url_template: str,
+    disease_url_template: str,
     ontology_path: Path,
     associations_path: Path,
+    disease_annotations_path: Path,
 ) -> HPODataUpdateResult:
-    """Validate and install one matching ontology and association release."""
+    """Validate and install one matching HPO data release."""
     temporary_ontology = _create_hpo_temporary_file(
         ontology_path.parent,
         ".obo.download",
@@ -739,6 +940,10 @@ def _perform_hpo_data_update(
     temporary_associations = _create_hpo_temporary_file(
         associations_path.parent,
         ".txt.download",
+    )
+    temporary_disease_annotations = _create_hpo_temporary_file(
+        disease_annotations_path.parent,
+        ".hpoa.download",
     )
 
     try:
@@ -775,6 +980,25 @@ def _perform_hpo_data_update(
             temporary_associations,
             maximum_bytes=MAX_HPO_GENE_ASSOCIATIONS_BYTES,
             data_label="HPO gene associations",
+        )
+        try:
+            disease_source_url = disease_url_template.format(
+                release=release_text
+            )
+        except (KeyError, ValueError) as exc:
+            raise HPODataError(
+                "HPO disease annotation URL template is invalid."
+            ) from exc
+        if not disease_source_url.lower().startswith("https://"):
+            raise HPODataError(
+                "HPO disease annotation updates require HTTPS."
+            )
+        _download_hpo_file(
+            session,
+            disease_source_url,
+            temporary_disease_annotations,
+            maximum_bytes=MAX_HPO_DISEASE_ANNOTATIONS_BYTES,
+            data_label="HPO disease annotations",
         )
 
         ontology_index = _load_hpo_index(temporary_ontology)
@@ -817,6 +1041,33 @@ def _perform_hpo_data_update(
                 for gene in genes
             }
         )
+        disease_index = _load_hpo_disease_index(
+            temporary_disease_annotations
+        )
+        if (
+            len(disease_index)
+            < MIN_HPO_DISEASE_ANNOTATION_TERMS
+        ):
+            raise HPODataError(
+                "Downloaded HPO disease annotations contain too "
+                "few terms."
+            )
+        unknown_disease_annotation_ids = (
+            disease_index.keys() - ontology_index.keys()
+        )
+        if unknown_disease_annotation_ids:
+            example_id = min(unknown_disease_annotation_ids)
+            raise HPODataError(
+                "HPO disease annotations do not match the ontology; "
+                f"unknown term {example_id}."
+            )
+        associated_disease_count = len(
+            {
+                disease["id"]
+                for diseases in disease_index.values()
+                for disease in diseases
+            }
+        )
         previous_version: str | None = None
         previous_release_date: date | None = None
         if ontology_path.exists():
@@ -840,7 +1091,15 @@ def _perform_hpo_data_update(
             associations_path,
             temporary_associations,
         )
-        if not ontology_changed and not associations_changed:
+        disease_annotations_changed = not _same_file_content(
+            disease_annotations_path,
+            temporary_disease_annotations,
+        )
+        if (
+            not ontology_changed
+            and not associations_changed
+            and not disease_annotations_changed
+        ):
             return {
                 "status": "unchanged",
                 "previous_version": previous_version,
@@ -849,8 +1108,11 @@ def _perform_hpo_data_update(
                 "ontology_lookup_id_count": len(ontology_index),
                 "association_term_count": len(association_index),
                 "associated_gene_count": associated_gene_count,
+                "disease_annotation_term_count": len(disease_index),
+                "associated_disease_count": associated_disease_count,
                 "ontology_backup_path": None,
                 "associations_backup_path": None,
+                "disease_annotations_backup_path": None,
             }
 
         ontology_backup = (
@@ -869,9 +1131,20 @@ def _perform_hpo_data_update(
             if associations_changed
             else None
         )
+        disease_annotations_backup = (
+            _backup_hpo_file(
+                disease_annotations_path,
+                disease_annotations_path.with_suffix(
+                    ".previous.hpoa"
+                ),
+            )
+            if disease_annotations_changed
+            else None
+        )
 
         ontology_installed = False
         associations_installed = False
+        disease_annotations_installed = False
         try:
             if ontology_changed:
                 os.replace(temporary_ontology, ontology_path)
@@ -882,8 +1155,19 @@ def _perform_hpo_data_update(
                     associations_path,
                 )
                 associations_installed = True
+            if disease_annotations_changed:
+                os.replace(
+                    temporary_disease_annotations,
+                    disease_annotations_path,
+                )
+                disease_annotations_installed = True
         except OSError as exc:
             try:
+                if disease_annotations_installed:
+                    _restore_hpo_file(
+                        disease_annotations_path,
+                        disease_annotations_backup,
+                    )
                 if associations_installed:
                     _restore_hpo_file(
                         associations_path,
@@ -906,6 +1190,7 @@ def _perform_hpo_data_update(
 
         _load_hpo_index.cache_clear()
         _load_hpo_gene_index.cache_clear()
+        _load_hpo_disease_index.cache_clear()
         return {
             "status": "updated",
             "previous_version": previous_version,
@@ -914,6 +1199,8 @@ def _perform_hpo_data_update(
             "ontology_lookup_id_count": len(ontology_index),
             "association_term_count": len(association_index),
             "associated_gene_count": associated_gene_count,
+            "disease_annotation_term_count": len(disease_index),
+            "associated_disease_count": associated_disease_count,
             "ontology_backup_path": (
                 str(ontology_backup)
                 if ontology_backup is not None
@@ -924,13 +1211,20 @@ def _perform_hpo_data_update(
                 if associations_backup is not None
                 else None
             ),
+            "disease_annotations_backup_path": (
+                str(disease_annotations_backup)
+                if disease_annotations_backup is not None
+                else None
+            ),
         }
     finally:
         _load_hpo_index.cache_clear()
         _load_hpo_gene_index.cache_clear()
+        _load_hpo_disease_index.cache_clear()
         for temporary_path in (
             temporary_ontology,
             temporary_associations,
+            temporary_disease_annotations,
         ):
             try:
                 temporary_path.unlink(missing_ok=True)
@@ -942,11 +1236,13 @@ def update_hpo_data(
     *,
     ontology_path: str | Path | None = None,
     associations_path: str | Path | None = None,
+    disease_annotations_path: str | Path | None = None,
     ontology_source_url: str | None = None,
     association_url_template: str | None = None,
+    disease_url_template: str | None = None,
     session: requests.Session | None = None,
 ) -> HPODataUpdateResult:
-    """Refresh matching HPO ontology and gene-association releases."""
+    """Refresh matching ontology, gene, and disease HPO data."""
     resolved_ontology_path = (
         Path(ontology_path)
         if ontology_path is not None
@@ -960,6 +1256,14 @@ def update_hpo_data(
             / HPO_GENE_ASSOCIATIONS_FILENAME
         )
     ).resolve()
+    resolved_disease_annotations_path = (
+        Path(disease_annotations_path)
+        if disease_annotations_path is not None
+        else (
+            settings.HPO_DATA_DIR
+            / HPO_DISEASE_ANNOTATIONS_FILENAME
+        )
+    ).resolve()
     resolved_ontology_url = (
         ontology_source_url
         if ontology_source_url is not None
@@ -969,6 +1273,11 @@ def update_hpo_data(
         association_url_template
         if association_url_template is not None
         else settings.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
+    ).strip()
+    resolved_disease_template = (
+        disease_url_template
+        if disease_url_template is not None
+        else settings.HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE
     ).strip()
     if not resolved_ontology_url.lower().startswith("https://"):
         raise HPODataError(
@@ -984,6 +1293,16 @@ def update_hpo_data(
             "HPO gene association URL template must use HTTPS "
             "and contain {release}."
         )
+    if (
+        not resolved_disease_template.lower().startswith(
+            "https://"
+        )
+        or "{release}" not in resolved_disease_template
+    ):
+        raise HPODataError(
+            "HPO disease annotation URL template must use HTTPS "
+            "and contain {release}."
+        )
 
     active_session = session or requests.Session()
     owns_session = session is None
@@ -993,8 +1312,10 @@ def update_hpo_data(
                 active_session,
                 resolved_ontology_url,
                 resolved_association_template,
+                resolved_disease_template,
                 resolved_ontology_path,
                 resolved_associations_path,
+                resolved_disease_annotations_path,
             )
     finally:
         if owns_session:

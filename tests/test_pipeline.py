@@ -15,6 +15,7 @@ from backend.annotation import (
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
+    get_diseases_for_hpo,
     get_genes_for_hpo,
     lookup_hpo_term,
     update_hpo_data,
@@ -801,6 +802,134 @@ class TestPhenotype:
             f"\t{gene_symbol}\tOMIM:607208\n"
         ).encode("utf-8")
 
+    @staticmethod
+    def _write_hpo_disease_fixture(tmp_path: Path) -> Path:
+        """Write a minimal official-format HPO disease table."""
+        annotations_path = tmp_path / "phenotype.hpoa"
+        header = (
+            "database_id\tdisease_name\tqualifier\thpo_id"
+            "\treference\tevidence\tonset\tfrequency\tsex"
+            "\tmodifier\taspect\tbiocuration"
+        )
+        rows = [
+            [
+                "OMIM:607208",
+                "Developmental and epileptic encephalopathy 6B",
+                "",
+                "HP:0001250",
+                "PMID:12345678",
+                "PCS",
+                "",
+                "",
+                "",
+                "",
+                "P",
+                "HPO:test[2026-01-01]",
+            ],
+            [
+                "ORPHA:33069",
+                "Dravet syndrome",
+                "",
+                "HP:0001250",
+                "ORPHA:33069",
+                "TAS",
+                "",
+                "",
+                "",
+                "",
+                "P",
+                "HPO:test[2026-01-01]",
+            ],
+            [
+                "OMIM:607208",
+                "Developmental and epileptic encephalopathy 6B",
+                "",
+                "HP:0001250",
+                "OMIM:607208",
+                "TAS",
+                "",
+                "",
+                "",
+                "",
+                "P",
+                "HPO:test[2026-01-02]",
+            ],
+            [
+                "OMIM:607208",
+                "DEE 6B",
+                "",
+                "HP:0001250",
+                "OMIM:607208",
+                "TAS",
+                "",
+                "",
+                "",
+                "",
+                "P",
+                "HPO:test[2025-01-01]",
+            ],
+            [
+                "ORPHA:999999",
+                "Negated example disease",
+                "NOT",
+                "HP:0001250",
+                "ORPHA:999999",
+                "TAS",
+                "",
+                "",
+                "",
+                "",
+                "P",
+                "HPO:test[2026-01-01]",
+            ],
+            [
+                "OMIM:999999",
+                "Inheritance-only example",
+                "",
+                "HP:0001250",
+                "OMIM:999999",
+                "TAS",
+                "",
+                "",
+                "",
+                "",
+                "I",
+                "HPO:test[2026-01-01]",
+            ],
+        ]
+        annotations_path.write_text(
+            "\n".join(
+                (
+                    '#version: "2026-01-01"',
+                    header,
+                    *("\t".join(row) for row in rows),
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        return annotations_path
+
+    @staticmethod
+    def _hpo_disease_release(
+        *,
+        hpo_id: str = "HP:0001250",
+        disease_id: str = "OMIM:607208",
+        disease_name: str = (
+            "Developmental and epileptic encephalopathy 6B"
+        ),
+    ) -> bytes:
+        """Build a minimal HPO disease release asset."""
+        return (
+            "#version: 2026-01-01\n"
+            "database_id\tdisease_name\tqualifier\thpo_id"
+            "\treference\tevidence\tonset\tfrequency\tsex"
+            "\tmodifier\taspect\tbiocuration\n"
+            f"{disease_id}\t{disease_name}\t\t{hpo_id}"
+            "\tPMID:12345678\tPCS\t\t\t\t\tP"
+            "\tHPO:test[2026-01-01]\n"
+        ).encode("utf-8")
+
     @pytest.mark.parametrize(
         ("hpo_id", "expected"),
         [
@@ -997,6 +1126,115 @@ class TestPhenotype:
                 "HP:0001250",
                 ontology_path=ontology_path,
                 associations_path=associations_path,
+            )
+
+    def test_hpo_disease_lookup_excludes_negated_and_nonphenotypic_rows(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        annotations_path = self._write_hpo_disease_fixture(tmp_path)
+
+        assert get_diseases_for_hpo(
+            "HP:0001250",
+            ontology_path=ontology_path,
+            annotations_path=annotations_path,
+        ) == {
+            "hpo_term": {
+                "id": "HP:0001250",
+                "name": "Seizure",
+            },
+            "diseases": [
+                {
+                    "id": "OMIM:607208",
+                    "name": (
+                        "Developmental and epileptic "
+                        "encephalopathy 6B"
+                    ),
+                },
+                {
+                    "id": "ORPHA:33069",
+                    "name": "Dravet syndrome",
+                },
+            ],
+            "disease_count": 2,
+        }
+
+    def test_valid_hpo_without_disease_association_returns_empty_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        annotations_path = self._write_hpo_disease_fixture(tmp_path)
+
+        assert get_diseases_for_hpo(
+            "HP:0001263",
+            ontology_path=ontology_path,
+            annotations_path=annotations_path,
+        ) == {
+            "hpo_term": {
+                "id": "HP:0001263",
+                "name": "Global developmental delay",
+            },
+            "diseases": [],
+            "disease_count": 0,
+        }
+
+    def test_unknown_hpo_is_rejected_before_disease_lookup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        annotations_path = self._write_hpo_disease_fixture(tmp_path)
+
+        with pytest.raises(PhenotypeError, match="not found"):
+            get_diseases_for_hpo(
+                "HP:9999999",
+                ontology_path=ontology_path,
+                annotations_path=annotations_path,
+            )
+
+    def test_missing_hpo_disease_annotations_are_reported(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+
+        with pytest.raises(HPODataError, match="Unable to open"):
+            get_diseases_for_hpo(
+                "HP:0001250",
+                ontology_path=ontology_path,
+                annotations_path=tmp_path / "missing.hpoa",
+            )
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "unexpected\theader\n",
+            (
+                "database_id\tdisease_name\tqualifier\thpo_id"
+                "\treference\tevidence\tonset\tfrequency\tsex"
+                "\tmodifier\taspect\tbiocuration\n"
+                "OMIM:607208\tExample disease\tMAYBE"
+                "\tHP:0001250\tPMID:1\tPCS\t\t\t\t\tP"
+                "\tHPO:test[2026-01-01]\n"
+            ),
+        ],
+    )
+    def test_malformed_hpo_disease_annotations_are_rejected(
+        self,
+        tmp_path: Path,
+        content: str,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        annotations_path = tmp_path / "phenotype.hpoa"
+        annotations_path.write_text(content, encoding="utf-8")
+
+        with pytest.raises(HPODataError):
+            get_diseases_for_hpo(
+                "HP:0001250",
+                ontology_path=ontology_path,
+                annotations_path=annotations_path,
             )
 
     def test_hpo_update_installs_newer_valid_release(
@@ -1217,17 +1455,29 @@ class TestPhenotype:
             "backend.phenotype.MIN_HPO_GENE_ASSOCIATION_TERMS",
             1,
         )
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_DISEASE_ANNOTATION_TERMS",
+            1,
+        )
         ontology_path = tmp_path / "hp.obo"
         associations_path = tmp_path / "phenotype_to_genes.txt"
+        disease_annotations_path = tmp_path / "phenotype.hpoa"
         old_ontology = self._hpo_release("2026-01-01")
         old_associations = self._hpo_gene_release()
+        old_disease_annotations = self._hpo_disease_release()
         ontology_path.write_bytes(old_ontology)
         associations_path.write_bytes(old_associations)
+        disease_annotations_path.write_bytes(old_disease_annotations)
         assert get_genes_for_hpo(
             "HP:0001250",
             ontology_path=ontology_path,
             associations_path=associations_path,
         )["genes"] == ["SCN1A"]
+        assert get_diseases_for_hpo(
+            "HP:0001250",
+            ontology_path=ontology_path,
+            annotations_path=disease_annotations_path,
+        )["disease_count"] == 1
 
         new_ontology = self._hpo_release(
             "2026-02-01",
@@ -1240,20 +1490,30 @@ class TestPhenotype:
             ncbi_gene_id="1654",
             gene_symbol="DDX3X",
         )
+        new_disease_annotations = self._hpo_disease_release(
+            hpo_id="HP:0001263",
+            disease_id="OMIM:300958",
+            disease_name="Snijders Blok-Campeau syndrome",
+        )
         session = FakeDownloadSession(
             [
                 FakeDownloadResponse(200, new_ontology),
                 FakeDownloadResponse(200, new_associations),
+                FakeDownloadResponse(200, new_disease_annotations),
             ]
         )
 
         result = update_hpo_data(
             ontology_path=ontology_path,
             associations_path=associations_path,
+            disease_annotations_path=disease_annotations_path,
             ontology_source_url="https://example.test/hp.obo",
             association_url_template=(
                 "https://example.test/v{release}/"
                 "phenotype_to_genes.txt"
+            ),
+            disease_url_template=(
+                "https://example.test/v{release}/phenotype.hpoa"
             ),
             session=session,  # type: ignore[arg-type]
         )
@@ -1266,11 +1526,16 @@ class TestPhenotype:
             "ontology_lookup_id_count": 1,
             "association_term_count": 1,
             "associated_gene_count": 1,
+            "disease_annotation_term_count": 1,
+            "associated_disease_count": 1,
             "ontology_backup_path": str(
                 ontology_path.with_suffix(".previous.obo")
             ),
             "associations_backup_path": str(
                 associations_path.with_suffix(".previous.txt")
+            ),
+            "disease_annotations_backup_path": str(
+                disease_annotations_path.with_suffix(".previous.hpoa")
             ),
         }
         assert ontology_path.with_suffix(
@@ -1279,11 +1544,24 @@ class TestPhenotype:
         assert associations_path.with_suffix(
             ".previous.txt"
         ).read_bytes() == old_associations
+        assert disease_annotations_path.with_suffix(
+            ".previous.hpoa"
+        ).read_bytes() == old_disease_annotations
         assert get_genes_for_hpo(
             "HP:0001263",
             ontology_path=ontology_path,
             associations_path=associations_path,
         )["genes"] == ["DDX3X"]
+        assert get_diseases_for_hpo(
+            "HP:0001263",
+            ontology_path=ontology_path,
+            annotations_path=disease_annotations_path,
+        )["diseases"] == [
+            {
+                "id": "OMIM:300958",
+                "name": "Snijders Blok-Campeau syndrome",
+            }
+        ]
         with pytest.raises(PhenotypeError, match="not found"):
             get_genes_for_hpo(
                 "HP:0001250",
@@ -1293,6 +1571,9 @@ class TestPhenotype:
         assert session.calls[1]["url"] == (
             "https://example.test/v2026-02-01/"
             "phenotype_to_genes.txt"
+        )
+        assert session.calls[2]["url"] == (
+            "https://example.test/v2026-02-01/phenotype.hpoa"
         )
 
     def test_coordinated_hpo_data_update_detects_no_changes(
@@ -1308,26 +1589,43 @@ class TestPhenotype:
             "backend.phenotype.MIN_HPO_GENE_ASSOCIATION_TERMS",
             1,
         )
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_DISEASE_ANNOTATION_TERMS",
+            1,
+        )
         ontology_path = tmp_path / "hp.obo"
         associations_path = tmp_path / "phenotype_to_genes.txt"
+        disease_annotations_path = tmp_path / "phenotype.hpoa"
         ontology_content = self._hpo_release("2026-02-01")
         association_content = self._hpo_gene_release()
+        disease_annotation_content = self._hpo_disease_release()
         ontology_path.write_bytes(ontology_content)
         associations_path.write_bytes(association_content)
+        disease_annotations_path.write_bytes(
+            disease_annotation_content
+        )
         session = FakeDownloadSession(
             [
                 FakeDownloadResponse(200, ontology_content),
                 FakeDownloadResponse(200, association_content),
+                FakeDownloadResponse(
+                    200,
+                    disease_annotation_content,
+                ),
             ]
         )
 
         result = update_hpo_data(
             ontology_path=ontology_path,
             associations_path=associations_path,
+            disease_annotations_path=disease_annotations_path,
             ontology_source_url="https://example.test/hp.obo",
             association_url_template=(
                 "https://example.test/v{release}/"
                 "phenotype_to_genes.txt"
+            ),
+            disease_url_template=(
+                "https://example.test/v{release}/phenotype.hpoa"
             ),
             session=session,  # type: ignore[arg-type]
         )
@@ -1335,6 +1633,7 @@ class TestPhenotype:
         assert result["status"] == "unchanged"
         assert result["ontology_backup_path"] is None
         assert result["associations_backup_path"] is None
+        assert result["disease_annotations_backup_path"] is None
 
     @pytest.mark.parametrize(
         "association_response",
@@ -1351,7 +1650,7 @@ class TestPhenotype:
             ),
         ],
     )
-    def test_failed_coordinated_update_preserves_both_files(
+    def test_failed_coordinated_update_preserves_all_files(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1365,12 +1664,19 @@ class TestPhenotype:
             "backend.phenotype.MIN_HPO_GENE_ASSOCIATION_TERMS",
             1,
         )
+        monkeypatch.setattr(
+            "backend.phenotype.MIN_HPO_DISEASE_ANNOTATION_TERMS",
+            1,
+        )
         ontology_path = tmp_path / "hp.obo"
         associations_path = tmp_path / "phenotype_to_genes.txt"
+        disease_annotations_path = tmp_path / "phenotype.hpoa"
         old_ontology = self._hpo_release("2026-01-01")
         old_associations = self._hpo_gene_release()
+        old_disease_annotations = self._hpo_disease_release()
         ontology_path.write_bytes(old_ontology)
         associations_path.write_bytes(old_associations)
+        disease_annotations_path.write_bytes(old_disease_annotations)
         session = FakeDownloadSession(
             [
                 FakeDownloadResponse(
@@ -1378,6 +1684,7 @@ class TestPhenotype:
                     self._hpo_release("2026-02-01"),
                 ),
                 association_response,
+                FakeDownloadResponse(200, old_disease_annotations),
             ]
         )
 
@@ -1385,16 +1692,24 @@ class TestPhenotype:
             update_hpo_data(
                 ontology_path=ontology_path,
                 associations_path=associations_path,
+                disease_annotations_path=disease_annotations_path,
                 ontology_source_url="https://example.test/hp.obo",
                 association_url_template=(
                     "https://example.test/v{release}/"
                     "phenotype_to_genes.txt"
+                ),
+                disease_url_template=(
+                    "https://example.test/v{release}/phenotype.hpoa"
                 ),
                 session=session,  # type: ignore[arg-type]
             )
 
         assert ontology_path.read_bytes() == old_ontology
         assert associations_path.read_bytes() == old_associations
+        assert (
+            disease_annotations_path.read_bytes()
+            == old_disease_annotations
+        )
         assert list(tmp_path.glob("*.download")) == []
 
     def test_coordinated_hpo_update_requires_release_template(
