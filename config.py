@@ -89,6 +89,34 @@ def _resolve_path(name: str, default: str) -> Path:
     return path.resolve()
 
 
+def _validate_secure_url(name: str, value: str) -> None:
+    """Require a credential-free HTTPS endpoint."""
+    try:
+        parsed_url = urlsplit(value)
+        parsed_url.port
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable '{name}' must be a secure HTTPS URL."
+        ) from exc
+
+    if (
+        parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or bool(parsed_url.query)
+        or bool(parsed_url.fragment)
+        or any(
+            character.isspace() or ord(character) < 32
+            for character in value
+        )
+    ):
+        raise RuntimeError(
+            f"Environment variable '{name}' must be a secure HTTPS URL "
+            "without credentials, query parameters, or fragments."
+        )
+
+
 class Settings:
     """
     Central configuration for the application.
@@ -305,7 +333,8 @@ class Settings:
         Validate central configuration values.
 
         Required LLM variables are already validated while loading the class.
-        This method checks URL formats and other configuration constraints.
+        This method checks secure URL formats and other configuration
+        constraints.
         """
         url_settings = {
             "LLM_BASE_URL": cls.LLM_BASE_URL,
@@ -323,46 +352,24 @@ class Settings:
         }
 
         for name, value in url_settings.items():
-            parsed_url = urlsplit(value)
-
-            if (
-                parsed_url.scheme not in {"http", "https"}
-                or not parsed_url.netloc
-            ):
-                raise RuntimeError(
-                    f"Environment variable '{name}' must be a valid "
-                    "HTTP or HTTPS URL."
-                )
-
-        if urlsplit(cls.HPO_ONTOLOGY_URL).scheme != "https":
-            raise RuntimeError(
-                "HPO_ONTOLOGY_URL must use HTTPS."
-            )
+            _validate_secure_url(name, value)
 
         if (
-            urlsplit(
-                cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
-            ).scheme
-            != "https"
-            or "{release}"
+            "{release}"
             not in cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
         ):
             raise RuntimeError(
-                "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE must use HTTPS "
-                "and contain {release}."
+                "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE must contain "
+                "{release}."
             )
 
         if (
-            urlsplit(
-                cls.HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE
-            ).scheme
-            != "https"
-            or "{release}"
+            "{release}"
             not in cls.HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE
         ):
             raise RuntimeError(
-                "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE must use HTTPS "
-                "and contain {release}."
+                "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE must contain "
+                "{release}."
             )
 
         if not cls.APP_NAME:

@@ -364,6 +364,7 @@ def _post_vep_batch(
                 params=params,
                 json={"variants": vep_inputs},
                 timeout=settings.REQUEST_TIMEOUT,
+                verify=True,
             )
         except requests.RequestException as exc:
             _log_api_call(
@@ -568,6 +569,7 @@ def _get_myvariant(
                 params=params,
                 headers={"Accept": "application/json"},
                 timeout=settings.REQUEST_TIMEOUT,
+                verify=True,
             )
         except requests.RequestException as exc:
             _log_api_call(
@@ -733,6 +735,7 @@ def _get_clinvar_json(
                     "User-Agent": "ClinicalVariantInterpretation/0.1",
                 },
                 timeout=settings.REQUEST_TIMEOUT,
+                verify=True,
             )
         except requests.RequestException as exc:
             _log_api_call(
@@ -1105,6 +1108,7 @@ def _get_clingen_gene_validity(
                 params=params,
                 headers={"Accept": "application/json"},
                 timeout=settings.REQUEST_TIMEOUT,
+                verify=True,
             )
         except requests.RequestException as exc:
             _log_api_call(

@@ -1009,6 +1009,7 @@ def _download_hpo_file(
             headers={"Accept": "text/plain"},
             stream=True,
             timeout=settings.REQUEST_TIMEOUT,
+            verify=True,
         )
     except requests.RequestException as exc:
         raise HPODataError(

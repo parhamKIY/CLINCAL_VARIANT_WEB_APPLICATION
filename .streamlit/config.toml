@@ -7,4 +7,17 @@ textColor = "#17324D"
 font = "sans serif"
 
 [server]
+headless = true
+address = "127.0.0.1"
+enableCORS = true
+enableXsrfProtection = true
 maxUploadSize = 25
+maxMessageSize = 25
+enableStaticServing = false
+
+[client]
+showErrorDetails = "none"
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

@@ -291,11 +291,16 @@ class OpenAICompatibleAdapter:
             )
         parsed_url = urlsplit(base_url.strip())
         if (
-            parsed_url.scheme not in {"http", "https"}
-            or not parsed_url.netloc
+            parsed_url.scheme != "https"
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or bool(parsed_url.query)
+            or bool(parsed_url.fragment)
         ):
             raise LLMConfigurationError(
-                "LLM base URL must be a valid HTTP or HTTPS URL."
+                "LLM base URL must be a secure HTTPS URL without "
+                "credentials, query parameters, or fragments."
             )
         if not isinstance(api_key, str) or not api_key.strip():
             raise LLMConfigurationError(
@@ -350,6 +355,7 @@ class OpenAICompatibleAdapter:
                     "Accept": "application/json",
                 },
                 timeout=self._timeout,
+                verify=True,
             )
         except requests.Timeout as exc:
             raise LLMTimeoutError(

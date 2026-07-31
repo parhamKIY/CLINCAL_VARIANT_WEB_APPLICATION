@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tomllib
 from copy import deepcopy
 from collections.abc import Iterator
 from logging.handlers import RotatingFileHandler
@@ -20,6 +21,7 @@ import requests
 from streamlit.testing.v1 import AppTest
 
 import config as config_module
+import app as app_module
 from backend.annotation import (
     AnnotationError,
     annotate_variants,
@@ -355,22 +357,22 @@ class TestConfiguration:
             (
                 "VEP_BASE_URL",
                 "not-a-url",
-                "must be a valid HTTP or HTTPS URL",
+                "must be a secure HTTPS URL",
             ),
             (
                 "HPO_ONTOLOGY_URL",
                 "http://example.test/hp.obo",
-                "HPO_ONTOLOGY_URL must use HTTPS",
+                "must be a secure HTTPS URL",
             ),
             (
                 "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE",
                 "https://example.test/genes.txt",
-                "must use HTTPS and contain",
+                "must contain",
             ),
             (
                 "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE",
                 "https://example.test/phenotype.hpoa",
-                "must use HTTPS and contain",
+                "must contain",
             ),
             ("APP_NAME", "", "APP_NAME cannot be empty"),
             ("LLM_PROVIDER", "", "LLM_PROVIDER cannot be empty"),
@@ -411,6 +413,36 @@ class TestConfiguration:
         monkeypatch.setattr(config_module.Settings, name, value)
 
         with pytest.raises(RuntimeError, match=message):
+            config_module.Settings.validate()
+
+    @pytest.mark.stage15_security
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("LLM_BASE_URL", "http://llm.example/v1"),
+            (
+                "VEP_BASE_URL",
+                "https://user:password@vep.example/api",
+            ),
+            (
+                "MYVARIANT_BASE_URL",
+                "https://myvariant.example/v1?token=secret",
+            ),
+            (
+                "CLINVAR_BASE_URL",
+                "https://clinvar.example/api#fragment",
+            ),
+        ],
+    )
+    def test_external_service_urls_reject_unsafe_transport_metadata(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        value: str,
+    ) -> None:
+        monkeypatch.setattr(config_module.Settings, name, value)
+
+        with pytest.raises(RuntimeError, match="secure HTTPS URL"):
             config_module.Settings.validate()
 
     def test_database_path_cannot_be_a_directory(
@@ -701,6 +733,56 @@ class TestStage15SecretsAudit:
         assert completed.stdout.strip() == (
             "Stage 15 secrets audit: PASSED"
         )
+
+
+@pytest.mark.stage15_security
+class TestStage15NetworkRuntimeSecurity:
+    """Verify secure transport and Streamlit runtime defaults."""
+
+    def test_streamlit_runtime_security_configuration(self) -> None:
+        with (
+            PROJECT_ROOT / ".streamlit" / "config.toml"
+        ).open("rb") as stream:
+            configuration = tomllib.load(stream)
+
+        server = configuration["server"]
+        client = configuration["client"]
+        browser = configuration["browser"]
+        assert server["headless"] is True
+        assert server["address"] == "127.0.0.1"
+        assert server["enableCORS"] is True
+        assert server["enableXsrfProtection"] is True
+        assert server["maxUploadSize"] == 25
+        assert server["maxMessageSize"] == 25
+        assert server["enableStaticServing"] is False
+        assert client["showErrorDetails"] == "none"
+        assert client["toolbarMode"] == "minimal"
+        assert browser["gatherUsageStats"] is False
+
+    def test_app_validates_configuration_before_starting_ui(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            app_module.settings,
+            "initialize",
+            lambda: calls.append("initialize"),
+        )
+        monkeypatch.setattr(
+            app_module,
+            "configure_logging",
+            lambda: calls.append("logging"),
+        )
+        monkeypatch.setattr(
+            app_module,
+            "render_app",
+            lambda: calls.append("render"),
+        )
+
+        app_module.main()
+
+        assert calls == ["initialize", "logging", "render"]
 
 
 class FakeResponse:
@@ -2375,6 +2457,7 @@ class TestPhenotype:
             "headers": {"Accept": "text/plain"},
             "stream": True,
             "timeout": settings.REQUEST_TIMEOUT,
+            "verify": True,
         }
 
     def test_hpo_update_skips_installed_release(
@@ -3028,6 +3111,7 @@ class TestAnnotation:
         assert annotations[0]["protein_change"] == "ENSP000001:p.Lys34Arg"
         assert annotations[0]["sources"]["vep"]["status"] == "success"
         assert "input" not in annotations[0]["sources"]["vep"]
+        assert session.post_calls[0]["verify"] is True
         assert session.post_calls[0]["params"] == {
             "canonical": 1,
             "hgvs": 1,
@@ -3067,6 +3151,7 @@ class TestAnnotation:
         }
         assert annotation["population_frequency"] == 0.004
         assert "dbsnp" not in myvariant
+        assert session.myvariant_get_calls[0]["verify"] is True
         assert session.myvariant_get_calls[0]["params"] == {
             "assembly": "hg38",
             "fields": (
@@ -3281,6 +3366,7 @@ class TestAnnotation:
         )[0]
 
         clinvar = annotation["sources"]["clinvar"]
+        assert session.clinvar_get_calls[0]["verify"] is True
         assert annotation["sources"]["myvariant"]["status"] == "not_found"
         assert clinvar == {
             "status": "success",
@@ -3530,6 +3616,7 @@ class TestAnnotation:
         assert clingen["gene_id"] == "HGNC:1"
         assert clingen["curation_count"] == 1
         assert clingen["curations_truncated"] is False
+        assert session.clingen_get_calls[0]["verify"] is True
         assert clingen["curations"] == [
             {
                 "curation_id": "SGC-000001",
@@ -4896,6 +4983,7 @@ class TestLLMContract:
             "https://llm.example/v1/chat/completions"
         )
         assert call["timeout"] == 17
+        assert call["verify"] is True
         assert call["headers"] == {
             "Authorization": "Bearer test-secret",
             "Content-Type": "application/json",
@@ -5154,7 +5242,19 @@ class TestLLMContract:
         [
             (
                 {"base_url": "not-a-url"},
-                "valid HTTP or HTTPS URL",
+                "secure HTTPS URL",
+            ),
+            (
+                {"base_url": "http://llm.example/v1"},
+                "secure HTTPS URL",
+            ),
+            (
+                {
+                    "base_url": (
+                        "https://user:password@llm.example/v1"
+                    )
+                },
+                "secure HTTPS URL",
             ),
             (
                 {"api_key": " "},

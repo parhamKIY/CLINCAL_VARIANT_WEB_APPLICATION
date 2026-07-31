@@ -476,6 +476,17 @@ labels, and email addresses. The LLM receives only the bounded Evidence Object;
 the uploaded filename, raw VCF, sample name, and genotype never cross that
 boundary.
 
+Stage 15 step 5 hardens outbound transport and the application runtime. Startup
+now validates configuration before the UI is rendered. Every external
+bioinformatics and LLM endpoint must use credential-free HTTPS without query
+parameters or fragments, and all outbound requests explicitly require TLS
+certificate verification. Streamlit binds only to `127.0.0.1` for direct
+access, keeps CORS and XSRF protections enabled, disables static serving and
+usage telemetry, limits WebSocket messages to 25 MB, hides internal exception
+details, and exposes only the minimal toolbar. A production deployment must
+place an authenticated HTTPS reverse proxy on the same host in front of this
+loopback-only service; Stage 15 does not add authentication by itself.
+
 ## Tests
 
 Run the offline test suite:
