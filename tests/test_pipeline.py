@@ -29,6 +29,7 @@ from backend.database import (
     get_analysis,
     initialize_database,
     save_analysis,
+    save_complete_analysis,
     save_evidence_objects,
     save_report,
     save_variants,
@@ -5910,6 +5911,7 @@ class TestPipelineContract:
             for record in result["stages"]
         )
         assert result["report_path"] is None
+        assert result["analysis_id"] is None
         assert result["errors"] == []
         json.dumps(result, allow_nan=False)
 
@@ -5935,6 +5937,11 @@ class TestPipelineContract:
                 ("progress_percent",),
                 True,
                 "integer from 0 to 100",
+            ),
+            (
+                ("analysis_id",),
+                "analysis-unsafe",
+                "application-generated format",
             ),
             (
                 ("stages", 0, "status"),
@@ -6363,6 +6370,7 @@ class TestCompletePipelineHappyPath:
             annotation_max_retries=0,
             llm_client=client,
             report_dir=tmp_path / "reports",
+            persist_analysis=False,
         )
 
         assert result["status"] == "success"
@@ -6419,6 +6427,45 @@ class TestCompletePipelineHappyPath:
         )
         json.dumps(result, allow_nan=False)
 
+    def test_persistence_failure_retains_safe_partial_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        terminal_result = create_pipeline_result()
+        terminal_result["status"] = "success"
+        terminal_result["current_stage"] = "completed"
+        terminal_result["progress_percent"] = 100
+        for stage in terminal_result["stages"]:
+            stage["status"] = "success"
+            stage["progress_percent"] = 100
+
+        monkeypatch.setattr(
+            "backend.pipeline._run_analysis_unpersisted",
+            lambda **_kwargs: terminal_result,
+        )
+
+        def fail_persistence(**_: object) -> object:
+            raise DatabaseWriteError("secret database path")
+
+        monkeypatch.setattr(
+            "backend.pipeline.save_complete_analysis",
+            fail_persistence,
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="1:100:A:G",
+            phenotypes=[],
+        )
+
+        assert result["status"] == "partial"
+        assert result["analysis_id"] is None
+        assert result["warnings"] == [
+            "The analysis completed but could not be saved to the "
+            "local analysis database."
+        ]
+        assert "secret database path" not in json.dumps(result)
+
     def test_llm_failure_retains_evidence_as_partial_result(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -6455,6 +6502,7 @@ class TestCompletePipelineHappyPath:
             top_n=1,
             seed=4,
             llm_client=client,
+            persist_analysis=False,
         )
 
         assert result["status"] == "partial"
@@ -6529,6 +6577,7 @@ class TestCompletePipelineHappyPath:
             seed=5,
             llm_client=client,
             report_dir=tmp_path / "reports",
+            persist_analysis=False,
         )
 
         assert result["status"] == "partial"
@@ -6567,6 +6616,7 @@ class TestCompletePipelineHappyPath:
             phenotypes=[],
             top_n=1,
             seed=6,
+            persist_analysis=False,
         )
 
         serialized = json.dumps(result, allow_nan=False)
@@ -6661,6 +6711,7 @@ class TestCompletePipelineHappyPath:
             associations_path=associations_path,
             llm_client=client,
             report_dir=tmp_path / "reports",
+            database_path=tmp_path / "analysis.sqlite3",
             progress_callback=capture_progress,
         )
 
@@ -6674,6 +6725,7 @@ class TestCompletePipelineHappyPath:
             "matched_hpo_terms"
         ] == ["HP:0001250"]
         assert result["report_path"] is not None
+        assert result["analysis_id"] is not None
         assert Path(result["report_path"]).is_file()
         assert len(annotation_session.post_calls) == 1
         assert len(annotation_session.myvariant_get_calls) == 1
@@ -6695,6 +6747,19 @@ class TestCompletePipelineHappyPath:
             for snapshot in progress_snapshots
         } == {*PIPELINE_STAGE_ORDER, "completed"}
         assert "callback-only mutation" not in result["warnings"]
+        restored = get_analysis(
+            result["analysis_id"],
+            database_path=tmp_path / "analysis.sqlite3",
+            report_dir=tmp_path / "reports",
+        )
+        assert restored["status"] == result["status"]
+        assert len(restored["candidates"]) == 1
+        assert "genotype" not in restored["candidates"][0]
+        assert (
+            restored["evidence_objects"]
+            == result["evidence_objects"]
+        )
+        assert restored["report_path"] == result["report_path"]
 
 
 class TestFrontendExecution:
@@ -7527,6 +7592,122 @@ class TestDatabaseFoundation:
                 database_path=database_path,
                 report_dir=report_directory,
             )
+
+    def test_save_complete_analysis_persists_one_retrievable_bundle(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = (
+            report_directory
+            / "clinical-report-grch38-1-941284-g-a-bundle.md"
+        )
+        report_path.write_text(
+            "# Clinical report\n\nValidated evidence.",
+            encoding="utf-8",
+        )
+        candidate = {
+            "chrom": "1",
+            "pos": 941284,
+            "ref": "G",
+            "alt": "A",
+            "genotype": "0/1",
+        }
+        evidence = TestEvidenceObject._complete_evidence_object()
+
+        analysis = save_complete_analysis(
+            status="success",
+            source_filename="identified-patient.vcf",
+            warnings=["One bounded warning."],
+            candidates=[candidate],
+            evidence_objects=[evidence],
+            report_path=report_path,
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+        restored = get_analysis(
+            analysis["analysis_id"],
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+
+        assert restored["status"] == "success"
+        assert restored["warnings"] == ["One bounded warning."]
+        assert restored["anonymized_filename"] == (
+            f"{analysis['analysis_id']}.vcf"
+        )
+        assert restored["candidates"] == [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": None,
+                "filter": None,
+            }
+        ]
+        assert restored["evidence_objects"] == [
+            sanitize_evidence_object(evidence)
+        ]
+        assert restored["report_path"] == str(report_path.resolve())
+
+    def test_save_complete_analysis_rolls_back_every_table(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        initialize_database(database_path)
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_test_evidence
+                BEFORE INSERT ON evidence_objects
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic failure');
+                END
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(
+            DatabaseWriteError,
+            match="complete analysis could not be saved",
+        ):
+            save_complete_analysis(
+                status="partial",
+                candidates=[
+                    {
+                        "chrom": "1",
+                        "pos": 941284,
+                        "ref": "G",
+                        "alt": "A",
+                    }
+                ],
+                evidence_objects=[
+                    TestEvidenceObject._complete_evidence_object()
+                ],
+                database_path=database_path,
+            )
+
+        connection = connect_database(database_path)
+        try:
+            counts = {
+                table: connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                for table in DATABASE_TABLES
+            }
+        finally:
+            connection.close()
+        assert counts == {
+            table: 0
+            for table in DATABASE_TABLES
+        }
 
     def test_get_analysis_reconstructs_complete_validated_record(
         self,

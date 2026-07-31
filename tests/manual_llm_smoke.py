@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.database import get_analysis
 from backend.llm import call_llm
 from backend.pipeline import run_analysis
 from backend.report import (
@@ -228,6 +229,10 @@ def check_complete_pipeline(
             "Pipeline completed without a saved clinical report: "
             f"{result['errors']}"
         )
+    if result["analysis_id"] is None:
+        raise RuntimeError(
+            "Pipeline completed without a stored analysis ID."
+        )
 
     report_path = Path(result["report_path"])
     if not report_path.is_file():
@@ -245,8 +250,18 @@ def check_complete_pipeline(
         raise RuntimeError(
             f"Pipeline returned a fatal issue: {result['errors']}"
         )
+    stored = get_analysis(result["analysis_id"])
+    if stored["report_path"] != str(report_path.resolve()):
+        raise RuntimeError(
+            "Stored analysis does not reference the generated report."
+        )
+    if stored["evidence_objects"] != result["evidence_objects"]:
+        raise RuntimeError(
+            "Stored analysis did not preserve the Evidence Objects."
+        )
 
     print(f"Pipeline status: {result['status']}")
+    print(f"Analysis ID: {result['analysis_id']}")
     print(f"Variant: {variant}")
     print(f"HPO terms: {', '.join(phenotypes)}")
     for stage in result["stages"]:
@@ -290,7 +305,7 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help=(
             "Run live annotation, HPO matching, LLM interpretation, "
-            "and report storage."
+            "report storage, and analysis persistence."
         ),
     )
     parser.add_argument(

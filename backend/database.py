@@ -444,14 +444,13 @@ def _anonymize_filename(
     return f"{analysis_id}{suffix}"
 
 
-def save_analysis(
+def _prepare_analysis_record(
     *,
     status: str,
-    source_filename: str | None = None,
-    warnings: Iterable[str] = (),
-    database_path: str | Path | None = None,
-) -> AnalysisRecord:
-    """Create and persist one analysis metadata record."""
+    source_filename: str | None,
+    warnings: Iterable[str],
+) -> tuple[AnalysisRecord, str]:
+    """Build validated metadata and its deterministic warning payload."""
 
     normalized_status = _validate_status(status)
     normalized_warnings = _normalize_warnings(warnings)
@@ -470,29 +469,69 @@ def save_analysis(
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    return (
+        {
+            "analysis_id": analysis_id,
+            "created_at": created_at,
+            "anonymized_filename": anonymized_filename,
+            "status": normalized_status,
+            "warnings": list(normalized_warnings),
+        },
+        warnings_json,
+    )
+
+
+def _insert_analysis_record(
+    connection: sqlite3.Connection,
+    record: AnalysisRecord,
+    warnings_json: str,
+) -> None:
+    """Insert one already validated analysis metadata record."""
+
+    connection.execute(
+        """
+        INSERT INTO analyses (
+            analysis_id,
+            created_at,
+            anonymized_filename,
+            status,
+            warnings_json
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            record["analysis_id"],
+            record["created_at"],
+            record["anonymized_filename"],
+            record["status"],
+            warnings_json,
+        ),
+    )
+
+
+def save_analysis(
+    *,
+    status: str,
+    source_filename: str | None = None,
+    warnings: Iterable[str] = (),
+    database_path: str | Path | None = None,
+) -> AnalysisRecord:
+    """Create and persist one analysis metadata record."""
+
+    record, warnings_json = _prepare_analysis_record(
+        status=status,
+        source_filename=source_filename,
+        warnings=warnings,
+    )
 
     resolved_path = initialize_database(database_path)
     connection = connect_database(resolved_path)
     try:
         with connection:
-            connection.execute(
-                """
-                INSERT INTO analyses (
-                    analysis_id,
-                    created_at,
-                    anonymized_filename,
-                    status,
-                    warnings_json
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    analysis_id,
-                    created_at,
-                    anonymized_filename,
-                    normalized_status,
-                    warnings_json,
-                ),
+            _insert_analysis_record(
+                connection,
+                record,
+                warnings_json,
             )
     except sqlite3.Error as exc:
         raise DatabaseWriteError(
@@ -501,13 +540,7 @@ def save_analysis(
     finally:
         connection.close()
 
-    return {
-        "analysis_id": analysis_id,
-        "created_at": created_at,
-        "anonymized_filename": anonymized_filename,
-        "status": normalized_status,
-        "warnings": list(normalized_warnings),
-    }
+    return record
 
 
 def _bounded_collection(
@@ -655,15 +688,11 @@ def _require_analysis(
         )
 
 
-def save_variants(
-    analysis_id: str,
+def _prepare_candidates(
     candidates: Iterable[object],
-    *,
-    database_path: str | Path | None = None,
-) -> int:
-    """Persist bounded genotype-free candidate variants atomically."""
+) -> tuple[list[StoredCandidateVariant], list[str]]:
+    """Validate candidates and build deterministic JSON payloads."""
 
-    normalized_id = _validate_analysis_id(analysis_id)
     raw_candidates = _bounded_collection(
         candidates,
         name="Candidate variants",
@@ -683,6 +712,21 @@ def save_variants(
         )
         for candidate in clean_candidates
     ]
+    return clean_candidates, serialized_candidates
+
+
+def save_variants(
+    analysis_id: str,
+    candidates: Iterable[object],
+    *,
+    database_path: str | Path | None = None,
+) -> int:
+    """Persist bounded genotype-free candidate variants atomically."""
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    clean_candidates, serialized_candidates = _prepare_candidates(
+        candidates
+    )
 
     resolved_path = initialize_database(database_path)
     connection = connect_database(resolved_path)
@@ -729,15 +773,11 @@ def save_variants(
     return len(clean_candidates)
 
 
-def save_evidence_objects(
-    analysis_id: str,
+def _prepare_evidence_objects(
     evidence_objects: Iterable[object],
-    *,
-    database_path: str | Path | None = None,
-) -> int:
-    """Validate, sanitize, and persist Evidence Objects atomically."""
+) -> tuple[list[EvidenceObject], list[str]]:
+    """Validate Evidence Objects and build deterministic JSON payloads."""
 
-    normalized_id = _validate_analysis_id(analysis_id)
     raw_evidence_objects = _bounded_collection(
         evidence_objects,
         name="Evidence Objects",
@@ -764,6 +804,21 @@ def save_evidence_objects(
         )
         for evidence in clean_evidence_objects
     ]
+    return clean_evidence_objects, serialized_evidence_objects
+
+
+def save_evidence_objects(
+    analysis_id: str,
+    evidence_objects: Iterable[object],
+    *,
+    database_path: str | Path | None = None,
+) -> int:
+    """Validate, sanitize, and persist Evidence Objects atomically."""
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    clean_evidence_objects, serialized_evidence_objects = (
+        _prepare_evidence_objects(evidence_objects)
+    )
 
     resolved_path = initialize_database(database_path)
     connection = connect_database(resolved_path)
@@ -944,6 +999,99 @@ def save_report(
     finally:
         connection.close()
     return stored_reference
+
+
+def save_complete_analysis(
+    *,
+    status: str,
+    source_filename: str | None = None,
+    warnings: Iterable[str] = (),
+    candidates: Iterable[object] = (),
+    evidence_objects: Iterable[object] = (),
+    report_path: str | Path | None = None,
+    database_path: str | Path | None = None,
+    report_dir: str | Path | None = None,
+) -> AnalysisRecord:
+    """Atomically persist one complete terminal pipeline result."""
+
+    record, warnings_json = _prepare_analysis_record(
+        status=status,
+        source_filename=source_filename,
+        warnings=warnings,
+    )
+    _, serialized_candidates = _prepare_candidates(candidates)
+    _, serialized_evidence_objects = _prepare_evidence_objects(
+        evidence_objects
+    )
+    stored_report_reference: str | None = None
+    if report_path is not None:
+        _, stored_report_reference = _validate_report_reference(
+            report_path,
+            report_dir=report_dir,
+        )
+
+    resolved_database_path = initialize_database(database_path)
+    connection = connect_database(resolved_database_path)
+    try:
+        with connection:
+            _insert_analysis_record(
+                connection,
+                record,
+                warnings_json,
+            )
+            connection.executemany(
+                """
+                INSERT INTO candidate_variants (
+                    analysis_id,
+                    candidate_index,
+                    variant_json
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (record["analysis_id"], index, payload)
+                    for index, payload in enumerate(
+                        serialized_candidates
+                    )
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO evidence_objects (
+                    analysis_id,
+                    evidence_index,
+                    evidence_json
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (record["analysis_id"], index, payload)
+                    for index, payload in enumerate(
+                        serialized_evidence_objects
+                    )
+                ),
+            )
+            if stored_report_reference is not None:
+                connection.execute(
+                    """
+                    INSERT INTO reports (
+                        analysis_id,
+                        report_path
+                    )
+                    VALUES (?, ?)
+                    """,
+                    (
+                        record["analysis_id"],
+                        stored_report_reference,
+                    ),
+                )
+    except sqlite3.Error as exc:
+        raise DatabaseWriteError(
+            "The complete analysis could not be saved."
+        ) from exc
+    finally:
+        connection.close()
+    return record
 
 
 def _restore_analysis_metadata(
@@ -1224,6 +1372,7 @@ __all__ = [
     "get_analysis",
     "initialize_database",
     "save_analysis",
+    "save_complete_analysis",
     "save_evidence_objects",
     "save_report",
     "save_variants",

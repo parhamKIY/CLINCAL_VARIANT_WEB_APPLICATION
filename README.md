@@ -274,7 +274,7 @@ Run the frontend:
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-## Stage 12 SQLite persistence: in progress
+## Stage 12 SQLite persistence: complete
 
 Stage 12 step 1 adds the versioned SQLite persistence foundation in
 `backend/database.py`. `DATABASE_PATH` is configured through `.env`, while
@@ -316,6 +316,16 @@ Stored JSON and metadata are revalidated instead of trusted, collection limits
 are re-applied during reads, and the portable report filename is resolved only
 after confinement and file-integrity checks. Missing analyses and corrupted
 records return explicit database errors rather than partial or unsafe data.
+
+Stage 12 step 6 integrates persistence into the public `run_analysis()`
+boundary. Every terminal result from valid input is saved as one atomic
+transaction containing analysis metadata, genotype-free candidates, sanitized
+Evidence Objects, and the optional report reference. The returned pipeline
+result exposes its application-generated `analysis_id`. If local persistence
+fails, the completed clinical output remains available, internal database
+details are not exposed, and a successful result is safely downgraded to
+partial with a bounded warning. The live `--pipeline` smoke mode also retrieves
+the saved analysis and verifies its report and Evidence Objects.
 
 ## Tests
 

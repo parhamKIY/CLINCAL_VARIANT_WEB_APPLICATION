@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Literal, TypedDict, cast
 import requests
 
 from backend.annotation import AnnotationError, annotate_variants
+from backend.database import DatabaseError, save_complete_analysis
 from backend.llm import LLMClient, LLMError
 from backend.phenotype import (
     HPODataError,
@@ -37,11 +39,12 @@ from backend.vcf_processing import (
 )
 
 
-PIPELINE_SCHEMA_VERSION = "1.0"
+PIPELINE_SCHEMA_VERSION = "1.1"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
 MAX_PIPELINE_RETAINED_VARIANTS = 100
+ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
 
 PipelineStatus = Literal[
     "pending",
@@ -142,6 +145,7 @@ class PipelineResult(TypedDict):
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
     report_path: str | None
+    analysis_id: str | None
     warnings: list[str]
     errors: list[PipelineIssue]
 
@@ -301,6 +305,7 @@ def create_pipeline_result() -> PipelineResult:
         "phenotype_results": [],
         "evidence_objects": [],
         "report_path": None,
+        "analysis_id": None,
         "warnings": [],
         "errors": [],
     }
@@ -504,6 +509,14 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             "pipeline.report_path",
             PipelineResultError,
         )
+    if value["analysis_id"] is not None and (
+        not isinstance(value["analysis_id"], str)
+        or ANALYSIS_ID_PATTERN.fullmatch(value["analysis_id"]) is None
+    ):
+        raise PipelineResultError(
+            "pipeline.analysis_id must use the application-generated "
+            "format or be null."
+        )
 
     warnings = value["warnings"]
     if not isinstance(warnings, list):
@@ -679,6 +692,42 @@ def _finish_failed_stage(
     validated = validate_pipeline_result(result)
     _notify_progress(validated, progress_callback)
     return validated
+
+
+def _persist_terminal_result(
+    request: AnalysisInput,
+    result: PipelineResult,
+    *,
+    database_path: str | Path | None,
+    report_dir: str | Path | None,
+) -> None:
+    """Persist terminal output without hiding usable clinical results."""
+
+    source_filename: str | None = None
+    if request["input_mode"] == "vcf" and request["vcf_path"] is not None:
+        source_filename = Path(request["vcf_path"]).name
+    try:
+        record = save_complete_analysis(
+            status=result["status"],
+            source_filename=source_filename,
+            warnings=result["warnings"],
+            candidates=result["candidates"],
+            evidence_objects=result["evidence_objects"],
+            report_path=result["report_path"],
+            database_path=database_path,
+            report_dir=report_dir,
+        )
+    except DatabaseError:
+        _append_warning(
+            result,
+            "The analysis completed but could not be saved to the "
+            "local analysis database.",
+        )
+        if result["status"] == "success":
+            result["status"] = "partial"
+        result["analysis_id"] = None
+        return
+    result["analysis_id"] = record["analysis_id"]
 
 
 def _process_and_prioritize(
@@ -1110,7 +1159,7 @@ def run_annotation_and_phenotype(
     return validate_pipeline_result(result)
 
 
-def run_analysis(
+def _run_analysis_unpersisted(
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
     manual_variant: str | None = None,
@@ -1128,7 +1177,7 @@ def run_analysis(
     report_dir: str | Path | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
-    """Run Stage 10 with retained progress and frontend-safe failures."""
+    """Run the clinical pipeline before optional database persistence."""
 
     result = create_pipeline_result()
     try:
@@ -1297,6 +1346,77 @@ def run_analysis(
             recoverable=False,
             progress_callback=progress_callback,
         )
+    return validate_pipeline_result(result)
+
+
+def run_analysis(
+    vcf_path: str | Path | None,
+    phenotypes: list[str] | tuple[str, ...],
+    manual_variant: str | None = None,
+    *,
+    top_n: int | None = None,
+    seed: int | None = None,
+    sample_name: str | None = None,
+    max_variants: int | None = None,
+    annotation_batch_size: int | None = None,
+    annotation_max_retries: int | None = None,
+    annotation_session: requests.Session | None = None,
+    ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
+    llm_client: LLMClient | None = None,
+    report_dir: str | Path | None = None,
+    database_path: str | Path | None = None,
+    persist_analysis: bool = True,
+    progress_callback: PipelineProgressCallback | None = None,
+) -> PipelineResult:
+    """Run the complete pipeline and optionally persist terminal output."""
+
+    result = _run_analysis_unpersisted(
+        vcf_path=vcf_path,
+        phenotypes=phenotypes,
+        manual_variant=manual_variant,
+        top_n=top_n,
+        seed=seed,
+        sample_name=sample_name,
+        max_variants=max_variants,
+        annotation_batch_size=annotation_batch_size,
+        annotation_max_retries=annotation_max_retries,
+        annotation_session=annotation_session,
+        ontology_path=ontology_path,
+        associations_path=associations_path,
+        llm_client=llm_client,
+        report_dir=report_dir,
+        progress_callback=progress_callback,
+    )
+    if not isinstance(persist_analysis, bool):
+        _append_warning(
+            result,
+            "Analysis persistence was disabled because its setting "
+            "was invalid.",
+        )
+        if result["status"] == "success":
+            result["status"] = "partial"
+        return validate_pipeline_result(result)
+    if not persist_analysis or (
+        result["current_stage"] == "input"
+        and any(
+            issue["code"] == "invalid_input"
+            for issue in result["errors"]
+        )
+    ):
+        return result
+
+    request = validate_analysis_input(
+        vcf_path=vcf_path,
+        manual_variant=manual_variant,
+        phenotypes=phenotypes,
+    )
+    _persist_terminal_result(
+        request,
+        result,
+        database_path=database_path,
+        report_dir=report_dir,
+    )
     return validate_pipeline_result(result)
 
 
