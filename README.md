@@ -327,12 +327,28 @@ details are not exposed, and a successful result is safely downgraded to
 partial with a bounded warning. The live `--pipeline` smoke mode also retrieves
 the saved analysis and verifies its report and Evidence Objects.
 
+## Stage 13 comprehensive testing: in progress
+
+Stage 13 step 1 completes the unit-test coverage audit. Central configuration
+now has explicit tests for environment parsing, numeric limits, path
+resolution, directory creation, URL and genome-assembly validation, and
+initialization order. The existing unit suites cover VCF processing,
+prioritization, annotation parsing, phenotype matching, Evidence Objects, and
+LLM error handling. `pytest-cov` provides a repeatable coverage measurement,
+with an initial project-wide minimum of 80%.
+
 ## Tests
 
 Run the offline test suite:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
+```
+
+Run the unit-coverage audit:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q --cov=config --cov=backend --cov=frontend --cov-report=term-missing --cov-fail-under=80
 ```
 
 Run a live request through the production LLM boundary:

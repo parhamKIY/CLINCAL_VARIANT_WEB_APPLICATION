@@ -13,6 +13,7 @@ import pytest
 import requests
 from streamlit.testing.v1 import AppTest
 
+import config as config_module
 from backend.annotation import (
     AnnotationError,
     annotate_variants,
@@ -142,6 +143,231 @@ MINIMAL_HEADER = (
     "##fileformat=VCFv4.2\n"
     '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
 )
+
+
+class TestConfiguration:
+    """Verify the Stage 13 unit-test boundary for central settings."""
+
+    def test_required_environment_value_is_normalized(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TEST_REQUIRED_SETTING", "  configured  ")
+
+        assert (
+            config_module._get_required_env("TEST_REQUIRED_SETTING")
+            == "configured"
+        )
+
+    def test_missing_required_environment_value_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TEST_REQUIRED_SETTING", "  ")
+
+        with pytest.raises(RuntimeError, match="is missing"):
+            config_module._get_required_env("TEST_REQUIRED_SETTING")
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("not-an-integer", "must be an integer"),
+            ("0", "must be greater than zero"),
+            ("-1", "must be greater than zero"),
+        ],
+    )
+    def test_positive_integer_setting_rejects_invalid_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+        message: str,
+    ) -> None:
+        monkeypatch.setenv("TEST_POSITIVE_SETTING", value)
+
+        with pytest.raises(RuntimeError, match=message):
+            config_module._get_positive_int(
+                "TEST_POSITIVE_SETTING",
+                10,
+            )
+
+    def test_positive_integer_setting_uses_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("TEST_POSITIVE_SETTING", raising=False)
+
+        assert (
+            config_module._get_positive_int(
+                "TEST_POSITIVE_SETTING",
+                10,
+            )
+            == 10
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("not-an-integer", "must be an integer"),
+            ("-1", "cannot be negative"),
+        ],
+    )
+    def test_non_negative_setting_rejects_invalid_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+        message: str,
+    ) -> None:
+        monkeypatch.setenv("TEST_NON_NEGATIVE_SETTING", value)
+
+        with pytest.raises(RuntimeError, match=message):
+            config_module._get_non_negative_int(
+                "TEST_NON_NEGATIVE_SETTING",
+                0,
+            )
+
+    def test_non_negative_setting_accepts_zero(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TEST_NON_NEGATIVE_SETTING", "0")
+
+        assert (
+            config_module._get_non_negative_int(
+                "TEST_NON_NEGATIVE_SETTING",
+                2,
+            )
+            == 0
+        )
+
+    def test_relative_and_absolute_paths_are_resolved(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("TEST_PATH_SETTING", raising=False)
+        assert config_module._resolve_path(
+            "TEST_PATH_SETTING",
+            "storage/test",
+        ) == (PROJECT_ROOT / "storage" / "test").resolve()
+
+        absolute_path = tmp_path / "configured"
+        monkeypatch.setenv(
+            "TEST_PATH_SETTING",
+            str(absolute_path),
+        )
+        assert (
+            config_module._resolve_path(
+                "TEST_PATH_SETTING",
+                "unused",
+            )
+            == absolute_path.resolve()
+        )
+
+    def test_create_directories_prepares_all_storage_roots(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        directories = {
+            "UPLOAD_DIR": tmp_path / "uploads",
+            "REPORT_DIR": tmp_path / "reports",
+            "DATABASE_PATH": tmp_path / "database" / "analysis.sqlite3",
+            "CACHE_DIR": tmp_path / "cache",
+            "HPO_DATA_DIR": tmp_path / "hpo",
+        }
+        for name, value in directories.items():
+            monkeypatch.setattr(config_module.Settings, name, value)
+
+        config_module.Settings.create_directories()
+
+        assert directories["UPLOAD_DIR"].is_dir()
+        assert directories["REPORT_DIR"].is_dir()
+        assert directories["DATABASE_PATH"].parent.is_dir()
+        assert directories["CACHE_DIR"].is_dir()
+        assert directories["HPO_DATA_DIR"].is_dir()
+
+    @pytest.mark.parametrize(
+        ("name", "value", "message"),
+        [
+            (
+                "VEP_BASE_URL",
+                "not-a-url",
+                "must be a valid HTTP or HTTPS URL",
+            ),
+            (
+                "HPO_ONTOLOGY_URL",
+                "http://example.test/hp.obo",
+                "HPO_ONTOLOGY_URL must use HTTPS",
+            ),
+            (
+                "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE",
+                "https://example.test/genes.txt",
+                "must use HTTPS and contain",
+            ),
+            (
+                "HPO_DISEASE_ANNOTATIONS_URL_TEMPLATE",
+                "https://example.test/phenotype.hpoa",
+                "must use HTTPS and contain",
+            ),
+            ("APP_NAME", "", "APP_NAME cannot be empty"),
+            ("LLM_PROVIDER", "", "LLM_PROVIDER cannot be empty"),
+            (
+                "GENOME_ASSEMBLY",
+                "hg38",
+                "must be GRCh37 or GRCh38",
+            ),
+            (
+                "VEP_BATCH_SIZE",
+                201,
+                "cannot exceed Ensembl's limit",
+            ),
+        ],
+    )
+    def test_invalid_central_configuration_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        value: object,
+        message: str,
+    ) -> None:
+        monkeypatch.setattr(config_module.Settings, name, value)
+
+        with pytest.raises(RuntimeError, match=message):
+            config_module.Settings.validate()
+
+    def test_database_path_cannot_be_a_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            config_module.Settings,
+            "DATABASE_PATH",
+            tmp_path,
+        )
+
+        with pytest.raises(RuntimeError, match="must point to a file"):
+            config_module.Settings.validate()
+
+    def test_initialize_validates_then_creates_directories(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            config_module.Settings,
+            "validate",
+            classmethod(lambda cls: calls.append("validate")),
+        )
+        monkeypatch.setattr(
+            config_module.Settings,
+            "create_directories",
+            classmethod(lambda cls: calls.append("create")),
+        )
+
+        config_module.Settings.initialize()
+
+        assert calls == ["validate", "create"]
 
 
 class FakeResponse:

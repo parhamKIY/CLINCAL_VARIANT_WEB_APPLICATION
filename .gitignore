@@ -3,6 +3,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+coverage.json
+coverage.xml
+htmlcov/
+tmp/coverage-*.json
 storage/uploads/*
 storage/reports/*
 storage/database/*
