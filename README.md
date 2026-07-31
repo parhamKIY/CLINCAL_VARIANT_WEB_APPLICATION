@@ -301,6 +301,14 @@ operations require an existing analysis, reject unknown fields and oversized
 collections, preserve collection order, and roll back the complete operation
 when any item is invalid.
 
+Stage 12 step 4 adds `save_report()` for secure report references. The
+database stores only a portable filename rather than an absolute server path.
+The referenced file must be a regular, non-symlinked, bounded UTF-8 Markdown
+report directly inside the configured `REPORT_DIR` and must follow the
+generated clinical-report filename convention. Missing parent analyses,
+outside paths, nested files, duplicate references, empty files, invalid UTF-8,
+and oversized reports are rejected without modifying existing records.
+
 ## Tests
 
 Run the offline test suite:

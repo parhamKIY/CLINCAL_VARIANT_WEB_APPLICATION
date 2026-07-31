@@ -14,6 +14,7 @@ from typing import TypedDict
 from uuid import uuid4
 
 from backend.report import (
+    MAX_CLINICAL_REPORT_MARKDOWN_BYTES,
     MAX_EVIDENCE_ALLELE_LENGTH,
     EvidenceObject,
     EvidenceObjectError,
@@ -49,6 +50,9 @@ _CANDIDATE_ALLOWED_FIELDS = frozenset(
         "filter",
         "genotype",
     }
+)
+_REPORT_FILENAME_PATTERN = re.compile(
+    r"clinical-report-[A-Za-z0-9][A-Za-z0-9.-]{0,239}\.md"
 )
 DATABASE_TABLES = {
     "analyses": (
@@ -787,6 +791,142 @@ def save_evidence_objects(
     return len(clean_evidence_objects)
 
 
+def _validate_report_reference(
+    report_path: str | Path,
+    *,
+    report_dir: str | Path | None,
+) -> tuple[Path, str]:
+    """Validate one generated report and return its safe relative path."""
+
+    if not isinstance(report_path, (str, Path)):
+        raise DatabaseValidationError(
+            "Report path must be a string or Path."
+        )
+    if report_dir is not None and not isinstance(
+        report_dir,
+        (str, Path),
+    ):
+        raise DatabaseValidationError(
+            "Report directory must be a string or Path."
+        )
+    allowed_directory = Path(
+        settings.REPORT_DIR if report_dir is None else report_dir
+    ).expanduser()
+    try:
+        allowed_directory = allowed_directory.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DatabaseValidationError(
+            "The configured report directory is unavailable."
+        ) from exc
+    if not allowed_directory.is_dir():
+        raise DatabaseValidationError(
+            "The configured report directory is not a directory."
+        )
+
+    candidate_path = Path(report_path).expanduser()
+    if not candidate_path.is_absolute():
+        candidate_path = allowed_directory / candidate_path
+    if candidate_path.is_symlink():
+        raise DatabaseValidationError(
+            "Report references cannot point to symbolic links."
+        )
+    try:
+        resolved_path = candidate_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DatabaseValidationError(
+            "The generated report file is unavailable."
+        ) from exc
+    if (
+        not resolved_path.is_file()
+        or resolved_path.parent != allowed_directory
+        or _REPORT_FILENAME_PATTERN.fullmatch(resolved_path.name)
+        is None
+    ):
+        raise DatabaseValidationError(
+            "Report references must point to a generated Markdown "
+            "file directly inside the configured report directory."
+        )
+
+    try:
+        with resolved_path.open("rb") as report_file:
+            report_data = report_file.read(
+                MAX_CLINICAL_REPORT_MARKDOWN_BYTES + 1
+            )
+    except OSError as exc:
+        raise DatabaseValidationError(
+            "The generated report file could not be read."
+        ) from exc
+    if not report_data:
+        raise DatabaseValidationError(
+            "The generated report file is empty."
+        )
+    if len(report_data) > MAX_CLINICAL_REPORT_MARKDOWN_BYTES:
+        raise DatabaseValidationError(
+            "The generated report file exceeds the storage limit."
+        )
+    try:
+        report_data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DatabaseValidationError(
+            "The generated report file must contain valid UTF-8 text."
+        ) from exc
+
+    return resolved_path, resolved_path.name
+
+
+def save_report(
+    analysis_id: str,
+    report_path: str | Path,
+    *,
+    database_path: str | Path | None = None,
+    report_dir: str | Path | None = None,
+) -> str:
+    """Persist one confined relative reference to a generated report."""
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    _, stored_reference = _validate_report_reference(
+        report_path,
+        report_dir=report_dir,
+    )
+
+    resolved_database_path = initialize_database(database_path)
+    connection = connect_database(resolved_database_path)
+    try:
+        with connection:
+            _require_analysis(connection, normalized_id)
+            existing_report = connection.execute(
+                """
+                SELECT 1
+                FROM reports
+                WHERE analysis_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+            if existing_report is not None:
+                raise DatabaseWriteError(
+                    "A report has already been saved for this analysis."
+                )
+            connection.execute(
+                """
+                INSERT INTO reports (
+                    analysis_id,
+                    report_path
+                )
+                VALUES (?, ?)
+                """,
+                (normalized_id, stored_reference),
+            )
+    except DatabaseError:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseWriteError(
+            "The report reference could not be saved."
+        ) from exc
+    finally:
+        connection.close()
+    return stored_reference
+
+
 __all__ = [
     "DATABASE_SCHEMA_VERSION",
     "DATABASE_TABLES",
@@ -805,5 +945,6 @@ __all__ = [
     "initialize_database",
     "save_analysis",
     "save_evidence_objects",
+    "save_report",
     "save_variants",
 ]

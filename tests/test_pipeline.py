@@ -27,6 +27,7 @@ from backend.database import (
     initialize_database,
     save_analysis,
     save_evidence_objects,
+    save_report,
     save_variants,
 )
 from backend.llm import (
@@ -7353,6 +7354,175 @@ class TestDatabaseFoundation:
                 analysis["analysis_id"],
                 candidates,
                 database_path=database_path,
+            )
+
+    def test_save_report_stores_only_confined_relative_reference(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = (
+            report_directory
+            / "clinical-report-grch38-1-941284-g-a-test.md"
+        )
+        report_path.write_text(
+            "# Clinical report\n\nValidated evidence.",
+            encoding="utf-8",
+        )
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+
+        stored_reference = save_report(
+            analysis["analysis_id"],
+            report_path,
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+
+        assert stored_reference == report_path.name
+        assert str(report_directory) not in stored_reference
+        connection = connect_database(database_path)
+        try:
+            stored_path = connection.execute(
+                """
+                SELECT report_path
+                FROM reports
+                WHERE analysis_id = ?
+                """,
+                (analysis["analysis_id"],),
+            ).fetchone()["report_path"]
+        finally:
+            connection.close()
+        assert stored_path == report_path.name
+
+    def test_save_report_rejects_path_outside_report_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        outside_report = (
+            tmp_path / "clinical-report-outside-test.md"
+        )
+        outside_report.write_text(
+            "# Outside report",
+            encoding="utf-8",
+        )
+        analysis = save_analysis(
+            status="partial",
+            database_path=database_path,
+        )
+
+        with pytest.raises(
+            DatabaseValidationError,
+            match="directly inside",
+        ):
+            save_report(
+                analysis["analysis_id"],
+                outside_report,
+                database_path=database_path,
+                report_dir=report_directory,
+            )
+
+        connection = connect_database(database_path)
+        try:
+            stored_count = connection.execute(
+                "SELECT COUNT(*) FROM reports"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert stored_count == 0
+
+    @pytest.mark.parametrize(
+        ("report_data", "message"),
+        [
+            (b"", "empty"),
+            (b"\xff\xfe", "valid UTF-8"),
+            (
+                b"x" * (MAX_CLINICAL_REPORT_MARKDOWN_BYTES + 1),
+                "exceeds the storage limit",
+            ),
+        ],
+        ids=("empty", "invalid-utf8", "oversized"),
+    )
+    def test_save_report_rejects_unsafe_contents(
+        self,
+        tmp_path: Path,
+        report_data: bytes,
+        message: str,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = (
+            report_directory / "clinical-report-invalid-test.md"
+        )
+        report_path.write_bytes(report_data)
+        analysis = save_analysis(
+            status="error",
+            database_path=database_path,
+        )
+
+        with pytest.raises(DatabaseValidationError, match=message):
+            save_report(
+                analysis["analysis_id"],
+                report_path,
+                database_path=database_path,
+                report_dir=report_directory,
+            )
+
+    def test_save_report_requires_parent_and_prevents_overwrite(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        first_report = (
+            report_directory / "clinical-report-first-test.md"
+        )
+        second_report = (
+            report_directory / "clinical-report-second-test.md"
+        )
+        first_report.write_text("# First report", encoding="utf-8")
+        second_report.write_text("# Second report", encoding="utf-8")
+
+        with pytest.raises(
+            DatabaseWriteError,
+            match="parent analysis does not exist",
+        ):
+            save_report(
+                "analysis-0123456789abcdef0123456789abcdef",
+                first_report,
+                database_path=database_path,
+                report_dir=report_directory,
+            )
+
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        save_report(
+            analysis["analysis_id"],
+            first_report,
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+
+        with pytest.raises(
+            DatabaseWriteError,
+            match="already been saved",
+        ):
+            save_report(
+                analysis["analysis_id"],
+                second_report,
+                database_path=database_path,
+                report_dir=report_directory,
             )
 
 
