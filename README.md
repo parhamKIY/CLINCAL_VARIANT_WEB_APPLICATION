@@ -345,6 +345,14 @@ persistence, and validated retrieval. Provider responses and the LLM are
 deterministic test doubles, so the integration suite never depends on live
 network services.
 
+Stage 13 step 3 enforces mocked service isolation for the complete automated
+suite. An automatic test guard fails immediately if any test attempts an
+unmocked HTTP request. A degraded-network pipeline test verifies that
+MyVariant.info, ClinVar, and ClinGen/GenCC connection failures remain isolated:
+validated VEP evidence still reaches a partial clinical report, source statuses
+remain explicit, and private transport exception details do not enter
+user-facing pipeline output.
+
 ## Tests
 
 Run the offline test suite:

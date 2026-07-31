@@ -295,7 +295,8 @@ def _post_vep_batch(
         except requests.RequestException as exc:
             if attempt >= max_retries:
                 raise AnnotationServiceError(
-                    f"Ensembl VEP request failed: {exc}"
+                    "Ensembl VEP request failed because the service "
+                    "was unavailable."
                 ) from exc
 
             LOGGER.warning(
@@ -470,7 +471,8 @@ def _get_myvariant(
         except requests.RequestException as exc:
             if attempt >= max_retries:
                 raise AnnotationServiceError(
-                    f"MyVariant.info request failed: {exc}"
+                    "MyVariant.info request failed because the service "
+                    "was unavailable."
                 ) from exc
 
             LOGGER.warning(
@@ -602,7 +604,8 @@ def _get_clinvar_json(
         except requests.RequestException as exc:
             if attempt >= max_retries:
                 raise AnnotationServiceError(
-                    f"NCBI ClinVar request failed: {exc}"
+                    "NCBI ClinVar request failed because the service "
+                    "was unavailable."
                 ) from exc
 
             LOGGER.warning(
@@ -940,7 +943,8 @@ def _get_clingen_gene_validity(
         except requests.RequestException as exc:
             if attempt >= max_retries:
                 raise AnnotationServiceError(
-                    f"UCSC GenCC request failed: {exc}"
+                    "UCSC GenCC request failed because the service "
+                    "was unavailable."
                 ) from exc
 
             LOGGER.warning(

@@ -145,6 +145,30 @@ MINIMAL_HEADER = (
 )
 
 
+@pytest.fixture(autouse=True)
+def block_live_http_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail every automated test that attempts unmocked HTTP."""
+
+    def blocked_request(
+        _session: requests.Session,
+        method: str,
+        url: str,
+        **_kwargs: object,
+    ) -> object:
+        raise AssertionError(
+            "Automated tests must not call live HTTP services: "
+            f"{method.upper()} {url}"
+        )
+
+    monkeypatch.setattr(
+        requests.sessions.Session,
+        "request",
+        blocked_request,
+    )
+
+
 class TestConfiguration:
     """Verify the Stage 13 unit-test boundary for central settings."""
 
@@ -7175,6 +7199,71 @@ class TestStage13IntegrationBoundaries:
             "matched_hpo_terms"
         ] == ["HP:0001250"]
         assert restored["report_path"] == result["report_path"]
+
+
+class TestStage13MockedServiceFailures:
+    """Verify deterministic failure isolation without live providers."""
+
+    def test_live_http_guard_rejects_unmocked_requests(self) -> None:
+        with pytest.raises(
+            AssertionError,
+            match="must not call live HTTP services",
+        ):
+            requests.get("https://example.test/forbidden")
+
+    def test_provider_network_failures_preserve_partial_report(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        session = (
+            TestStage13IntegrationBoundaries._annotation_session()
+        )
+        session.get_responses = [
+            requests.ConnectionError(
+                "private MyVariant network detail"
+            )
+        ]
+        session.clinvar_responses = [
+            requests.Timeout("private ClinVar timeout detail")
+        ]
+        session.clingen_responses = [
+            requests.ConnectionError(
+                "private ClinGen network detail"
+            )
+        ]
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="1:100:A:G",
+            phenotypes=[],
+            top_n=1,
+            seed=13,
+            annotation_max_retries=0,
+            annotation_session=session,  # type: ignore[arg-type]
+            llm_client=(
+                TestStage13IntegrationBoundaries._llm_client()
+            ),
+            report_dir=tmp_path / "reports",
+            persist_analysis=False,
+        )
+
+        assert result["status"] == "partial"
+        assert result["report_path"] is not None
+        assert Path(result["report_path"]).is_file()
+        evidence = result["evidence_objects"][0]
+        assert evidence["source_statuses"] == {
+            "vep": "success",
+            "myvariant": "error",
+            "clinvar": "error",
+            "clingen": "error",
+        }
+        assert evidence["gene"] == "SCN1A"
+        assert evidence["consequence"] == "missense_variant"
+        assert len(result["warnings"]) >= 3
+        serialized = json.dumps(result, allow_nan=False)
+        assert "private MyVariant network detail" not in serialized
+        assert "private ClinVar timeout detail" not in serialized
+        assert "private ClinGen network detail" not in serialized
 
 
 class TestFrontendExecution:
