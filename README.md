@@ -1,6 +1,76 @@
-# Clinical Variant Interpretation
+<div align="center">
+
+# 🧬 Clinical Variant Interpretation
+
+### Evidence-centered variant analysis, phenotype correlation, and clinical reporting
 
 Clinical variant interpretation MVP built with Python and Streamlit.
+
+Secure, provider-neutral, evidence-bound, and designed for an explainable
+professor-facing workflow.
+
+[![MVP status](https://img.shields.io/badge/MVP-Stage_16_complete-24708a?style=for-the-badge)](#stage-16-mvp-preparation-complete)
+[![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=for-the-badge&logo=python&logoColor=white)](#environment)
+[![Streamlit](https://img.shields.io/badge/Streamlit-frontend-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#stage-11-streamlit-frontend-complete)
+[![Tests](https://img.shields.io/badge/tests-464_passing-2e7d32?style=for-the-badge)](#tests)
+[![Coverage](https://img.shields.io/badge/coverage-87%25+-2e7d32?style=for-the-badge)](#tests)
+[![Security](https://img.shields.io/badge/security-Stage_15_complete-5c6bc0?style=for-the-badge)](#stage-15-security-complete)
+
+</div>
+
+> [!IMPORTANT]
+> This application provides clinical decision support only. Its output is not
+> a diagnosis or treatment recommendation and must be reviewed by a qualified
+> healthcare professional.
+
+---
+
+## Explore the project
+
+| Start here | Implementation | Quality and safety |
+|---|---|---|
+| [Environment](#environment) | [Annotation](#stage-5-annotation-complete) | [Comprehensive testing](#stage-13-comprehensive-testing-complete) |
+| [Run the frontend](#stage-11-streamlit-frontend-complete) | [Phenotype and HPO](#stage-6-phenotype-and-hpo-complete) | [Logging and error handling](#stage-14-logging-and-error-handling-complete) |
+| [Run tests](#tests) | [Evidence and LLM](#stage-7-evidence-object-complete) | [Security](#stage-15-security-complete) |
+| [MVP demo](docs/STAGE_16_MVP_DEMO_RUNBOOK.md) | [Reports and persistence](#stage-9-clinical-report-generation-complete) | [MVP release](#stage-16-mvp-preparation-complete) |
+
+## How the system works
+
+```mermaid
+flowchart LR
+    A["VCF upload or manual variant"] --> B["Validation and normalization"]
+    B --> C["Bounded candidate prioritization"]
+    C --> D["Multi-source annotation"]
+    D --> E["HPO phenotype matching"]
+    E --> F["Sanitized Evidence Objects"]
+    F --> G["Provider-neutral LLM interpretation"]
+    G --> H["Validated clinical report"]
+    H --> I["Markdown, PDF, and Word"]
+    H --> J["SQLite persistence"]
+
+    D1["Ensembl VEP"] --> D
+    D2["MyVariant.info"] --> D
+    D3["NCBI ClinVar"] --> D
+    D4["UCSC GenCC"] --> D
+
+    classDef input fill:#e8f4f8,stroke:#24708a,color:#17324d
+    classDef evidence fill:#eef1f7,stroke:#5c6bc0,color:#17324d
+    classDef output fill:#eaf5eb,stroke:#2e7d32,color:#17324d
+    class A,B,C input
+    class D,E,F,G evidence
+    class H,I,J output
+```
+
+| Capability | What the MVP provides |
+|---|---|
+| **Variant input** | Streamed `.vcf`/`.vcf.gz` processing and manual `CHROM:POS:REF:ALT` input |
+| **Clinical evidence** | Isolated Ensembl VEP, MyVariant.info, NCBI ClinVar, and UCSC GenCC integrations |
+| **Phenotype correlation** | Local HPO search, normalization, update workflow, and explainable gene matching |
+| **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
+| **Reporting** | Validated Markdown plus local PDF and Word exports |
+| **Safety** | Data minimization, bounded storage, secret scanning, safe errors, and security acceptance gates |
+
+---
 
 ## Current implementation status
 
@@ -38,14 +108,56 @@ The two current files under `data/samples/` are Ensembl reference VCFs.
 They do not contain `FORMAT` or patient sample columns, so their genotype
 output is correctly reported as `None`.
 
-## Environment
+<a id="environment"></a>
+
+## 🚀 Environment
+
+Create an isolated Python environment and install the pinned project
+dependencies:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Stage 6 phenotype and HPO: complete
+<a id="stage-5-annotation-complete"></a>
+
+## 🧬 Stage 5 annotation: complete
+
+`backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info,
+NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
+
+- explicit GRCh37/GRCh38 assembly configuration;
+- POST batching with Ensembl's 200-variant maximum;
+- exact MyVariant chromosome, position, REF, ALT, and assembly matching;
+- direct ClinVar ESearch and ESummary queries using exact assembly-specific
+  HGVS identifiers;
+- NCBI E-utility requests limited to fewer than three requests per second;
+- request timeout and limited retries for transient failures;
+- structured per-variant error output without stopping the whole pipeline;
+- cleaned transcript, gene, consequence, impact, HGVS protein change, and
+  source-reference fields;
+- standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
+- standardized ClinVar VCV/RCV/SCV accessions, germline clinical
+  significance, review status, evaluation date, and conditions;
+- exact UCSC assembly, coordinate, ClinGen submitter, and gene-symbol
+  matching with standardized disease, classification, inheritance,
+  criteria URL, PMID, and report fields;
+- unified multi-source output with independent failure isolation;
+- no raw API response is passed to later pipeline stages.
+
+Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks
+through the production annotation path:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_annotation_smoke.py
+```
+
+An optional manual variant can be supplied in `CHROM:POS:REF:ALT` format.
+
+<a id="stage-6-phenotype-and-hpo-complete"></a>
+
+## 🧩 Stage 6 phenotype and HPO: complete
 
 Stage 6 uses the official Human Phenotype Ontology OBO release stored at:
 
@@ -77,7 +189,9 @@ installation, rejects downgrades, preserves the previous files, and rolls back
 a partial installation. This keeps phenotype terms, gene associations, and
 disease annotations release-compatible.
 
-## Stage 7 evidence object: complete
+<a id="stage-7-evidence-object-complete"></a>
+
+## 🧱 Stage 7 evidence object: complete
 
 `backend/report.py` defines the versioned `EvidenceObject` contract and its
 validation boundary. The schema keeps only standardized variant, annotation,
@@ -94,7 +208,9 @@ truncation warnings, and enforces a 64 KiB serialized-size ceiling. Automated
 boundary integration and a complete local smoke test verify the Stage 5,
 Stage 6, and Stage 7 handoff without exposing genotype or raw source payloads.
 
-## Stage 8 LLM interpretation: complete
+<a id="stage-8-llm-interpretation-complete"></a>
+
+## 🤖 Stage 8 LLM interpretation: complete
 
 `backend/llm.py` is the only application-facing LLM boundary. Stage 8 step 1
 defines immutable provider-neutral request, response, message, and token-usage
@@ -158,7 +274,9 @@ LLM_MODEL=model-name
 LLM_TIMEOUT=30
 ```
 
-## Stage 9 clinical report generation: complete
+<a id="stage-9-clinical-report-generation-complete"></a>
+
+## 📄 Stage 9 clinical report generation: complete
 
 Stage 9 step 1 defines a versioned, JSON-safe `ClinicalReport` contract in
 `backend/report.py`. It fixes the nine-section display order for case summary,
@@ -200,7 +318,9 @@ composition, rendering, idempotent storage, sensitive-field exclusion, and
 failure before file creation. The live `--report` smoke mode performs the same
 path with bundled synthetic evidence and saves the result under `REPORT_DIR`.
 
-## Stage 10 complete pipeline integration: complete
+<a id="stage-10-complete-pipeline-integration-complete"></a>
+
+## 🔄 Stage 10 complete pipeline integration: complete
 
 Stage 10 step 1 defines the public analysis-input and frontend-result contracts
 in `backend/pipeline.py`. Exactly one VCF path or manual variant is accepted,
@@ -251,7 +371,9 @@ only remote services. A live `--pipeline` smoke mode exercises the same public
 the saved report. Stage 10 is complete; the temporary random prioritizer
 remains the documented non-clinical MVP limitation.
 
-## Stage 11 Streamlit frontend: complete
+<a id="stage-11-streamlit-frontend-complete"></a>
+
+## 🖥️ Stage 11 Streamlit frontend: complete
 
 Stage 11 establishes the complete Streamlit execution and result-presentation
 boundary. The root `app.py` delegates rendering to
@@ -286,7 +408,9 @@ Run the frontend:
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-## Stage 12 SQLite persistence: complete
+<a id="stage-12-sqlite-persistence-complete"></a>
+
+## 🗄️ Stage 12 SQLite persistence: complete
 
 Stage 12 step 1 adds the versioned SQLite persistence foundation in
 `backend/database.py`. `DATABASE_PATH` is configured through `.env`, while
@@ -339,7 +463,9 @@ details are not exposed, and a successful result is safely downgraded to
 partial with a bounded warning. The live `--pipeline` smoke mode also retrieves
 the saved analysis and verifies its report and Evidence Objects.
 
-## Stage 13 comprehensive testing: complete
+<a id="stage-13-comprehensive-testing-complete"></a>
+
+## ✅ Stage 13 comprehensive testing: complete
 
 Stage 13 step 1 completes the unit-test coverage audit. Central configuration
 now has explicit tests for environment parsing, numeric limits, path
@@ -383,7 +509,9 @@ regression set, and then requires the complete offline suite to pass with at
 least 80% coverage. Live provider checks remain explicitly separate from the
 deterministic acceptance gate.
 
-## Stage 14 logging and error handling: complete
+<a id="stage-14-logging-and-error-handling-complete"></a>
+
+## 🧭 Stage 14 logging and error handling: complete
 
 Stage 14 step 1 adds the central logging boundary in
 `backend/logging_config.py`. The Streamlit entry point configures one
@@ -440,7 +568,9 @@ internal-failure leak check. `tests/run_stage14_acceptance.py` compiles the
 project, runs those focused security checks, and then requires the complete
 offline suite to pass with at least 80% coverage.
 
-## Stage 15 security: complete
+<a id="stage-15-security-complete"></a>
+
+## 🔐 Stage 15 security: complete
 
 Stage 15 step 1 adds a repeatable repository secrets audit in
 `tests/run_secrets_audit.py`. It verifies that `.env` remains ignored, rejects
@@ -507,7 +637,9 @@ dependency consistency without network access, runs the repository secrets
 audit, executes all focused `stage15_security` checks, and requires the complete
 test suite to pass with at least 80% coverage.
 
-## Stage 16 MVP preparation: complete
+<a id="stage-16-mvp-preparation-complete"></a>
+
+## 🏁 Stage 16 MVP preparation: complete
 
 Stage 16 step 1 completes the MVP requirements audit in
 `docs/STAGE_16_MVP_REQUIREMENTS.md`. Every roadmap capability is mapped to its
@@ -543,7 +675,11 @@ and Stage 16 MVP checks, and requires the complete suite to pass with at least
 professor-demonstration decision, evidence, assets, pre-presentation checks,
 accepted MVP limitations, and production restriction.
 
-## Tests
+---
+
+<a id="tests"></a>
+
+## 🧪 Tests
 
 Run the offline test suite:
 
@@ -673,7 +809,11 @@ Custom phenotype inputs can be supplied when needed:
   --gene SCN1A
 ```
 
-## Windows VCF parser decision
+---
+
+## Technical decisions and MVP limitations
+
+### Windows VCF parser decision
 
 `cyvcf2` has no compatible native Windows wheel for the current Python
 3.13 environment and its Windows support is experimental. The MVP uses
@@ -682,7 +822,11 @@ functions remain isolated in `backend/vcf_processing.py`, allowing the
 parser implementation to be replaced later without changing the
 pipeline interface.
 
-## Normalization limitation
+### Normalization limitation
+
+> [!WARNING]
+> Reference-aware normalization is implemented but is not active in the
+> current Windows MVP environment.
 
 Reference-aware normalization is optional during MVP parsing but must be
 enabled before clinical annotation whenever reference-aware left alignment
@@ -695,7 +839,11 @@ or representation normalization is required. It needs:
 normalization command is implemented and error-tested but has not yet
 been executed against a reference FASTA.
 
-## Temporary prioritization strategy
+### Temporary prioritization strategy
+
+> [!CAUTION]
+> Reservoir sampling is a bounded-memory MVP placeholder, not a clinically
+> valid ranking method.
 
 `backend/prioritization.py` currently uses reservoir sampling. This keeps
 memory usage bounded while giving each parsed variant an equal chance of
@@ -706,36 +854,3 @@ ranking algorithm. The pipeline calls only `prioritize_variants()`, so the
 internal strategy can later be replaced with configurable frequency,
 functional-impact, phenotype, gene-disease, and inheritance scoring without
 changing the pipeline interface.
-
-## Stage 5 annotation: complete
-
-`backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info,
-NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
-
-- explicit GRCh37/GRCh38 assembly configuration;
-- POST batching with Ensembl's 200-variant maximum;
-- exact MyVariant chromosome, position, REF, ALT, and assembly matching;
-- direct ClinVar ESearch and ESummary queries using exact assembly-specific
-  HGVS identifiers;
-- NCBI E-utility requests limited to fewer than three requests per second;
-- request timeout and limited retries for transient failures;
-- structured per-variant error output without stopping the whole pipeline;
-- cleaned transcript, gene, consequence, impact, HGVS protein change, and
-  source-reference fields;
-- standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
-- standardized ClinVar VCV/RCV/SCV accessions, germline clinical
-  significance, review status, evaluation date, and conditions;
-- exact UCSC assembly, coordinate, ClinGen submitter, and gene-symbol
-  matching with standardized disease, classification, inheritance,
-  criteria URL, PMID, and report fields;
-- unified multi-source output with independent failure isolation;
-- no raw API response is passed to later pipeline stages.
-
-Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks
-through the production annotation path:
-
-```powershell
-.\.venv\Scripts\python.exe tests\manual_annotation_smoke.py
-```
-
-An optional manual variant can be supplied in `CHROM:POS:REF:ALT` format.
