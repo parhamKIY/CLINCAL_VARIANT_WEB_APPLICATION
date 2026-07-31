@@ -309,6 +309,14 @@ generated clinical-report filename convention. Missing parent analyses,
 outside paths, nested files, duplicate references, empty files, invalid UTF-8,
 and oversized reports are rejected without modifying existing records.
 
+Stage 12 step 5 adds `get_analysis()` as the validated retrieval boundary. It
+reconstructs metadata, ordered genotype-free candidates, sanitized Evidence
+Objects, warnings, and the optional report reference from an analysis ID.
+Stored JSON and metadata are revalidated instead of trusted, collection limits
+are re-applied during reads, and the portable report filename is resolved only
+after confinement and file-integrity checks. Missing analyses and corrupted
+records return explicit database errors rather than partial or unsafe data.
+
 ## Tests
 
 Run the offline test suite:

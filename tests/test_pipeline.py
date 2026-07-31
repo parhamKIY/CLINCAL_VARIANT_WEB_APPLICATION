@@ -20,10 +20,13 @@ from backend.annotation import (
 from backend.database import (
     DATABASE_SCHEMA_VERSION,
     DATABASE_TABLES,
+    AnalysisNotFoundError,
     DatabaseInitializationError,
+    DatabaseReadError,
     DatabaseValidationError,
     DatabaseWriteError,
     connect_database,
+    get_analysis,
     initialize_database,
     save_analysis,
     save_evidence_objects,
@@ -7521,6 +7524,246 @@ class TestDatabaseFoundation:
             save_report(
                 analysis["analysis_id"],
                 second_report,
+                database_path=database_path,
+                report_dir=report_directory,
+            )
+
+    def test_get_analysis_reconstructs_complete_validated_record(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = (
+            report_directory
+            / "clinical-report-grch38-1-941284-g-a-retrieval.md"
+        )
+        report_path.write_text(
+            "# Clinical report\n\nValidated evidence.",
+            encoding="utf-8",
+        )
+        analysis = save_analysis(
+            status="partial",
+            source_filename="patient-name.vcf",
+            warnings=["ClinVar was temporarily unavailable."],
+            database_path=database_path,
+        )
+        candidate = {
+            "chrom": "1",
+            "pos": 941284,
+            "ref": "G",
+            "alt": "A",
+            "qual": 99.0,
+            "filter": "PASS",
+            "genotype": "0/1",
+        }
+        evidence = TestEvidenceObject._complete_evidence_object()
+        save_variants(
+            analysis["analysis_id"],
+            [candidate],
+            database_path=database_path,
+        )
+        save_evidence_objects(
+            analysis["analysis_id"],
+            [evidence],
+            database_path=database_path,
+        )
+        save_report(
+            analysis["analysis_id"],
+            report_path,
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+
+        restored = get_analysis(
+            analysis["analysis_id"],
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+
+        assert restored["analysis_id"] == analysis["analysis_id"]
+        assert restored["created_at"] == analysis["created_at"]
+        assert restored["anonymized_filename"] == (
+            f"{analysis['analysis_id']}.vcf"
+        )
+        assert restored["status"] == "partial"
+        assert restored["warnings"] == [
+            "ClinVar was temporarily unavailable."
+        ]
+        assert restored["candidates"] == [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": 99.0,
+                "filter": "PASS",
+            }
+        ]
+        assert "genotype" not in restored["candidates"][0]
+        assert restored["evidence_objects"] == [
+            sanitize_evidence_object(evidence)
+        ]
+        assert restored["report_path"] == str(report_path.resolve())
+
+    def test_get_analysis_returns_empty_optional_collections(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="error",
+            database_path=database_path,
+        )
+
+        restored = get_analysis(
+            analysis["analysis_id"],
+            database_path=database_path,
+        )
+
+        assert restored["anonymized_filename"] is None
+        assert restored["candidates"] == []
+        assert restored["evidence_objects"] == []
+        assert restored["report_path"] is None
+
+    def test_get_analysis_reports_missing_identifier(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+
+        with pytest.raises(
+            AnalysisNotFoundError,
+            match="was not found",
+        ):
+            get_analysis(
+                "analysis-0123456789abcdef0123456789abcdef",
+                database_path=database_path,
+            )
+
+    @pytest.mark.parametrize(
+        ("column", "corrupt_value", "message"),
+        [
+            (
+                "warnings_json",
+                '{"unexpected":true}',
+                "warnings are invalid",
+            ),
+            (
+                "status",
+                "finished",
+                "metadata is invalid",
+            ),
+        ],
+    )
+    def test_get_analysis_rejects_corrupted_metadata(
+        self,
+        tmp_path: Path,
+        column: str,
+        corrupt_value: str,
+        message: str,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                f'UPDATE analyses SET "{column}" = ? '
+                "WHERE analysis_id = ?",
+                (corrupt_value, analysis["analysis_id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(DatabaseReadError, match=message):
+            get_analysis(
+                analysis["analysis_id"],
+                database_path=database_path,
+            )
+
+    def test_get_analysis_rejects_corrupted_candidate_json(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        save_variants(
+            analysis["analysis_id"],
+            [
+                {
+                    "chrom": "1",
+                    "pos": 941284,
+                    "ref": "G",
+                    "alt": "A",
+                }
+            ],
+            database_path=database_path,
+        )
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                UPDATE candidate_variants
+                SET variant_json = ?
+                WHERE analysis_id = ?
+                """,
+                (
+                    '{"chrom":"1","pos":941284,"ref":"G",'
+                    '"alt":"A","qual":null,"filter":null,'
+                    '"genotype":"0/1"}',
+                    analysis["analysis_id"],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(
+            DatabaseReadError,
+            match="stored candidate variant is invalid",
+        ):
+            get_analysis(
+                analysis["analysis_id"],
+                database_path=database_path,
+            )
+
+    def test_get_analysis_revalidates_report_file(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = (
+            report_directory / "clinical-report-missing-test.md"
+        )
+        report_path.write_text("# Report", encoding="utf-8")
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        save_report(
+            analysis["analysis_id"],
+            report_path,
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+        report_path.unlink()
+
+        with pytest.raises(
+            DatabaseReadError,
+            match="stored report reference is invalid",
+        ):
+            get_analysis(
+                analysis["analysis_id"],
                 database_path=database_path,
                 report_dir=report_directory,
             )

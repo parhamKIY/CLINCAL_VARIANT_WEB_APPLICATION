@@ -40,6 +40,9 @@ _CONTROL_CHARACTER_PATTERN = re.compile(
 _CANDIDATE_REQUIRED_FIELDS = frozenset(
     {"chrom", "pos", "ref", "alt"}
 )
+_STORED_CANDIDATE_FIELDS = frozenset(
+    {"chrom", "pos", "ref", "alt", "qual", "filter"}
+)
 _CANDIDATE_ALLOWED_FIELDS = frozenset(
     {
         "chrom",
@@ -156,6 +159,14 @@ class DatabaseWriteError(DatabaseError):
     """Raised when validated analysis metadata cannot be persisted."""
 
 
+class DatabaseReadError(DatabaseError):
+    """Raised when persisted analysis data cannot be read safely."""
+
+
+class AnalysisNotFoundError(DatabaseReadError):
+    """Raised when an analysis identifier has no stored record."""
+
+
 class AnalysisRecord(TypedDict):
     """Frontend-safe metadata stored for one analysis."""
 
@@ -175,6 +186,14 @@ class StoredCandidateVariant(TypedDict):
     alt: str
     qual: float | None
     filter: str | None
+
+
+class StoredAnalysisRecord(AnalysisRecord):
+    """Complete validated database record for one analysis."""
+
+    candidates: list[StoredCandidateVariant]
+    evidence_objects: list[EvidenceObject]
+    report_path: str | None
 
 
 def _resolve_database_path(
@@ -927,6 +946,263 @@ def save_report(
     return stored_reference
 
 
+def _restore_analysis_metadata(
+    row: sqlite3.Row,
+) -> AnalysisRecord:
+    """Validate metadata loaded from the database without normalizing it."""
+
+    analysis_id = _validate_analysis_id(row["analysis_id"])
+    created_at = row["created_at"]
+    if not isinstance(created_at, str):
+        raise DatabaseReadError(
+            "Stored analysis metadata is invalid."
+        )
+    try:
+        parsed_created_at = datetime.strptime(
+            created_at,
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+    except ValueError as exc:
+        raise DatabaseReadError(
+            "Stored analysis metadata is invalid."
+        ) from exc
+    if (
+        parsed_created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        != created_at
+    ):
+        raise DatabaseReadError(
+            "Stored analysis metadata is invalid."
+        )
+
+    stored_status = row["status"]
+    try:
+        normalized_status = _validate_status(stored_status)
+    except DatabaseValidationError as exc:
+        raise DatabaseReadError(
+            "Stored analysis metadata is invalid."
+        ) from exc
+    if normalized_status != stored_status:
+        raise DatabaseReadError(
+            "Stored analysis metadata is invalid."
+        )
+
+    anonymized_filename = row["anonymized_filename"]
+    approved_filenames = {
+        f"{analysis_id}.vcf",
+        f"{analysis_id}.vcf.gz",
+    }
+    if (
+        anonymized_filename is not None
+        and anonymized_filename not in approved_filenames
+    ):
+        raise DatabaseReadError(
+            "Stored analysis metadata is invalid."
+        )
+
+    try:
+        raw_warnings = json.loads(row["warnings_json"])
+        restored_warnings = _normalize_warnings(raw_warnings)
+    except (
+        json.JSONDecodeError,
+        TypeError,
+        DatabaseValidationError,
+    ) as exc:
+        raise DatabaseReadError(
+            "Stored analysis warnings are invalid."
+        ) from exc
+    if restored_warnings != raw_warnings:
+        raise DatabaseReadError(
+            "Stored analysis warnings are invalid."
+        )
+
+    return {
+        "analysis_id": analysis_id,
+        "created_at": created_at,
+        "anonymized_filename": anonymized_filename,
+        "status": normalized_status,
+        "warnings": restored_warnings,
+    }
+
+
+def _restore_candidates(
+    rows: list[sqlite3.Row],
+) -> list[StoredCandidateVariant]:
+    """Restore ordered genotype-free candidates and reject corruption."""
+
+    if len(rows) > MAX_STORED_CANDIDATES:
+        raise DatabaseReadError(
+            "Stored candidate variants exceed the retrieval limit."
+        )
+    restored: list[StoredCandidateVariant] = []
+    for expected_index, row in enumerate(rows):
+        if row["candidate_index"] != expected_index:
+            raise DatabaseReadError(
+                "Stored candidate variant order is invalid."
+            )
+        try:
+            raw_candidate = json.loads(row["variant_json"])
+            if (
+                not isinstance(raw_candidate, dict)
+                or set(raw_candidate) != _STORED_CANDIDATE_FIELDS
+            ):
+                raise DatabaseValidationError(
+                    "Stored candidate fields are invalid."
+                )
+            clean_candidate = _sanitize_candidate(
+                raw_candidate,
+                index=expected_index,
+            )
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            DatabaseValidationError,
+        ) as exc:
+            raise DatabaseReadError(
+                "A stored candidate variant is invalid."
+            ) from exc
+        if clean_candidate != raw_candidate:
+            raise DatabaseReadError(
+                "A stored candidate variant is invalid."
+            )
+        restored.append(clean_candidate)
+    return restored
+
+
+def _restore_evidence_objects(
+    rows: list[sqlite3.Row],
+) -> list[EvidenceObject]:
+    """Restore ordered Evidence Objects through the Stage 7 boundary."""
+
+    if len(rows) > MAX_STORED_EVIDENCE_OBJECTS:
+        raise DatabaseReadError(
+            "Stored Evidence Objects exceed the retrieval limit."
+        )
+    restored: list[EvidenceObject] = []
+    for expected_index, row in enumerate(rows):
+        if row["evidence_index"] != expected_index:
+            raise DatabaseReadError(
+                "Stored Evidence Object order is invalid."
+            )
+        try:
+            raw_evidence = json.loads(row["evidence_json"])
+            clean_evidence = sanitize_evidence_object(raw_evidence)
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            EvidenceObjectError,
+        ) as exc:
+            raise DatabaseReadError(
+                "A stored Evidence Object is invalid."
+            ) from exc
+        if clean_evidence != raw_evidence:
+            raise DatabaseReadError(
+                "A stored Evidence Object is invalid."
+            )
+        restored.append(clean_evidence)
+    return restored
+
+
+def get_analysis(
+    analysis_id: str,
+    *,
+    database_path: str | Path | None = None,
+    report_dir: str | Path | None = None,
+) -> StoredAnalysisRecord:
+    """Retrieve and revalidate one complete persisted analysis."""
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    resolved_database_path = initialize_database(database_path)
+    connection = connect_database(resolved_database_path)
+    try:
+        metadata_row = connection.execute(
+            """
+            SELECT
+                analysis_id,
+                created_at,
+                anonymized_filename,
+                status,
+                warnings_json
+            FROM analyses
+            WHERE analysis_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+        if metadata_row is None:
+            raise AnalysisNotFoundError(
+                "The requested analysis was not found."
+            )
+        candidate_rows = list(
+            connection.execute(
+                """
+                SELECT candidate_index, variant_json
+                FROM candidate_variants
+                WHERE analysis_id = ?
+                ORDER BY candidate_index
+                LIMIT ?
+                """,
+                (normalized_id, MAX_STORED_CANDIDATES + 1),
+            )
+        )
+        evidence_rows = list(
+            connection.execute(
+                """
+                SELECT evidence_index, evidence_json
+                FROM evidence_objects
+                WHERE analysis_id = ?
+                ORDER BY evidence_index
+                LIMIT ?
+                """,
+                (normalized_id, MAX_STORED_EVIDENCE_OBJECTS + 1),
+            )
+        )
+        report_row = connection.execute(
+            """
+            SELECT report_path
+            FROM reports
+            WHERE analysis_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+    except DatabaseError:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseReadError(
+            "The stored analysis could not be read."
+        ) from exc
+    finally:
+        connection.close()
+
+    metadata = _restore_analysis_metadata(metadata_row)
+    candidates = _restore_candidates(candidate_rows)
+    evidence_objects = _restore_evidence_objects(evidence_rows)
+
+    restored_report_path: str | None = None
+    if report_row is not None:
+        try:
+            resolved_report_path, stored_reference = (
+                _validate_report_reference(
+                    report_row["report_path"],
+                    report_dir=report_dir,
+                )
+            )
+        except DatabaseValidationError as exc:
+            raise DatabaseReadError(
+                "The stored report reference is invalid."
+            ) from exc
+        if stored_reference != report_row["report_path"]:
+            raise DatabaseReadError(
+                "The stored report reference is invalid."
+            )
+        restored_report_path = str(resolved_report_path)
+
+    return {
+        **metadata,
+        "candidates": candidates,
+        "evidence_objects": evidence_objects,
+        "report_path": restored_report_path,
+    }
+
+
 __all__ = [
     "DATABASE_SCHEMA_VERSION",
     "DATABASE_TABLES",
@@ -934,14 +1210,18 @@ __all__ = [
     "MAX_STORED_EVIDENCE_OBJECTS",
     "ANALYSIS_STATUSES",
     "AnalysisRecord",
+    "AnalysisNotFoundError",
     "StoredCandidateVariant",
+    "StoredAnalysisRecord",
     "DatabaseConfigurationError",
     "DatabaseConnectionError",
     "DatabaseError",
     "DatabaseInitializationError",
+    "DatabaseReadError",
     "DatabaseValidationError",
     "DatabaseWriteError",
     "connect_database",
+    "get_analysis",
     "initialize_database",
     "save_analysis",
     "save_evidence_objects",
