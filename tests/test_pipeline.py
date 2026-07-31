@@ -10336,7 +10336,11 @@ class TestFrontendFoundation:
                 "alternative; validate report consistency"
             ),
         ]
-        model_selector.set_value("gpt-5.4-nano").run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "gpt-5.4-nano"
+        ).click().run(timeout=10)
         app.segmented_control[0].set_value("Manual variant").run(
             timeout=10
         )

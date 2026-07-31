@@ -157,6 +157,13 @@ def _format_llm_model_option(model: str) -> str:
     return f"{model} — {pin_label}{advantage}"
 
 
+def _select_pinned_llm_model(model: str) -> None:
+    """Select one pinned model and discard an older analysis result."""
+
+    st.session_state[LLM_MODEL_KEY] = model
+    _clear_analysis_result()
+
+
 def _initialize_session_state() -> None:
     """Initialize frontend-only state in one place."""
 
@@ -357,6 +364,34 @@ def _render_llm_model_selector() -> str:
             "and type any part of a model name to search the curated "
             "AvalAI chat-model catalog."
         )
+        with st.container(
+            key="pinned_llm_models",
+            gap="xsmall",
+        ):
+            st.markdown(
+                "**:material/push_pin: Pinned model quick picks**"
+            )
+            st.caption(
+                "Frequently used models are grouped here for fast "
+                "access. Hover over a model to see its advantage."
+            )
+            with st.container(
+                horizontal=True,
+                gap="xsmall",
+            ):
+                for model in LLM_PINNED_MODELS:
+                    st.button(
+                        model,
+                        key=f"select_{model}",
+                        type=(
+                            "primary"
+                            if st.session_state[LLM_MODEL_KEY] == model
+                            else "secondary"
+                        ),
+                        help=LLM_MODEL_ADVANTAGES[model],
+                        on_click=_select_pinned_llm_model,
+                        args=(model,),
+                    )
         selected_model = st.selectbox(
             "LLM model",
             _llm_model_options(),

@@ -49,6 +49,37 @@ h3 {
     line-height: 1.7rem;
 }
 
+.st-key-pinned_llm_models {
+    margin: 0.35rem 0 0.85rem;
+    padding: 0.85rem 0.95rem 0.95rem;
+    border: 1px solid #d1d7de;
+    border-radius: 0.85rem;
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.62), transparent),
+        #edf0f3;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+.st-key-pinned_llm_models [data-testid="stButton"] button {
+    border-color: #c5ccd4;
+    background: #dde2e7;
+    color: var(--cv-navy);
+    font-weight: 650;
+    box-shadow: 0 1px 2px rgba(23, 50, 77, 0.08);
+}
+
+.st-key-pinned_llm_models [data-testid="stButton"] button:hover {
+    border-color: #9da8b3;
+    background: #cfd6dd;
+    color: var(--cv-navy);
+}
+
+.st-key-pinned_llm_models [data-testid="stButton"] button[kind="primary"] {
+    border-color: var(--cv-blue);
+    background: var(--cv-blue);
+    color: #ffffff;
+}
+
 @media (max-width: 760px) {
     .block-container {
         padding-top: 1.3rem;
