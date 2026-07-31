@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 from copy import deepcopy
@@ -27,6 +28,7 @@ from backend.database import (
     DATABASE_SCHEMA_VERSION,
     DATABASE_TABLES,
     AnalysisNotFoundError,
+    DatabaseConfigurationError,
     DatabaseInitializationError,
     DatabaseReadError,
     DatabaseValidationError,
@@ -330,6 +332,16 @@ class TestConfiguration:
         assert directories["CACHE_DIR"].is_dir()
         assert directories["HPO_DATA_DIR"].is_dir()
         assert directories["LOG_PATH"].parent.is_dir()
+        if os.name == "posix":
+            for name, directory in directories.items():
+                checked_directory = (
+                    directory.parent
+                    if name in {"DATABASE_PATH", "LOG_PATH"}
+                    else directory
+                )
+                assert stat.S_IMODE(
+                    checked_directory.stat().st_mode
+                ) == 0o700
 
     @pytest.mark.parametrize(
         ("name", "value", "message"),
@@ -481,6 +493,30 @@ class TestLoggingConfiguration:
             for handler in logger.handlers
         )
         assert log_path.is_file()
+        if os.name == "posix":
+            assert stat.S_IMODE(
+                log_path.parent.stat().st_mode
+            ) == 0o700
+            assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+    @pytest.mark.stage15_security
+    def test_symbolic_link_log_target_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "target.log"
+        target.write_text("existing", encoding="utf-8")
+        link = tmp_path / "linked.log"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("Symbolic links are unavailable.")
+
+        with pytest.raises(ValueError, match="symbolic link"):
+            configure_logging(
+                log_path=link,
+                force=True,
+            )
 
     def test_messages_arguments_and_exceptions_are_redacted(
         self,
@@ -6117,6 +6153,34 @@ class TestClinicalReportStorage:
         )
         assert list(first.parent.glob("*.md")) == [first]
         assert list(first.parent.glob("*.tmp")) == []
+        if os.name == "posix":
+            assert stat.S_IMODE(first.parent.stat().st_mode) == 0o700
+            assert stat.S_IMODE(first.stat().st_mode) == 0o600
+
+    @pytest.mark.stage15_security
+    def test_symbolic_link_report_directory_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        real_directory = tmp_path / "real-reports"
+        real_directory.mkdir()
+        linked_directory = tmp_path / "linked-reports"
+        try:
+            linked_directory.symlink_to(
+                real_directory,
+                target_is_directory=True,
+            )
+        except OSError:
+            pytest.skip("Symbolic links are unavailable.")
+
+        with pytest.raises(
+            ClinicalReportStorageError,
+            match="symbolic link",
+        ):
+            save_clinical_report(
+                self._report(),
+                report_dir=linked_directory,
+            )
 
     def test_changed_report_uses_a_different_content_hash(
         self,
@@ -8119,6 +8183,12 @@ class TestFrontendExecution:
             temporary_path = Path(vcf_path)
             observed["path"] = temporary_path
             observed["contents"] = temporary_path.read_bytes()
+            observed["file_mode"] = stat.S_IMODE(
+                temporary_path.stat().st_mode
+            )
+            observed["directory_mode"] = stat.S_IMODE(
+                temporary_path.parent.stat().st_mode
+            )
             observed["manual_variant"] = manual_variant
             observed["phenotypes"] = phenotypes
             observed["callback"] = progress_callback
@@ -8151,6 +8221,9 @@ class TestFrontendExecution:
         assert temporary_path.name == expected_name
         assert not temporary_path.exists()
         assert list(upload_directory.iterdir()) == []
+        if os.name == "posix":
+            assert observed["file_mode"] == 0o600
+            assert observed["directory_mode"] == 0o700
 
     @pytest.mark.parametrize(
         "filename",
@@ -8299,6 +8372,86 @@ class TestFrontendExecution:
                 phenotypes=[],
             )
 
+    def test_temporary_upload_is_removed_after_pipeline_exception(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        upload_directory = tmp_path / "uploads"
+        observed_path: Path | None = None
+
+        def fail_analysis(
+            **kwargs: object,
+        ) -> PipelineResult:
+            nonlocal observed_path
+            observed_path = Path(str(kwargs["vcf_path"]))
+            assert observed_path.is_file()
+            raise RuntimeError("simulated internal failure")
+
+        monkeypatch.setattr(settings, "UPLOAD_DIR", upload_directory)
+        monkeypatch.setattr(
+            "frontend.execution.run_analysis",
+            fail_analysis,
+        )
+        uploaded = SimpleNamespace(
+            name="patient.vcf",
+            getvalue=self._valid_vcf_bytes,
+        )
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            execute_frontend_analysis(
+                uploaded_vcf=uploaded,
+                manual_variant=None,
+                phenotypes=[],
+            )
+
+        assert observed_path is not None
+        assert not observed_path.exists()
+        assert list(upload_directory.iterdir()) == []
+
+    def test_unsafe_upload_roots_are_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        valid_upload = SimpleNamespace(
+            name="patient.vcf",
+            getvalue=self._valid_vcf_bytes,
+        )
+        file_root = tmp_path / "upload-file"
+        file_root.write_text("not a directory", encoding="utf-8")
+        monkeypatch.setattr(settings, "UPLOAD_DIR", file_root)
+        with pytest.raises(
+            FrontendExecutionError,
+            match="prepared securely",
+        ):
+            execute_frontend_analysis(
+                uploaded_vcf=valid_upload,
+                manual_variant=None,
+                phenotypes=[],
+            )
+
+        real_root = tmp_path / "real-uploads"
+        real_root.mkdir()
+        linked_root = tmp_path / "linked-uploads"
+        try:
+            linked_root.symlink_to(
+                real_root,
+                target_is_directory=True,
+            )
+        except OSError:
+            return
+        monkeypatch.setattr(settings, "UPLOAD_DIR", linked_root)
+        with pytest.raises(
+            FrontendExecutionError,
+            match="unsafe",
+        ):
+            execute_frontend_analysis(
+                uploaded_vcf=valid_upload,
+                manual_variant=None,
+                phenotypes=[],
+            )
+
 
 class TestFrontendResults:
     """Verify bounded, privacy-aware result transformations."""
@@ -8432,6 +8585,30 @@ class TestDatabaseFoundation:
         assert schema_version == DATABASE_SCHEMA_VERSION
         assert table_names == set(DATABASE_TABLES)
         assert foreign_keys == 1
+        if os.name == "posix":
+            assert stat.S_IMODE(
+                database_path.parent.stat().st_mode
+            ) == 0o700
+            assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
+
+    @pytest.mark.stage15_security
+    def test_symbolic_link_database_path_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "target.sqlite3"
+        initialize_database(target)
+        link = tmp_path / "linked.sqlite3"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("Symbolic links are unavailable.")
+
+        with pytest.raises(
+            DatabaseConfigurationError,
+            match="symbolic link",
+        ):
+            initialize_database(link)
 
     def test_initialize_database_is_idempotent(
         self,

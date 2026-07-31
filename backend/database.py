@@ -20,7 +20,11 @@ from backend.report import (
     EvidenceObjectError,
     sanitize_evidence_object,
 )
-from config import settings
+from config import (
+    PRIVATE_DIRECTORY_MODE,
+    PRIVATE_FILE_MODE,
+    settings,
+)
 
 
 DATABASE_SCHEMA_VERSION = 1
@@ -201,11 +205,16 @@ def _resolve_database_path(
 ) -> Path:
     """Resolve and validate one database file path."""
 
-    resolved_path = Path(
+    configured_path = Path(
         database_path
         if database_path is not None
         else settings.DATABASE_PATH
-    ).expanduser().resolve()
+    ).expanduser()
+    if configured_path.is_symlink():
+        raise DatabaseConfigurationError(
+            "The configured database path cannot be a symbolic link."
+        )
+    resolved_path = configured_path.resolve()
     if resolved_path.exists() and not resolved_path.is_file():
         raise DatabaseConfigurationError(
             "The configured database path must point to a file."
@@ -219,12 +228,14 @@ def connect_database(
     """Open one configured SQLite connection with safe defaults."""
 
     resolved_path = _resolve_database_path(database_path)
+    path_existed = resolved_path.exists()
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
             resolved_path,
             timeout=DATABASE_BUSY_TIMEOUT_MS / 1_000,
         )
+        resolved_path.chmod(PRIVATE_FILE_MODE)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
@@ -233,9 +244,14 @@ def connect_database(
         foreign_keys_enabled = connection.execute(
             "PRAGMA foreign_keys"
         ).fetchone()[0]
-    except sqlite3.Error as exc:
+    except (OSError, sqlite3.Error) as exc:
         if connection is not None:
             connection.close()
+        if not path_existed:
+            try:
+                resolved_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise DatabaseConnectionError(
             "The analysis database could not be opened."
         ) from exc
@@ -296,7 +312,12 @@ def initialize_database(
 
     resolved_path = _resolve_database_path(database_path)
     try:
-        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.parent.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE,
+            parents=True,
+            exist_ok=True,
+        )
+        resolved_path.parent.chmod(PRIVATE_DIRECTORY_MODE)
     except OSError as exc:
         raise DatabaseConfigurationError(
             "The database directory could not be prepared."
@@ -338,6 +359,12 @@ def initialize_database(
     finally:
         connection.close()
 
+    try:
+        resolved_path.chmod(PRIVATE_FILE_MODE)
+    except OSError as exc:
+        raise DatabaseConfigurationError(
+            "The database permissions could not be secured."
+        ) from exc
     return resolved_path
 
 

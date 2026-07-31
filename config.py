@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 
 # Root directory of the project
 BASE_DIR = Path(__file__).resolve().parent
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
 
 # Treat the project's .env file as the single source of configuration.
 load_dotenv(BASE_DIR / ".env", override=True)
@@ -291,9 +293,11 @@ class Settings:
 
         for directory in directories:
             directory.mkdir(
+                mode=PRIVATE_DIRECTORY_MODE,
                 parents=True,
                 exist_ok=True,
             )
+            directory.chmod(PRIVATE_DIRECTORY_MODE)
 
     @classmethod
     def validate(cls) -> None:

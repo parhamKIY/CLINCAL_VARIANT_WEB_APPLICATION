@@ -13,7 +13,11 @@ from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
 from backend.llm import LLMClient, LLMResponse, call_llm
-from config import settings
+from config import (
+    PRIVATE_DIRECTORY_MODE,
+    PRIVATE_FILE_MODE,
+    settings,
+)
 
 
 EVIDENCE_SCHEMA_VERSION = "1.0"
@@ -1768,8 +1772,19 @@ def save_clinical_report(
         else report_dir
     ).expanduser()
     try:
-        destination.mkdir(parents=True, exist_ok=True)
+        if destination.is_symlink():
+            raise ClinicalReportStorageError(
+                "The clinical report directory cannot be a symbolic link."
+            )
+        destination.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE,
+            parents=True,
+            exist_ok=True,
+        )
+        destination.chmod(PRIVATE_DIRECTORY_MODE)
         destination = destination.resolve(strict=True)
+    except ClinicalReportStorageError:
+        raise
     except OSError as exc:
         raise ClinicalReportStorageError(
             "The clinical report directory could not be prepared."
@@ -1785,9 +1800,16 @@ def save_clinical_report(
             "The clinical report path escaped its destination directory."
         )
     if _read_existing_report(target, markdown):
+        try:
+            target.chmod(PRIVATE_FILE_MODE)
+        except OSError as exc:
+            raise ClinicalReportStorageError(
+                "The clinical report permissions could not be secured."
+            ) from exc
         return target
 
     temporary_path: Path | None = None
+    target_created = False
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -1802,17 +1824,25 @@ def save_clinical_report(
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
             temporary_path = Path(temporary_file.name)
+            temporary_path.chmod(PRIVATE_FILE_MODE)
 
         try:
             os.link(temporary_path, target)
+            target_created = True
         except FileExistsError:
             if not _read_existing_report(target, markdown):
                 raise ClinicalReportStorageError(
                     "The clinical report target could not be published."
                 )
+        target.chmod(PRIVATE_FILE_MODE)
     except ClinicalReportStorageError:
         raise
     except OSError as exc:
+        if target_created:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise ClinicalReportStorageError(
             "The clinical report could not be saved."
         ) from exc

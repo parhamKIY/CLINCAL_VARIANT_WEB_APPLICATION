@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import gzip
+import os
 import zlib
 from io import BytesIO
 from pathlib import Path
@@ -15,7 +16,11 @@ from backend.pipeline import (
     PipelineResult,
     run_analysis,
 )
-from config import settings
+from config import (
+    PRIVATE_DIRECTORY_MODE,
+    PRIVATE_FILE_MODE,
+    settings,
+)
 
 
 class FrontendExecutionError(RuntimeError):
@@ -169,6 +174,79 @@ def _validate_upload_content(payload: bytes, suffix: str) -> None:
     _validate_vcf_stream(BytesIO(payload))
 
 
+def _prepare_upload_directory() -> Path:
+    """Create one non-symlinked private upload root."""
+
+    configured = Path(settings.UPLOAD_DIR).expanduser()
+    try:
+        if configured.is_symlink():
+            raise FrontendExecutionError(
+                "The configured upload directory is unsafe."
+            )
+        configured.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE,
+            parents=True,
+            exist_ok=True,
+        )
+        configured.chmod(PRIVATE_DIRECTORY_MODE)
+        resolved = configured.resolve(strict=True)
+    except FrontendExecutionError:
+        raise
+    except OSError as exc:
+        raise FrontendExecutionError(
+            "The upload directory could not be prepared securely."
+        ) from exc
+    if not resolved.is_dir():
+        raise FrontendExecutionError(
+            "The configured upload path is not a directory."
+        )
+    return resolved
+
+
+def _write_private_upload(
+    path: Path,
+    payload: bytes,
+    *,
+    temporary_directory: Path,
+) -> None:
+    """Create one exclusive private file inside its temporary directory."""
+
+    if (
+        path.parent != temporary_directory
+        or not temporary_directory.is_dir()
+        or temporary_directory.is_symlink()
+    ):
+        raise FrontendExecutionError(
+            "The temporary upload path is unsafe."
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    file_descriptor: int | None = None
+    try:
+        file_descriptor = os.open(
+            path,
+            flags,
+            PRIVATE_FILE_MODE,
+        )
+        with os.fdopen(file_descriptor, "wb") as upload_file:
+            file_descriptor = None
+            upload_file.write(payload)
+            upload_file.flush()
+            os.fsync(upload_file.fileno())
+        path.chmod(PRIVATE_FILE_MODE)
+    except OSError as exc:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise FrontendExecutionError(
+            "The uploaded VCF could not be stored securely."
+        ) from exc
+
+
 def execute_analysis(
     *,
     uploaded_vcf: UploadedVCF | None,
@@ -196,20 +274,34 @@ def execute_analysis(
     )
     payload = _read_upload(uploaded_vcf)
     _validate_upload_content(payload, suffix)
+    upload_directory = _prepare_upload_directory()
     try:
-        settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(
             prefix="analysis-",
-            dir=settings.UPLOAD_DIR,
+            dir=upload_directory,
         ) as temporary_directory:
-            temporary_path = Path(temporary_directory) / f"input{suffix}"
-            temporary_path.write_bytes(payload)
+            temporary_root = Path(temporary_directory).resolve(
+                strict=True
+            )
+            if temporary_root.parent != upload_directory:
+                raise FrontendExecutionError(
+                    "The temporary upload directory is unsafe."
+                )
+            temporary_root.chmod(PRIVATE_DIRECTORY_MODE)
+            temporary_path = temporary_root / f"input{suffix}"
+            _write_private_upload(
+                temporary_path,
+                payload,
+                temporary_directory=temporary_root,
+            )
             return run_analysis(
                 vcf_path=temporary_path,
                 manual_variant=None,
                 phenotypes=phenotypes,
                 progress_callback=progress_callback,
             )
+    except FrontendExecutionError:
+        raise
     except OSError as exc:
         raise FrontendExecutionError(
             "The uploaded VCF could not be prepared for analysis."

@@ -449,6 +449,20 @@ file-format declaration and required column header. Streamlit also rejects
 uploads above 25 MB before application execution, while the backend validation
 remains authoritative and returns only fixed user-safe errors.
 
+Stage 15 step 3 hardens temporary and persistent storage. Every upload is
+written with exclusive-create and no-follow semantics to a randomized private
+directory beneath the configured upload root, uses a fixed application
+filename instead of user-controlled path text, and is removed after successful
+or failed analysis execution. Symbolic-link upload roots, report directories,
+database files, and log files are rejected. Application-created private
+directories request owner-only `0700` permissions and uploaded VCFs, reports,
+databases, and logs request owner-only `0600` permissions on platforms that
+support POSIX modes. Report publication remains atomic, while storage paths
+remain confined to their resolved configured roots. Windows deployments still
+inherit NTFS access control from the configured storage directories and must
+apply the institution's production ACL policy before real patient data is
+used.
+
 ## Tests
 
 Run the offline test suite:

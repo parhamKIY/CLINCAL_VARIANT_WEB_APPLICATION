@@ -11,7 +11,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-from config import settings
+from config import (
+    PRIVATE_DIRECTORY_MODE,
+    PRIVATE_FILE_MODE,
+    settings,
+)
 
 
 APP_LOGGER_NAME = "clinical_variant_app"
@@ -187,14 +191,24 @@ def configure_logging(
         setattr(logger, "_clinical_variant_configured", False)
 
     resolved_level = _resolve_level(level)
-    resolved_path = Path(
+    configured_path = Path(
         settings.LOG_PATH if log_path is None else log_path
-    ).expanduser().resolve()
+    ).expanduser()
+    if configured_path.is_symlink():
+        raise ValueError(
+            "Logging path cannot be a symbolic link."
+        )
+    resolved_path = configured_path.resolve()
     if resolved_path.exists() and resolved_path.is_dir():
         raise ValueError(
             "Logging path must point to a file, not a directory."
         )
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.parent.mkdir(
+        mode=PRIVATE_DIRECTORY_MODE,
+        parents=True,
+        exist_ok=True,
+    )
+    resolved_path.parent.chmod(PRIVATE_DIRECTORY_MODE)
 
     redactor = SecretRedactor(
         (
@@ -218,6 +232,13 @@ def configure_logging(
     file_handler.setLevel(resolved_level)
     file_handler.addFilter(RedactingFilter(redactor))
     file_handler.setFormatter(formatter)
+    try:
+        resolved_path.chmod(PRIVATE_FILE_MODE)
+    except OSError as exc:
+        file_handler.close()
+        raise ValueError(
+            "Logging file permissions could not be secured."
+        ) from exc
 
     logger.setLevel(resolved_level)
     logger.propagate = False
