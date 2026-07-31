@@ -495,6 +495,14 @@ dependency consistency without network access, runs the repository secrets
 audit, executes all focused `stage15_security` checks, and requires the complete
 test suite to pass with at least 80% coverage.
 
+## Stage 16 MVP preparation: in progress
+
+Stage 16 step 1 completes the MVP requirements audit in
+`docs/STAGE_16_MVP_REQUIREMENTS.md`. Every roadmap capability is mapped to its
+implementation and offline verification evidence. The audit found no missing
+core feature. Dedicated MVP acceptance, fresh live-provider validation, a
+professor-facing demo runbook, and the final release decision remain.
+
 ## Tests
 
 Run the offline test suite:
