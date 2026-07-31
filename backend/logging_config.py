@@ -22,11 +22,14 @@ LOG_FORMAT = (
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 REDACTED = "[REDACTED]"
 SENSITIVE_FIELD_NAMES = {
-    "api-key",
     "api_key",
     "apikey",
+    "access_token",
     "authorization",
+    "client_secret",
     "password",
+    "private_key",
+    "refresh_token",
     "secret",
     "token",
 }
@@ -80,7 +83,12 @@ class SecretRedactor:
             return {
                 key: (
                     REDACTED
-                    if str(key).strip().casefold()
+                    if (
+                        str(key)
+                        .strip()
+                        .casefold()
+                        .replace("-", "_")
+                    )
                     in SENSITIVE_FIELD_NAMES
                     else self.value(item)
                 )
@@ -103,6 +111,7 @@ class RedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact the message template and its interpolation arguments."""
 
+        record.args = self._redactor.value(record.args)
         rendered_message = record.getMessage()
         record.msg = self._redactor.text(rendered_message)
         record.args = ()
@@ -113,7 +122,7 @@ class RedactingFilter(logging.Filter):
 
 
 class RedactingFormatter(logging.Formatter):
-    """Redact exception text that bypasses normal record arguments."""
+    """Retain exception types while omitting unsafe traceback text."""
 
     def __init__(self, redactor: SecretRedactor) -> None:
         super().__init__(
@@ -124,11 +133,10 @@ class RedactingFormatter(logging.Formatter):
         self.converter = time.gmtime
 
     def formatException(self, exc_info: Any) -> str:
-        """Return sanitized exception output."""
+        """Return only the bounded exception class name."""
 
-        return self._redactor.text(
-            super().formatException(exc_info)
-        )
+        exception_type = exc_info[0]
+        return self._redactor.text(exception_type.__name__)
 
 
 def _resolve_level(level: str | None) -> int:

@@ -1612,7 +1612,11 @@ def _annotate_with_myvariant(
             max_retries,
         )
     except AnnotationServiceError as exc:
-        LOGGER.error("MyVariant.info request failed: %s", exc)
+        LOGGER.error(
+            "event=annotation_source_failed service=myvariant "
+            "error_type=%s",
+            type(exc).__name__,
+        )
         annotation["sources"]["myvariant"]["status"] = "error"
         annotation["warnings"].append(str(exc))
         return
@@ -1812,7 +1816,11 @@ def _annotate_with_clinvar(
             max_retries,
         )
     except AnnotationServiceError as exc:
-        LOGGER.error("NCBI ClinVar request failed: %s", exc)
+        LOGGER.error(
+            "event=annotation_source_failed service=ncbi_clinvar "
+            "error_type=%s",
+            type(exc).__name__,
+        )
         annotation["sources"]["clinvar"]["status"] = "error"
         annotation["warnings"].append(str(exc))
         return
@@ -1989,7 +1997,11 @@ def _annotate_with_clingen(
             gene,
         )
     except AnnotationServiceError as exc:
-        LOGGER.error("UCSC GenCC request failed: %s", exc)
+        LOGGER.error(
+            "event=annotation_source_failed service=ucsc_gencc "
+            "error_type=%s",
+            type(exc).__name__,
+        )
         annotation["sources"]["clingen"]["status"] = "error"
         annotation["warnings"].append(str(exc))
 
@@ -2030,7 +2042,11 @@ def annotate_variants(
                     resolved_retries,
                 )
             except AnnotationServiceError as exc:
-                LOGGER.error("Ensembl VEP batch failed: %s", exc)
+                LOGGER.error(
+                    "event=annotation_source_failed "
+                    "service=ensembl_vep error_type=%s",
+                    type(exc).__name__,
+                )
                 annotations.extend(
                     _base_annotation(
                         variant,

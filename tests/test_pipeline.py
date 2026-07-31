@@ -429,6 +429,7 @@ class TestConfiguration:
         assert calls == ["validate", "create"]
 
 
+@pytest.mark.stage14_security
 class TestLoggingConfiguration:
     """Verify central Stage 14 logging and secret redaction."""
 
@@ -507,6 +508,88 @@ class TestLoggingConfiguration:
         assert REDACTED in contents
         assert "retained" in contents
         assert "RuntimeError" in contents
+
+    def test_nested_credentials_and_exception_text_are_omitted(
+        self,
+        log_path: Path,
+    ) -> None:
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        logger = get_logger("nested-security-test")
+
+        logger.info(
+            "credentials=%s",
+            {
+                "client-secret": "unconfigured-client-secret",
+                "nested": [
+                    {"access_token": "unconfigured-access-token"},
+                    {"refresh-token": "unconfigured-refresh-token"},
+                    {"safe": "retained-value"},
+                ],
+            },
+        )
+        try:
+            raise RuntimeError(
+                "private patient path C:/patients/secret.vcf "
+                "and variant 1:941284:G:A"
+            )
+        except RuntimeError:
+            logger.exception("event=bounded_exception")
+
+        for handler in logging.getLogger(
+            APP_LOGGER_NAME
+        ).handlers:
+            handler.flush()
+        contents = log_path.read_text(encoding="utf-8")
+
+        assert "unconfigured-client-secret" not in contents
+        assert "unconfigured-access-token" not in contents
+        assert "unconfigured-refresh-token" not in contents
+        assert "C:/patients/secret.vcf" not in contents
+        assert "1:941284:G:A" not in contents
+        assert "private patient" not in contents
+        assert "Traceback" not in contents
+        assert "RuntimeError" in contents
+        assert "retained-value" in contents
+
+    def test_rotation_preserves_redaction_and_backup_limit(
+        self,
+        log_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(settings, "LOG_MAX_BYTES", 350)
+        monkeypatch.setattr(settings, "LOG_BACKUP_COUNT", 2)
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        logger = get_logger("rotation-security-test")
+
+        for index in range(30):
+            logger.info(
+                "event=rotation index=%d credentials=%s padding=%s",
+                index,
+                {"api_key": "rotating-secret-value"},
+                "x" * 40,
+            )
+
+        for handler in logging.getLogger(
+            APP_LOGGER_NAME
+        ).handlers:
+            handler.flush()
+        files = sorted(log_path.parent.glob(f"{log_path.name}*"))
+        contents = "".join(
+            path.read_text(encoding="utf-8")
+            for path in files
+        )
+
+        assert 2 <= len(files) <= 3
+        assert "rotating-secret-value" not in contents
+        assert REDACTED in contents
 
     @pytest.mark.parametrize("level", ["", "TRACE", 10])
     def test_invalid_logging_level_is_rejected(
@@ -7354,6 +7437,7 @@ class TestStage13IntegrationBoundaries:
         assert restored["report_path"] == result["report_path"]
 
 
+@pytest.mark.stage14_security
 class TestSafeErrorHandling:
     """Verify internal exception details never cross the UI boundary."""
 
@@ -7494,6 +7578,7 @@ class TestSafeErrorHandling:
         assert "secret" not in message.casefold()
 
 
+@pytest.mark.stage14_security
 class TestLLMCallLogging:
     """Verify provider-neutral LLM telemetry excludes clinical text."""
 
@@ -7566,6 +7651,7 @@ class TestLLMCallLogging:
         assert "private provider timeout detail" not in contents
 
 
+@pytest.mark.stage14_security
 class TestAnnotationApiLogging:
     """Verify bounded API latency, retry, and timeout telemetry."""
 
@@ -7674,6 +7760,7 @@ class TestAnnotationApiLogging:
         assert "1:100:A:G" not in contents
 
 
+@pytest.mark.stage14_security
 class TestPipelineLifecycleLogging:
     """Verify safe correlated logging for the complete pipeline."""
 
@@ -7800,6 +7887,77 @@ class TestPipelineLifecycleLogging:
         ) in contents
         assert "event=analysis_finished status=error" in contents
         assert "Exactly one of" not in contents
+
+
+@pytest.mark.stage14_security
+class TestStage14SecurityAcceptance:
+    """Verify one failed analysis is safe across result and log outputs."""
+
+    def test_internal_failure_detail_is_absent_from_all_outputs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sentinel = (
+            "patient-name sentinel 1:941284:G:A "
+            "C:/private/patient.vcf"
+        )
+        log_path = tmp_path / "logs" / "security-acceptance.log"
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+
+        def fail_annotation(*_: object, **__: object) -> object:
+            raise RuntimeError(sentinel)
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fail_annotation,
+        )
+        try:
+            result = run_analysis(
+                vcf_path=None,
+                manual_variant="1:941284:G:A",
+                phenotypes=[],
+                persist_analysis=False,
+            )
+            for handler in logging.getLogger(
+                APP_LOGGER_NAME
+            ).handlers:
+                handler.flush()
+            log_contents = log_path.read_text(encoding="utf-8")
+        finally:
+            shutdown_logging()
+
+        public_output = json.dumps(result, allow_nan=False)
+        assert result["status"] == "error"
+        assert result["errors"] == [
+            {
+                "stage": "annotation",
+                "code": "unexpected_enrichment_error",
+                "message": (
+                    "Candidate enrichment stopped because of an "
+                    "unexpected internal error."
+                ),
+                "recoverable": False,
+            }
+        ]
+        for private_value in (
+            sentinel,
+            "patient-name",
+            "1:941284:G:A",
+            "C:/private/patient.vcf",
+        ):
+            assert private_value not in public_output
+            assert private_value not in log_contents
+        assert (
+            "event=user_safe_error stage=annotation "
+            "code=unexpected_enrichment_error recoverable=False "
+            "error_type=RuntimeError"
+        ) in log_contents
+        assert "Traceback" not in log_contents
 
 
 class TestStage13MockedServiceFailures:

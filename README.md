@@ -371,7 +371,7 @@ regression set, and then requires the complete offline suite to pass with at
 least 80% coverage. Live provider checks remain explicitly separate from the
 deterministic acceptance gate.
 
-## Stage 14 logging and error handling: in progress
+## Stage 14 logging and error handling: complete
 
 Stage 14 step 1 adds the central logging boundary in
 `backend/logging_config.py`. The Streamlit entry point configures one
@@ -417,6 +417,17 @@ fixed frontend messages. Logs retain only the stage or UI context, public error
 code, recoverability, and exception type; internal exception text, paths,
 provider responses, patient data, and stack traces remain excluded.
 
+Stage 14 step 6 completes the security audit and acceptance gate. Nested
+credential fields are redacted before interpolation, exception logging retains
+only the exception class, and annotation-source failure logs use bounded event
+fields instead of exception messages. Rotation tests verify that redaction is
+preserved across the configured backup files. The `stage14_security` test
+marker covers logging configuration, API telemetry, LLM telemetry, correlated
+pipeline lifecycle events, centralized public errors, and an end-to-end
+internal-failure leak check. `tests/run_stage14_acceptance.py` compiles the
+project, runs those focused security checks, and then requires the complete
+offline suite to pass with at least 80% coverage.
+
 ## Tests
 
 Run the offline test suite:
@@ -435,6 +446,12 @@ Run the complete offline Stage 13 acceptance gate:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_stage13_acceptance.py
+```
+
+Run the complete offline Stage 14 security acceptance gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage14_acceptance.py
 ```
 
 Run the complete live Stage 13 manual-validation matrix:
