@@ -428,6 +428,16 @@ internal-failure leak check. `tests/run_stage14_acceptance.py` compiles the
 project, runs those focused security checks, and then requires the complete
 offline suite to pass with at least 80% coverage.
 
+## Stage 15 security: in progress
+
+Stage 15 step 1 adds a repeatable repository secrets audit in
+`tests/run_secrets_audit.py`. It verifies that `.env` remains ignored, rejects
+tracked environment files, keys, certificates, databases, logs, uploads, and
+reports, and scans all non-ignored source files plus every Git patch for
+high-confidence provider credentials and private keys. Findings identify only
+the scope, path, and rule; detected values are never printed. `.env.example`
+remains tracked with an explicit non-secret placeholder.
+
 ## Tests
 
 Run the offline test suite:
@@ -452,6 +462,12 @@ Run the complete offline Stage 14 security acceptance gate:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_stage14_acceptance.py
+```
+
+Run the Stage 15 repository secrets audit:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_secrets_audit.py
 ```
 
 Run the complete live Stage 13 manual-validation matrix:

@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
+import sys
 from copy import deepcopy
 from collections.abc import Iterator
 from logging.handlers import RotatingFileHandler
@@ -621,6 +623,29 @@ class TestLoggingConfiguration:
                 log_path=log_path.parent,
                 force=True,
             )
+
+
+@pytest.mark.stage15_security
+class TestStage15SecretsAudit:
+    """Keep repository and Git-history credential checks repeatable."""
+
+    def test_repository_secrets_audit_passes(self) -> None:
+        completed = subprocess.run(
+            (
+                sys.executable,
+                str(PROJECT_ROOT / "tests" / "run_secrets_audit.py"),
+            ),
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == (
+            "Stage 15 secrets audit: PASSED"
+        )
 
 
 class FakeResponse:
