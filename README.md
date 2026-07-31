@@ -383,6 +383,15 @@ key, labelled credentials, bearer tokens, nested message arguments, and
 exception text before output. Existing annotation logging now uses the central
 application logger.
 
+Stage 14 step 2 adds correlated analysis lifecycle logging. Each complete
+pipeline run receives a non-identifying application-generated run ID, records
+the safe input mode and phenotype count, logs every stage start and terminal
+status, and records the final pipeline status and persisted analysis ID.
+Context-local run IDs keep concurrent analyses distinguishable and are reset
+after completion. Variant coordinates, alleles, HPO identifiers, genes, raw
+VCF data, and stage error messages are deliberately excluded from lifecycle
+logs.
+
 ## Tests
 
 Run the offline test suite:

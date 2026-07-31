@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,10 @@ from config import settings
 
 
 APP_LOGGER_NAME = "clinical_variant_app"
-LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+LOG_FORMAT = (
+    "%(asctime)s %(levelname)s %(name)s "
+    "run_id=%(analysis_run_id)s %(message)s"
+)
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 REDACTED = "[REDACTED]"
 SENSITIVE_FIELD_NAMES = {
@@ -32,6 +36,11 @@ LABELED_SECRET_PATTERN = re.compile(
 )
 BEARER_PATTERN = re.compile(
     r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"
+)
+RUN_ID_PATTERN = re.compile(r"run-[0-9a-f]{32}")
+_ANALYSIS_RUN_ID: ContextVar[str] = ContextVar(
+    "clinical_variant_analysis_run_id",
+    default="-",
 )
 
 
@@ -97,6 +106,7 @@ class RedactingFilter(logging.Filter):
         rendered_message = record.getMessage()
         record.msg = self._redactor.text(rendered_message)
         record.args = ()
+        record.analysis_run_id = _ANALYSIS_RUN_ID.get()
         if record.exc_info is not None:
             record.exc_text = None
         return True
@@ -218,6 +228,25 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"{APP_LOGGER_NAME}.{normalized}")
 
 
+def bind_analysis_run_id(run_id: str) -> Token[str]:
+    """Bind one application-generated run ID to the current context."""
+
+    if (
+        not isinstance(run_id, str)
+        or RUN_ID_PATTERN.fullmatch(run_id) is None
+    ):
+        raise ValueError(
+            "Analysis run ID must use the application-generated format."
+        )
+    return _ANALYSIS_RUN_ID.set(run_id)
+
+
+def reset_analysis_run_id(token: Token[str]) -> None:
+    """Restore the previous analysis logging context."""
+
+    _ANALYSIS_RUN_ID.reset(token)
+
+
 def shutdown_logging() -> None:
     """Close application-owned handlers."""
 
@@ -232,7 +261,9 @@ __all__ = [
     "RedactingFilter",
     "RedactingFormatter",
     "SecretRedactor",
+    "bind_analysis_run_id",
     "configure_logging",
     "get_logger",
+    "reset_analysis_run_id",
     "shutdown_logging",
 ]

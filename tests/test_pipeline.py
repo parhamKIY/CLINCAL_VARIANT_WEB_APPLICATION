@@ -4,6 +4,7 @@ import gzip
 import json
 import logging
 import os
+import re
 import sqlite3
 from copy import deepcopy
 from collections.abc import Iterator
@@ -7347,6 +7348,116 @@ class TestStage13IntegrationBoundaries:
             "matched_hpo_terms"
         ] == ["HP:0001250"]
         assert restored["report_path"] == result["report_path"]
+
+
+class TestPipelineLifecycleLogging:
+    """Verify safe correlated logging for the complete pipeline."""
+
+    def test_successful_analysis_logs_every_stage_without_inputs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_path = tmp_path / "logs" / "pipeline.log"
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        try:
+            result = run_analysis(
+                vcf_path=None,
+                manual_variant="1:100:A:G",
+                phenotypes=["HP:0001250"],
+                top_n=1,
+                seed=14,
+                annotation_max_retries=0,
+                annotation_session=(  # type: ignore[arg-type]
+                    TestStage13IntegrationBoundaries
+                    ._annotation_session()
+                ),
+                ontology_path=ontology_path,
+                associations_path=associations_path,
+                llm_client=(
+                    TestStage13IntegrationBoundaries._llm_client()
+                ),
+                report_dir=tmp_path / "reports",
+                database_path=tmp_path / "analysis.sqlite3",
+            )
+            for handler in logging.getLogger(
+                APP_LOGGER_NAME
+            ).handlers:
+                handler.flush()
+            contents = log_path.read_text(encoding="utf-8")
+        finally:
+            shutdown_logging()
+
+        assert result["status"] == "success"
+        assert (
+            "event=analysis_started input_mode=manual "
+            "phenotype_count=1"
+        ) in contents
+        for stage in PIPELINE_STAGE_ORDER:
+            assert (
+                f"event=pipeline_stage_started stage={stage}"
+                in contents
+            )
+            assert (
+                "event=pipeline_stage_finished "
+                f"stage={stage} status=success"
+                in contents
+            )
+        assert (
+            "event=analysis_finished status=success "
+            f"analysis_id={result['analysis_id']}"
+        ) in contents
+        run_ids = re.findall(
+            r"run_id=(run-[0-9a-f]{32})",
+            contents,
+        )
+        assert run_ids
+        assert len(set(run_ids)) == 1
+        assert "1:100:A:G" not in contents
+        assert "HP:0001250" not in contents
+        assert "SCN1A" not in contents
+
+    def test_invalid_input_logs_safe_terminal_lifecycle(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_path = tmp_path / "logs" / "invalid.log"
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        try:
+            result = run_analysis(
+                vcf_path=None,
+                manual_variant=None,
+                phenotypes=[],
+            )
+            for handler in logging.getLogger(
+                APP_LOGGER_NAME
+            ).handlers:
+                handler.flush()
+            contents = log_path.read_text(encoding="utf-8")
+        finally:
+            shutdown_logging()
+
+        assert result["status"] == "error"
+        assert (
+            "event=analysis_started input_mode=invalid "
+            "phenotype_count=0"
+        ) in contents
+        assert (
+            "event=pipeline_stage_finished stage=input status=error"
+        ) in contents
+        assert "event=analysis_finished status=error" in contents
+        assert "Exactly one of" not in contents
 
 
 class TestStage13MockedServiceFailures:

@@ -8,12 +8,18 @@ from collections.abc import Callable, Iterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal, TypedDict, cast
+from uuid import uuid4
 
 import requests
 
 from backend.annotation import AnnotationError, annotate_variants
 from backend.database import DatabaseError, save_complete_analysis
 from backend.llm import LLMClient, LLMError
+from backend.logging_config import (
+    bind_analysis_run_id,
+    get_logger,
+    reset_analysis_run_id,
+)
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
@@ -45,6 +51,7 @@ MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
 MAX_PIPELINE_RETAINED_VARIANTS = 100
 ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
+LOGGER = get_logger("pipeline")
 
 PipelineStatus = Literal[
     "pending",
@@ -583,6 +590,22 @@ def _set_stage(
         "progress_percent": progress_percent,
         "message": message,
     }
+    if status == "running":
+        LOGGER.info(
+            "event=pipeline_stage_started stage=%s",
+            stage,
+        )
+    elif status in {
+        "success",
+        "warning",
+        "error",
+        "skipped",
+    }:
+        LOGGER.info(
+            "event=pipeline_stage_finished stage=%s status=%s",
+            stage,
+            status,
+        )
 
 
 def _append_warning(
@@ -1371,53 +1394,87 @@ def run_analysis(
 ) -> PipelineResult:
     """Run the complete pipeline and optionally persist terminal output."""
 
-    result = _run_analysis_unpersisted(
-        vcf_path=vcf_path,
-        phenotypes=phenotypes,
-        manual_variant=manual_variant,
-        top_n=top_n,
-        seed=seed,
-        sample_name=sample_name,
-        max_variants=max_variants,
-        annotation_batch_size=annotation_batch_size,
-        annotation_max_retries=annotation_max_retries,
-        annotation_session=annotation_session,
-        ontology_path=ontology_path,
-        associations_path=associations_path,
-        llm_client=llm_client,
-        report_dir=report_dir,
-        progress_callback=progress_callback,
+    if vcf_path is not None and manual_variant is None:
+        input_mode = "vcf"
+    elif manual_variant is not None and vcf_path is None:
+        input_mode = "manual"
+    else:
+        input_mode = "invalid"
+    phenotype_count = (
+        len(phenotypes)
+        if isinstance(phenotypes, (list, tuple))
+        else -1
     )
-    if not isinstance(persist_analysis, bool):
-        _append_warning(
-            result,
-            "Analysis persistence was disabled because its setting "
-            "was invalid.",
+    run_id = f"run-{uuid4().hex}"
+    context_token = bind_analysis_run_id(run_id)
+    LOGGER.info(
+        "event=analysis_started input_mode=%s phenotype_count=%d",
+        input_mode,
+        phenotype_count,
+    )
+    try:
+        result = _run_analysis_unpersisted(
+            vcf_path=vcf_path,
+            phenotypes=phenotypes,
+            manual_variant=manual_variant,
+            top_n=top_n,
+            seed=seed,
+            sample_name=sample_name,
+            max_variants=max_variants,
+            annotation_batch_size=annotation_batch_size,
+            annotation_max_retries=annotation_max_retries,
+            annotation_session=annotation_session,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            llm_client=llm_client,
+            report_dir=report_dir,
+            progress_callback=progress_callback,
         )
-        if result["status"] == "success":
-            result["status"] = "partial"
-        return validate_pipeline_result(result)
-    if not persist_analysis or (
-        result["current_stage"] == "input"
-        and any(
-            issue["code"] == "invalid_input"
-            for issue in result["errors"]
-        )
-    ):
-        return result
+        if not isinstance(persist_analysis, bool):
+            _append_warning(
+                result,
+                "Analysis persistence was disabled because its setting "
+                "was invalid.",
+            )
+            if result["status"] == "success":
+                result["status"] = "partial"
+        elif persist_analysis and not (
+            result["current_stage"] == "input"
+            and any(
+                issue["code"] == "invalid_input"
+                for issue in result["errors"]
+            )
+        ):
+            request = validate_analysis_input(
+                vcf_path=vcf_path,
+                manual_variant=manual_variant,
+                phenotypes=phenotypes,
+            )
+            _persist_terminal_result(
+                request,
+                result,
+                database_path=database_path,
+                report_dir=report_dir,
+            )
 
-    request = validate_analysis_input(
-        vcf_path=vcf_path,
-        manual_variant=manual_variant,
-        phenotypes=phenotypes,
-    )
-    _persist_terminal_result(
-        request,
-        result,
-        database_path=database_path,
-        report_dir=report_dir,
-    )
-    return validate_pipeline_result(result)
+        validated = validate_pipeline_result(result)
+        LOGGER.info(
+            "event=analysis_finished status=%s analysis_id=%s "
+            "warning_count=%d error_count=%d",
+            validated["status"],
+            validated["analysis_id"],
+            len(validated["warnings"]),
+            len(validated["errors"]),
+        )
+        return validated
+    except Exception as exc:
+        LOGGER.error(
+            "event=analysis_aborted error_type=%s",
+            type(exc).__name__,
+        )
+        raise
+    finally:
+        reset_analysis_run_id(context_token)
 
 
 __all__ = [
