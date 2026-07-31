@@ -217,6 +217,11 @@ class Settings:
         "storage/reports",
     )
 
+    DATABASE_PATH: Path = _resolve_path(
+        "DATABASE_PATH",
+        "storage/database/clinical_variant.sqlite3",
+    )
+
     CACHE_DIR: Path = _resolve_path(
         "CACHE_DIR",
         "data/cache",
@@ -244,6 +249,7 @@ class Settings:
         directories = (
             cls.UPLOAD_DIR,
             cls.REPORT_DIR,
+            cls.DATABASE_PATH.parent,
             cls.CACHE_DIR,
             cls.HPO_DATA_DIR,
         )
@@ -338,6 +344,11 @@ class Settings:
         if cls.VEP_BATCH_SIZE > 200:
             raise RuntimeError(
                 "VEP_BATCH_SIZE cannot exceed Ensembl's limit of 200."
+            )
+
+        if cls.DATABASE_PATH.exists() and cls.DATABASE_PATH.is_dir():
+            raise RuntimeError(
+                "DATABASE_PATH must point to a file, not a directory."
             )
 
     @classmethod

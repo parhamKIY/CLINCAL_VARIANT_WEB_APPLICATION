@@ -274,6 +274,16 @@ Run the frontend:
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
+## Stage 12 SQLite persistence: in progress
+
+Stage 12 step 1 adds the versioned SQLite persistence foundation in
+`backend/database.py`. `DATABASE_PATH` is configured through `.env`, while
+connection creation enables foreign-key enforcement and a bounded busy
+timeout. `initialize_database()` creates or validates the versioned analysis,
+candidate-variant, Evidence Object, and report tables without overwriting an
+unknown or newer schema. Database files and SQLite sidecar files remain
+excluded from Git under `storage/database/`.
+
 ## Tests
 
 Run the offline test suite:

@@ -3,6 +3,7 @@
 import gzip
 import json
 import os
+import sqlite3
 from copy import deepcopy
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,6 +16,13 @@ from streamlit.testing.v1 import AppTest
 from backend.annotation import (
     AnnotationError,
     annotate_variants,
+)
+from backend.database import (
+    DATABASE_SCHEMA_VERSION,
+    DATABASE_TABLES,
+    DatabaseInitializationError,
+    connect_database,
+    initialize_database,
 )
 from backend.llm import (
     LLMAuthenticationError,
@@ -6834,6 +6842,128 @@ class TestFrontendReportViewer:
                 oversized_report,
                 report_dir=report_directory,
             )
+
+
+class TestDatabaseFoundation:
+    """Verify the Stage 12 SQLite configuration and schema boundary."""
+
+    def test_initialize_database_creates_versioned_schema(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "nested" / "analysis.sqlite3"
+
+        initialized_path = initialize_database(database_path)
+
+        assert initialized_path == database_path.resolve()
+        assert database_path.is_file()
+        connection = connect_database(database_path)
+        try:
+            schema_version = connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0]
+            table_names = {
+                str(row["name"])
+                for row in connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name NOT LIKE 'sqlite_%'
+                    """
+                )
+            }
+            foreign_keys = connection.execute(
+                "PRAGMA foreign_keys"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+        assert schema_version == DATABASE_SCHEMA_VERSION
+        assert table_names == set(DATABASE_TABLES)
+        assert foreign_keys == 1
+
+    def test_initialize_database_is_idempotent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        initialize_database(database_path)
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO analyses (
+                    analysis_id,
+                    created_at,
+                    anonymized_filename,
+                    status,
+                    warnings_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "analysis-1",
+                    "2026-07-31T00:00:00Z",
+                    None,
+                    "success",
+                    "[]",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        initialize_database(database_path)
+
+        connection = connect_database(database_path)
+        try:
+            analysis_count = connection.execute(
+                "SELECT COUNT(*) FROM analyses"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert analysis_count == 1
+
+    def test_initialize_database_rejects_newer_schema(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "newer.sqlite3"
+        connection = sqlite3.connect(database_path)
+        try:
+            connection.execute(
+                f"PRAGMA user_version = "
+                f"{DATABASE_SCHEMA_VERSION + 1}"
+            )
+        finally:
+            connection.close()
+
+        with pytest.raises(
+            DatabaseInitializationError,
+            match="newer application version",
+        ):
+            initialize_database(database_path)
+
+    def test_initialize_database_rejects_unversioned_tables(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "unknown.sqlite3"
+        connection = sqlite3.connect(database_path)
+        try:
+            connection.execute(
+                "CREATE TABLE unrelated (value TEXT)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(
+            DatabaseInitializationError,
+            match="no supported schema version",
+        ):
+            initialize_database(database_path)
 
 
 class TestFrontendFoundation:
