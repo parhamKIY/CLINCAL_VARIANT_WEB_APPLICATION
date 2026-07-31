@@ -259,6 +259,78 @@ def _retry_delay(
     return min(float(2**attempt), 5.0)
 
 
+def _log_api_call(
+    *,
+    service: str,
+    operation: str,
+    attempt: int,
+    started_at: float,
+    response: requests.Response | None = None,
+    exception: requests.RequestException | None = None,
+) -> None:
+    """Log bounded external-call telemetry without request data."""
+
+    duration_ms = max(
+        0,
+        round((time.perf_counter() - started_at) * 1000),
+    )
+    status_code = (
+        response.status_code
+        if response is not None
+        else None
+    )
+    if exception is not None:
+        outcome = (
+            "timeout"
+            if isinstance(exception, requests.Timeout)
+            else "network_error"
+        )
+    elif status_code is not None and 200 <= status_code < 300:
+        outcome = "success"
+    elif status_code == 404:
+        outcome = "not_found"
+    else:
+        outcome = "http_error"
+    log_method = (
+        LOGGER.info
+        if outcome in {"success", "not_found"}
+        else LOGGER.warning
+    )
+    log_method(
+        "event=api_call service=%s operation=%s attempt=%d "
+        "outcome=%s duration_ms=%d http_status=%s "
+        "timeout_seconds=%d",
+        service,
+        operation,
+        attempt + 1,
+        outcome,
+        duration_ms,
+        status_code,
+        settings.REQUEST_TIMEOUT,
+    )
+
+
+def _log_api_retry(
+    *,
+    service: str,
+    operation: str,
+    attempt: int,
+    reason: str,
+    delay_seconds: float,
+) -> None:
+    """Log one bounded retry decision."""
+
+    LOGGER.warning(
+        "event=api_retry_scheduled service=%s operation=%s "
+        "next_attempt=%d reason=%s delay_ms=%d",
+        service,
+        operation,
+        attempt + 2,
+        reason,
+        round(delay_seconds * 1000),
+    )
+
+
 def _post_vep_batch(
     session: requests.Session,
     vep_inputs: list[str],
@@ -283,6 +355,7 @@ def _post_vep_batch(
 
     for attempt in range(max_retries + 1):
         response: requests.Response | None = None
+        started_at = time.perf_counter()
 
         try:
             response = session.post(
@@ -293,25 +366,52 @@ def _post_vep_batch(
                 timeout=settings.REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
+            _log_api_call(
+                service="ensembl_vep",
+                operation="annotate_batch",
+                attempt=attempt,
+                started_at=started_at,
+                exception=exc,
+            )
             if attempt >= max_retries:
                 raise AnnotationServiceError(
                     "Ensembl VEP request failed because the service "
                     "was unavailable."
                 ) from exc
 
-            LOGGER.warning(
-                "Retrying Ensembl VEP after a connection error."
+            delay = _retry_delay(attempt)
+            _log_api_retry(
+                service="ensembl_vep",
+                operation="annotate_batch",
+                attempt=attempt,
+                reason=(
+                    "timeout"
+                    if isinstance(exc, requests.Timeout)
+                    else "network_error"
+                ),
+                delay_seconds=delay,
             )
-            time.sleep(_retry_delay(attempt))
+            time.sleep(delay)
             continue
 
+        _log_api_call(
+            service="ensembl_vep",
+            operation="annotate_batch",
+            attempt=attempt,
+            started_at=started_at,
+            response=response,
+        )
         if response.status_code in TRANSIENT_HTTP_STATUSES:
             if attempt < max_retries:
-                LOGGER.warning(
-                    "Retrying Ensembl VEP after HTTP %s.",
-                    response.status_code,
+                delay = _retry_delay(attempt, response)
+                _log_api_retry(
+                    service="ensembl_vep",
+                    operation="annotate_batch",
+                    attempt=attempt,
+                    reason=f"http_{response.status_code}",
+                    delay_seconds=delay,
                 )
-                time.sleep(_retry_delay(attempt, response))
+                time.sleep(delay)
                 continue
 
         if not 200 <= response.status_code < 300:
@@ -460,6 +560,7 @@ def _get_myvariant(
 
     for attempt in range(max_retries + 1):
         response: requests.Response | None = None
+        started_at = time.perf_counter()
 
         try:
             response = session.get(
@@ -469,28 +570,55 @@ def _get_myvariant(
                 timeout=settings.REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
+            _log_api_call(
+                service="myvariant",
+                operation="lookup_variant",
+                attempt=attempt,
+                started_at=started_at,
+                exception=exc,
+            )
             if attempt >= max_retries:
                 raise AnnotationServiceError(
                     "MyVariant.info request failed because the service "
                     "was unavailable."
                 ) from exc
 
-            LOGGER.warning(
-                "Retrying MyVariant.info after a connection error."
+            delay = _retry_delay(attempt)
+            _log_api_retry(
+                service="myvariant",
+                operation="lookup_variant",
+                attempt=attempt,
+                reason=(
+                    "timeout"
+                    if isinstance(exc, requests.Timeout)
+                    else "network_error"
+                ),
+                delay_seconds=delay,
             )
-            time.sleep(_retry_delay(attempt))
+            time.sleep(delay)
             continue
 
+        _log_api_call(
+            service="myvariant",
+            operation="lookup_variant",
+            attempt=attempt,
+            started_at=started_at,
+            response=response,
+        )
         if response.status_code == 404:
             return None, variant_id, None
 
         if response.status_code in TRANSIENT_HTTP_STATUSES:
             if attempt < max_retries:
-                LOGGER.warning(
-                    "Retrying MyVariant.info after HTTP %s.",
-                    response.status_code,
+                delay = _retry_delay(attempt, response)
+                _log_api_retry(
+                    service="myvariant",
+                    operation="lookup_variant",
+                    attempt=attempt,
+                    reason=f"http_{response.status_code}",
+                    delay_seconds=delay,
                 )
-                time.sleep(_retry_delay(attempt, response))
+                time.sleep(delay)
                 continue
 
         if not 200 <= response.status_code < 300:
@@ -586,12 +714,17 @@ def _get_clinvar_json(
         "tool": "clinical_variant_app",
         **params,
     }
+    operation = {
+        "esearch.fcgi": "search_variant",
+        "esummary.fcgi": "summarize_variant",
+    }.get(endpoint_name, "request")
 
     for attempt in range(max_retries + 1):
         response: requests.Response | None = None
+        _wait_for_clinvar_request_slot(session)
+        started_at = time.perf_counter()
 
         try:
-            _wait_for_clinvar_request_slot(session)
             response = session.get(
                 endpoint,
                 params=request_params,
@@ -602,25 +735,52 @@ def _get_clinvar_json(
                 timeout=settings.REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
+            _log_api_call(
+                service="ncbi_clinvar",
+                operation=operation,
+                attempt=attempt,
+                started_at=started_at,
+                exception=exc,
+            )
             if attempt >= max_retries:
                 raise AnnotationServiceError(
                     "NCBI ClinVar request failed because the service "
                     "was unavailable."
                 ) from exc
 
-            LOGGER.warning(
-                "Retrying NCBI ClinVar after a connection error."
+            delay = _retry_delay(attempt)
+            _log_api_retry(
+                service="ncbi_clinvar",
+                operation=operation,
+                attempt=attempt,
+                reason=(
+                    "timeout"
+                    if isinstance(exc, requests.Timeout)
+                    else "network_error"
+                ),
+                delay_seconds=delay,
             )
-            time.sleep(_retry_delay(attempt))
+            time.sleep(delay)
             continue
 
+        _log_api_call(
+            service="ncbi_clinvar",
+            operation=operation,
+            attempt=attempt,
+            started_at=started_at,
+            response=response,
+        )
         if response.status_code in TRANSIENT_HTTP_STATUSES:
             if attempt < max_retries:
-                LOGGER.warning(
-                    "Retrying NCBI ClinVar after HTTP %s.",
-                    response.status_code,
+                delay = _retry_delay(attempt, response)
+                _log_api_retry(
+                    service="ncbi_clinvar",
+                    operation=operation,
+                    attempt=attempt,
+                    reason=f"http_{response.status_code}",
+                    delay_seconds=delay,
                 )
-                time.sleep(_retry_delay(attempt, response))
+                time.sleep(delay)
                 continue
 
         if not 200 <= response.status_code < 300:
@@ -643,10 +803,15 @@ def _get_clinvar_json(
 
         if payload.get("error"):
             if attempt < max_retries:
-                LOGGER.warning(
-                    "Retrying NCBI ClinVar after an API error."
+                delay = _retry_delay(attempt, response)
+                _log_api_retry(
+                    service="ncbi_clinvar",
+                    operation=operation,
+                    attempt=attempt,
+                    reason="api_error",
+                    delay_seconds=delay,
                 )
-                time.sleep(_retry_delay(attempt, response))
+                time.sleep(delay)
                 continue
 
             raise AnnotationServiceError(
@@ -932,6 +1097,7 @@ def _get_clingen_gene_validity(
 
     for attempt in range(max_retries + 1):
         response: requests.Response | None = None
+        started_at = time.perf_counter()
 
         try:
             response = session.get(
@@ -941,25 +1107,52 @@ def _get_clingen_gene_validity(
                 timeout=settings.REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
+            _log_api_call(
+                service="ucsc_gencc",
+                operation="lookup_gene_validity",
+                attempt=attempt,
+                started_at=started_at,
+                exception=exc,
+            )
             if attempt >= max_retries:
                 raise AnnotationServiceError(
                     "UCSC GenCC request failed because the service "
                     "was unavailable."
                 ) from exc
 
-            LOGGER.warning(
-                "Retrying UCSC GenCC after a connection error."
+            delay = _retry_delay(attempt)
+            _log_api_retry(
+                service="ucsc_gencc",
+                operation="lookup_gene_validity",
+                attempt=attempt,
+                reason=(
+                    "timeout"
+                    if isinstance(exc, requests.Timeout)
+                    else "network_error"
+                ),
+                delay_seconds=delay,
             )
-            time.sleep(_retry_delay(attempt))
+            time.sleep(delay)
             continue
 
+        _log_api_call(
+            service="ucsc_gencc",
+            operation="lookup_gene_validity",
+            attempt=attempt,
+            started_at=started_at,
+            response=response,
+        )
         if response.status_code in TRANSIENT_HTTP_STATUSES:
             if attempt < max_retries:
-                LOGGER.warning(
-                    "Retrying UCSC GenCC after HTTP %s.",
-                    response.status_code,
+                delay = _retry_delay(attempt, response)
+                _log_api_retry(
+                    service="ucsc_gencc",
+                    operation="lookup_gene_validity",
+                    attempt=attempt,
+                    reason=f"http_{response.status_code}",
+                    delay_seconds=delay,
                 )
-                time.sleep(_retry_delay(attempt, response))
+                time.sleep(delay)
                 continue
 
         if not 200 <= response.status_code < 300:

@@ -7350,6 +7350,114 @@ class TestStage13IntegrationBoundaries:
         assert restored["report_path"] == result["report_path"]
 
 
+class TestAnnotationApiLogging:
+    """Verify bounded API latency, retry, and timeout telemetry."""
+
+    def test_successful_provider_calls_log_only_safe_telemetry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_path = tmp_path / "logs" / "api-success.log"
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        try:
+            annotations = annotate_variants(
+                [TestAnnotation._variant()],
+                session=(  # type: ignore[arg-type]
+                    TestStage13IntegrationBoundaries
+                    ._annotation_session()
+                ),
+                max_retries=0,
+            )
+            for handler in logging.getLogger(
+                APP_LOGGER_NAME
+            ).handlers:
+                handler.flush()
+            contents = log_path.read_text(encoding="utf-8")
+        finally:
+            shutdown_logging()
+
+        assert annotations[0]["gene"] == "SCN1A"
+        expected_calls = (
+            ("ensembl_vep", "annotate_batch"),
+            ("myvariant", "lookup_variant"),
+            ("ncbi_clinvar", "search_variant"),
+            ("ncbi_clinvar", "summarize_variant"),
+            ("ucsc_gencc", "lookup_gene_validity"),
+        )
+        for service, operation in expected_calls:
+            assert (
+                f"event=api_call service={service} "
+                f"operation={operation} attempt=1 outcome=success"
+                in contents
+            )
+        assert len(re.findall(r"duration_ms=\d+", contents)) == 5
+        assert "http_status=200" in contents
+        assert settings.VEP_BASE_URL not in contents
+        assert "1:100:A:G" not in contents
+        assert "SCN1A" not in contents
+
+    def test_timeout_and_retry_are_logged_without_exception_detail(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        log_path = tmp_path / "logs" / "api-timeout.log"
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        session = FakeSession(
+            [
+                requests.Timeout(
+                    "private timeout detail 1:100:A:G"
+                ),
+                FakeResponse(
+                    200,
+                    [TestAnnotation._vep_response()],
+                ),
+            ]
+        )
+        monkeypatch.setattr(
+            "backend.annotation.time.sleep",
+            lambda _delay: None,
+        )
+        try:
+            annotations = annotate_variants(
+                [TestAnnotation._variant()],
+                session=session,  # type: ignore[arg-type]
+                max_retries=1,
+            )
+            for handler in logging.getLogger(
+                APP_LOGGER_NAME
+            ).handlers:
+                handler.flush()
+            contents = log_path.read_text(encoding="utf-8")
+        finally:
+            shutdown_logging()
+
+        assert annotations[0]["sources"]["vep"]["status"] == "success"
+        assert (
+            "event=api_call service=ensembl_vep "
+            "operation=annotate_batch attempt=1 outcome=timeout"
+        ) in contents
+        assert (
+            "event=api_retry_scheduled service=ensembl_vep "
+            "operation=annotate_batch next_attempt=2 reason=timeout "
+            "delay_ms=1000"
+        ) in contents
+        assert (
+            "event=api_call service=ensembl_vep "
+            "operation=annotate_batch attempt=2 outcome=success"
+        ) in contents
+        assert "private timeout detail" not in contents
+        assert "1:100:A:G" not in contents
+
+
 class TestPipelineLifecycleLogging:
     """Verify safe correlated logging for the complete pipeline."""
 

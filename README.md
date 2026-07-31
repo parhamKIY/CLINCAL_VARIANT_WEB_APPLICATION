@@ -392,6 +392,14 @@ after completion. Variant coordinates, alleles, HPO identifiers, genes, raw
 VCF data, and stage error messages are deliberately excluded from lifecycle
 logs.
 
+Stage 14 step 3 adds structured external API telemetry for Ensembl VEP,
+MyVariant.info, NCBI ClinVar, and UCSC GenCC. Every request records only the
+service, bounded operation name, attempt number, outcome, elapsed
+milliseconds, HTTP status, and configured timeout. Timeout, connection, HTTP,
+and API-error retries record their safe reason, next attempt, and bounded
+delay. URLs, query parameters, coordinates, alleles, genes, provider payloads,
+and transport exception text are never logged.
+
 ## Tests
 
 Run the offline test suite:
