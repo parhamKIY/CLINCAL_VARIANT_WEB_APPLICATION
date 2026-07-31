@@ -1,6 +1,5 @@
 """External variant annotation and evidence standardization."""
 
-import logging
 import math
 import re
 import time
@@ -11,11 +10,12 @@ from urllib.parse import quote
 
 import requests
 
+from backend.logging_config import get_logger
 from backend.vcf_processing import VariantData
 from config import settings
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = get_logger("annotation")
 
 # Ensembl documents a maximum of 200 variants per POST request.
 MAX_VEP_BATCH_SIZE = 200

@@ -2,10 +2,12 @@
 
 import gzip
 import json
+import logging
 import os
 import sqlite3
 from copy import deepcopy
 from collections.abc import Iterator
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,6 +51,13 @@ from backend.llm import (
     LLMValidationError,
     OpenAICompatibleAdapter,
     call_llm,
+)
+from backend.logging_config import (
+    APP_LOGGER_NAME,
+    REDACTED,
+    configure_logging,
+    get_logger,
+    shutdown_logging,
 )
 from backend.phenotype import (
     HPODataError,
@@ -298,6 +307,7 @@ class TestConfiguration:
             "DATABASE_PATH": tmp_path / "database" / "analysis.sqlite3",
             "CACHE_DIR": tmp_path / "cache",
             "HPO_DATA_DIR": tmp_path / "hpo",
+            "LOG_PATH": tmp_path / "logs" / "application.log",
         }
         for name, value in directories.items():
             monkeypatch.setattr(config_module.Settings, name, value)
@@ -309,6 +319,7 @@ class TestConfiguration:
         assert directories["DATABASE_PATH"].parent.is_dir()
         assert directories["CACHE_DIR"].is_dir()
         assert directories["HPO_DATA_DIR"].is_dir()
+        assert directories["LOG_PATH"].parent.is_dir()
 
     @pytest.mark.parametrize(
         ("name", "value", "message"),
@@ -345,6 +356,11 @@ class TestConfiguration:
                 201,
                 "cannot exceed Ensembl's limit",
             ),
+            (
+                "LOG_LEVEL",
+                "VERBOSE",
+                "LOG_LEVEL must be",
+            ),
         ],
     )
     def test_invalid_central_configuration_is_rejected(
@@ -373,6 +389,20 @@ class TestConfiguration:
         with pytest.raises(RuntimeError, match="must point to a file"):
             config_module.Settings.validate()
 
+    def test_log_path_cannot_be_a_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            config_module.Settings,
+            "LOG_PATH",
+            tmp_path,
+        )
+
+        with pytest.raises(RuntimeError, match="must point to a file"):
+            config_module.Settings.validate()
+
     def test_initialize_validates_then_creates_directories(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -392,6 +422,117 @@ class TestConfiguration:
         config_module.Settings.initialize()
 
         assert calls == ["validate", "create"]
+
+
+class TestLoggingConfiguration:
+    """Verify central Stage 14 logging and secret redaction."""
+
+    @pytest.fixture
+    def log_path(self, tmp_path: Path) -> Iterator[Path]:
+        shutdown_logging()
+        path = tmp_path / "logs" / "application.log"
+        yield path
+        shutdown_logging()
+
+    def test_console_and_rotating_file_handlers_are_idempotent(
+        self,
+        log_path: Path,
+    ) -> None:
+        logger = configure_logging(
+            level="DEBUG",
+            log_path=log_path,
+            force=True,
+        )
+        original_handlers = tuple(logger.handlers)
+
+        same_logger = configure_logging(
+            level="ERROR",
+            log_path=log_path.parent / "ignored.log",
+        )
+
+        assert logger is same_logger
+        assert tuple(logger.handlers) == original_handlers
+        assert logger.name == APP_LOGGER_NAME
+        assert logger.level == logging.DEBUG
+        assert len(logger.handlers) == 2
+        assert any(
+            isinstance(handler, RotatingFileHandler)
+            for handler in logger.handlers
+        )
+        assert log_path.is_file()
+
+    def test_messages_arguments_and_exceptions_are_redacted(
+        self,
+        log_path: Path,
+    ) -> None:
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+            additional_secrets=("configured-secret-value",),
+        )
+        logger = get_logger("security-test")
+
+        logger.info(
+            "api_key=%s headers=%s credential=%s",
+            "configured-secret-value",
+            {
+                "Authorization": "Bearer private-header-token",
+                "safe": "retained",
+            },
+            "Bearer standalone-token",
+        )
+        try:
+            raise RuntimeError(
+                "configured-secret-value in exception"
+            )
+        except RuntimeError:
+            logger.exception("password=hunter2")
+
+        for handler in logging.getLogger(
+            APP_LOGGER_NAME
+        ).handlers:
+            handler.flush()
+        contents = log_path.read_text(encoding="utf-8")
+
+        assert "configured-secret-value" not in contents
+        assert "private-header-token" not in contents
+        assert "standalone-token" not in contents
+        assert "hunter2" not in contents
+        assert REDACTED in contents
+        assert "retained" in contents
+        assert "RuntimeError" in contents
+
+    @pytest.mark.parametrize("level", ["", "TRACE", 10])
+    def test_invalid_logging_level_is_rejected(
+        self,
+        log_path: Path,
+        level: object,
+    ) -> None:
+        with pytest.raises(
+            ValueError,
+            match="Logging level",
+        ):
+            configure_logging(
+                level=level,  # type: ignore[arg-type]
+                log_path=log_path,
+                force=True,
+            )
+
+    def test_log_path_must_be_a_file(
+        self,
+        log_path: Path,
+    ) -> None:
+        log_path.parent.mkdir(parents=True)
+
+        with pytest.raises(
+            ValueError,
+            match="must point to a file",
+        ):
+            configure_logging(
+                log_path=log_path.parent,
+                force=True,
+            )
 
 
 class FakeResponse:

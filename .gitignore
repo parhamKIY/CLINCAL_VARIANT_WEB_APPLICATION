@@ -12,5 +12,6 @@ output/stage13-manual-validation*.json
 storage/uploads/*
 storage/reports/*
 storage/database/*
+storage/logs/*
 data/cache/*
 /docs/

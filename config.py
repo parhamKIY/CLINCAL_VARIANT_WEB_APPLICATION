@@ -204,6 +204,30 @@ class Settings:
     )
 
     # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
+
+    LOG_LEVEL: str = os.getenv(
+        "LOG_LEVEL",
+        "INFO",
+    ).strip().upper()
+
+    LOG_PATH: Path = _resolve_path(
+        "LOG_PATH",
+        "storage/logs/clinical_variant.log",
+    )
+
+    LOG_MAX_BYTES: int = _get_positive_int(
+        "LOG_MAX_BYTES",
+        5_000_000,
+    )
+
+    LOG_BACKUP_COUNT: int = _get_non_negative_int(
+        "LOG_BACKUP_COUNT",
+        3,
+    )
+
+    # ------------------------------------------------------------------
     # Storage paths
     # ------------------------------------------------------------------
 
@@ -252,6 +276,7 @@ class Settings:
             cls.DATABASE_PATH.parent,
             cls.CACHE_DIR,
             cls.HPO_DATA_DIR,
+            cls.LOG_PATH.parent,
         )
 
         for directory in directories:
@@ -346,9 +371,26 @@ class Settings:
                 "VEP_BATCH_SIZE cannot exceed Ensembl's limit of 200."
             )
 
+        if cls.LOG_LEVEL not in {
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        }:
+            raise RuntimeError(
+                "LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, "
+                "or CRITICAL."
+            )
+
         if cls.DATABASE_PATH.exists() and cls.DATABASE_PATH.is_dir():
             raise RuntimeError(
                 "DATABASE_PATH must point to a file, not a directory."
+            )
+
+        if cls.LOG_PATH.exists() and cls.LOG_PATH.is_dir():
+            raise RuntimeError(
+                "LOG_PATH must point to a file, not a directory."
             )
 
     @classmethod

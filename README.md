@@ -371,6 +371,18 @@ regression set, and then requires the complete offline suite to pass with at
 least 80% coverage. Live provider checks remain explicitly separate from the
 deterministic acceptance gate.
 
+## Stage 14 logging and error handling: in progress
+
+Stage 14 step 1 adds the central logging boundary in
+`backend/logging_config.py`. The Streamlit entry point configures one
+idempotent application logger with UTC console output and a bounded rotating
+UTF-8 log file. `LOG_LEVEL`, `LOG_PATH`, `LOG_MAX_BYTES`, and
+`LOG_BACKUP_COUNT` are configurable through `.env`; generated logs remain
+excluded from Git. Every application handler redacts the configured LLM API
+key, labelled credentials, bearer tokens, nested message arguments, and
+exception text before output. Existing annotation logging now uses the central
+application logger.
+
 ## Tests
 
 Run the offline test suite:
