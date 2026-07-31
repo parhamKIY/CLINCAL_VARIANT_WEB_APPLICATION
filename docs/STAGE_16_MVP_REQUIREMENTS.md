@@ -37,7 +37,8 @@ found. The remaining work is acceptance and release preparation:
    `docs/STAGE_16_MVP_DEMO_RUNBOOK.md`.
 3. Use the professor-facing runbook and `data/samples/mvp_demo.vcf` for the
    presentation.
-4. Run the final MVP acceptance gate and record the release decision.
+4. Run `tests/run_stage16_final_acceptance.py` and use the release decision in
+   `docs/STAGE_16_MVP_RELEASE_CHECKLIST.md`.
 
 ## Explicit MVP boundaries
 

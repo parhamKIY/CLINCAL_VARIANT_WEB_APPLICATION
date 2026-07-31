@@ -495,7 +495,7 @@ dependency consistency without network access, runs the repository secrets
 audit, executes all focused `stage15_security` checks, and requires the complete
 test suite to pass with at least 80% coverage.
 
-## Stage 16 MVP preparation: in progress
+## Stage 16 MVP preparation: complete
 
 Stage 16 step 1 completes the MVP requirements audit in
 `docs/STAGE_16_MVP_REQUIREMENTS.md`. Every roadmap capability is mapped to its
@@ -522,6 +522,14 @@ preflight commands, the primary VCF workflow, a manual-input fallback, expected
 results, the verified live baseline, presentation talking points, and network
 troubleshooting. The demo VCF is GRCh38, contains one public variant, and has no
 sample or genotype columns.
+
+Stage 16 step 5 completes the MVP release decision.
+`tests/run_stage16_final_acceptance.py` compiles the project, checks installed
+dependency consistency, runs the secrets audit, executes the Stage 15 security
+and Stage 16 MVP checks, and requires the complete suite to pass with at least
+80% coverage. `docs/STAGE_16_MVP_RELEASE_CHECKLIST.md` records the
+professor-demonstration decision, evidence, assets, pre-presentation checks,
+accepted MVP limitations, and production restriction.
 
 ## Tests
 
@@ -565,6 +573,12 @@ Run the deterministic offline Stage 16 MVP acceptance gate:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_stage16_mvp_acceptance.py
+```
+
+Run the final offline Stage 16 MVP release gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage16_final_acceptance.py
 ```
 
 Run the complete live Stage 13 manual-validation matrix:
