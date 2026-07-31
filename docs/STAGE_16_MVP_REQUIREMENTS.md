@@ -17,10 +17,10 @@ required.
 | Upload a VCF | `frontend/ui.py::_render_variant_input` and `frontend/execution.py::execute_analysis` | Verified offline |
 | Process the VCF | `backend/vcf_processing.py::process_vcf` and VCF validation, gzip, multi-allelic, and boundary tests | Verified offline |
 | Select candidate variants | `backend/prioritization.py::prioritize_variants` and deterministic bounded-selection tests | Verified offline |
-| Obtain at least one annotation | `backend/annotation.py::annotate_variants` and unified VEP, MyVariant.info, ClinVar, and UCSC GenCC tests | Verified offline; live validation pending |
+| Obtain at least one annotation | `backend/annotation.py::annotate_variants` and unified VEP, MyVariant.info, ClinVar, and UCSC GenCC tests | Verified offline and live |
 | Enter phenotypes | Local HPO search and selection controls in `frontend/ui.py` | Verified offline |
 | Build an Evidence Object | `backend/report.py::build_evidence_object` and Stage 7 contract tests | Verified offline |
-| Call the LLM | Provider-neutral boundary in `backend/llm.py` and report interpretation tests | Verified offline with a fake provider; live validation pending |
+| Call the LLM | Provider-neutral boundary in `backend/llm.py` and report interpretation tests | Verified offline and live |
 | Generate a report | `backend/report.py::build_clinical_report` | Verified offline |
 | Display and download the report | `frontend/report_viewer.py::render_report_viewer` and report-viewer tests | Verified offline |
 | Save the report | `backend/report.py::save_clinical_report` plus database report-reference persistence | Verified offline |
@@ -33,9 +33,10 @@ found. The remaining work is acceptance and release preparation:
 
 1. Run the dedicated deterministic MVP acceptance gate in
    `tests/run_stage16_mvp_acceptance.py`.
-2. Run a fresh live analysis against annotation and LLM providers using only
-   public or synthetic data.
-3. Prepare a concise professor-facing demo runbook and known-good input.
+2. Use the verified live baseline recorded in
+   `docs/STAGE_16_MVP_DEMO_RUNBOOK.md`.
+3. Use the professor-facing runbook and `data/samples/mvp_demo.vcf` for the
+   presentation.
 4. Run the final MVP acceptance gate and record the release decision.
 
 ## Explicit MVP boundaries

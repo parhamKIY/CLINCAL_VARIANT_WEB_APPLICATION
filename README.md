@@ -510,6 +510,19 @@ manual analysis, local phenotype selection, safe missing-input behavior, and
 report viewing and download. This gate performs no international network
 requests.
 
+Stage 16 step 3 verifies the known public variant through the configured live
+annotation and LLM providers. The final baseline completed every required
+stage, saved the report, and returned zero errors. UCSC GenCC had no exact
+SAMD11 validity claim, so the pipeline correctly returned one explicit
+missing-evidence warning and an acceptable partial status.
+
+Stage 16 step 4 adds the presentation-safe `data/samples/mvp_demo.vcf` and the
+professor-facing `docs/STAGE_16_MVP_DEMO_RUNBOOK.md`. The runbook contains
+preflight commands, the primary VCF workflow, a manual-input fallback, expected
+results, the verified live baseline, presentation talking points, and network
+troubleshooting. The demo VCF is GRCh38, contains one public variant, and has no
+sample or genotype columns.
+
 ## Tests
 
 Run the offline test suite:

@@ -1271,6 +1271,28 @@ class TestVCFProcessing:
         }
         assert len(variants) == 3
 
+    @pytest.mark.stage16_mvp
+    def test_mvp_demo_vcf_is_safe_and_parseable(self) -> None:
+        path = PROJECT_ROOT / "data" / "samples" / "mvp_demo.vcf"
+
+        variants = list(process_vcf(vcf_path=path))
+
+        assert variants == [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": 100.0,
+                "filter": "PASS",
+                "genotype": None,
+            }
+        ]
+        contents = path.read_text(encoding="utf-8")
+        assert "##reference=GRCh38" in contents
+        assert "\tFORMAT\t" not in contents
+        assert "PATIENT" not in contents
+
     def test_normalization_requires_bcftools(
         self,
         tmp_path: Path,

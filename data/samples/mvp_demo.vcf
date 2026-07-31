@@ -1,0 +1,6 @@
+##fileformat=VCFv4.2
+##reference=GRCh38
+##contig=<ID=1,length=248956422>
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Synthetic read depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	941284	rs571654307	G	A	100	PASS	DP=50

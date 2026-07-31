@@ -17,3 +17,4 @@ data/cache/*
 /docs/*
 !/docs/STAGE_15_SECURITY_ACCEPTANCE.md
 !/docs/STAGE_16_MVP_REQUIREMENTS.md
+!/docs/STAGE_16_MVP_DEMO_RUNBOOK.md
