@@ -1353,6 +1353,7 @@ def generate_clinical_interpretation(
     evidence_object: object,
     *,
     client: LLMClient | None = None,
+    model: str | None = None,
 ) -> LLMResponse:
     """Generate one deterministic, evidence-bound LLM interpretation."""
 
@@ -1363,6 +1364,7 @@ def generate_clinical_interpretation(
         temperature=0.0,
         max_tokens=CLINICAL_INTERPRETATION_MAX_TOKENS,
         client=client,
+        model=model,
     )
 
 

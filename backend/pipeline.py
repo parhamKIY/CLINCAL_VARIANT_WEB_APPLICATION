@@ -1091,6 +1091,7 @@ def _build_evidence_and_report(
     result: PipelineResult,
     *,
     llm_client: LLMClient | None,
+    llm_model: str | None,
     report_dir: str | Path | None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
@@ -1143,6 +1144,7 @@ def _build_evidence_and_report(
     interpretation = generate_clinical_interpretation(
         leading_evidence,
         client=llm_client,
+        model=llm_model,
     )
     _set_stage(
         result,
@@ -1284,6 +1286,7 @@ def _run_analysis_unpersisted(
     ontology_path: str | Path | None = None,
     associations_path: str | Path | None = None,
     llm_client: LLMClient | None = None,
+    llm_model: str | None = None,
     report_dir: str | Path | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
@@ -1412,6 +1415,7 @@ def _run_analysis_unpersisted(
         _build_evidence_and_report(
             result,
             llm_client=llm_client,
+            llm_model=llm_model,
             report_dir=report_dir,
             progress_callback=progress_callback,
         )
@@ -1488,6 +1492,7 @@ def run_analysis(
     ontology_path: str | Path | None = None,
     associations_path: str | Path | None = None,
     llm_client: LLMClient | None = None,
+    llm_model: str | None = None,
     report_dir: str | Path | None = None,
     database_path: str | Path | None = None,
     persist_analysis: bool = True,
@@ -1528,6 +1533,7 @@ def run_analysis(
             ontology_path=ontology_path,
             associations_path=associations_path,
             llm_client=llm_client,
+            llm_model=llm_model,
             report_dir=report_dir,
             progress_callback=progress_callback,
         )

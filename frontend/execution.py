@@ -252,6 +252,7 @@ def execute_analysis(
     uploaded_vcf: UploadedVCF | None,
     manual_variant: str | None,
     phenotypes: list[str],
+    llm_model: str | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
@@ -266,6 +267,7 @@ def execute_analysis(
             vcf_path=None,
             manual_variant=manual_variant,
             phenotypes=phenotypes,
+            llm_model=llm_model,
             progress_callback=progress_callback,
         )
 
@@ -298,6 +300,7 @@ def execute_analysis(
                 vcf_path=temporary_path,
                 manual_variant=None,
                 phenotypes=phenotypes,
+                llm_model=llm_model,
                 progress_callback=progress_callback,
             )
     except FrontendExecutionError:

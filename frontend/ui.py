@@ -38,6 +38,36 @@ MANUAL_INPUT_MODE = "Manual variant"
 SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 PIPELINE_RESULT_KEY = "pipeline_result"
+LLM_MODEL_KEY = "selected_llm_model"
+LLM_MODEL_CATALOG = (
+    "gpt-5.4-mini",
+    "gpt-5.4",
+    "gemini-3.1-pro-preview",
+    "claude-sonnet-4-6",
+    "gemini-3.1-flash-lite",
+    "gpt-5.4-nano",
+)
+LLM_MODEL_ADVANTAGES = {
+    "gpt-5.4-mini": (
+        "Recommended: best balance for conclusions, report quality, "
+        "speed, and cost"
+    ),
+    "gpt-5.4": (
+        "Best for difficult cases and deeper conclusions; higher cost"
+    ),
+    "gemini-3.1-pro-preview": (
+        "High-quality comparison model for complex interpretation"
+    ),
+    "claude-sonnet-4-6": (
+        "Strong professional report writing; higher cost"
+    ),
+    "gemini-3.1-flash-lite": (
+        "Cheap and fast for draft reports"
+    ),
+    "gpt-5.4-nano": (
+        "Lowest-cost option for basic testing; less detailed conclusions"
+    ),
+}
 PIPELINE_STAGE_LABELS = {
     "input": "Input validation",
     "vcf_processing": "VCF processing",
@@ -64,6 +94,25 @@ class AnalysisSubmission(TypedDict):
     uploaded_vcf: UploadedVCF | None
     manual_variant: str | None
     phenotypes: list[str]
+    llm_model: str
+
+
+def _llm_model_options() -> tuple[str, ...]:
+    """Return the configured default followed by approved UI models."""
+
+    return tuple(
+        dict.fromkeys((settings.LLM_MODEL, *LLM_MODEL_CATALOG))
+    )
+
+
+def _format_llm_model_option(model: str) -> str:
+    """Add a concise use-case advantage to one model identifier."""
+
+    advantage = LLM_MODEL_ADVANTAGES.get(
+        model,
+        "Custom model configured in .env",
+    )
+    return f"{model} — {advantage}"
 
 
 def _initialize_session_state() -> None:
@@ -72,6 +121,9 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(SELECTED_HPO_KEY, [])
     st.session_state.setdefault(HPO_RESULTS_KEY, [])
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
+    model_options = _llm_model_options()
+    if st.session_state.get(LLM_MODEL_KEY) not in model_options:
+        st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL
 
 
 def _clear_analysis_result() -> None:
@@ -253,6 +305,35 @@ def _render_hpo_picker() -> None:
                     st.rerun()
 
 
+def _render_llm_model_selector() -> str:
+    """Render the per-analysis LLM model selection."""
+
+    with st.container(border=True):
+        st.subheader("Interpretation model")
+        st.caption(
+            "Choose the AvalAI chat model used for the clinical "
+            "interpretation and final report. The selection applies "
+            "to new analyses."
+        )
+        selected_model = st.selectbox(
+            "LLM model",
+            _llm_model_options(),
+            key=LLM_MODEL_KEY,
+            format_func=_format_llm_model_option,
+            help=(
+                "More capable models may produce stronger summaries but "
+                "usually cost more. Every result still requires review "
+                "by a qualified healthcare professional."
+            ),
+            on_change=_clear_analysis_result,
+        )
+        st.caption(
+            "Selected advantage: "
+            f"{LLM_MODEL_ADVANTAGES.get(selected_model, 'Configured default')}."
+        )
+    return selected_model
+
+
 def _is_supported_vcf_filename(filename: str) -> bool:
     """Return whether an uploaded filename is VCF-shaped."""
 
@@ -266,6 +347,7 @@ def _prepare_input(
     input_mode: str,
     uploaded_vcf: object | None,
     manual_variant: str,
+    llm_model: str,
 ) -> AnalysisSubmission | None:
     """Validate frontend presence rules and build one submission."""
 
@@ -287,6 +369,7 @@ def _prepare_input(
             "uploaded_vcf": cast(UploadedVCF, uploaded_vcf),
             "manual_variant": None,
             "phenotypes": phenotype_ids,
+            "llm_model": llm_model,
         }
 
     normalized_variant = manual_variant.strip()
@@ -302,10 +385,13 @@ def _prepare_input(
         "uploaded_vcf": None,
         "manual_variant": normalized_variant,
         "phenotypes": phenotype_ids,
+        "llm_model": llm_model,
     }
 
 
-def _render_variant_input() -> AnalysisSubmission | None:
+def _render_variant_input(
+    llm_model: str,
+) -> AnalysisSubmission | None:
     """Render source selection and the batched analysis submission form."""
 
     with st.container(border=True):
@@ -353,6 +439,7 @@ def _render_variant_input() -> AnalysisSubmission | None:
                 input_mode or VCF_INPUT_MODE,
                 uploaded_vcf,
                 manual_variant,
+                llm_model,
             )
     return None
 
@@ -482,6 +569,7 @@ def _execute_submission(
             uploaded_vcf=submission["uploaded_vcf"],
             manual_variant=submission["manual_variant"],
             phenotypes=submission["phenotypes"],
+            llm_model=submission["llm_model"],
             progress_callback=update_progress,
         )
     except FrontendExecutionError as exc:
@@ -543,7 +631,8 @@ def render_app() -> None:
     st.subheader("Analysis workflow")
     _render_workflow_overview()
     st.divider()
-    submission = _render_variant_input()
+    llm_model = _render_llm_model_selector()
+    submission = _render_variant_input(llm_model)
     _render_hpo_picker()
     st.divider()
 

@@ -514,20 +514,28 @@ class LLMClient:
         return response
 
 
-def get_default_llm_client() -> LLMClient:
-    """Build the client selected entirely through central settings."""
+def get_default_llm_client(
+    *,
+    model: str | None = None,
+) -> LLMClient:
+    """Build the configured client with an optional request model."""
 
     if settings.LLM_PROVIDER != "openai_compatible":
         raise LLMConfigurationError(
             f"Unsupported LLM_PROVIDER '{settings.LLM_PROVIDER}'. "
             "Supported provider protocol: openai_compatible."
         )
+    selected_model = (
+        settings.LLM_MODEL
+        if model is None
+        else _require_text(model, "model")
+    )
 
     return LLMClient(
         OpenAICompatibleAdapter(
             base_url=settings.LLM_BASE_URL,
             api_key=settings.LLM_API_KEY,
-            model=settings.LLM_MODEL,
+            model=selected_model,
             timeout=settings.LLM_TIMEOUT,
         )
     )
@@ -540,8 +548,14 @@ def call_llm(
     temperature: float = 0.0,
     max_tokens: int = 1000,
     client: LLMClient | None = None,
+    model: str | None = None,
 ) -> LLMResponse:
     """Call an LLM without exposing provider-specific SDK details."""
+
+    if client is not None and model is not None:
+        raise LLMConfigurationError(
+            "Choose either a custom LLM client or a model override."
+        )
 
     request = LLMRequest(
         messages=(
@@ -567,7 +581,7 @@ def call_llm(
     active_client = (
         client
         if client is not None
-        else get_default_llm_client()
+        else get_default_llm_client(model=model)
     )
 
     if not isinstance(active_client, LLMClient):

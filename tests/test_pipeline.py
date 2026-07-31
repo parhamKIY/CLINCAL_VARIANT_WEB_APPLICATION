@@ -5093,6 +5093,55 @@ class TestLLMContract:
         )
         assert session.post_calls[0]["timeout"] == 23
 
+    def test_call_model_override_is_request_scoped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "choices": [
+                            {
+                                "message": {"content": "OK"},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    },
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_PROVIDER",
+            "openai_compatible",
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_BASE_URL",
+            "https://configured.example/v1",
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_API_KEY",
+            "configured-secret",
+        )
+        monkeypatch.setattr(settings, "LLM_MODEL", "default-model")
+        monkeypatch.setattr(settings, "LLM_TIMEOUT", 23)
+        monkeypatch.setattr(requests, "post", session.post)
+
+        result = call_llm(
+            "System",
+            "Reply OK",
+            max_tokens=8,
+            model="gpt-5.4-nano",
+        )
+
+        assert result.model == "gpt-5.4-nano"
+        assert session.post_calls[0]["json"]["model"] == "gpt-5.4-nano"
+        assert settings.LLM_MODEL == "default-model"
+
     @pytest.mark.parametrize(
         ("status_code", "error_type", "message"),
         [
@@ -8484,6 +8533,7 @@ class TestFrontendExecution:
             vcf_path: str | Path | None,
             manual_variant: str | None,
             phenotypes: list[str],
+            llm_model: str | None,
             progress_callback: PipelineProgressCallback | None,
         ) -> PipelineResult:
             assert vcf_path is not None
@@ -8498,6 +8548,7 @@ class TestFrontendExecution:
             )
             observed["manual_variant"] = manual_variant
             observed["phenotypes"] = phenotypes
+            observed["llm_model"] = llm_model
             observed["callback"] = progress_callback
             return expected
 
@@ -8522,6 +8573,7 @@ class TestFrontendExecution:
         assert observed["contents"] == payload
         assert observed["manual_variant"] is None
         assert observed["phenotypes"] == ["HP:0001250"]
+        assert observed["llm_model"] is None
         assert observed["callback"] is callback
         temporary_path = observed["path"]
         assert isinstance(temporary_path, Path)
@@ -10157,12 +10209,18 @@ class TestFrontendFoundation:
             "REPORT_DIR",
             report_directory,
         )
+        monkeypatch.setattr(
+            settings,
+            "LLM_MODEL",
+            "gpt-5.4-mini",
+        )
 
         def fake_execute_analysis(
             *,
             uploaded_vcf: object,
             manual_variant: str | None,
             phenotypes: list[str],
+            llm_model: str,
             progress_callback: PipelineProgressCallback,
         ) -> PipelineResult:
             received.update(
@@ -10170,6 +10228,7 @@ class TestFrontendFoundation:
                     "uploaded_vcf": uploaded_vcf,
                     "manual_variant": manual_variant,
                     "phenotypes": phenotypes,
+                    "llm_model": llm_model,
                 }
             )
             result = create_pipeline_result()
@@ -10207,6 +10266,38 @@ class TestFrontendFoundation:
             str(PROJECT_ROOT / "app.py")
         ).run(timeout=10)
 
+        model_selector = next(
+            field
+            for field in app.selectbox
+            if field.label == "LLM model"
+        )
+        assert model_selector.options == [
+            (
+                "gpt-5.4-mini — Recommended: best balance for "
+                "conclusions, report quality, speed, and cost"
+            ),
+            (
+                "gpt-5.4 — Best for difficult cases and deeper "
+                "conclusions; higher cost"
+            ),
+            (
+                "gemini-3.1-pro-preview — High-quality comparison "
+                "model for complex interpretation"
+            ),
+            (
+                "claude-sonnet-4-6 — Strong professional report "
+                "writing; higher cost"
+            ),
+            (
+                "gemini-3.1-flash-lite — Cheap and fast for draft "
+                "reports"
+            ),
+            (
+                "gpt-5.4-nano — Lowest-cost option for basic testing; "
+                "less detailed conclusions"
+            ),
+        ]
+        model_selector.set_value("gpt-5.4-nano").run(timeout=10)
         app.segmented_control[0].set_value("Manual variant").run(
             timeout=10
         )
@@ -10228,6 +10319,7 @@ class TestFrontendFoundation:
             "uploaded_vcf": None,
             "manual_variant": "1:941284:G:A",
             "phenotypes": [],
+            "llm_model": "gpt-5.4-nano",
         }
         assert app.session_state["pipeline_result"]["status"] == (
             "success"
@@ -10282,10 +10374,15 @@ class TestFrontendFoundation:
         )
         search_button.click().run(timeout=30)
 
-        assert app.selectbox[0].options[0] == (
+        phenotype_selector = next(
+            field
+            for field in app.selectbox
+            if field.label == "Search results"
+        )
+        assert phenotype_selector.options[0] == (
             "HP:0001250 — Seizure"
         )
-        app.selectbox[0].select("HP:0001250 — Seizure").run(
+        phenotype_selector.select("HP:0001250 — Seizure").run(
             timeout=10
         )
         add_button = next(

@@ -113,6 +113,13 @@ timeout, connection, HTTP, malformed JSON, and malformed response failures to
 the public error hierarchy. Changing between OpenAI-compatible services now
 requires only changing the `.env` base URL, API key, and model.
 
+The Streamlit interface also provides a per-analysis interpretation-model
+selector. It uses `LLM_MODEL` as the default, presents an approved AvalAI model
+catalog with concise quality, speed, and cost guidance, and passes the selected
+model through the provider-neutral LLM boundary without changing global
+settings. The generated report continues to record the model returned by the
+provider.
+
 Stage 8 step 3 adds a versioned clinical-interpretation prompt builder in
 `backend/report.py`. It accepts only a complete Stage 7 Evidence Object,
 validates and sanitizes it again, serializes it deterministically as bounded
