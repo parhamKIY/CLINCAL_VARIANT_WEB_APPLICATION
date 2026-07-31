@@ -428,7 +428,7 @@ internal-failure leak check. `tests/run_stage14_acceptance.py` compiles the
 project, runs those focused security checks, and then requires the complete
 offline suite to pass with at least 80% coverage.
 
-## Stage 15 security: in progress
+## Stage 15 security: complete
 
 Stage 15 step 1 adds a repeatable repository secrets audit in
 `tests/run_secrets_audit.py`. It verifies that `.env` remains ignored, rejects
@@ -487,6 +487,14 @@ details, and exposes only the minimal toolbar. A production deployment must
 place an authenticated HTTPS reverse proxy on the same host in front of this
 loopback-only service; Stage 15 does not add authentication by itself.
 
+Stage 15 step 6 completes the offline security review and acceptance gate.
+`docs/STAGE_15_SECURITY_ACCEPTANCE.md` records the implemented controls, exact
+acceptance criterion, live-test boundary, and remaining production blockers.
+`tests/run_stage15_acceptance.py` compiles the project, verifies installed
+dependency consistency without network access, runs the repository secrets
+audit, executes all focused `stage15_security` checks, and requires the complete
+test suite to pass with at least 80% coverage.
+
 ## Tests
 
 Run the offline test suite:
@@ -517,6 +525,12 @@ Run the Stage 15 repository secrets audit:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_secrets_audit.py
+```
+
+Run the complete offline Stage 15 security acceptance gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage15_acceptance.py
 ```
 
 Run the complete live Stage 13 manual-validation matrix:

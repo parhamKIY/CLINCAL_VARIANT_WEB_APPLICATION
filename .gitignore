@@ -14,4 +14,5 @@ storage/reports/*
 storage/database/*
 storage/logs/*
 data/cache/*
-/docs/
+/docs/*
+!/docs/STAGE_15_SECURITY_ACCEPTANCE.md
