@@ -38,6 +38,10 @@ from backend.database import (
     save_report,
     save_variants,
 )
+from backend.error_handling import (
+    map_pipeline_exception,
+    safe_ui_error_message,
+)
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -7350,6 +7354,146 @@ class TestStage13IntegrationBoundaries:
         assert restored["report_path"] == result["report_path"]
 
 
+class TestSafeErrorHandling:
+    """Verify internal exception details never cross the UI boundary."""
+
+    @pytest.mark.parametrize(
+        ("error", "expected_code", "expected_recoverable"),
+        [
+            (
+                VCFProcessingError("secret patient VCF path"),
+                "vcf_processing_failed",
+                False,
+            ),
+            (
+                PrioritizationError("secret candidate detail"),
+                "prioritization_failed",
+                False,
+            ),
+            (
+                AnnotationError("secret provider payload"),
+                "annotation_failed",
+                True,
+            ),
+            (
+                EvidenceObjectError("secret evidence detail"),
+                "evidence_object_failed",
+                False,
+            ),
+            (
+                LLMAuthenticationError("secret API key"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
+                LLMRateLimitError("secret provider response"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
+                LLMTimeoutError("secret provider timeout"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
+                LLMRequestError("secret request detail"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
+                LLMResponseError("secret response text"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
+                ClinicalInterpretationError("secret interpretation"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
+                ClinicalReportError("secret report path"),
+                "report_generation_failed",
+                True,
+            ),
+            (
+                RuntimeError("secret internal traceback"),
+                "unexpected_pipeline_error",
+                False,
+            ),
+        ],
+    )
+    def test_pipeline_mapper_returns_only_bounded_safe_fields(
+        self,
+        error: Exception,
+        expected_code: str,
+        expected_recoverable: bool,
+    ) -> None:
+        public_error = map_pipeline_exception(
+            error,
+            stage="report",
+            default_code="unexpected_pipeline_error",
+            default_message=(
+                "Analysis stopped because of an unexpected internal "
+                "error."
+            ),
+            default_recoverable=False,
+        )
+
+        assert set(public_error) == {
+            "code",
+            "message",
+            "recoverable",
+        }
+        assert public_error["code"] == expected_code
+        assert public_error["recoverable"] is expected_recoverable
+        assert "secret" not in public_error["message"].casefold()
+
+    def test_input_validation_message_remains_actionable(self) -> None:
+        public_error = map_pipeline_exception(
+            PipelineInputError(
+                "Exactly one input source must be provided."
+            ),
+            stage="input",
+            default_code="unexpected_input_error",
+            default_message="The analysis input is invalid.",
+            default_recoverable=False,
+        )
+
+        assert public_error == {
+            "code": "invalid_input",
+            "message": "Exactly one input source must be provided.",
+            "recoverable": False,
+        }
+
+    @pytest.mark.parametrize(
+        ("context", "expected"),
+        [
+            (
+                "hpo_update",
+                "HPO data could not be updated. The previously "
+                "installed data remains available.",
+            ),
+            (
+                "phenotype_search",
+                "Phenotype search could not be completed. Verify the "
+                "local HPO data and try again.",
+            ),
+        ],
+    )
+    def test_ui_mapper_discards_exception_text(
+        self,
+        context: str,
+        expected: str,
+    ) -> None:
+        message = safe_ui_error_message(
+            HPODataError("secret local ontology path"),
+            context=context,  # type: ignore[arg-type]
+        )
+
+        assert message == expected
+        assert "secret" not in message.casefold()
+
+
 class TestLLMCallLogging:
     """Verify provider-neutral LLM telemetry excludes clinical text."""
 
@@ -8953,6 +9097,77 @@ class TestFrontendFoundation:
             in message.value
             for message in app.success
         )
+
+    def test_hpo_update_error_hides_internal_detail(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_update() -> dict[str, object]:
+            raise HPODataError("secret ontology download path")
+
+        monkeypatch.setattr(
+            "frontend.ui.update_hpo_data",
+            fail_update,
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        update_button = next(
+            button
+            for button in app.button
+            if button.label == "Update HPO data"
+        )
+        update_button.click().run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            message.value
+            == (
+                "HPO data could not be updated. The previously "
+                "installed data remains available."
+            )
+            for message in app.error
+        )
+        assert "secret" not in str(app).casefold()
+
+    def test_hpo_search_error_hides_internal_detail(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_search(*_: object, **__: object) -> object:
+            raise HPODataError("secret local ontology path")
+
+        monkeypatch.setattr(
+            "frontend.ui.search_hpo_terms",
+            fail_search,
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        search_field = next(
+            field
+            for field in app.text_input
+            if field.label == "Search HPO terms"
+        )
+        search_field.set_value("seizure").run(timeout=10)
+        search_button = next(
+            button
+            for button in app.button
+            if button.label == "Search"
+        )
+        search_button.click().run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            message.value
+            == (
+                "Phenotype search could not be completed. Verify the "
+                "local HPO data and try again."
+            )
+            for message in app.error
+        )
+        assert "secret" not in str(app).casefold()
 
     @pytest.mark.regression
     def test_app_shell_renders_without_exceptions(self) -> None:

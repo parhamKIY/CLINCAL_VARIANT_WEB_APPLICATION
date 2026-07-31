@@ -408,6 +408,15 @@ bounded error type without prompts, responses, or provider exception text.
 Successful report storage records the managed report directory and an opaque
 content-derived report ID, never the coordinate-bearing report filename.
 
+Stage 14 step 5 centralizes user-safe error handling in
+`backend/error_handling.py`. Typed pipeline, annotation, evidence, LLM, report,
+and unexpected failures are converted to stable error codes, fixed actionable
+messages, and explicit recoverability flags before they reach the result
+contract. HPO update and phenotype-search failures use the same boundary for
+fixed frontend messages. Logs retain only the stage or UI context, public error
+code, recoverability, and exception type; internal exception text, paths,
+provider responses, patient data, and stack traces remain excluded.
+
 ## Tests
 
 Run the offline test suite:

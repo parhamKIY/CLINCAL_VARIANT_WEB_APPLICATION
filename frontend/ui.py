@@ -5,6 +5,7 @@ from typing import TypedDict, cast
 
 import streamlit as st
 
+from backend.error_handling import safe_ui_error_message
 from backend.pipeline import PipelineResult
 from backend.phenotype import (
     HPODataError,
@@ -143,7 +144,7 @@ def _render_hpo_update_control() -> None:
         with st.spinner("Updating HPO datasets..."):
             result = update_hpo_data()
     except (HPODataError, PhenotypeError, OSError, RuntimeError) as exc:
-        st.error(f"HPO update failed: {exc}")
+        st.error(safe_ui_error_message(exc, context="hpo_update"))
         return
 
     st.session_state[HPO_RESULTS_KEY] = []
@@ -185,7 +186,12 @@ def _render_hpo_picker() -> None:
                 )
             except (PhenotypeError, HPODataError) as exc:
                 st.session_state[HPO_RESULTS_KEY] = []
-                st.error(str(exc))
+                st.error(
+                    safe_ui_error_message(
+                        exc,
+                        context="phenotype_search",
+                    )
+                )
 
         suggestions = st.session_state[HPO_RESULTS_KEY]
         if search_submitted and not suggestions:

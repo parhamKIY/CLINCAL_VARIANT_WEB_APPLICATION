@@ -14,6 +14,12 @@ import requests
 
 from backend.annotation import AnnotationError, annotate_variants
 from backend.database import DatabaseError, save_complete_analysis
+from backend.error_handling import (
+    PipelineError,
+    PipelineInputError,
+    PipelineResultError,
+    map_pipeline_exception,
+)
 from backend.llm import LLMClient, LLMError
 from backend.logging_config import (
     bind_analysis_run_id,
@@ -95,18 +101,6 @@ PIPELINE_STAGE_ORDER = (
     "llm",
     "report",
 )
-
-
-class PipelineError(RuntimeError):
-    """Base error for the complete analysis pipeline."""
-
-
-class PipelineInputError(PipelineError):
-    """Raised when an analysis request violates its public contract."""
-
-
-class PipelineResultError(PipelineError):
-    """Raised when a frontend-safe pipeline result is malformed."""
 
 
 class AnalysisInput(TypedDict):
@@ -717,6 +711,35 @@ def _finish_failed_stage(
     return validated
 
 
+def _finish_exception(
+    result: PipelineResult,
+    *,
+    stage: str,
+    error: Exception,
+    default_code: str,
+    default_message: str,
+    default_recoverable: bool,
+    progress_callback: PipelineProgressCallback | None = None,
+) -> PipelineResult:
+    """Finalize a stage using only centrally mapped public error fields."""
+
+    public_error = map_pipeline_exception(
+        error,
+        stage=stage,
+        default_code=default_code,
+        default_message=default_message,
+        default_recoverable=default_recoverable,
+    )
+    return _finish_failed_stage(
+        result,
+        stage=stage,
+        code=public_error["code"],
+        message=public_error["message"],
+        recoverable=public_error["recoverable"],
+        progress_callback=progress_callback,
+    )
+
+
 def _persist_terminal_result(
     request: AnalysisInput,
     result: PipelineResult,
@@ -1229,12 +1252,13 @@ def _run_analysis_unpersisted(
             phenotypes=phenotypes,
         )
     except PipelineInputError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="input",
-            code="invalid_input",
-            message=str(exc),
-            recoverable=False,
+            error=exc,
+            default_code="invalid_input",
+            default_message="The analysis input is invalid.",
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
 
@@ -1261,42 +1285,46 @@ def _run_analysis_unpersisted(
             progress_callback=progress_callback,
         )
     except VCFProcessingError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="vcf_processing",
-            code="vcf_processing_failed",
-            message=str(exc),
-            recoverable=False,
+            error=exc,
+            default_code="vcf_processing_failed",
+            default_message="Variant processing could not be completed.",
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
     except PrioritizationError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="prioritization",
-            code="prioritization_failed",
-            message=str(exc),
-            recoverable=False,
+            error=exc,
+            default_code="prioritization_failed",
+            default_message="Candidate prioritization could not be completed.",
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
     except PipelineError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="vcf_processing",
-            code="no_variants",
-            message=str(exc),
-            recoverable=False,
+            error=exc,
+            default_code="no_variants",
+            default_message="Variant processing produced no variants.",
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
-    except Exception:
-        return _finish_failed_stage(
+    except Exception as exc:
+        return _finish_exception(
             result,
             stage=result["current_stage"],
-            code="unexpected_processing_error",
-            message=(
+            error=exc,
+            default_code="unexpected_processing_error",
+            default_message=(
                 "Variant processing stopped because of an unexpected "
                 "internal error."
             ),
-            recoverable=False,
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
 
@@ -1312,24 +1340,26 @@ def _run_analysis_unpersisted(
             progress_callback=progress_callback,
         )
     except AnnotationError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="annotation",
-            code="annotation_failed",
-            message=str(exc),
-            recoverable=True,
+            error=exc,
+            default_code="annotation_failed",
+            default_message="Variant annotation could not be completed.",
+            default_recoverable=True,
             progress_callback=progress_callback,
         )
-    except Exception:
-        return _finish_failed_stage(
+    except Exception as exc:
+        return _finish_exception(
             result,
             stage=result["current_stage"],
-            code="unexpected_enrichment_error",
-            message=(
+            error=exc,
+            default_code="unexpected_enrichment_error",
+            default_message=(
                 "Candidate enrichment stopped because of an unexpected "
                 "internal error."
             ),
-            recoverable=False,
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
 
@@ -1341,51 +1371,58 @@ def _run_analysis_unpersisted(
             progress_callback=progress_callback,
         )
     except EvidenceObjectError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="evidence",
-            code="evidence_object_failed",
-            message=str(exc),
-            recoverable=False,
+            error=exc,
+            default_code="evidence_object_failed",
+            default_message="Evidence construction could not be completed.",
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
     except (LLMError, ClinicalInterpretationError) as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="llm",
-            code="llm_interpretation_failed",
-            message=str(exc),
-            recoverable=True,
+            error=exc,
+            default_code="llm_interpretation_failed",
+            default_message=(
+                "Clinical interpretation could not be completed."
+            ),
+            default_recoverable=True,
             progress_callback=progress_callback,
         )
     except ClinicalReportError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="report",
-            code="report_generation_failed",
-            message=str(exc),
-            recoverable=True,
+            error=exc,
+            default_code="report_generation_failed",
+            default_message="The clinical report could not be generated.",
+            default_recoverable=True,
             progress_callback=progress_callback,
         )
     except PipelineError as exc:
-        return _finish_failed_stage(
+        return _finish_exception(
             result,
             stage="evidence",
-            code="evidence_object_failed",
-            message=str(exc),
-            recoverable=False,
+            error=exc,
+            default_code="evidence_object_failed",
+            default_message="Evidence construction produced no candidates.",
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
-    except Exception:
-        return _finish_failed_stage(
+    except Exception as exc:
+        return _finish_exception(
             result,
             stage=result["current_stage"],
-            code="unexpected_pipeline_error",
-            message=(
+            error=exc,
+            default_code="unexpected_pipeline_error",
+            default_message=(
                 "Analysis stopped because of an unexpected internal "
                 "error."
             ),
-            recoverable=False,
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
     return validate_pipeline_result(result)
