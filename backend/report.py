@@ -13,6 +13,10 @@ from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
 from backend.llm import LLMClient, LLMResponse, call_llm
+from backend.privacy import (
+    ClinicalDataPrivacyError,
+    validate_llm_payload,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -1303,6 +1307,13 @@ def build_clinical_interpretation_prompt(
     """Build deterministic prompts from one validated Evidence Object only."""
 
     clean_evidence = sanitize_evidence_object(evidence_object)
+    try:
+        validate_llm_payload(clean_evidence)
+    except ClinicalDataPrivacyError as exc:
+        raise EvidenceObjectError(
+            "Evidence Object contains data that is not approved for "
+            "LLM processing."
+        ) from exc
     evidence_json = json.dumps(
         clean_evidence,
         ensure_ascii=False,

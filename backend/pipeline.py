@@ -31,6 +31,11 @@ from backend.phenotype import (
     PhenotypeError,
     match_phenotypes,
 )
+from backend.privacy import (
+    ClinicalDataPrivacyError,
+    minimize_variant,
+    validate_no_prohibited_fields,
+)
 from backend.prioritization import (
     PrioritizationError,
     prioritize_variants,
@@ -488,6 +493,24 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             raise PipelineResultError(
                 f"pipeline.{field} must be a list of dictionaries."
             )
+    try:
+        validate_no_prohibited_fields(
+            {
+                field: value[field]
+                for field in (
+                    "variants",
+                    "candidates",
+                    "annotations",
+                    "phenotype_results",
+                    "evidence_objects",
+                )
+            },
+            context="Pipeline result",
+        )
+    except ClinicalDataPrivacyError as exc:
+        raise PipelineResultError(
+            "Pipeline result contains prohibited clinical data."
+        ) from exc
     if len(value["variants"]) > MAX_PIPELINE_RETAINED_VARIANTS:
         raise PipelineResultError(
             "pipeline.variants exceeds the retained-variant maximum of "
@@ -824,7 +847,7 @@ def _process_and_prioritize(
                 len(retained_variants)
                 < MAX_PIPELINE_RETAINED_VARIANTS
             ):
-                retained_variants.append(dict(variant))
+                retained_variants.append(minimize_variant(variant))
             yield variant
 
     result["current_stage"] = "prioritization"
@@ -853,7 +876,7 @@ def _process_and_prioritize(
         variant_count > len(retained_variants)
     )
     result["candidates"] = [
-        dict(candidate)
+        minimize_variant(candidate)
         for candidate in candidates
     ]
     if result["variants_truncated"]:
@@ -940,10 +963,21 @@ def _annotate_and_match(
         max_retries=annotation_max_retries,
         session=annotation_session,
     )
-    result["annotations"] = [
+    public_annotations = [
         dict(annotation)
         for annotation in annotations
     ]
+    try:
+        validate_no_prohibited_fields(
+            public_annotations,
+            context="Annotation output",
+        )
+    except ClinicalDataPrivacyError as exc:
+        raise AnnotationError(
+            "Annotation output violated the clinical-data privacy "
+            "contract."
+        ) from exc
+    result["annotations"] = public_annotations
     _retain_annotation_warnings(result, result["annotations"])
     annotation_status: PipelineStageStatus = (
         "warning"
@@ -1022,10 +1056,21 @@ def _annotate_and_match(
                 message=message,
             )
         else:
-            result["phenotype_results"] = [
+            public_phenotype_results = [
                 dict(candidate)
                 for candidate in phenotype_results
             ]
+            try:
+                validate_no_prohibited_fields(
+                    public_phenotype_results,
+                    context="Phenotype output",
+                )
+            except ClinicalDataPrivacyError as exc:
+                raise AnnotationError(
+                    "Phenotype output violated the clinical-data privacy "
+                    "contract."
+                ) from exc
+            result["phenotype_results"] = public_phenotype_results
             _set_stage(
                 result,
                 "phenotype",

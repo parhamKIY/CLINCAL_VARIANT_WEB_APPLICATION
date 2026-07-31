@@ -97,6 +97,12 @@ from backend.pipeline import (
     validate_analysis_input,
     validate_pipeline_result,
 )
+from backend.privacy import (
+    ClinicalDataPrivacyError,
+    minimize_variant,
+    validate_llm_payload,
+    validate_no_prohibited_fields,
+)
 from backend.prioritization import (
     PrioritizationError,
     prioritize_variants,
@@ -4221,6 +4227,22 @@ class TestEvidenceObject:
             "raw_api_payload": {"not": "copied"},
         }
 
+    @staticmethod
+    def _pipeline_candidate() -> dict[str, object]:
+        candidate = TestEvidenceObject._complete_candidate()
+        candidate.pop("raw_api_payload")
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        vep = sources["vep"]
+        assert isinstance(vep, dict)
+        vep.pop("raw_internal_detail")
+        references = candidate["references"]
+        assert isinstance(references, list)
+        for reference in references:
+            assert isinstance(reference, dict)
+            reference.pop("raw_internal_detail")
+        return candidate
+
     def test_complete_evidence_object_is_valid_and_json_safe(
         self,
     ) -> None:
@@ -5203,6 +5225,35 @@ class TestLLMContract:
         assert supplied_evidence == evidence
         assert "genotype" not in prompt["user_prompt"]
         assert "raw_internal_detail" not in prompt["user_prompt"]
+
+    @pytest.mark.stage15_security
+    @pytest.mark.parametrize(
+        "private_text",
+        [
+            (
+                "##fileformat=VCFv4.2\n"
+                "#CHROM\tPOS\tID\tREF\tALT"
+            ),
+            "patient_name=Identified Person",
+            "sample-id: private-sample",
+            "MRN=123456",
+            "date of birth: 2000-01-01",
+            "genotype=0/1",
+            "identified.person@example.test",
+        ],
+    )
+    def test_llm_prompt_rejects_raw_or_identifying_text(
+        self,
+        private_text: str,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        evidence["warnings"] = [private_text]
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="not approved for LLM processing",
+        ):
+            build_clinical_interpretation_prompt(evidence)
 
     def test_medical_prompt_is_deterministic(self) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()
@@ -6397,6 +6448,85 @@ class TestStage9EndToEnd:
         assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.stage15_security
+class TestClinicalDataPrivacy:
+    """Verify structural minimization before public or LLM boundaries."""
+
+    def test_variant_minimization_removes_sample_data(self) -> None:
+        variant = {
+            "chrom": "1",
+            "pos": 941284,
+            "ref": "G",
+            "alt": "A",
+            "qual": 99.0,
+            "filter": "PASS",
+            "genotype": "0/1",
+            "sample_name": "identified-sample",
+        }
+
+        minimized = minimize_variant(variant)
+
+        assert minimized == {
+            "chrom": "1",
+            "pos": 941284,
+            "ref": "G",
+            "alt": "A",
+            "qual": 99.0,
+            "filter": "PASS",
+        }
+        assert variant["genotype"] == "0/1"
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "genotype",
+            "sample-name",
+            "patient_id",
+            "medical-record-number",
+            "raw_vcf",
+            "vcf-content",
+        ],
+    )
+    def test_nested_prohibited_fields_are_rejected(
+        self,
+        field: str,
+    ) -> None:
+        with pytest.raises(
+            ClinicalDataPrivacyError,
+            match="prohibited clinical data",
+        ):
+            validate_no_prohibited_fields(
+                {"nested": [{field: "private value"}]},
+                context="Test payload",
+            )
+
+    def test_llm_privacy_validator_accepts_minimal_evidence(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+
+        validate_llm_payload(evidence)
+
+    def test_pipeline_result_rejects_sample_data(self) -> None:
+        result = create_pipeline_result()
+        result["variant_count"] = 1
+        result["variants"] = [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "genotype": "0/1",
+            }
+        ]
+
+        with pytest.raises(
+            PipelineResultError,
+            match="prohibited clinical data",
+        ):
+            validate_pipeline_result(result)
+
+
 class TestPipelineContract:
     """Verify the Stage 10 public input and result boundaries."""
 
@@ -6914,7 +7044,7 @@ class TestCompletePipelineHappyPath:
         ) -> list[dict[str, object]]:
             annotations: list[dict[str, object]] = []
             for variant in variants:  # type: ignore[union-attr]
-                candidate = TestEvidenceObject._complete_candidate()
+                candidate = TestEvidenceObject._pipeline_candidate()
                 candidate["variant"] = dict(variant)
                 annotations.append(candidate)
             return annotations
@@ -7063,7 +7193,7 @@ class TestCompletePipelineHappyPath:
         ) -> list[dict[str, object]]:
             annotations: list[dict[str, object]] = []
             for variant in variants:  # type: ignore[union-attr]
-                candidate = TestEvidenceObject._complete_candidate()
+                candidate = TestEvidenceObject._pipeline_candidate()
                 candidate["variant"] = dict(variant)
                 annotations.append(candidate)
             return annotations
@@ -7124,7 +7254,7 @@ class TestCompletePipelineHappyPath:
         ) -> list[dict[str, object]]:
             annotations: list[dict[str, object]] = []
             for variant in variants:  # type: ignore[union-attr]
-                candidate = TestEvidenceObject._complete_candidate()
+                candidate = TestEvidenceObject._pipeline_candidate()
                 candidate["variant"] = dict(variant)
                 for field in (
                     "phenotype_score",
@@ -7214,6 +7344,45 @@ class TestCompletePipelineHappyPath:
         )
         assert "secret internal API detail" not in serialized
         assert "traceback" not in serialized.casefold()
+
+    @pytest.mark.stage15_security
+    def test_private_annotation_payload_is_blocked_before_retention(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sentinel = "identified-patient-private-value"
+
+        def unsafe_annotation(
+            *_: object,
+            **__: object,
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "raw_api_payload": {
+                        "patient_name": sentinel,
+                    }
+                }
+            ]
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            unsafe_annotation,
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variant="1:941284:G:A",
+            phenotypes=[],
+            persist_analysis=False,
+        )
+
+        serialized = json.dumps(result, allow_nan=False)
+        assert result["status"] == "partial"
+        assert result["current_stage"] == "annotation"
+        assert result["annotations"] == []
+        assert result["errors"][0]["code"] == "annotation_failed"
+        assert sentinel not in serialized
+        assert "raw_api_payload" not in serialized
 
     @pytest.mark.regression
     def test_offline_end_to_end_pipeline_uses_real_stage_boundaries(
@@ -7438,7 +7607,13 @@ class TestStage13IntegrationBoundaries:
         )
 
         assert result["variant_count"] == 1
-        assert result["candidates"][0]["genotype"] == "0/1"
+        assert "genotype" not in result["variants"][0]
+        assert "genotype" not in result["candidates"][0]
+        assert (
+            "genotype"
+            not in result["annotations"][0]["variant"]
+        )
+        assert "PATIENT" not in json.dumps(result)
         assert result["annotations"][0]["gene"] == "SCN1A"
         assert result["annotations"][0]["sources"]["vep"][
             "status"

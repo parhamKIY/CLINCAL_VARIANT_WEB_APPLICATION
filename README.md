@@ -463,6 +463,19 @@ inherit NTFS access control from the configured storage directories and must
 apply the institution's production ACL policy before real patient data is
 used.
 
+Stage 15 step 4 adds an explicit clinical-data minimization boundary in
+`backend/privacy.py`. Genotype and sample fields are removed immediately after
+internal candidate selection, so public pipeline variants, annotations,
+progress snapshots, frontend state, Evidence Objects, reports, and database
+records retain only approved non-sample fields. Pipeline-result validation
+recursively rejects genotype, patient, sample, source-filename, raw-VCF, and
+raw-provider fields. Before every clinical LLM request, the sanitized Evidence
+Object is checked again for prohibited keys, raw VCF headers, labelled patient
+or sample identifiers, medical-record identifiers, dates of birth, genotype
+labels, and email addresses. The LLM receives only the bounded Evidence Object;
+the uploaded filename, raw VCF, sample name, and genotype never cross that
+boundary.
+
 ## Tests
 
 Run the offline test suite:
