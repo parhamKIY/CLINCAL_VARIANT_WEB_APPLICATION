@@ -840,6 +840,15 @@ def _process_and_prioritize(
             "parsed variants for display; candidate selection still "
             "evaluated the complete processed stream."
         )
+    LOGGER.info(
+        "event=variant_selection_finished variant_count=%d "
+        "retained_variant_count=%d variants_truncated=%s "
+        "candidate_count=%d",
+        variant_count,
+        len(retained_variants),
+        result["variants_truncated"],
+        len(candidates),
+    )
 
     _set_stage(
         result,
@@ -1040,6 +1049,10 @@ def _build_evidence_and_report(
         dict(evidence)
         for evidence in evidence_objects
     ]
+    LOGGER.info(
+        "event=evidence_build_finished evidence_object_count=%d",
+        len(evidence_objects),
+    )
     _set_stage(
         result,
         "evidence",
@@ -1093,6 +1106,12 @@ def _build_evidence_and_report(
         report_dir=report_dir,
     )
     result["report_path"] = str(report_path)
+    report_id = report_path.stem.rsplit("-", 1)[-1]
+    LOGGER.info(
+        "event=report_saved report_directory=%s report_id=%s",
+        report_path.parent,
+        report_id,
+    )
     _set_stage(
         result,
         "report",

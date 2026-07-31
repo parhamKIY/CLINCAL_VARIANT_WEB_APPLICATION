@@ -7350,6 +7350,78 @@ class TestStage13IntegrationBoundaries:
         assert restored["report_path"] == result["report_path"]
 
 
+class TestLLMCallLogging:
+    """Verify provider-neutral LLM telemetry excludes clinical text."""
+
+    def test_success_and_failure_logs_exclude_prompt_content(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_path = tmp_path / "logs" / "llm.log"
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        success_client = LLMClient(
+            FakeLLMAdapter(
+                LLMResponse(
+                    content="private model response",
+                    model="test-model",
+                    usage=LLMUsage(
+                        input_tokens=12,
+                        output_tokens=4,
+                        total_tokens=16,
+                    ),
+                )
+            )
+        )
+        timeout_client = LLMClient(
+            FakeLLMAdapter(
+                LLMTimeoutError(
+                    "private provider timeout detail"
+                )
+            )
+        )
+        try:
+            response = call_llm(
+                "private system prompt",
+                "private patient prompt",
+                max_tokens=32,
+                client=success_client,
+            )
+            with pytest.raises(LLMTimeoutError):
+                call_llm(
+                    "second private system prompt",
+                    "second private patient prompt",
+                    max_tokens=16,
+                    client=timeout_client,
+                )
+            for handler in logging.getLogger(
+                APP_LOGGER_NAME
+            ).handlers:
+                handler.flush()
+            contents = log_path.read_text(encoding="utf-8")
+        finally:
+            shutdown_logging()
+
+        assert response.content == "private model response"
+        assert (
+            "event=llm_call "
+            f"provider_protocol={settings.LLM_PROVIDER} "
+            "outcome=success"
+        ) in contents
+        assert "message_count=2 max_tokens=32" in contents
+        assert "input_tokens=12 output_tokens=4" in contents
+        assert "outcome=timeout" in contents
+        assert "error_type=LLMTimeoutError" in contents
+        assert len(re.findall(r"duration_ms=\d+", contents)) == 2
+        assert "private system prompt" not in contents
+        assert "private patient prompt" not in contents
+        assert "private model response" not in contents
+        assert "private provider timeout detail" not in contents
+
+
 class TestAnnotationApiLogging:
     """Verify bounded API latency, retry, and timeout telemetry."""
 
@@ -7522,6 +7594,22 @@ class TestPipelineLifecycleLogging:
             "event=analysis_finished status=success "
             f"analysis_id={result['analysis_id']}"
         ) in contents
+        assert (
+            "event=variant_selection_finished variant_count=1 "
+            "retained_variant_count=1 variants_truncated=False "
+            "candidate_count=1"
+        ) in contents
+        assert (
+            "event=evidence_build_finished evidence_object_count=1"
+        ) in contents
+        assert (
+            "event=report_saved report_directory="
+            f"{(tmp_path / 'reports').resolve()}"
+        ) in contents
+        assert re.search(
+            r"event=report_saved .* report_id=[0-9a-f]{16}",
+            contents,
+        )
         run_ids = re.findall(
             r"run_id=(run-[0-9a-f]{32})",
             contents,
@@ -7531,6 +7619,8 @@ class TestPipelineLifecycleLogging:
         assert "1:100:A:G" not in contents
         assert "HP:0001250" not in contents
         assert "SCN1A" not in contents
+        assert result["report_path"] is not None
+        assert Path(result["report_path"]).name not in contents
 
     def test_invalid_input_logs_safe_terminal_lifecycle(
         self,

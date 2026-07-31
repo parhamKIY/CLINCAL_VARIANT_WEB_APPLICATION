@@ -5,15 +5,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
+from time import perf_counter
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
 import requests
 
+from backend.logging_config import get_logger
 from config import settings
 
 
 LLMRole = Literal["system", "user", "assistant"]
+LOGGER = get_logger("llm")
 
 
 class LLMError(RuntimeError):
@@ -46,6 +49,53 @@ class LLMTimeoutError(LLMRequestError):
 
 class LLMResponseError(LLMError):
     """Raised when a provider returns an invalid standardized response."""
+
+
+def _llm_error_outcome(error: LLMError) -> str:
+    """Map one provider-neutral error to a bounded log outcome."""
+
+    if isinstance(error, LLMAuthenticationError):
+        return "authentication_error"
+    if isinstance(error, LLMRateLimitError):
+        return "rate_limited"
+    if isinstance(error, LLMTimeoutError):
+        return "timeout"
+    if isinstance(error, LLMRequestError):
+        return "request_error"
+    if isinstance(error, LLMResponseError):
+        return "response_error"
+    if isinstance(error, LLMConfigurationError):
+        return "configuration_error"
+    if isinstance(error, LLMValidationError):
+        return "validation_error"
+    return "llm_error"
+
+
+def _log_llm_call(
+    request: LLMRequest,
+    *,
+    started_at: float,
+    outcome: str,
+    response: LLMResponse | None = None,
+    error_type: str | None = None,
+) -> None:
+    """Log bounded LLM telemetry without prompts or response content."""
+
+    usage = response.usage if response is not None else None
+    log_method = LOGGER.info if outcome == "success" else LOGGER.warning
+    log_method(
+        "event=llm_call provider_protocol=%s outcome=%s "
+        "duration_ms=%d message_count=%d max_tokens=%d "
+        "input_tokens=%s output_tokens=%s error_type=%s",
+        settings.LLM_PROVIDER,
+        outcome,
+        max(0, round((perf_counter() - started_at) * 1000)),
+        len(request.messages),
+        request.max_tokens,
+        usage.input_tokens if usage is not None else None,
+        usage.output_tokens if usage is not None else None,
+        error_type,
+    )
 
 
 def _require_text(
@@ -416,20 +466,45 @@ class LLMClient:
                 "request must be an LLMRequest object."
             )
 
+        started_at = perf_counter()
         try:
             response = self._adapter.generate(request)
-        except LLMError:
+        except LLMError as exc:
+            _log_llm_call(
+                request,
+                started_at=started_at,
+                outcome=_llm_error_outcome(exc),
+                error_type=type(exc).__name__,
+            )
             raise
         except Exception as exc:
+            _log_llm_call(
+                request,
+                started_at=started_at,
+                outcome="unexpected_error",
+                error_type=type(exc).__name__,
+            )
             raise LLMRequestError(
                 "The LLM provider request failed."
             ) from exc
 
         if not isinstance(response, LLMResponse):
+            _log_llm_call(
+                request,
+                started_at=started_at,
+                outcome="response_error",
+                error_type="InvalidAdapterResponse",
+            )
             raise LLMResponseError(
                 "LLM adapter must return an LLMResponse object."
             )
 
+        _log_llm_call(
+            request,
+            started_at=started_at,
+            outcome="success",
+            response=response,
+        )
         return response
 
 

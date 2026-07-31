@@ -400,6 +400,14 @@ and API-error retries record their safe reason, next attempt, and bounded
 delay. URLs, query parameters, coordinates, alleles, genes, provider payloads,
 and transport exception text are never logged.
 
+Stage 14 step 4 adds safe operational outcome logging. Variant processing
+records total, retained, truncated, and candidate counts; Evidence Object
+construction records only its count. Provider-neutral LLM calls record
+duration, outcome, message count, token limit, optional usage totals, and
+bounded error type without prompts, responses, or provider exception text.
+Successful report storage records the managed report directory and an opaque
+content-derived report ID, never the coordinate-bearing report filename.
+
 ## Tests
 
 Run the offline test suite:
