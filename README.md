@@ -353,6 +353,14 @@ validated VEP evidence still reaches a partial clinical report, source statuses
 remain explicit, and private transport exception details do not enter
 user-facing pipeline output.
 
+Stage 13 step 4 adds `tests/manual_stage13_validation.py` for repeatable live
+validation. Its non-identifying matrix covers a known manual variant, missing
+phenotype input, and a bounded run over the bundled public Ensembl clinical
+VCF. It validates report creation, analysis persistence, and retrieval, then
+writes a compact JSON record under `output/`. A temporary timeout override
+supports degraded-network testing. Multiple LLM providers are tested by
+changing only the provider settings in `.env` and rerunning the same command.
+
 ## Tests
 
 Run the offline test suite:
@@ -365,6 +373,26 @@ Run the unit-coverage audit:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q --cov=config --cov=backend --cov=frontend --cov-report=term-missing --cov-fail-under=80
+```
+
+Run the complete live Stage 13 manual-validation matrix:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_stage13_validation.py --case all
+```
+
+Run the public sample VCF case only:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_stage13_validation.py --case sample-vcf
+```
+
+Exercise timeout and degraded-network behavior:
+
+```powershell
+.\.venv\Scripts\python.exe tests\manual_stage13_validation.py `
+  --case known-variant `
+  --timeout-seconds 1
 ```
 
 Run a live request through the production LLM boundary:
