@@ -118,7 +118,9 @@ selector. It uses `LLM_MODEL` as the default, presents an approved AvalAI model
 catalog with concise quality, speed, and cost guidance, and passes the selected
 model through the provider-neutral LLM boundary without changing global
 settings. The generated report continues to record the model returned by the
-provider.
+provider. The six primary models remain pinned at the top, additional
+cost/quality alternatives include premium and budget tiers, and the selector
+supports name filtering for quick model search.
 
 Stage 8 step 3 adds a versioned clinical-interpretation prompt builder in
 `backend/report.py`. It accepts only a complete Stage 7 Evidence Object,

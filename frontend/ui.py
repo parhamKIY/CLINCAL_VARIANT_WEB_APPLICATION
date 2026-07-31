@@ -39,7 +39,7 @@ SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 PIPELINE_RESULT_KEY = "pipeline_result"
 LLM_MODEL_KEY = "selected_llm_model"
-LLM_MODEL_CATALOG = (
+LLM_PINNED_MODELS = (
     "gpt-5.4-mini",
     "gpt-5.4",
     "gemini-3.1-pro-preview",
@@ -47,6 +47,18 @@ LLM_MODEL_CATALOG = (
     "gemini-3.1-flash-lite",
     "gpt-5.4-nano",
 )
+LLM_RECOMMENDED_MODELS = (
+    "gpt-5.5",
+    "claude-opus-4-8",
+    "deepseek-v4-pro",
+    "gemini-3.5-flash",
+    "claude-haiku-4-5",
+    "gpt-4.1-mini",
+    "gpt-5-nano",
+    "gemini-2.5-flash-lite",
+    "deepseek-v4-flash",
+)
+LLM_MODEL_CATALOG = LLM_PINNED_MODELS + LLM_RECOMMENDED_MODELS
 LLM_MODEL_ADVANTAGES = {
     "gpt-5.4-mini": (
         "Recommended: best balance for conclusions, report quality, "
@@ -66,6 +78,35 @@ LLM_MODEL_ADVANTAGES = {
     ),
     "gpt-5.4-nano": (
         "Lowest-cost option for basic testing; less detailed conclusions"
+    ),
+    "gpt-5.5": (
+        "Maximum-quality option for the hardest conclusions; extremely "
+        "high cost and potentially more billed reasoning tokens"
+    ),
+    "claude-opus-4-8": (
+        "Premium nuanced synthesis and polished reports; very high cost"
+    ),
+    "deepseek-v4-pro": (
+        "Strong analytical synthesis at comparatively low cost"
+    ),
+    "gemini-3.5-flash": (
+        "Latest fast Google option with strong quality; costly for a "
+        "Flash model"
+    ),
+    "claude-haiku-4-5": (
+        "Fast, polished report writing at moderate cost"
+    ),
+    "gpt-4.1-mini": (
+        "Reliable structured reports at low-to-moderate cost"
+    ),
+    "gpt-5-nano": (
+        "Very cheap and fast for screening; reduced conclusion depth"
+    ),
+    "gemini-2.5-flash-lite": (
+        "Ultra-low-cost fast drafts; reduced conclusion depth"
+    ),
+    "deepseek-v4-flash": (
+        "Lowest-cost analytical alternative; validate report consistency"
     ),
 }
 PIPELINE_STAGE_LABELS = {
@@ -98,10 +139,10 @@ class AnalysisSubmission(TypedDict):
 
 
 def _llm_model_options() -> tuple[str, ...]:
-    """Return the configured default followed by approved UI models."""
+    """Return pinned, recommended, and configured model options."""
 
     return tuple(
-        dict.fromkeys((settings.LLM_MODEL, *LLM_MODEL_CATALOG))
+        dict.fromkeys((*LLM_MODEL_CATALOG, settings.LLM_MODEL))
     )
 
 
@@ -112,7 +153,8 @@ def _format_llm_model_option(model: str) -> str:
         model,
         "Custom model configured in .env",
     )
-    return f"{model} — {advantage}"
+    pin_label = "Pinned — " if model in LLM_PINNED_MODELS else ""
+    return f"{model} — {pin_label}{advantage}"
 
 
 def _initialize_session_state() -> None:
@@ -311,18 +353,21 @@ def _render_llm_model_selector() -> str:
     with st.container(border=True):
         st.subheader("Interpretation model")
         st.caption(
-            "Choose the AvalAI chat model used for the clinical "
-            "interpretation and final report. The selection applies "
-            "to new analyses."
+            "The six primary choices are pinned first. Open the menu "
+            "and type any part of a model name to search the curated "
+            "AvalAI chat-model catalog."
         )
         selected_model = st.selectbox(
             "LLM model",
             _llm_model_options(),
             key=LLM_MODEL_KEY,
             format_func=_format_llm_model_option,
+            placeholder="Search or select an AvalAI chat model",
+            filter_mode="contains",
             help=(
                 "More capable models may produce stronger summaries but "
-                "usually cost more. Every result still requires review "
+                "usually cost more. Premium reasoning may also increase "
+                "billed token usage. Every result still requires review "
                 "by a qualified healthcare professional."
             ),
             on_change=_clear_analysis_result,

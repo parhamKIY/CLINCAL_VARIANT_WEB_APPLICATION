@@ -10271,30 +10271,69 @@ class TestFrontendFoundation:
             for field in app.selectbox
             if field.label == "LLM model"
         )
-        assert model_selector.options == [
+        assert model_selector.options[:6] == [
             (
-                "gpt-5.4-mini — Recommended: best balance for "
+                "gpt-5.4-mini — Pinned — Recommended: best balance for "
                 "conclusions, report quality, speed, and cost"
             ),
             (
-                "gpt-5.4 — Best for difficult cases and deeper "
+                "gpt-5.4 — Pinned — Best for difficult cases and deeper "
                 "conclusions; higher cost"
             ),
             (
-                "gemini-3.1-pro-preview — High-quality comparison "
-                "model for complex interpretation"
+                "gemini-3.1-pro-preview — Pinned — High-quality "
+                "comparison model for complex interpretation"
             ),
             (
-                "claude-sonnet-4-6 — Strong professional report "
-                "writing; higher cost"
+                "claude-sonnet-4-6 — Pinned — Strong professional "
+                "report writing; higher cost"
             ),
             (
-                "gemini-3.1-flash-lite — Cheap and fast for draft "
-                "reports"
+                "gemini-3.1-flash-lite — Pinned — Cheap and fast for "
+                "draft reports"
             ),
             (
-                "gpt-5.4-nano — Lowest-cost option for basic testing; "
-                "less detailed conclusions"
+                "gpt-5.4-nano — Pinned — Lowest-cost option for basic "
+                "testing; less detailed conclusions"
+            ),
+        ]
+        assert model_selector.options[6:] == [
+            (
+                "gpt-5.5 — Maximum-quality option for the hardest "
+                "conclusions; extremely high cost and potentially more "
+                "billed reasoning tokens"
+            ),
+            (
+                "claude-opus-4-8 — Premium nuanced synthesis and "
+                "polished reports; very high cost"
+            ),
+            (
+                "deepseek-v4-pro — Strong analytical synthesis at "
+                "comparatively low cost"
+            ),
+            (
+                "gemini-3.5-flash — Latest fast Google option with "
+                "strong quality; costly for a Flash model"
+            ),
+            (
+                "claude-haiku-4-5 — Fast, polished report writing at "
+                "moderate cost"
+            ),
+            (
+                "gpt-4.1-mini — Reliable structured reports at "
+                "low-to-moderate cost"
+            ),
+            (
+                "gpt-5-nano — Very cheap and fast for screening; "
+                "reduced conclusion depth"
+            ),
+            (
+                "gemini-2.5-flash-lite — Ultra-low-cost fast drafts; "
+                "reduced conclusion depth"
+            ),
+            (
+                "deepseek-v4-flash — Lowest-cost analytical "
+                "alternative; validate report consistency"
             ),
         ]
         model_selector.set_value("gpt-5.4-nano").run(timeout=10)
