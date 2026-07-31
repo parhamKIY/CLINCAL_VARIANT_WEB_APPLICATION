@@ -10027,6 +10027,49 @@ class TestDatabaseFoundation:
 class TestFrontendFoundation:
     """Verify the Stage 11 Streamlit shell and input controls."""
 
+    def test_app_direct_launch_builds_streamlit_command(self) -> None:
+        command = app_module.streamlit_command(
+            ("--server.port", "8512")
+        )
+
+        assert command == [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(PROJECT_ROOT / "app.py"),
+            "--server.port",
+            "8512",
+        ]
+
+    def test_app_direct_launch_uses_project_directory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            command: list[str],
+            *,
+            cwd: Path,
+            check: bool,
+        ) -> SimpleNamespace:
+            captured.update(
+                command=command,
+                cwd=cwd,
+                check=check,
+            )
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+
+        assert app_module.launch_streamlit() == 0
+        assert captured == {
+            "command": app_module.streamlit_command(),
+            "cwd": PROJECT_ROOT,
+            "check": False,
+        }
+
     def test_hpo_update_control_uses_coordinated_backend(
         self,
         monkeypatch: pytest.MonkeyPatch,

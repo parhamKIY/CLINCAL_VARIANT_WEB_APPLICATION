@@ -120,6 +120,28 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+### Start the application
+
+On Windows, double-click:
+
+```text
+run_app.bat
+```
+
+If the virtual environment is already active, the shortest terminal command
+is:
+
+```powershell
+python app.py
+```
+
+Running `app.py` directly now launches it through Streamlit automatically.
+The conventional command remains supported:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
 <a id="stage-5-annotation-complete"></a>
 
 ## 🧬 Stage 5 annotation: complete
@@ -402,10 +424,10 @@ responsive layouts without horizontal overflow at desktop, tablet, and mobile
 widths. Remote annotation and LLM calls remain outside the offline UI test
 suite and must be checked separately with the live Stage 10 smoke mode.
 
-Run the frontend:
+Run the frontend with the one-click `run_app.bat` launcher or directly:
 
 ```powershell
-.\.venv\Scripts\python.exe -m streamlit run app.py
+python app.py
 ```
 
 <a id="stage-12-sqlite-persistence-complete"></a>
