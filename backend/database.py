@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from typing import TypedDict
 from uuid import uuid4
 
+from backend.report import (
+    MAX_EVIDENCE_ALLELE_LENGTH,
+    EvidenceObject,
+    EvidenceObjectError,
+    sanitize_evidence_object,
+)
 from config import settings
 
 
@@ -19,11 +27,28 @@ DATABASE_BUSY_TIMEOUT_MS = 5_000
 MAX_ANALYSIS_WARNINGS = 100
 MAX_ANALYSIS_WARNING_LENGTH = 1_000
 MAX_ANALYSIS_WARNINGS_JSON_BYTES = 64 * 1024
+MAX_STORED_CANDIDATES = 100
+MAX_STORED_EVIDENCE_OBJECTS = 100
 ANALYSIS_STATUSES = frozenset(
     {"pending", "running", "success", "partial", "error"}
 )
+_ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
 _CONTROL_CHARACTER_PATTERN = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+_CANDIDATE_REQUIRED_FIELDS = frozenset(
+    {"chrom", "pos", "ref", "alt"}
+)
+_CANDIDATE_ALLOWED_FIELDS = frozenset(
+    {
+        "chrom",
+        "pos",
+        "ref",
+        "alt",
+        "qual",
+        "filter",
+        "genotype",
+    }
 )
 DATABASE_TABLES = {
     "analyses": (
@@ -135,6 +160,17 @@ class AnalysisRecord(TypedDict):
     anonymized_filename: str | None
     status: str
     warnings: list[str]
+
+
+class StoredCandidateVariant(TypedDict):
+    """Genotype-free candidate variant approved for persistence."""
+
+    chrom: str
+    pos: int
+    ref: str
+    alt: str
+    qual: float | None
+    filter: str | None
 
 
 def _resolve_database_path(
@@ -298,6 +334,19 @@ def _validate_status(status: str) -> str:
     return normalized_status
 
 
+def _validate_analysis_id(analysis_id: str) -> str:
+    """Validate an application-generated analysis identifier."""
+
+    if (
+        not isinstance(analysis_id, str)
+        or _ANALYSIS_ID_PATTERN.fullmatch(analysis_id) is None
+    ):
+        raise DatabaseValidationError(
+            "Analysis ID must use the application-generated format."
+        )
+    return analysis_id
+
+
 def _normalize_warnings(warnings: Iterable[str]) -> list[str]:
     """Normalize bounded frontend-safe warnings for JSON storage."""
 
@@ -438,11 +487,314 @@ def save_analysis(
     }
 
 
+def _bounded_collection(
+    values: Iterable[object],
+    *,
+    name: str,
+    maximum: int,
+) -> list[object]:
+    """Materialize one bounded non-string persistence collection."""
+
+    if (
+        isinstance(values, (str, bytes, dict))
+        or not isinstance(values, Iterable)
+    ):
+        raise DatabaseValidationError(
+            f"{name} must be a collection."
+        )
+    materialized = list(islice(values, maximum + 1))
+    if len(materialized) > maximum:
+        raise DatabaseValidationError(
+            f"{name} exceeds the maximum of {maximum}."
+        )
+    return materialized
+
+
+def _candidate_text(
+    value: object,
+    *,
+    path: str,
+    maximum: int,
+) -> str:
+    """Validate one bounded candidate text field."""
+
+    if not isinstance(value, str):
+        raise DatabaseValidationError(
+            f"{path} must be a string."
+        )
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > maximum
+        or _CONTROL_CHARACTER_PATTERN.search(normalized) is not None
+    ):
+        raise DatabaseValidationError(
+            f"{path} is empty, oversized, or contains control "
+            "characters."
+        )
+    return normalized
+
+
+def _sanitize_candidate(
+    value: object,
+    *,
+    index: int,
+) -> StoredCandidateVariant:
+    """Select and validate genotype-free candidate fields."""
+
+    path = f"candidates[{index}]"
+    if not isinstance(value, dict):
+        raise DatabaseValidationError(
+            f"{path} must be a dictionary."
+        )
+    fields = set(value)
+    missing = _CANDIDATE_REQUIRED_FIELDS - fields
+    extra = fields - _CANDIDATE_ALLOWED_FIELDS
+    if missing:
+        raise DatabaseValidationError(
+            f"{path} is missing required fields: "
+            f"{', '.join(sorted(missing))}."
+        )
+    if extra:
+        raise DatabaseValidationError(
+            f"{path} contains unsupported fields: "
+            f"{', '.join(sorted(str(field) for field in extra))}."
+        )
+
+    position = value["pos"]
+    if (
+        isinstance(position, bool)
+        or not isinstance(position, int)
+        or position <= 0
+    ):
+        raise DatabaseValidationError(
+            f"{path}.pos must be a positive integer."
+        )
+
+    quality = value.get("qual")
+    if quality is not None and (
+        isinstance(quality, bool)
+        or not isinstance(quality, (int, float))
+        or not math.isfinite(quality)
+    ):
+        raise DatabaseValidationError(
+            f"{path}.qual must be a finite number or null."
+        )
+
+    raw_filter = value.get("filter")
+    normalized_filter: str | None = None
+    if raw_filter is not None:
+        normalized_filter = _candidate_text(
+            raw_filter,
+            path=f"{path}.filter",
+            maximum=500,
+        )
+
+    return {
+        "chrom": _candidate_text(
+            value["chrom"],
+            path=f"{path}.chrom",
+            maximum=32,
+        ),
+        "pos": position,
+        "ref": _candidate_text(
+            value["ref"],
+            path=f"{path}.ref",
+            maximum=MAX_EVIDENCE_ALLELE_LENGTH,
+        ).upper(),
+        "alt": _candidate_text(
+            value["alt"],
+            path=f"{path}.alt",
+            maximum=MAX_EVIDENCE_ALLELE_LENGTH,
+        ).upper(),
+        "qual": None if quality is None else float(quality),
+        "filter": normalized_filter,
+    }
+
+
+def _require_analysis(
+    connection: sqlite3.Connection,
+    analysis_id: str,
+) -> None:
+    """Require an existing parent analysis before child persistence."""
+
+    exists = connection.execute(
+        """
+        SELECT 1
+        FROM analyses
+        WHERE analysis_id = ?
+        """,
+        (analysis_id,),
+    ).fetchone()
+    if exists is None:
+        raise DatabaseWriteError(
+            "The parent analysis does not exist."
+        )
+
+
+def save_variants(
+    analysis_id: str,
+    candidates: Iterable[object],
+    *,
+    database_path: str | Path | None = None,
+) -> int:
+    """Persist bounded genotype-free candidate variants atomically."""
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    raw_candidates = _bounded_collection(
+        candidates,
+        name="Candidate variants",
+        maximum=MAX_STORED_CANDIDATES,
+    )
+    clean_candidates = [
+        _sanitize_candidate(candidate, index=index)
+        for index, candidate in enumerate(raw_candidates)
+    ]
+    serialized_candidates = [
+        json.dumps(
+            candidate,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for candidate in clean_candidates
+    ]
+
+    resolved_path = initialize_database(database_path)
+    connection = connect_database(resolved_path)
+    try:
+        with connection:
+            _require_analysis(connection, normalized_id)
+            existing_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM candidate_variants
+                WHERE analysis_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()[0]
+            if existing_count:
+                raise DatabaseWriteError(
+                    "Candidate variants have already been saved for "
+                    "this analysis."
+                )
+            connection.executemany(
+                """
+                INSERT INTO candidate_variants (
+                    analysis_id,
+                    candidate_index,
+                    variant_json
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (normalized_id, index, payload)
+                    for index, payload in enumerate(
+                        serialized_candidates
+                    )
+                ),
+            )
+    except DatabaseError:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseWriteError(
+            "Candidate variants could not be saved."
+        ) from exc
+    finally:
+        connection.close()
+    return len(clean_candidates)
+
+
+def save_evidence_objects(
+    analysis_id: str,
+    evidence_objects: Iterable[object],
+    *,
+    database_path: str | Path | None = None,
+) -> int:
+    """Validate, sanitize, and persist Evidence Objects atomically."""
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    raw_evidence_objects = _bounded_collection(
+        evidence_objects,
+        name="Evidence Objects",
+        maximum=MAX_STORED_EVIDENCE_OBJECTS,
+    )
+    clean_evidence_objects: list[EvidenceObject] = []
+    for index, evidence in enumerate(raw_evidence_objects):
+        try:
+            clean_evidence_objects.append(
+                sanitize_evidence_object(evidence)
+            )
+        except EvidenceObjectError as exc:
+            raise DatabaseValidationError(
+                f"Evidence Objects[{index}] is invalid: {exc}"
+            ) from exc
+
+    serialized_evidence_objects = [
+        json.dumps(
+            evidence,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for evidence in clean_evidence_objects
+    ]
+
+    resolved_path = initialize_database(database_path)
+    connection = connect_database(resolved_path)
+    try:
+        with connection:
+            _require_analysis(connection, normalized_id)
+            existing_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM evidence_objects
+                WHERE analysis_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()[0]
+            if existing_count:
+                raise DatabaseWriteError(
+                    "Evidence Objects have already been saved for "
+                    "this analysis."
+                )
+            connection.executemany(
+                """
+                INSERT INTO evidence_objects (
+                    analysis_id,
+                    evidence_index,
+                    evidence_json
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (normalized_id, index, payload)
+                    for index, payload in enumerate(
+                        serialized_evidence_objects
+                    )
+                ),
+            )
+    except DatabaseError:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseWriteError(
+            "Evidence Objects could not be saved."
+        ) from exc
+    finally:
+        connection.close()
+    return len(clean_evidence_objects)
+
+
 __all__ = [
     "DATABASE_SCHEMA_VERSION",
     "DATABASE_TABLES",
+    "MAX_STORED_CANDIDATES",
+    "MAX_STORED_EVIDENCE_OBJECTS",
     "ANALYSIS_STATUSES",
     "AnalysisRecord",
+    "StoredCandidateVariant",
     "DatabaseConfigurationError",
     "DatabaseConnectionError",
     "DatabaseError",
@@ -452,4 +804,6 @@ __all__ = [
     "connect_database",
     "initialize_database",
     "save_analysis",
+    "save_evidence_objects",
+    "save_variants",
 ]

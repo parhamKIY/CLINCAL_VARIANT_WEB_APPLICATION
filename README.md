@@ -292,6 +292,15 @@ store no filename. Parameterized SQL and explicit transactions prevent input
 text from changing the database structure, and an existing record is never
 silently overwritten.
 
+Stage 12 step 3 adds atomic candidate and Evidence Object persistence.
+`save_variants()` stores only bounded chromosome, position, allele, quality,
+and filter fields; VCF genotype data is deliberately excluded.
+`save_evidence_objects()` passes every item through the existing Stage 7
+validation and sanitization boundary before deterministic JSON storage. Both
+operations require an existing analysis, reject unknown fields and oversized
+collections, preserve collection order, and roll back the complete operation
+when any item is invalid.
+
 ## Tests
 
 Run the offline test suite:

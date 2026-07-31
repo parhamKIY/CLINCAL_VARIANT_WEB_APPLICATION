@@ -22,9 +22,12 @@ from backend.database import (
     DATABASE_TABLES,
     DatabaseInitializationError,
     DatabaseValidationError,
+    DatabaseWriteError,
     connect_database,
     initialize_database,
     save_analysis,
+    save_evidence_objects,
+    save_variants,
 )
 from backend.llm import (
     LLMAuthenticationError,
@@ -7112,6 +7115,245 @@ class TestDatabaseFoundation:
             )
 
         assert not database_path.exists()
+
+    def test_save_variants_excludes_genotype_and_preserves_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        candidates = [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "g",
+                "alt": "a",
+                "qual": 99,
+                "filter": "PASS",
+                "genotype": "0/1",
+            },
+            {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+                "qual": None,
+                "filter": None,
+                "genotype": "1/1",
+            },
+        ]
+
+        saved_count = save_variants(
+            analysis["analysis_id"],
+            candidates,
+            database_path=database_path,
+        )
+
+        assert saved_count == 2
+        connection = connect_database(database_path)
+        try:
+            stored_payloads = [
+                json.loads(row["variant_json"])
+                for row in connection.execute(
+                    """
+                    SELECT variant_json
+                    FROM candidate_variants
+                    WHERE analysis_id = ?
+                    ORDER BY candidate_index
+                    """,
+                    (analysis["analysis_id"],),
+                )
+            ]
+        finally:
+            connection.close()
+
+        assert stored_payloads == [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": 99.0,
+                "filter": "PASS",
+            },
+            {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+                "qual": None,
+                "filter": None,
+            },
+        ]
+        assert all(
+            "genotype" not in payload
+            for payload in stored_payloads
+        )
+
+    def test_save_evidence_objects_uses_stage_7_boundary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        evidence = TestEvidenceObject._complete_evidence_object()
+
+        saved_count = save_evidence_objects(
+            analysis["analysis_id"],
+            [evidence],
+            database_path=database_path,
+        )
+
+        assert saved_count == 1
+        connection = connect_database(database_path)
+        try:
+            stored_payload = json.loads(
+                connection.execute(
+                    """
+                    SELECT evidence_json
+                    FROM evidence_objects
+                    WHERE analysis_id = ?
+                    """,
+                    (analysis["analysis_id"],),
+                ).fetchone()["evidence_json"]
+            )
+        finally:
+            connection.close()
+        assert stored_payload == sanitize_evidence_object(evidence)
+
+    def test_invalid_candidate_rolls_back_complete_collection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="partial",
+            database_path=database_path,
+        )
+
+        with pytest.raises(
+            DatabaseValidationError,
+            match="missing required fields: alt",
+        ):
+            save_variants(
+                analysis["analysis_id"],
+                [
+                    {
+                        "chrom": "1",
+                        "pos": 941284,
+                        "ref": "G",
+                        "alt": "A",
+                    },
+                    {
+                        "chrom": "2",
+                        "pos": 166848215,
+                        "ref": "C",
+                    },
+                ],
+                database_path=database_path,
+            )
+
+        connection = connect_database(database_path)
+        try:
+            stored_count = connection.execute(
+                "SELECT COUNT(*) FROM candidate_variants"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert stored_count == 0
+
+    def test_invalid_evidence_is_rejected_before_storage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="partial",
+            database_path=database_path,
+        )
+        evidence = TestEvidenceObject._complete_evidence_object()
+        evidence["genotype"] = "0/1"
+
+        with pytest.raises(
+            DatabaseValidationError,
+            match="unsupported fields: genotype",
+        ):
+            save_evidence_objects(
+                analysis["analysis_id"],
+                [evidence],
+                database_path=database_path,
+            )
+
+        connection = connect_database(database_path)
+        try:
+            stored_count = connection.execute(
+                "SELECT COUNT(*) FROM evidence_objects"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert stored_count == 0
+
+    def test_child_records_require_existing_analysis(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+
+        with pytest.raises(
+            DatabaseWriteError,
+            match="parent analysis does not exist",
+        ):
+            save_variants(
+                "analysis-0123456789abcdef0123456789abcdef",
+                [
+                    {
+                        "chrom": "1",
+                        "pos": 941284,
+                        "ref": "G",
+                        "alt": "A",
+                    }
+                ],
+                database_path=database_path,
+            )
+
+    def test_child_collections_are_not_silently_overwritten(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        analysis = save_analysis(
+            status="success",
+            database_path=database_path,
+        )
+        candidates = [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+            }
+        ]
+        save_variants(
+            analysis["analysis_id"],
+            candidates,
+            database_path=database_path,
+        )
+
+        with pytest.raises(
+            DatabaseWriteError,
+            match="already been saved",
+        ):
+            save_variants(
+                analysis["analysis_id"],
+                candidates,
+                database_path=database_path,
+            )
 
 
 class TestFrontendFoundation:
