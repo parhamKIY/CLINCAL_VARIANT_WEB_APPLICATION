@@ -327,7 +327,7 @@ details are not exposed, and a successful result is safely downgraded to
 partial with a bounded warning. The live `--pipeline` smoke mode also retrieves
 the saved analysis and verifies its report and Evidence Objects.
 
-## Stage 13 comprehensive testing: in progress
+## Stage 13 comprehensive testing: complete
 
 Stage 13 step 1 completes the unit-test coverage audit. Central configuration
 now has explicit tests for environment parsing, numeric limits, path
@@ -361,6 +361,16 @@ writes a compact JSON record under `output/`. A temporary timeout override
 supports degraded-network testing. Multiple LLM providers are tested by
 changing only the provider settings in `.env` and rerunning the same command.
 
+Stage 13 step 5 establishes the final regression and acceptance gate. Eleven
+critical checks are marked across public VCF parsing, HPO validation,
+multi-source annotation, provider-neutral LLM transport, prompt-injection
+containment, report generation, degraded-network behavior, complete pipeline
+persistence, database retrieval, and frontend startup.
+`tests/run_stage13_acceptance.py` compiles the project, runs this focused
+regression set, and then requires the complete offline suite to pass with at
+least 80% coverage. Live provider checks remain explicitly separate from the
+deterministic acceptance gate.
+
 ## Tests
 
 Run the offline test suite:
@@ -373,6 +383,12 @@ Run the unit-coverage audit:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q --cov=config --cov=backend --cov=frontend --cov-report=term-missing --cov-fail-under=80
+```
+
+Run the complete offline Stage 13 acceptance gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage13_acceptance.py
 ```
 
 Run the complete live Stage 13 manual-validation matrix:

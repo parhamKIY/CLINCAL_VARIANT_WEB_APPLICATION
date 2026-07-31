@@ -858,6 +858,7 @@ class TestVCFProcessing:
                 normalize=True,
             )
 
+    @pytest.mark.regression
     def test_reference_sample_vcf_is_parsed(self) -> None:
         path = (
             PROJECT_ROOT
@@ -1364,6 +1365,7 @@ class TestPhenotype:
         "hpo_id",
         ["HP:0008888", "HP:0009999"],
     )
+    @pytest.mark.regression
     def test_unknown_or_obsolete_hpo_term_is_rejected(
         self,
         tmp_path: Path,
@@ -3455,6 +3457,7 @@ class TestAnnotation:
         )
         assert session.clingen_get_calls == []
 
+    @pytest.mark.regression
     def test_unified_multi_source_annotation_is_complete_and_clean(
         self,
     ) -> None:
@@ -4506,6 +4509,7 @@ class TestLLMContract:
                 model="test-model",
             )
 
+    @pytest.mark.regression
     def test_openai_compatible_request_and_response_mapping(
         self,
     ) -> None:
@@ -4934,6 +4938,7 @@ class TestLLMContract:
             in prompt["user_prompt"]
         )
 
+    @pytest.mark.regression
     def test_prompt_injection_text_remains_untrusted_data(
         self,
     ) -> None:
@@ -5981,6 +5986,7 @@ class TestClinicalReportStorage:
 class TestStage9EndToEnd:
     """Verify the complete offline Evidence-to-report handoff."""
 
+    @pytest.mark.regression
     def test_candidate_evidence_to_saved_report(
         self,
         tmp_path: Path,
@@ -6878,6 +6884,7 @@ class TestCompletePipelineHappyPath:
         assert "secret internal API detail" not in serialized
         assert "traceback" not in serialized.casefold()
 
+    @pytest.mark.regression
     def test_offline_end_to_end_pipeline_uses_real_stage_boundaries(
         self,
         tmp_path: Path,
@@ -7211,6 +7218,7 @@ class TestStage13MockedServiceFailures:
         ):
             requests.get("https://example.test/forbidden")
 
+    @pytest.mark.regression
     def test_provider_network_failures_preserve_partial_report(
         self,
         tmp_path: Path,
@@ -8213,6 +8221,7 @@ class TestDatabaseFoundation:
             for table in DATABASE_TABLES
         }
 
+    @pytest.mark.regression
     def test_get_analysis_reconstructs_complete_validated_record(
         self,
         tmp_path: Path,
@@ -8495,6 +8504,7 @@ class TestFrontendFoundation:
             for message in app.success
         )
 
+    @pytest.mark.regression
     def test_app_shell_renders_without_exceptions(self) -> None:
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")
