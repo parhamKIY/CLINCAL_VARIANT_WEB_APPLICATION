@@ -327,7 +327,11 @@ def _render_variant_input() -> AnalysisSubmission | None:
                     "VCF file",
                     type=("vcf", "gz"),
                     key="vcf_upload",
-                    help="Accepted formats: .vcf and .vcf.gz.",
+                    help=(
+                        "Accepted formats: .vcf and .vcf.gz. "
+                        f"Maximum size: "
+                        f"{settings.MAX_UPLOAD_BYTES // 1_000_000} MB."
+                    ),
                 )
             else:
                 manual_variant = st.text_input(

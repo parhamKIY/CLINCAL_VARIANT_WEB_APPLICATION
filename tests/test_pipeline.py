@@ -141,7 +141,10 @@ from backend.vcf_processing import (
     validate_vcf,
 )
 from config import settings
-from frontend.execution import execute_analysis as execute_frontend_analysis
+from frontend.execution import (
+    FrontendExecutionError,
+    execute_analysis as execute_frontend_analysis,
+)
 from frontend.results import (
     build_annotation_rows,
     build_candidate_rows,
@@ -367,6 +370,16 @@ class TestConfiguration:
                 "LOG_LEVEL",
                 "VERBOSE",
                 "LOG_LEVEL must be",
+            ),
+            (
+                "MAX_UPLOAD_BYTES",
+                100_000_001,
+                "MAX_UPLOAD_BYTES cannot exceed",
+            ),
+            (
+                "MAX_UNCOMPRESSED_VCF_BYTES",
+                500_000_001,
+                "MAX_UNCOMPRESSED_VCF_BYTES cannot exceed",
             ),
         ],
     )
@@ -8051,13 +8064,40 @@ class TestStage13MockedServiceFailures:
         assert "private ClinGen network detail" not in serialized
 
 
+@pytest.mark.stage15_security
 class TestFrontendExecution:
     """Verify safe bridging from uploads to the public pipeline."""
 
+    @staticmethod
+    def _valid_vcf_bytes() -> bytes:
+        return (
+            MINIMAL_HEADER
+            + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            + "1\t100\t.\tA\tG\t99\tPASS\t.\n"
+        ).encode("utf-8")
+
+    @pytest.mark.parametrize(
+        ("filename", "payload", "expected_name"),
+        [
+            (
+                "patient.vcf",
+                _valid_vcf_bytes(),
+                "input.vcf",
+            ),
+            (
+                "patient.vcf.gz",
+                gzip.compress(_valid_vcf_bytes()),
+                "input.vcf.gz",
+            ),
+        ],
+    )
     def test_vcf_upload_uses_a_cleaned_temporary_path(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        filename: str,
+        payload: bytes,
+        expected_name: str,
     ) -> None:
         upload_directory = tmp_path / "uploads"
         monkeypatch.setattr(
@@ -8090,8 +8130,8 @@ class TestFrontendExecution:
         )
         callback = lambda _: None
         uploaded = SimpleNamespace(
-            name="../../patient.vcf.gz",
-            getvalue=lambda: b"compressed-vcf",
+            name=filename,
+            getvalue=lambda: payload,
         )
 
         result = execute_frontend_analysis(
@@ -8102,15 +8142,162 @@ class TestFrontendExecution:
         )
 
         assert result is expected
-        assert observed["contents"] == b"compressed-vcf"
+        assert observed["contents"] == payload
         assert observed["manual_variant"] is None
         assert observed["phenotypes"] == ["HP:0001250"]
         assert observed["callback"] is callback
         temporary_path = observed["path"]
         assert isinstance(temporary_path, Path)
-        assert temporary_path.name == "input.vcf.gz"
+        assert temporary_path.name == expected_name
         assert not temporary_path.exists()
         assert list(upload_directory.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "",
+            "patient.txt",
+            "patient.vcf.exe",
+            "../patient.vcf",
+            r"..\patient.vcf.gz",
+            "patient\n.vcf",
+            f"{'x' * 256}.vcf",
+        ],
+    )
+    def test_invalid_upload_filename_is_rejected(
+        self,
+        filename: str,
+    ) -> None:
+        uploaded = SimpleNamespace(
+            name=filename,
+            getvalue=self._valid_vcf_bytes,
+        )
+
+        with pytest.raises(FrontendExecutionError):
+            execute_frontend_analysis(
+                uploaded_vcf=uploaded,
+                manual_variant=None,
+                phenotypes=[],
+            )
+
+    @pytest.mark.parametrize(
+        ("filename", "payload", "message"),
+        [
+            (
+                "patient.vcf",
+                b"not a VCF",
+                "valid VCF header",
+            ),
+            (
+                "patient.vcf.gz",
+                _valid_vcf_bytes(),
+                "not a valid gzip",
+            ),
+            (
+                "patient.vcf",
+                gzip.compress(_valid_vcf_bytes()),
+                "must use the .vcf.gz extension",
+            ),
+            (
+                "patient.vcf.gz",
+                b"\x1f\x8b damaged",
+                "damaged or invalid",
+            ),
+            (
+                "patient.vcf",
+                b"##fileformat=VCFv4.2\n",
+                "required VCF column header",
+            ),
+            (
+                "patient.vcf",
+                (
+                    b"##fileformat=VCFv4.2\n"
+                    b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+                    b"\xff"
+                ),
+                "valid UTF-8",
+            ),
+            (
+                "patient.vcf",
+                (
+                    b"##fileformat=VCFv4.2\n"
+                    b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+                    b"\0"
+                ),
+                "invalid binary data",
+            ),
+        ],
+    )
+    def test_extension_and_content_must_match(
+        self,
+        filename: str,
+        payload: bytes,
+        message: str,
+    ) -> None:
+        uploaded = SimpleNamespace(
+            name=filename,
+            getvalue=lambda: payload,
+        )
+
+        with pytest.raises(FrontendExecutionError, match=message):
+            execute_frontend_analysis(
+                uploaded_vcf=uploaded,
+                manual_variant=None,
+                phenotypes=[],
+            )
+
+    def test_empty_and_non_byte_uploads_are_rejected(self) -> None:
+        for payload in (b"", "not-bytes"):
+            uploaded = SimpleNamespace(
+                name="patient.vcf",
+                getvalue=lambda value=payload: value,
+            )
+            with pytest.raises(FrontendExecutionError):
+                execute_frontend_analysis(
+                    uploaded_vcf=uploaded,
+                    manual_variant=None,
+                    phenotypes=[],
+                )
+
+    def test_upload_and_uncompressed_size_limits_are_enforced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plain_vcf = self._valid_vcf_bytes()
+        monkeypatch.setattr(settings, "MAX_UPLOAD_BYTES", 10)
+        oversized_upload = SimpleNamespace(
+            name="patient.vcf",
+            getvalue=lambda: plain_vcf,
+        )
+        with pytest.raises(
+            FrontendExecutionError,
+            match="configured size limit",
+        ):
+            execute_frontend_analysis(
+                uploaded_vcf=oversized_upload,
+                manual_variant=None,
+                phenotypes=[],
+            )
+
+        monkeypatch.setattr(settings, "MAX_UPLOAD_BYTES", 10_000)
+        monkeypatch.setattr(
+            settings,
+            "MAX_UNCOMPRESSED_VCF_BYTES",
+            len(plain_vcf) - 1,
+        )
+        compressed_upload = SimpleNamespace(
+            name="patient.vcf.gz",
+            getvalue=lambda: gzip.compress(plain_vcf),
+        )
+        with pytest.raises(
+            FrontendExecutionError,
+            match="uncompressed VCF exceeds",
+        ):
+            execute_frontend_analysis(
+                uploaded_vcf=compressed_upload,
+                manual_variant=None,
+                phenotypes=[],
+            )
 
 
 class TestFrontendResults:

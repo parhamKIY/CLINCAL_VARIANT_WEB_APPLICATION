@@ -438,6 +438,17 @@ high-confidence provider credentials and private keys. Findings identify only
 the scope, path, and rule; detected values are never printed. `.env.example`
 remains tracked with an explicit non-secret placeholder.
 
+Stage 15 step 2 hardens the VCF upload boundary before any file is written.
+Original filenames are treated as untrusted metadata and must be bounded,
+control-character-free basenames ending exactly in `.vcf` or `.vcf.gz`.
+Uploaded and gzip-expanded sizes are independently bounded through
+`MAX_UPLOAD_BYTES` and `MAX_UNCOMPRESSED_VCF_BYTES`, with absolute
+configuration ceilings. Plain and compressed content must match the declared
+extension, decode as UTF-8 without NUL bytes, and contain both the VCF
+file-format declaration and required column header. Streamlit also rejects
+uploads above 25 MB before application execution, while the backend validation
+remains authoritative and returns only fixed user-safe errors.
+
 ## Tests
 
 Run the offline test suite:

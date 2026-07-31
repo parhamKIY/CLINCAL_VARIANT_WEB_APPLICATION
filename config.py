@@ -236,6 +236,16 @@ class Settings:
         "storage/uploads",
     )
 
+    MAX_UPLOAD_BYTES: int = _get_positive_int(
+        "MAX_UPLOAD_BYTES",
+        25_000_000,
+    )
+
+    MAX_UNCOMPRESSED_VCF_BYTES: int = _get_positive_int(
+        "MAX_UNCOMPRESSED_VCF_BYTES",
+        100_000_000,
+    )
+
     REPORT_DIR: Path = _resolve_path(
         "REPORT_DIR",
         "storage/reports",
@@ -381,6 +391,16 @@ class Settings:
             raise RuntimeError(
                 "LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, "
                 "or CRITICAL."
+            )
+
+        if cls.MAX_UPLOAD_BYTES > 100_000_000:
+            raise RuntimeError(
+                "MAX_UPLOAD_BYTES cannot exceed 100000000."
+            )
+
+        if cls.MAX_UNCOMPRESSED_VCF_BYTES > 500_000_000:
+            raise RuntimeError(
+                "MAX_UNCOMPRESSED_VCF_BYTES cannot exceed 500000000."
             )
 
         if cls.DATABASE_PATH.exists() and cls.DATABASE_PATH.is_dir():
