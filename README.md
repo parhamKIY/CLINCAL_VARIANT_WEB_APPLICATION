@@ -503,6 +503,13 @@ implementation and offline verification evidence. The audit found no missing
 core feature. Dedicated MVP acceptance, fresh live-provider validation, a
 professor-facing demo runbook, and the final release decision remain.
 
+Stage 16 step 2 adds `tests/run_stage16_mvp_acceptance.py` as the deterministic
+offline MVP gate. The `stage16_mvp` checks cover the real backend stage
+boundaries with mocked providers, VCF upload confinement, Streamlit startup,
+manual analysis, local phenotype selection, safe missing-input behavior, and
+report viewing and download. This gate performs no international network
+requests.
+
 ## Tests
 
 Run the offline test suite:
@@ -539,6 +546,12 @@ Run the complete offline Stage 15 security acceptance gate:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_stage15_acceptance.py
+```
+
+Run the deterministic offline Stage 16 MVP acceptance gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage16_mvp_acceptance.py
 ```
 
 Run the complete live Stage 13 manual-validation matrix:

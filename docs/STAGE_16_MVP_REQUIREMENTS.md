@@ -31,8 +31,8 @@ required.
 All Stage 16 MVP capabilities are implemented. No missing core feature was
 found. The remaining work is acceptance and release preparation:
 
-1. Add one dedicated deterministic MVP acceptance gate that proves the complete
-   workflow in a single command.
+1. Run the dedicated deterministic MVP acceptance gate in
+   `tests/run_stage16_mvp_acceptance.py`.
 2. Run a fresh live analysis against annotation and LLM providers using only
    public or synthetic data.
 3. Prepare a concise professor-facing demo runbook and known-good input.
@@ -50,3 +50,13 @@ post-MVP work.
 This audit did not call any external service. Live annotation and LLM outcomes
 must be reported separately so network failures are not confused with code
 failures.
+
+## Deterministic acceptance command
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage16_mvp_acceptance.py
+```
+
+This offline gate compiles the application and runs the marked backend
+end-to-end, VCF-upload boundary, Streamlit shell, manual-analysis, phenotype
+selection, error-handling, and report-download checks.

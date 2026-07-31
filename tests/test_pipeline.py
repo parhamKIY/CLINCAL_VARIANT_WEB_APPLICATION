@@ -7485,6 +7485,7 @@ class TestCompletePipelineHappyPath:
         assert "raw_api_payload" not in serialized
 
     @pytest.mark.regression
+    @pytest.mark.stage16_mvp
     def test_offline_end_to_end_pipeline_uses_real_stage_boundaries(
         self,
         tmp_path: Path,
@@ -8430,6 +8431,7 @@ class TestFrontendExecution:
             ),
         ],
     )
+    @pytest.mark.stage16_mvp
     def test_vcf_upload_uses_a_cleaned_temporary_path(
         self,
         tmp_path: Path,
@@ -8764,6 +8766,7 @@ class TestFrontendResults:
 class TestFrontendReportViewer:
     """Verify secure generated-report loading."""
 
+    @pytest.mark.stage16_mvp
     def test_markdown_report_loads_with_download_bytes(
         self,
         tmp_path: Path,
@@ -9992,6 +9995,7 @@ class TestFrontendFoundation:
         assert "secret" not in str(app).casefold()
 
     @pytest.mark.regression
+    @pytest.mark.stage16_mvp
     def test_app_shell_renders_without_exceptions(self) -> None:
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")
@@ -10021,6 +10025,7 @@ class TestFrontendFoundation:
             for button in app.button
         )
 
+    @pytest.mark.stage16_mvp
     def test_missing_vcf_is_rejected_before_pipeline_execution(
         self,
     ) -> None:
@@ -10043,6 +10048,7 @@ class TestFrontendFoundation:
         )
         assert not app.success
 
+    @pytest.mark.stage16_mvp
     def test_manual_variant_executes_pipeline(
         self,
         tmp_path: Path,
@@ -10165,6 +10171,7 @@ class TestFrontendFoundation:
             for markdown in app.markdown
         )
 
+    @pytest.mark.stage16_mvp
     def test_local_hpo_search_adds_selected_phenotype(self) -> None:
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")
