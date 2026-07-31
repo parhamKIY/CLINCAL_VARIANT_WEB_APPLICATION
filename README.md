@@ -29,6 +29,9 @@ Clinical variant interpretation MVP built with Python and Streamlit.
   preserved.
 - Stage 6 provides local HPO search, normalization, gene and disease
   associations, and explainable phenotype scoring for annotated candidates.
+- Generated clinical reports can be downloaded as Markdown, PDF, or Word.
+  PDF and Word files are created locally in memory from the validated
+  Markdown report, without additional provider calls or clinical data.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
 The two current files under `data/samples/` are Ensembl reference VCFs.

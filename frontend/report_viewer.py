@@ -9,6 +9,11 @@ import streamlit as st
 
 from backend.pipeline import PipelineResult
 from backend.report import MAX_CLINICAL_REPORT_MARKDOWN_BYTES
+from backend.report_exports import (
+    ReportExportError,
+    render_report_docx,
+    render_report_pdf,
+)
 from config import settings
 
 
@@ -100,17 +105,59 @@ def render_report_viewer(result: PipelineResult) -> None:
 
     with st.container(border=True):
         st.caption(f"Generated report: {report.filename}")
-        st.download_button(
-            "Download Markdown report",
-            data=report.data,
-            file_name=report.filename,
-            mime="text/markdown",
-            key="download_clinical_report",
-            icon=":material/download:",
-            type="primary",
-            on_click="ignore",
-            width="stretch",
-        )
+        try:
+            pdf_data = render_report_pdf(report.markdown)
+            docx_data = render_report_docx(report.markdown)
+        except ReportExportError:
+            pdf_data = None
+            docx_data = None
+            st.warning(
+                "PDF and Word exports are temporarily unavailable. "
+                "The Markdown report remains available."
+            )
+
+        with st.container(
+            horizontal=True,
+            horizontal_alignment="left",
+            gap="small",
+        ):
+            st.download_button(
+                "Download Markdown",
+                data=report.data,
+                file_name=report.filename,
+                mime="text/markdown",
+                key="download_clinical_report_markdown",
+                icon=":material/download:",
+                on_click="ignore",
+            )
+            if pdf_data is not None:
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_data,
+                    file_name=Path(report.filename).with_suffix(
+                        ".pdf"
+                    ).name,
+                    mime="application/pdf",
+                    key="download_clinical_report_pdf",
+                    icon=":material/picture_as_pdf:",
+                    type="primary",
+                    on_click="ignore",
+                )
+            if docx_data is not None:
+                st.download_button(
+                    "Download Word",
+                    data=docx_data,
+                    file_name=Path(report.filename).with_suffix(
+                        ".docx"
+                    ).name,
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "wordprocessingml.document"
+                    ),
+                    key="download_clinical_report_docx",
+                    icon=":material/description:",
+                    on_click="ignore",
+                )
         st.divider()
         st.markdown(report.markdown)
 

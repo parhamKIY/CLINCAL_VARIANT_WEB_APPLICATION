@@ -10,8 +10,10 @@ import stat
 import subprocess
 import sys
 import tomllib
+import zipfile
 from copy import deepcopy
 from collections.abc import Iterator
+from io import BytesIO
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,6 +143,12 @@ from backend.report import (
     validate_and_sanitize_clinical_interpretation,
     validate_clinical_report,
     validate_evidence_object,
+)
+from backend.report_exports import (
+    MAX_REPORT_EXPORT_INPUT_BYTES,
+    ReportExportError,
+    render_report_docx,
+    render_report_pdf,
 )
 from backend.vcf_processing import (
     VCFProcessingError,
@@ -8808,6 +8816,66 @@ class TestFrontendReportViewer:
         assert document.markdown == report_text
         assert document.data == report_path.read_bytes()
 
+    @pytest.mark.stage16_mvp
+    def test_pdf_and_word_exports_preserve_report_content(self) -> None:
+        report_text = """\
+# Clinical Variant Interpretation Report
+
+- Assembly: GRCh38
+- Variant: 1:941284 G>A
+
+## Clinical Evidence
+
+Evidence-based summary.
+
+## Medical Disclaimer
+
+This report requires review by a qualified healthcare professional.
+"""
+
+        pdf_data = render_report_pdf(report_text)
+        docx_data = render_report_docx(report_text)
+
+        assert pdf_data.startswith(b"%PDF-")
+        assert b"/Type /Page" in pdf_data
+        assert len(pdf_data) < 500_000
+        with zipfile.ZipFile(BytesIO(docx_data)) as archive:
+            names = set(archive.namelist())
+            document_xml = archive.read("word/document.xml").decode(
+                "utf-8"
+            )
+            assert {
+                "[Content_Types].xml",
+                "word/document.xml",
+                "word/styles.xml",
+            }.issubset(names)
+        assert "Clinical Variant Interpretation Report" in document_xml
+        assert "1:941284 G&gt;A" in document_xml
+        assert "Evidence-based summary." in document_xml
+        assert "qualified healthcare professional" in document_xml
+
+    @pytest.mark.parametrize(
+        "report_text, message",
+        [
+            ("", "empty"),
+            ("\x00unsafe", "unsupported characters"),
+            (
+                "x" * (MAX_REPORT_EXPORT_INPUT_BYTES + 1),
+                "exceeds the export size limit",
+            ),
+        ],
+        ids=("empty", "control-character", "oversized"),
+    )
+    def test_report_exports_reject_unsafe_input(
+        self,
+        report_text: str,
+        message: str,
+    ) -> None:
+        with pytest.raises(ReportExportError, match=message):
+            render_report_pdf(report_text)
+        with pytest.raises(ReportExportError, match=message):
+            render_report_docx(report_text)
+
     def test_report_outside_configured_directory_is_rejected(
         self,
         tmp_path: Path,
@@ -10186,7 +10254,9 @@ class TestFrontendFoundation:
         }
         assert len(app.dataframe) == 6
         assert [button.label for button in app.get("download_button")] == [
-            "Download Markdown report"
+            "Download Markdown",
+            "Download PDF",
+            "Download Word",
         ]
         assert any(
             "Evidence-based summary." in markdown.value
