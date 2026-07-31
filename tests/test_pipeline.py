@@ -6988,6 +6988,195 @@ class TestCompletePipelineHappyPath:
         assert restored["report_path"] == result["report_path"]
 
 
+class TestStage13IntegrationBoundaries:
+    """Verify offline integration across the main clinical boundaries."""
+
+    @staticmethod
+    def _annotation_session() -> FakeSession:
+        vep_response = TestAnnotation._vep_response()
+        transcripts = vep_response["transcript_consequences"]
+        assert isinstance(transcripts, list)
+        transcript = transcripts[0]
+        assert isinstance(transcript, dict)
+        transcript["gene_symbol"] = "SCN1A"
+        transcript["gene_id"] = "ENSG00000144285"
+
+        myvariant_response = TestAnnotation._myvariant_response()
+        dbsnp = myvariant_response["dbsnp"]
+        assert isinstance(dbsnp, dict)
+        dbsnp["gene"] = {"symbol": "SCN1A"}
+
+        clinvar_summary = TestAnnotation._clinvar_summary_response()
+        clinvar_result = clinvar_summary["result"]
+        assert isinstance(clinvar_result, dict)
+        clinvar_record = clinvar_result["123"]
+        assert isinstance(clinvar_record, dict)
+        clinvar_record["gene_sort"] = "SCN1A"
+        clinvar_record["genes"] = [
+            {
+                "symbol": "SCN1A",
+                "geneid": "6323",
+            }
+        ]
+
+        return FakeSession(
+            [FakeResponse(200, [vep_response])],
+            get_responses=[
+                FakeResponse(200, myvariant_response)
+            ],
+            clinvar_responses=[
+                FakeResponse(
+                    200,
+                    TestAnnotation._clinvar_search_response(),
+                ),
+                FakeResponse(200, clinvar_summary),
+            ],
+            clingen_responses=[
+                FakeResponse(
+                    200,
+                    TestAnnotation._clingen_response(gene="SCN1A"),
+                )
+            ],
+        )
+
+    @staticmethod
+    def _llm_client() -> LLMClient:
+        return LLMClient(
+            FakeLLMAdapter(
+                LLMResponse(
+                    content=(
+                        TestCompletePipelineHappyPath
+                        ._minimal_interpretation()
+                    ),
+                    model="integration-test-model",
+                )
+            )
+        )
+
+    def test_vcf_to_annotation_boundary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        vcf_path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+            "\tFORMAT\tPATIENT\n"
+            "1\t100\trs123\tA\tG\t50\tPASS\t.\tGT\t0/1\n",
+        )
+        session = self._annotation_session()
+
+        result = run_annotation_and_phenotype(
+            vcf_path=vcf_path,
+            manual_variant=None,
+            phenotypes=[],
+            top_n=1,
+            seed=13,
+            annotation_max_retries=0,
+            annotation_session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["variant_count"] == 1
+        assert result["candidates"][0]["genotype"] == "0/1"
+        assert result["annotations"][0]["gene"] == "SCN1A"
+        assert result["annotations"][0]["sources"]["vep"][
+            "status"
+        ] == "success"
+        assert result["annotations"][0]["sources"]["myvariant"][
+            "status"
+        ] == "success"
+        assert result["annotations"][0]["sources"]["clinvar"][
+            "status"
+        ] == "success"
+        assert result["annotations"][0]["sources"]["clingen"][
+            "status"
+        ] == "success"
+        assert result["phenotype_results"] == result["annotations"]
+        assert result["stages"][4]["status"] == "skipped"
+
+    def test_annotation_to_report_boundary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        annotations = annotate_variants(
+            [TestAnnotation._variant()],
+            session=self._annotation_session(),  # type: ignore[arg-type]
+            max_retries=0,
+        )
+        evidence = build_evidence_object(annotations[0])
+
+        report_path = generate_and_save_clinical_report(
+            evidence,
+            client=self._llm_client(),
+            report_dir=tmp_path / "reports",
+        )
+        markdown = report_path.read_text(encoding="utf-8")
+
+        assert evidence["gene"] == "SCN1A"
+        assert evidence["clinvar_accession"] == "VCV000000123.4"
+        assert report_path.is_file()
+        assert "SCN1A" in markdown
+        assert "VCV000000123.4" in markdown
+        assert "## Medical Disclaimer" in markdown
+        assert "genotype" not in markdown
+
+    def test_complete_vcf_pipeline_persists_retrievable_output(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        vcf_path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+            "\tFORMAT\tPATIENT\n"
+            "1\t100\trs123\tA\tG\t50\tPASS\t.\tGT\t0/1\n",
+        )
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        report_directory = tmp_path / "reports"
+        database_path = tmp_path / "analysis.sqlite3"
+
+        result = run_analysis(
+            vcf_path=vcf_path,
+            manual_variant=None,
+            phenotypes=["HP:0001250"],
+            top_n=1,
+            seed=13,
+            annotation_max_retries=0,
+            annotation_session=(  # type: ignore[arg-type]
+                self._annotation_session()
+            ),
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            llm_client=self._llm_client(),
+            report_dir=report_directory,
+            database_path=database_path,
+        )
+
+        assert result["status"] == "success"
+        assert result["analysis_id"] is not None
+        assert result["report_path"] is not None
+        assert all(
+            stage["status"] == "success"
+            for stage in result["stages"]
+        )
+        restored = get_analysis(
+            result["analysis_id"],
+            database_path=database_path,
+            report_dir=report_directory,
+        )
+        assert restored["anonymized_filename"] == (
+            f"{result['analysis_id']}.vcf"
+        )
+        assert len(restored["candidates"]) == 1
+        assert "genotype" not in restored["candidates"][0]
+        assert restored["evidence_objects"][0]["gene"] == "SCN1A"
+        assert restored["evidence_objects"][0][
+            "matched_hpo_terms"
+        ] == ["HP:0001250"]
+        assert restored["report_path"] == result["report_path"]
+
+
 class TestFrontendExecution:
     """Verify safe bridging from uploads to the public pipeline."""
 

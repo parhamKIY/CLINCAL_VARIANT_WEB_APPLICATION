@@ -337,6 +337,14 @@ prioritization, annotation parsing, phenotype matching, Evidence Objects, and
 LLM error handling. `pytest-cov` provides a repeatable coverage measurement,
 with an initial project-wide minimum of 80%.
 
+Stage 13 step 2 adds explicit offline integration tests for the three required
+handoffs: VCF processing through multi-source annotation, annotation through
+Evidence Object and clinical-report generation, and the complete VCF pipeline
+through HPO matching, LLM interpretation, report storage, atomic database
+persistence, and validated retrieval. Provider responses and the LLM are
+deterministic test doubles, so the integration suite never depends on live
+network services.
+
 ## Tests
 
 Run the offline test suite:
