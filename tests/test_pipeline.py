@@ -21,8 +21,10 @@ from backend.database import (
     DATABASE_SCHEMA_VERSION,
     DATABASE_TABLES,
     DatabaseInitializationError,
+    DatabaseValidationError,
     connect_database,
     initialize_database,
+    save_analysis,
 )
 from backend.llm import (
     LLMAuthenticationError,
@@ -6964,6 +6966,152 @@ class TestDatabaseFoundation:
             match="no supported schema version",
         ):
             initialize_database(database_path)
+
+    def test_save_analysis_stores_anonymized_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+
+        record = save_analysis(
+            status="SUCCESS",
+            source_filename="Patient_Jane_Doe.vcf.gz",
+            warnings=[
+                " VEP response was incomplete.\n",
+                "ClinVar's source was unavailable.",
+            ],
+            database_path=database_path,
+        )
+
+        assert record["analysis_id"].startswith("analysis-")
+        assert len(record["analysis_id"]) == 41
+        assert record["created_at"].endswith("Z")
+        assert record["anonymized_filename"] == (
+            f"{record['analysis_id']}.vcf.gz"
+        )
+        assert "Jane" not in record["anonymized_filename"]
+        assert record["status"] == "success"
+        assert record["warnings"] == [
+            "VEP response was incomplete.",
+            "ClinVar's source was unavailable.",
+        ]
+
+        connection = connect_database(database_path)
+        try:
+            stored_row = connection.execute(
+                """
+                SELECT
+                    analysis_id,
+                    created_at,
+                    anonymized_filename,
+                    status,
+                    warnings_json
+                FROM analyses
+                WHERE analysis_id = ?
+                """,
+                (record["analysis_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        assert stored_row is not None
+        assert stored_row["analysis_id"] == record["analysis_id"]
+        assert stored_row["created_at"] == record["created_at"]
+        assert stored_row["anonymized_filename"] == (
+            record["anonymized_filename"]
+        )
+        assert stored_row["status"] == "success"
+        assert json.loads(stored_row["warnings_json"]) == (
+            record["warnings"]
+        )
+        assert "Patient_Jane_Doe" not in tuple(stored_row)
+
+    def test_save_manual_analyses_have_unique_ids(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+
+        first = save_analysis(
+            status="partial",
+            warnings=(),
+            database_path=database_path,
+        )
+        second = save_analysis(
+            status="error",
+            warnings=["The annotation service timed out."],
+            database_path=database_path,
+        )
+
+        assert first["analysis_id"] != second["analysis_id"]
+        assert first["anonymized_filename"] is None
+        assert second["anonymized_filename"] is None
+
+        connection = connect_database(database_path)
+        try:
+            analysis_count = connection.execute(
+                "SELECT COUNT(*) FROM analyses"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert analysis_count == 2
+
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            (
+                {"status": "finished"},
+                "Analysis status must be",
+            ),
+            (
+                {"status": 1},
+                "Analysis status must be a string",
+            ),
+            (
+                {
+                    "status": "success",
+                    "source_filename": "patient.txt",
+                },
+                "Only .vcf and .vcf.gz",
+            ),
+            (
+                {
+                    "status": "success",
+                    "warnings": "not a warning collection",
+                },
+                "collection of strings",
+            ),
+            (
+                {
+                    "status": "success",
+                    "warnings": 1,
+                },
+                "collection of strings",
+            ),
+            (
+                {
+                    "status": "success",
+                    "warnings": [""],
+                },
+                "cannot be empty",
+            ),
+        ],
+    )
+    def test_save_analysis_rejects_invalid_metadata_before_storage(
+        self,
+        tmp_path: Path,
+        arguments: dict[str, object],
+        message: str,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+
+        with pytest.raises(DatabaseValidationError, match=message):
+            save_analysis(
+                **arguments,  # type: ignore[arg-type]
+                database_path=database_path,
+            )
+
+        assert not database_path.exists()
 
 
 class TestFrontendFoundation:

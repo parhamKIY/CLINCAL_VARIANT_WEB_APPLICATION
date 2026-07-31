@@ -284,6 +284,14 @@ candidate-variant, Evidence Object, and report tables without overwriting an
 unknown or newer schema. Database files and SQLite sidecar files remain
 excluded from Git under `storage/database/`.
 
+Stage 12 step 2 adds `save_analysis()` for bounded analysis metadata. It
+generates a unique analysis ID and UTC execution time, accepts only known
+pipeline statuses, normalizes bounded warnings, and replaces an uploaded VCF
+name with an analysis-scoped alias before storage. Manual-variant analyses
+store no filename. Parameterized SQL and explicit transactions prevent input
+text from changing the database structure, and an existing record is never
+silently overwritten.
+
 ## Tests
 
 Run the offline test suite:
