@@ -64,7 +64,8 @@ The professor changed the input responsibility:
 - the application must not claim that it ranked or prioritized that allele;
 - VCF genotype and sample fields are ignored and excluded from public output.
 
-The Streamlit manual input is a fixed five-row editor with:
+The Streamlit manual input is a fixed five-row, table-style group of native
+widgets with:
 
 ```text
 CHROM | POS | REF | ALT | QUAL | FILTER
@@ -73,39 +74,42 @@ CHROM | POS | REF | ALT | QUAL | FILTER
 `CHROM`, `POS`, `REF`, and `ALT` are required for each used row. `QUAL` and
 `FILTER` are optional.
 
-The manual editor restricts `CHROM` to the 25 standard primary labels
-`1`–`22`, `X`, `Y`, and `MT`. Selecting a chromosome displays its valid POS
-range for the configured GRCh37 or GRCh38 assembly. Invalid coordinates are
-shown immediately and are rejected before analysis. Only POS is
+Each CHROM dropdown is restricted to the 25 standard primary labels `1`–`22`,
+`X`, `Y`, and `MT`. Its POS field remains disabled until CHROM is selected,
+then displays the exact valid GRCh37/GRCh38 range as an in-field placeholder.
+The native Streamlit number input receives the row-specific minimum and
+maximum, so out-of-range input is marked invalid and cannot be analyzed.
+Backend validation enforces the same boundary. Only POS is
 chromosome-dependent: REF and ALT use allele-syntax validation, QUAL is an
 optional non-negative value, and FILTER is optional text.
 
 ## Latest uncommitted implementation
 
-The manual chromosome and coordinate validation improvement is complete but
-has not yet been committed.
+The row-aware manual-input refinement is complete but has not yet been
+committed.
 
 Main changes:
 
-- changed manual CHROM cells from free text to a dropdown containing
-  `1`–`22`, `X`, `Y`, and `MT`;
-- added authoritative GRCh37 and GRCh38 primary chromosome length tables;
-- added live, row-specific POS range guidance after CHROM selection;
-- added immediate invalid-POS feedback and pre-analysis rejection;
-- retained backend validation so the rules cannot be bypassed through the UI;
-- documented that REF, ALT, QUAL, and FILTER are not chromosome-length-bound;
-- updated offline regression tests and synchronized project documentation.
+- replaced the shared `st.data_editor` with five table-style rows composed
+  exclusively of native Streamlit widgets;
+- retained the 25-option CHROM dropdown in every row;
+- disabled each POS field until its own CHROM is selected;
+- added the selected chromosome's exact range inside its POS placeholder;
+- passed row-specific minimum and maximum values to `st.number_input` for
+  native invalid-field feedback and submission blocking;
+- preserved authoritative frontend and backend coordinate validation;
+- updated offline UI regression tests and synchronized documentation.
 
 Suggested commit title:
 
 ```text
-feat: validate manual chromosome coordinates
+refactor: add row-aware manual variant inputs
 ```
 
-The preceding filtered-input refactor was committed as:
+The preceding chromosome-coordinate validation was committed as:
 
 ```text
-4a68ff8 refactor: accept filtered VCF tables and remove prioritization
+f8a84b1 feat: validate manual chromosome coordinates
 ```
 
 ## Validation baseline
@@ -113,8 +117,8 @@ The preceding filtered-input refactor was committed as:
 The latest completed validation was:
 
 ```text
-456 passed, 3 skipped
-Total coverage: 87.87%
+457 passed, 3 skipped
+Total coverage: 87.99%
 Stage 16 MVP release acceptance: PASSED
 Stage 15 secrets audit: PASSED
 ```
@@ -132,9 +136,8 @@ tests, and the 80% coverage gate.
 
 ## Current Git state warning
 
-At the time this handoff was written, the manual chromosome-coordinate
-validation change is uncommitted. Inspect the current worktree before doing
-anything:
+At the time this handoff was written, the row-aware manual-input refinement is
+uncommitted. Inspect the current worktree before doing anything:
 
 ```powershell
 git status --short

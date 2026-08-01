@@ -57,8 +57,9 @@ It contains no patient name, sample column, or genotype.
 If browser upload interaction is unavailable:
 
 1. Change the input source to **Manual table**.
-2. Select `1` from the CHROM dropdown and confirm that the configured
-   assembly's acceptable POS range appears below the table.
+2. Select `1` from the first CHROM dropdown and confirm that the first POS
+   field becomes enabled and shows the configured assembly's acceptable range
+   inside the field.
 3. Enter `941284`, `G`, and `A` in the POS, REF, and ALT columns.
 4. Add `HP:0001250 - Seizure`.
 5. Run the analysis and download the report.

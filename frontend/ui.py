@@ -205,6 +205,24 @@ def _clear_analysis_result() -> None:
     st.session_state.pop("selected_evidence_object", None)
 
 
+def _manual_widget_key(field: str, row_index: int) -> str:
+    """Return one stable key for a manual-variant row widget."""
+
+    return f"manual_variant_{field}_{row_index}"
+
+
+def _manual_chromosome_changed(row_index: int) -> None:
+    """Clear stale state when a manual chromosome selection is removed."""
+
+    _clear_analysis_result()
+    chromosome_key = _manual_widget_key("chrom", row_index)
+    if st.session_state.get(chromosome_key) is None:
+        st.session_state.pop(
+            _manual_widget_key("pos", row_index),
+            None,
+        )
+
+
 def _analysis_job() -> AnalysisJob | None:
     """Return the current background job when one exists."""
 
@@ -608,57 +626,165 @@ def _normalize_manual_table(
     return rows
 
 
-def _manual_position_feedback(
-    table: object,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return selected chromosome ranges and live POS errors."""
+def _manual_position_error(
+    chromosome: str | None,
+    position: object,
+    row_index: int,
+) -> str | None:
+    """Return an assembly-aware error for one visible POS widget."""
 
+    if chromosome is None or position is None:
+        return None
+    chromosome_length = get_primary_chromosome_length(
+        chromosome,
+        settings.GENOME_ASSEMBLY,
+    )
     if (
-        not isinstance(table, pd.DataFrame)
-        or tuple(table.columns) != MANUAL_VARIANT_COLUMNS
+        isinstance(position, bool)
+        or not isinstance(position, Integral)
+        or int(position) < 1
+        or int(position) > chromosome_length
     ):
-        return (), ()
-    ranges: list[str] = []
-    errors: list[str] = []
-    for row_index, raw_row in enumerate(
-        table.to_dict(orient="records")
-    ):
-        raw_chromosome = raw_row["chrom"]
-        if _is_blank_table_value(raw_chromosome):
-            continue
-        try:
-            chromosome = normalize_primary_chromosome(
-                str(raw_chromosome)
-            )
-            chromosome_length = get_primary_chromosome_length(
-                chromosome,
-                settings.GENOME_ASSEMBLY,
-            )
-        except VCFProcessingError as exc:
-            errors.append(
-                f"Row {row_index + 1}: {exc}"
-            )
-            continue
-        ranges.append(
-            f"row {row_index + 1}, chromosome {chromosome}: "
-            f"1-{chromosome_length:,}"
+        return (
+            f"POS in row {row_index + 1} must be between 1 and "
+            f"{chromosome_length:,} for chromosome {chromosome} "
+            f"({settings.GENOME_ASSEMBLY}). Correct this value before "
+            "analysis."
         )
-        raw_position = raw_row["pos"]
-        if _is_blank_table_value(raw_position):
-            continue
-        if (
-            isinstance(raw_position, bool)
-            or not isinstance(raw_position, Integral)
-            or int(raw_position) < 1
-            or int(raw_position) > chromosome_length
+    return None
+
+
+def _render_manual_variant_table(
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    """Render five row-aware native Streamlit variant-input rows."""
+
+    table = _manual_variant_table()
+    position_errors: list[str] = []
+    for row_index in range(MAX_FILTERED_VCF_ROWS):
+        first_row = row_index == 0
+        visible_label = "visible" if first_row else "collapsed"
+        row_label = row_index + 1
+
+        with st.container(
+            horizontal=True,
+            vertical_alignment="top",
+            gap="small",
         ):
-            errors.append(
-                f"POS in row {row_index + 1} is outside chromosome "
-                f"{chromosome} in {settings.GENOME_ASSEMBLY}. Enter an "
-                f"integer from 1 to {chromosome_length:,}; analysis "
-                "will not accept the row until it is corrected."
+            chromosome = st.selectbox(
+                "CHROM" if first_row else f"Row {row_label} CHROM",
+                STANDARD_PRIMARY_CHROMOSOMES,
+                index=None,
+                key=_manual_widget_key("chrom", row_index),
+                placeholder="Select",
+                help=(
+                    "Select a standard human chromosome: "
+                    "1-22, X, Y, or MT."
+                ),
+                on_change=_manual_chromosome_changed,
+                args=(row_index,),
+                label_visibility=visible_label,
+                width=105,
             )
-    return tuple(ranges), tuple(errors)
+            chromosome_length = (
+                get_primary_chromosome_length(
+                    chromosome,
+                    settings.GENOME_ASSEMBLY,
+                )
+                if chromosome is not None
+                else max(
+                    get_primary_chromosome_length(
+                        available_chromosome,
+                        settings.GENOME_ASSEMBLY,
+                    )
+                    for available_chromosome
+                    in STANDARD_PRIMARY_CHROMOSOMES
+                )
+            )
+            position = st.number_input(
+                "POS" if first_row else f"Row {row_label} POS",
+                min_value=1,
+                max_value=chromosome_length,
+                value=None,
+                step=1,
+                format="%d",
+                key=_manual_widget_key("pos", row_index),
+                placeholder=(
+                    f"1 - {chromosome_length:,}"
+                    if chromosome is not None
+                    else "Select CHROM first"
+                ),
+                disabled=chromosome is None,
+                help=(
+                    "The allowed range follows the selected chromosome "
+                    f"in {settings.GENOME_ASSEMBLY}."
+                ),
+                on_change=_clear_analysis_result,
+                label_visibility=visible_label,
+                width=190,
+            )
+            reference = st.text_input(
+                "REF" if first_row else f"Row {row_label} REF",
+                key=_manual_widget_key("ref", row_index),
+                placeholder="e.g. A",
+                on_change=_clear_analysis_result,
+                label_visibility=visible_label,
+                width=95,
+            )
+            alternate = st.text_input(
+                "ALT" if first_row else f"Row {row_label} ALT",
+                key=_manual_widget_key("alt", row_index),
+                placeholder="e.g. G",
+                help=(
+                    "Use a nucleotide allele or a supported symbolic "
+                    "allele such as <DEL>."
+                ),
+                on_change=_clear_analysis_result,
+                label_visibility=visible_label,
+                width=115,
+            )
+            quality = st.number_input(
+                "QUAL" if first_row else f"Row {row_label} QUAL",
+                min_value=0.0,
+                value=None,
+                step=0.01,
+                format="%.2f",
+                key=_manual_widget_key("qual", row_index),
+                placeholder="Optional",
+                on_change=_clear_analysis_result,
+                label_visibility=visible_label,
+                width=115,
+            )
+            filter_value = st.text_input(
+                "FILTER" if first_row else f"Row {row_label} FILTER",
+                key=_manual_widget_key("filter", row_index),
+                placeholder="e.g. PASS",
+                on_change=_clear_analysis_result,
+                label_visibility=visible_label,
+                width=120,
+            )
+
+        position_error = _manual_position_error(
+            chromosome,
+            position,
+            row_index,
+        )
+        if position_error is not None:
+            position_errors.append(position_error)
+            st.error(position_error)
+
+        table.at[row_index, "chrom"] = (
+            pd.NA if chromosome is None else chromosome
+        )
+        table.at[row_index, "pos"] = (
+            pd.NA if position is None else position
+        )
+        table.at[row_index, "ref"] = reference
+        table.at[row_index, "alt"] = alternate
+        table.at[row_index, "qual"] = (
+            pd.NA if quality is None else quality
+        )
+        table.at[row_index, "filter"] = filter_value
+    return table, tuple(position_errors)
 
 
 def _prepare_input(
@@ -729,6 +855,7 @@ def _render_variant_input(
 
         uploaded_vcf = None
         manual_table: object = _manual_variant_table()
+        position_errors: tuple[str, ...] = ()
         if input_mode == MANUAL_INPUT_MODE:
             st.caption(
                 "Enter up to five already-filtered variants. "
@@ -736,73 +863,9 @@ def _render_variant_input(
                 "is annotated; the report focuses on the first listed "
                 "variant."
             )
-            manual_table = st.data_editor(
-                _manual_variant_table(),
-                key="manual_variant_table",
-                hide_index=True,
-                num_rows="fixed",
-                width="stretch",
-                on_change=_clear_analysis_result,
-                column_config={
-                    "chrom": st.column_config.SelectboxColumn(
-                        "CHROM",
-                        options=STANDARD_PRIMARY_CHROMOSOMES,
-                        help=(
-                            "Select a standard human chromosome: "
-                            "1-22, X, Y, or MT."
-                        ),
-                    ),
-                    "pos": st.column_config.NumberColumn(
-                        "POS",
-                        min_value=1,
-                        max_value=max(
-                            get_primary_chromosome_length(
-                                chromosome,
-                                settings.GENOME_ASSEMBLY,
-                            )
-                            for chromosome
-                            in STANDARD_PRIMARY_CHROMOSOMES
-                        ),
-                        step=1,
-                        format="%d",
-                        help=(
-                            "Select CHROM first. Its allowed "
-                            f"{settings.GENOME_ASSEMBLY} POS range "
-                            "appears below the table."
-                        ),
-                    ),
-                    "ref": st.column_config.TextColumn("REF"),
-                    "alt": st.column_config.TextColumn(
-                        "ALT",
-                        help=(
-                            "Use a nucleotide allele or a supported "
-                            "symbolic allele such as <DEL>."
-                        ),
-                    ),
-                    "qual": st.column_config.NumberColumn(
-                        "QUAL",
-                        min_value=0,
-                        format="%.2f",
-                    ),
-                    "filter": st.column_config.TextColumn("FILTER"),
-                },
+            manual_table, position_errors = (
+                _render_manual_variant_table()
             )
-            position_ranges, position_errors = (
-                _manual_position_feedback(manual_table)
-            )
-            if position_ranges:
-                st.caption(
-                    f"Allowed POS ranges ({settings.GENOME_ASSEMBLY}): "
-                    + "; ".join(position_ranges)
-                    + "."
-                )
-            else:
-                st.caption(
-                    "Select CHROM to display the acceptable POS range "
-                    f"for {settings.GENOME_ASSEMBLY}."
-                )
-            for position_error in position_errors:
-                st.error(position_error)
 
         with st.form("analysis_input_form", border=False):
             if input_mode == VCF_INPUT_MODE:
@@ -831,7 +894,7 @@ def _render_variant_input(
                     type="primary",
                     icon=":material/biotech:",
                     width="stretch",
-                    disabled=job_present,
+                    disabled=job_present or bool(position_errors),
                 )
                 st.form_submit_button(
                     "Cancelling..." if cancellation_pending else "Cancel",

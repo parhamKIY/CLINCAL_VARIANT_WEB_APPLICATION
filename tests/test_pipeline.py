@@ -174,7 +174,7 @@ from frontend.report_viewer import (
     load_report_document,
 )
 from frontend.ui import (
-    _manual_position_feedback,
+    _manual_position_error,
     _manual_variant_table,
     _normalize_manual_table,
 )
@@ -8318,20 +8318,19 @@ class TestFrontendExecution:
         ):
             _normalize_manual_table(table)
 
-    def test_manual_position_feedback_uses_selected_chromosome(
+    def test_manual_position_error_uses_selected_chromosome(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(settings, "GENOME_ASSEMBLY", "GRCh38")
-        table = _manual_variant_table()
-        table.loc[0, ["chrom", "pos"]] = ["MT", 16_570]
 
-        ranges, errors = _manual_position_feedback(table)
+        error = _manual_position_error("MT", 16_570, 0)
 
-        assert ranges == ("row 1, chromosome MT: 1-16,569",)
-        assert len(errors) == 1
-        assert "Enter an integer from 1 to 16,569" in errors[0]
-        assert "will not accept the row until it is corrected" in errors[0]
+        assert error is not None
+        assert "between 1 and 16,569" in error
+        assert "chromosome MT (GRCh38)" in error
+        assert "Correct this value before analysis" in error
+        assert _manual_position_error("MT", 16_569, 0) is None
 
     def test_cancelled_job_discards_result_and_new_report(
         self,
@@ -10152,6 +10151,46 @@ class TestFrontendFoundation:
         )
         assert not app.success
 
+    @pytest.mark.stage16_mvp
+    def test_manual_position_widget_tracks_selected_chromosome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(settings, "GENOME_ASSEMBLY", "GRCh38")
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        app.segmented_control[0].set_value("Manual table").run(
+            timeout=10
+        )
+
+        position = next(
+            field
+            for field in app.number_input
+            if field.label == "POS"
+        )
+        assert position.disabled
+        assert position.proto.placeholder == "Select CHROM first"
+
+        chromosome = next(
+            field
+            for field in app.selectbox
+            if field.label == "CHROM"
+        )
+        chromosome.select("12").run(timeout=10)
+        position = next(
+            field
+            for field in app.number_input
+            if field.label == "POS"
+        )
+
+        assert not position.disabled
+        assert position.min == 1
+        assert position.max == 133_275_309
+        assert position.proto.has_min
+        assert position.proto.has_max
+        assert position.proto.placeholder == "1 - 133,275,309"
+
     def test_cancel_button_requests_active_analysis(self) -> None:
         first_progress = threading.Event()
         continue_analysis = threading.Event()
@@ -10271,10 +10310,6 @@ class TestFrontendFoundation:
             fake_execute_analysis,
         )
         manual_rows = _manual_rows("1:941284:G:A")
-        monkeypatch.setattr(
-            "frontend.ui._normalize_manual_table",
-            lambda _: manual_rows,
-        )
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")
         ).run(timeout=10)
@@ -10357,6 +10392,31 @@ class TestFrontendFoundation:
         app.segmented_control[0].set_value("Manual table").run(
             timeout=10
         )
+        next(
+            field
+            for field in app.selectbox
+            if field.label == "CHROM"
+        ).select("1").run(timeout=10)
+        next(
+            field
+            for field in app.number_input
+            if field.label == "POS"
+        ).set_value(941284).run(timeout=10)
+        next(
+            field
+            for field in app.text_input
+            if field.label == "REF"
+        ).set_value("G").run(timeout=10)
+        next(
+            field
+            for field in app.text_input
+            if field.label == "ALT"
+        ).set_value("A").run(timeout=10)
+        next(
+            field
+            for field in app.text_input
+            if field.label == "FILTER"
+        ).set_value("PASS").run(timeout=10)
         analyze_button = next(
             button
             for button in app.button
@@ -10393,7 +10453,7 @@ class TestFrontendFoundation:
             "ClinVar": "Success",
             "ClinGen/GenCC": "Success",
         }
-        assert len(app.dataframe) == 7
+        assert len(app.dataframe) == 6
         assert [button.label for button in app.get("download_button")] == [
             "Download text",
             "Download PDF",
