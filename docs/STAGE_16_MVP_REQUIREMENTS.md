@@ -15,7 +15,7 @@ required.
 | --- | --- | --- |
 | Start the Streamlit application | `app.py`, `frontend/ui.py::render_app`, and the Streamlit shell regression test | Verified offline |
 | Upload a filtered VCF | `frontend/ui.py::_render_variant_input` and `frontend/execution.py::execute_analysis` | Verified offline |
-| Enter a filtered table manually | Fixed five-row editor in `frontend/ui.py` and `backend/vcf_processing.py::parse_manual_variants` | Verified offline |
+| Enter a filtered table manually | Fixed five-row editor with a standard primary CHROM dropdown and assembly-aware POS guidance in `frontend/ui.py`; authoritative chromosome and coordinate validation in `backend/vcf_processing.py::parse_manual_variants` | Verified offline |
 | Validate and process 1–5 rows | `backend/vcf_processing.py::process_vcf` and VCF validation, gzip, multi-allelic, and row-boundary tests | Verified offline |
 | Annotate every supplied variant | Direct filtered-input handoff in `backend/pipeline.py::run_variant_processing` | Verified offline |
 | Obtain at least one annotation | `backend/annotation.py::annotate_variants` and unified VEP, MyVariant.info, ClinVar, and UCSC GenCC tests | Verified offline and live |

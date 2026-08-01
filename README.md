@@ -78,8 +78,13 @@ flowchart LR
 - Multi-allelic records are split into one object per ALT allele.
 - VCF sample, genotype, and patient columns are ignored and never enter the
   public pipeline result.
-- Manual input uses a five-row VCF-style table with CHROM, POS, REF, ALT,
-  optional QUAL, and optional FILTER columns.
+- Manual input uses a five-row VCF-style table with a standard primary
+  chromosome dropdown (`1`–`22`, `X`, `Y`, or `MT`), assembly-aware POS
+  guidance, REF, ALT, optional QUAL, and optional FILTER columns.
+- Selecting CHROM determines only the valid POS range for the configured
+  GRCh37 or GRCh38 assembly. REF and ALT are checked as allele syntax, QUAL
+  remains an optional non-negative score without a chromosome-specific upper
+  bound, and FILTER remains optional text.
 - Filtering, optimization, and clinical ranking are performed upstream and
   are intentionally outside this application's responsibility.
 - Every supplied variant proceeds directly to multi-source annotation in the

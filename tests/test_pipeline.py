@@ -150,7 +150,9 @@ from backend.report_exports import (
 )
 from backend.vcf_processing import (
     MAX_FILTERED_VCF_ROWS,
+    STANDARD_PRIMARY_CHROMOSOMES,
     VCFProcessingError,
+    get_primary_chromosome_length,
     parse_manual_variants,
     parse_vcf,
     process_vcf,
@@ -172,6 +174,7 @@ from frontend.report_viewer import (
     load_report_document,
 )
 from frontend.ui import (
+    _manual_position_feedback,
     _manual_variant_table,
     _normalize_manual_table,
 )
@@ -1033,6 +1036,27 @@ def _manual_rows(*variants: str) -> list[dict[str, object]]:
 
 
 class TestVCFProcessing:
+    def test_standard_primary_chromosome_contract(self) -> None:
+        assert STANDARD_PRIMARY_CHROMOSOMES == (
+            *(str(chromosome) for chromosome in range(1, 23)),
+            "X",
+            "Y",
+            "MT",
+        )
+        assert len(STANDARD_PRIMARY_CHROMOSOMES) == 25
+        assert get_primary_chromosome_length(
+            "1",
+            "GRCh37",
+        ) == 249_250_621
+        assert get_primary_chromosome_length(
+            "chr1",
+            "GRCh38",
+        ) == 248_956_422
+        assert get_primary_chromosome_length(
+            "M",
+            "GRCh38",
+        ) == 16_569
+
     def test_parse_vcf_splits_multiallelic_records(
         self,
         tmp_path: Path,
@@ -1281,6 +1305,37 @@ class TestVCFProcessing:
         assert "##reference=GRCh38" in contents
         assert "\tFORMAT\t" not in contents
         assert "PATIENT" not in contents
+
+    def test_manual_position_is_bounded_by_assembly_and_chromosome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(settings, "GENOME_ASSEMBLY", "GRCh38")
+
+        with pytest.raises(
+            VCFProcessingError,
+            match=(
+                "POS must be between 1 and 248,956,422 "
+                "for chromosome 1 in GRCh38"
+            ),
+        ):
+            parse_manual_variants(
+                _manual_rows("1:249000000:A:G")
+            )
+
+        monkeypatch.setattr(settings, "GENOME_ASSEMBLY", "GRCh37")
+        assert parse_manual_variants(
+            _manual_rows("1:249000000:A:G")
+        )[0]["pos"] == 249_000_000
+
+    def test_manual_non_primary_chromosome_is_rejected(self) -> None:
+        with pytest.raises(
+            VCFProcessingError,
+            match="CHROM must be one of 1-22, X, Y, or MT",
+        ):
+            parse_manual_variants(
+                _manual_rows("GL000207.1:100:A:G")
+            )
 
 class TestPhenotype:
     """Verify the Stage 6 phenotype input contract."""
@@ -8226,7 +8281,7 @@ class TestFrontendExecution:
 
         assert rows == [
             {
-                "chrom": "chr1",
+                "chrom": "1",
                 "pos": 941284,
                 "ref": "g",
                 "alt": "a",
@@ -8241,6 +8296,42 @@ class TestFrontendExecution:
 
         with pytest.raises(ValueError, match="Complete CHROM"):
             _normalize_manual_table(table)
+
+    def test_manual_editor_rejects_position_outside_chromosome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(settings, "GENOME_ASSEMBLY", "GRCh38")
+        table = _manual_variant_table()
+        table.loc[0, ["chrom", "pos", "ref", "alt"]] = [
+            "21",
+            50_000_000,
+            "A",
+            "G",
+        ]
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                "between 1 and 46,709,983 for chromosome 21 in GRCh38"
+            ),
+        ):
+            _normalize_manual_table(table)
+
+    def test_manual_position_feedback_uses_selected_chromosome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(settings, "GENOME_ASSEMBLY", "GRCh38")
+        table = _manual_variant_table()
+        table.loc[0, ["chrom", "pos"]] = ["MT", 16_570]
+
+        ranges, errors = _manual_position_feedback(table)
+
+        assert ranges == ("row 1, chromosome MT: 1-16,569",)
+        assert len(errors) == 1
+        assert "Enter an integer from 1 to 16,569" in errors[0]
+        assert "will not accept the row until it is corrected" in errors[0]
 
     def test_cancelled_job_discards_result_and_new_report(
         self,

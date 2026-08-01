@@ -64,6 +64,10 @@ or provider availability.
   evidence is unavailable.
 - Input filtering, optimization, normalization, and ranking must be completed
   upstream; the application accepts only 1–5 already-filtered VCF rows.
+- The manual editor accepts standard primary chromosomes `1`–`22`, `X`, `Y`,
+  and `MT`. It rejects POS values outside the configured GRCh37/GRCh38
+  chromosome length; alternate and unplaced contigs are not manual-editor
+  options.
 - The system is single-user and local.
 - Authentication, user roles, PostgreSQL, background jobs, Docker, monitoring,
   and institutional deployment remain post-MVP work.

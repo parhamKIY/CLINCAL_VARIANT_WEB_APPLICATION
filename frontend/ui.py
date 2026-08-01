@@ -16,7 +16,13 @@ from backend.phenotype import (
     search_hpo_terms,
     update_hpo_data,
 )
-from backend.vcf_processing import MAX_FILTERED_VCF_ROWS
+from backend.vcf_processing import (
+    MAX_FILTERED_VCF_ROWS,
+    STANDARD_PRIMARY_CHROMOSOMES,
+    VCFProcessingError,
+    get_primary_chromosome_length,
+    normalize_primary_chromosome,
+)
 from config import settings
 from frontend.execution import (
     AnalysisJob,
@@ -477,7 +483,7 @@ def _manual_variant_table() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "chrom": pd.Series(
-                [""] * MAX_FILTERED_VCF_ROWS,
+                [pd.NA] * MAX_FILTERED_VCF_ROWS,
                 dtype="string",
             ),
             "pos": pd.Series(
@@ -551,6 +557,25 @@ def _normalize_manual_table(
             raise ValueError(
                 f"POS in row {row_index + 1} must be a positive integer."
             )
+        try:
+            chromosome = normalize_primary_chromosome(
+                str(raw_row["chrom"])
+            )
+            chromosome_length = get_primary_chromosome_length(
+                chromosome,
+                settings.GENOME_ASSEMBLY,
+            )
+        except VCFProcessingError as exc:
+            raise ValueError(
+                f"CHROM in row {row_index + 1} is invalid: {exc}"
+            ) from exc
+        if int(raw_position) > chromosome_length:
+            raise ValueError(
+                f"POS in row {row_index + 1} must be between 1 and "
+                f"{chromosome_length:,} for chromosome {chromosome} in "
+                f"{settings.GENOME_ASSEMBLY}. Analysis will not start "
+                "until this value is corrected."
+            )
         raw_quality = raw_row["qual"]
         quality: float | None = None
         if not _is_blank_table_value(raw_quality):
@@ -566,7 +591,7 @@ def _normalize_manual_table(
             quality = float(raw_quality)
         rows.append(
             {
-                "chrom": str(raw_row["chrom"]).strip(),
+                "chrom": chromosome,
                 "pos": int(raw_position),
                 "ref": str(raw_row["ref"]).strip(),
                 "alt": str(raw_row["alt"]).strip(),
@@ -581,6 +606,59 @@ def _normalize_manual_table(
     if not rows:
         raise ValueError("Enter at least one manual variant row.")
     return rows
+
+
+def _manual_position_feedback(
+    table: object,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return selected chromosome ranges and live POS errors."""
+
+    if (
+        not isinstance(table, pd.DataFrame)
+        or tuple(table.columns) != MANUAL_VARIANT_COLUMNS
+    ):
+        return (), ()
+    ranges: list[str] = []
+    errors: list[str] = []
+    for row_index, raw_row in enumerate(
+        table.to_dict(orient="records")
+    ):
+        raw_chromosome = raw_row["chrom"]
+        if _is_blank_table_value(raw_chromosome):
+            continue
+        try:
+            chromosome = normalize_primary_chromosome(
+                str(raw_chromosome)
+            )
+            chromosome_length = get_primary_chromosome_length(
+                chromosome,
+                settings.GENOME_ASSEMBLY,
+            )
+        except VCFProcessingError as exc:
+            errors.append(
+                f"Row {row_index + 1}: {exc}"
+            )
+            continue
+        ranges.append(
+            f"row {row_index + 1}, chromosome {chromosome}: "
+            f"1-{chromosome_length:,}"
+        )
+        raw_position = raw_row["pos"]
+        if _is_blank_table_value(raw_position):
+            continue
+        if (
+            isinstance(raw_position, bool)
+            or not isinstance(raw_position, Integral)
+            or int(raw_position) < 1
+            or int(raw_position) > chromosome_length
+        ):
+            errors.append(
+                f"POS in row {row_index + 1} is outside chromosome "
+                f"{chromosome} in {settings.GENOME_ASSEMBLY}. Enter an "
+                f"integer from 1 to {chromosome_length:,}; analysis "
+                "will not accept the row until it is corrected."
+            )
+    return tuple(ranges), tuple(errors)
 
 
 def _prepare_input(
@@ -649,9 +727,84 @@ def _render_variant_input(
         job_present = job is not None
         cancellation_pending = job_state == "cancelling"
 
+        uploaded_vcf = None
+        manual_table: object = _manual_variant_table()
+        if input_mode == MANUAL_INPUT_MODE:
+            st.caption(
+                "Enter up to five already-filtered variants. "
+                "CHROM, POS, REF, and ALT are required. Every row "
+                "is annotated; the report focuses on the first listed "
+                "variant."
+            )
+            manual_table = st.data_editor(
+                _manual_variant_table(),
+                key="manual_variant_table",
+                hide_index=True,
+                num_rows="fixed",
+                width="stretch",
+                on_change=_clear_analysis_result,
+                column_config={
+                    "chrom": st.column_config.SelectboxColumn(
+                        "CHROM",
+                        options=STANDARD_PRIMARY_CHROMOSOMES,
+                        help=(
+                            "Select a standard human chromosome: "
+                            "1-22, X, Y, or MT."
+                        ),
+                    ),
+                    "pos": st.column_config.NumberColumn(
+                        "POS",
+                        min_value=1,
+                        max_value=max(
+                            get_primary_chromosome_length(
+                                chromosome,
+                                settings.GENOME_ASSEMBLY,
+                            )
+                            for chromosome
+                            in STANDARD_PRIMARY_CHROMOSOMES
+                        ),
+                        step=1,
+                        format="%d",
+                        help=(
+                            "Select CHROM first. Its allowed "
+                            f"{settings.GENOME_ASSEMBLY} POS range "
+                            "appears below the table."
+                        ),
+                    ),
+                    "ref": st.column_config.TextColumn("REF"),
+                    "alt": st.column_config.TextColumn(
+                        "ALT",
+                        help=(
+                            "Use a nucleotide allele or a supported "
+                            "symbolic allele such as <DEL>."
+                        ),
+                    ),
+                    "qual": st.column_config.NumberColumn(
+                        "QUAL",
+                        min_value=0,
+                        format="%.2f",
+                    ),
+                    "filter": st.column_config.TextColumn("FILTER"),
+                },
+            )
+            position_ranges, position_errors = (
+                _manual_position_feedback(manual_table)
+            )
+            if position_ranges:
+                st.caption(
+                    f"Allowed POS ranges ({settings.GENOME_ASSEMBLY}): "
+                    + "; ".join(position_ranges)
+                    + "."
+                )
+            else:
+                st.caption(
+                    "Select CHROM to display the acceptable POS range "
+                    f"for {settings.GENOME_ASSEMBLY}."
+                )
+            for position_error in position_errors:
+                st.error(position_error)
+
         with st.form("analysis_input_form", border=False):
-            uploaded_vcf = None
-            manual_table: object = _manual_variant_table()
             if input_mode == VCF_INPUT_MODE:
                 uploaded_vcf = st.file_uploader(
                     "VCF file",
@@ -666,43 +819,6 @@ def _render_variant_input(
                         f"Maximum size: "
                         f"{settings.MAX_UPLOAD_BYTES // 1_000_000} MB."
                     ),
-                )
-            else:
-                st.caption(
-                    "Enter up to five already-filtered variants. "
-                    "CHROM, POS, REF, and ALT are required. Every row "
-                    "is annotated; the report focuses on the first listed "
-                    "variant."
-                )
-                manual_table = st.data_editor(
-                    _manual_variant_table(),
-                    key="manual_variant_table",
-                    hide_index=True,
-                    num_rows="fixed",
-                    width="stretch",
-                    column_config={
-                        "chrom": st.column_config.TextColumn("CHROM"),
-                        "pos": st.column_config.NumberColumn(
-                            "POS",
-                            min_value=1,
-                            step=1,
-                            format="%d",
-                        ),
-                        "ref": st.column_config.TextColumn("REF"),
-                        "alt": st.column_config.TextColumn(
-                            "ALT",
-                            help=(
-                                "Use a nucleotide allele or a supported "
-                                "symbolic allele such as <DEL>."
-                            ),
-                        ),
-                        "qual": st.column_config.NumberColumn(
-                            "QUAL",
-                            min_value=0,
-                            format="%.2f",
-                        ),
-                        "filter": st.column_config.TextColumn("FILTER"),
-                    },
                 )
 
             with st.container(

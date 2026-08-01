@@ -73,36 +73,39 @@ CHROM | POS | REF | ALT | QUAL | FILTER
 `CHROM`, `POS`, `REF`, and `ALT` are required for each used row. `QUAL` and
 `FILTER` are optional.
 
+The manual editor restricts `CHROM` to the 25 standard primary labels
+`1`–`22`, `X`, `Y`, and `MT`. Selecting a chromosome displays its valid POS
+range for the configured GRCh37 or GRCh38 assembly. Invalid coordinates are
+shown immediately and are rejected before analysis. Only POS is
+chromosome-dependent: REF and ALT use allele-syntax validation, QUAL is an
+optional non-negative value, and FILTER is optional text.
+
 ## Latest uncommitted implementation
 
-The filtered-input refactor is complete but has not yet been committed.
+The manual chromosome and coordinate validation improvement is complete but
+has not yet been committed.
 
 Main changes:
 
-- removed `backend/prioritization.py`;
-- removed `TOP_VARIANTS` from `config.py` and `.env.example`;
-- simplified `backend/vcf_processing.py` for strict one-to-five-row input;
-- added `parse_manual_variants()` for manual VCF-style rows;
-- removed sample selection, genotype extraction, large-file preview limits,
-  random selection, and the unused `bcftools` normalization path;
-- removed the prioritization stage and candidate-preview fields from the
-  public pipeline result;
-- renamed the public processing boundary to `run_variant_processing()`;
-- changed annotation to process every supplied variant directly;
-- changed the frontend from one coordinate text field to a five-row editor;
-- added strict upload row-count validation before temporary storage;
-- renamed the frontend result view to **Input variants**;
-- renamed the submit control to **Analyze variants**;
-- updated smoke scripts, tests, README, and Stage 16 documentation;
-- removed obsolete large sample files:
-  - `data/samples/homo_sapiens-chrMT.vcf.gz`
-  - `data/samples/homo_sapiens_clinically_associated.vcf.gz`
-- retained `data/samples/mvp_demo.vcf` as the valid one-row demonstration file.
+- changed manual CHROM cells from free text to a dropdown containing
+  `1`–`22`, `X`, `Y`, and `MT`;
+- added authoritative GRCh37 and GRCh38 primary chromosome length tables;
+- added live, row-specific POS range guidance after CHROM selection;
+- added immediate invalid-POS feedback and pre-analysis rejection;
+- retained backend validation so the rules cannot be bypassed through the UI;
+- documented that REF, ALT, QUAL, and FILTER are not chromosome-length-bound;
+- updated offline regression tests and synchronized project documentation.
 
 Suggested commit title:
 
 ```text
-refactor: accept filtered VCF tables and remove prioritization
+feat: validate manual chromosome coordinates
+```
+
+The preceding filtered-input refactor was committed as:
+
+```text
+4a68ff8 refactor: accept filtered VCF tables and remove prioritization
 ```
 
 ## Validation baseline
@@ -110,8 +113,8 @@ refactor: accept filtered VCF tables and remove prioritization
 The latest completed validation was:
 
 ```text
-451 passed, 3 skipped
-Total coverage: 87.94%
+456 passed, 3 skipped
+Total coverage: 87.87%
 Stage 16 MVP release acceptance: PASSED
 Stage 15 secrets audit: PASSED
 ```
@@ -127,29 +130,16 @@ The final acceptance command also checks compilation, installed dependency
 consistency, secrets, security controls, the Stage 16 workflow, regression
 tests, and the 80% coverage gate.
 
-When testing the current uncommitted deletion set, the secrets audit sees
-deleted tracked files until those deletions are staged. Do not weaken the
-audit to work around this. Once the refactor is committed, the normal
-acceptance command works directly.
-
 ## Current Git state warning
 
-At the time this handoff was written, the filtered-input refactor is
-uncommitted. Inspect the current worktree before doing anything:
+At the time this handoff was written, the manual chromosome-coordinate
+validation change is uncommitted. Inspect the current worktree before doing
+anything:
 
 ```powershell
 git status --short
 git diff --check
 ```
-
-There is also an unrelated untracked generated file:
-
-```text
-output/pdf/clinical-report-grch38-mt-5791-g-a-e5ccf339d531ec1c.pdf
-```
-
-Treat it as user-owned output. Do not delete, modify, stage, or commit it unless
-the user explicitly asks.
 
 ## Important implementation boundaries
 

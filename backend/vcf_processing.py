@@ -10,9 +10,75 @@ from pathlib import Path
 
 import vcfpy
 
+from config import settings
+
 
 SUPPORTED_VCF_SUFFIXES = (".vcf", ".vcf.gz")
 MAX_FILTERED_VCF_ROWS = 5
+STANDARD_PRIMARY_CHROMOSOMES = (
+    *(str(chromosome) for chromosome in range(1, 23)),
+    "X",
+    "Y",
+    "MT",
+)
+# Nuclear lengths follow the NCBI Genome Reference Consortium assembly
+# tables. MT uses the 16,569-base NC_012920.1 reference sequence.
+PRIMARY_CHROMOSOME_LENGTHS = {
+    "GRCh37": {
+        "1": 249_250_621,
+        "2": 243_199_373,
+        "3": 198_022_430,
+        "4": 191_154_276,
+        "5": 180_915_260,
+        "6": 171_115_067,
+        "7": 159_138_663,
+        "8": 146_364_022,
+        "9": 141_213_431,
+        "10": 135_534_747,
+        "11": 135_006_516,
+        "12": 133_851_895,
+        "13": 115_169_878,
+        "14": 107_349_540,
+        "15": 102_531_392,
+        "16": 90_354_753,
+        "17": 81_195_210,
+        "18": 78_077_248,
+        "19": 59_128_983,
+        "20": 63_025_520,
+        "21": 48_129_895,
+        "22": 51_304_566,
+        "X": 155_270_560,
+        "Y": 59_373_566,
+        "MT": 16_569,
+    },
+    "GRCh38": {
+        "1": 248_956_422,
+        "2": 242_193_529,
+        "3": 198_295_559,
+        "4": 190_214_555,
+        "5": 181_538_259,
+        "6": 170_805_979,
+        "7": 159_345_973,
+        "8": 145_138_636,
+        "9": 138_394_717,
+        "10": 133_797_422,
+        "11": 135_086_622,
+        "12": 133_275_309,
+        "13": 114_364_328,
+        "14": 107_043_718,
+        "15": 101_991_189,
+        "16": 90_338_345,
+        "17": 83_257_441,
+        "18": 80_373_285,
+        "19": 58_617_616,
+        "20": 64_444_167,
+        "21": 46_709_983,
+        "22": 50_818_468,
+        "X": 156_040_895,
+        "Y": 57_227_415,
+        "MT": 16_569,
+    },
+}
 MANUAL_VARIANT_FIELDS = frozenset(
     {"chrom", "pos", "ref", "alt", "qual", "filter"}
 )
@@ -97,6 +163,31 @@ def _normalize_chromosome(chromosome: str) -> str:
     if not value:
         raise VCFProcessingError("Chromosome cannot be empty.")
     return value
+
+
+def normalize_primary_chromosome(chromosome: str) -> str:
+    """Return one canonical standard human chromosome label."""
+
+    normalized = _normalize_chromosome(chromosome).upper()
+    if normalized not in STANDARD_PRIMARY_CHROMOSOMES:
+        raise VCFProcessingError(
+            "CHROM must be one of 1-22, X, Y, or MT."
+        )
+    return normalized
+
+
+def get_primary_chromosome_length(
+    chromosome: str,
+    assembly: str,
+) -> int:
+    """Return the configured assembly length of a primary chromosome."""
+
+    lengths = PRIMARY_CHROMOSOME_LENGTHS.get(assembly)
+    if lengths is None:
+        raise VCFProcessingError(
+            "Genome assembly must be GRCh37 or GRCh38."
+        )
+    return lengths[normalize_primary_chromosome(chromosome)]
 
 
 def _format_filter(filters: list[str]) -> str | None:
@@ -248,6 +339,22 @@ def _parse_manual_row(
         raise VCFProcessingError(
             f"Manual row {row_index + 1} POS must be greater than zero."
         )
+    try:
+        chromosome = normalize_primary_chromosome(chromosome)
+    except VCFProcessingError as exc:
+        raise VCFProcessingError(
+            f"Manual row {row_index + 1} {exc}"
+        ) from exc
+    chromosome_length = get_primary_chromosome_length(
+        chromosome,
+        settings.GENOME_ASSEMBLY,
+    )
+    if raw_position > chromosome_length:
+        raise VCFProcessingError(
+            f"Manual row {row_index + 1} POS must be between 1 and "
+            f"{chromosome_length:,} for chromosome {chromosome} in "
+            f"{settings.GENOME_ASSEMBLY}."
+        )
     reference = _manual_text(
         row["ref"],
         "REF",
@@ -289,7 +396,6 @@ def _parse_manual_row(
         if isinstance(raw_filter, str) and raw_filter.strip()
         else None
     )
-    chromosome = _normalize_chromosome(chromosome)
     return [
         {
             "chrom": chromosome,
@@ -351,10 +457,14 @@ def process_vcf(
 __all__ = [
     "MANUAL_VARIANT_FIELDS",
     "MAX_FILTERED_VCF_ROWS",
+    "PRIMARY_CHROMOSOME_LENGTHS",
+    "STANDARD_PRIMARY_CHROMOSOMES",
     "SUPPORTED_VCF_SUFFIXES",
     "VCFProcessingError",
     "VariantData",
+    "get_primary_chromosome_length",
     "iter_vcf_variants",
+    "normalize_primary_chromosome",
     "parse_manual_variants",
     "parse_vcf",
     "process_vcf",
