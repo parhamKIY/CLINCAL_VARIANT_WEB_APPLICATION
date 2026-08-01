@@ -39,8 +39,8 @@ http://127.0.0.1:8501
 3. Search for `seizure` in the phenotype search.
 4. Select `HP:0001250 - Seizure`.
 5. Select **Add phenotype**.
-6. Select **Analyze variant**.
-7. Show the pipeline progress, candidate variant, annotation sources,
+6. Select **Analyze variants**.
+7. Show the pipeline progress, filtered input variant, annotation sources,
    phenotype evidence, Evidence Object, and clinical report.
 8. Select **Download text** and open the downloaded `.txt` file.
 
@@ -56,14 +56,14 @@ It contains no patient name, sample column, or genotype.
 
 If browser upload interaction is unavailable:
 
-1. Change the input source to **Manual variant**.
-2. Enter `1:941284:G:A`.
+1. Change the input source to **Manual table**.
+2. Enter `1`, `941284`, `G`, and `A` in the CHROM, POS, REF, and ALT columns.
 3. Add `HP:0001250 - Seizure`.
 4. Run the analysis and download the report.
 
 ## Expected result
 
-- Input validation, VCF processing, prioritization, phenotype, evidence, LLM,
+- Input validation, filtered VCF processing, annotation, phenotype, evidence, LLM,
   and report stages should finish successfully.
 - The annotation stage may finish with a warning when an optional provider has
   no exact record for the variant or gene.
@@ -94,6 +94,8 @@ runbook.
 - The LLM receives validated evidence rather than raw VCF or patient data.
 - Missing external evidence remains visible instead of being invented.
 - The report is decision support and requires qualified clinical review.
+- Filtering and ranking happen upstream; every supplied table row is annotated
+  in its original order.
 - This is a local MVP, not an authenticated institutional production system.
 
 ## Network troubleshooting

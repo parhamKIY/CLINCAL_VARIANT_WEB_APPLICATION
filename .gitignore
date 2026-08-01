@@ -15,6 +15,7 @@ storage/database/*
 storage/logs/*
 data/cache/*
 /docs/*
+!/docs/AI_HANDOFF.md
 !/docs/STAGE_15_SECURITY_ACCEPTANCE.md
 !/docs/STAGE_16_MVP_REQUIREMENTS.md
 !/docs/STAGE_16_MVP_DEMO_RUNBOOK.md

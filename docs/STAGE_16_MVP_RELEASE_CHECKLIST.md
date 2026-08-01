@@ -62,8 +62,8 @@ or provider availability.
 - External services may be unavailable or return incomplete evidence.
 - The application may return `partial` with explicit warnings when optional
   evidence is unavailable.
-- The prioritization algorithm is the documented MVP strategy, not a
-  professor-approved advanced clinical ranking model.
+- Input filtering, optimization, normalization, and ranking must be completed
+  upstream; the application accepts only 1–5 already-filtered VCF rows.
 - The system is single-user and local.
 - Authentication, user roles, PostgreSQL, background jobs, Docker, monitoring,
   and institutional deployment remain post-MVP work.

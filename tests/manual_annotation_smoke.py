@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.annotation import annotate_variants
-from backend.vcf_processing import VCFProcessingError, parse_manual_variant
+from backend.vcf_processing import VCFProcessingError, parse_manual_variants
 from config import settings
 
 
@@ -39,7 +39,25 @@ def _parse_arguments() -> argparse.Namespace:
 
 def check_production_annotation(variant_text: str) -> None:
     """Validate standardized evidence from all annotation sources."""
-    variants = parse_manual_variant(variant_text)
+    try:
+        chrom, pos, ref, alt = variant_text.split(":")
+        position = int(pos)
+    except (TypeError, ValueError) as exc:
+        raise VCFProcessingError(
+            "Variant must use CHROM:POS:REF:ALT format."
+        ) from exc
+    variants = parse_manual_variants(
+        [
+            {
+                "chrom": chrom,
+                "pos": position,
+                "ref": ref,
+                "alt": alt,
+                "qual": None,
+                "filter": "PASS",
+            }
+        ]
+    )
     started_at = perf_counter()
     annotations = annotate_variants(variants, batch_size=1)
     elapsed_seconds = perf_counter() - started_at

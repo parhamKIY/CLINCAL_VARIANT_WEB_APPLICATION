@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal, TypedDict, cast
@@ -36,10 +36,6 @@ from backend.privacy import (
     minimize_variant,
     validate_no_prohibited_fields,
 )
-from backend.prioritization import (
-    PrioritizationError,
-    prioritize_variants,
-)
 from backend.report import (
     ClinicalInterpretationError,
     ClinicalReportError,
@@ -51,16 +47,15 @@ from backend.report import (
 )
 from backend.vcf_processing import (
     VCFProcessingError,
-    VariantData,
+    parse_manual_variants,
     process_vcf,
 )
 
 
-PIPELINE_SCHEMA_VERSION = "1.1"
+PIPELINE_SCHEMA_VERSION = "1.2"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
-MAX_PIPELINE_RETAINED_VARIANTS = 100
 ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
 LOGGER = get_logger("pipeline")
 
@@ -99,7 +94,6 @@ PIPELINE_STAGE_STATUS_VALUES = {
 PIPELINE_STAGE_ORDER = (
     "input",
     "vcf_processing",
-    "prioritization",
     "annotation",
     "phenotype",
     "evidence",
@@ -109,11 +103,11 @@ PIPELINE_STAGE_ORDER = (
 
 
 class AnalysisInput(TypedDict):
-    """Validated mutually exclusive VCF or manual-variant input."""
+    """Validated mutually exclusive filtered VCF-table input."""
 
     input_mode: PipelineInputMode
     vcf_path: str | None
-    manual_variant: str | None
+    manual_variants: list[dict[str, object]] | None
     phenotypes: list[str]
 
 
@@ -144,9 +138,7 @@ class PipelineResult(TypedDict):
     progress_percent: int
     stages: list[PipelineStageRecord]
     variant_count: int
-    variants_truncated: bool
     variants: list[dict[str, object]]
-    candidates: list[dict[str, object]]
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
@@ -214,7 +206,7 @@ def validate_analysis_input(
     *,
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
-    manual_variant: str | None = None,
+    manual_variants: Sequence[Mapping[str, object]] | None = None,
 ) -> AnalysisInput:
     """Validate one analysis request without accessing the filesystem."""
 
@@ -230,24 +222,26 @@ def validate_analysis_input(
             PipelineInputError,
         )
 
-    normalized_manual_variant: str | None = None
-    if manual_variant is not None:
-        normalized_manual_variant = _required_text(
-            manual_variant,
-            "manual_variant",
-            PipelineInputError,
-        )
+    normalized_manual_variants: list[dict[str, object]] | None = None
+    if manual_variants is not None:
+        try:
+            normalized_manual_variants = [
+                dict(variant)
+                for variant in parse_manual_variants(manual_variants)
+            ]
+        except VCFProcessingError as exc:
+            raise PipelineInputError(str(exc)) from exc
 
     source_count = sum(
         value is not None
         for value in (
             normalized_vcf_path,
-            normalized_manual_variant,
+            normalized_manual_variants,
         )
     )
     if source_count != 1:
         raise PipelineInputError(
-            "Exactly one of vcf_path or manual_variant must be provided."
+            "Exactly one of vcf_path or manual_variants must be provided."
         )
 
     if not isinstance(phenotypes, (list, tuple)):
@@ -281,7 +275,7 @@ def validate_analysis_input(
             else "manual"
         ),
         "vcf_path": normalized_vcf_path,
-        "manual_variant": normalized_manual_variant,
+        "manual_variants": normalized_manual_variants,
         "phenotypes": normalized_phenotypes,
     }
 
@@ -304,9 +298,7 @@ def create_pipeline_result() -> PipelineResult:
             for stage in PIPELINE_STAGE_ORDER
         ],
         "variant_count": 0,
-        "variants_truncated": False,
         "variants": [],
-        "candidates": [],
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
@@ -474,13 +466,8 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "pipeline.variant_count must be a non-negative integer."
         )
-    if not isinstance(value["variants_truncated"], bool):
-        raise PipelineResultError(
-            "pipeline.variants_truncated must be a boolean."
-        )
     for field in (
         "variants",
-        "candidates",
         "annotations",
         "phenotype_results",
         "evidence_objects",
@@ -499,7 +486,6 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 field: value[field]
                 for field in (
                     "variants",
-                    "candidates",
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
@@ -511,21 +497,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "Pipeline result contains prohibited clinical data."
         ) from exc
-    if len(value["variants"]) > MAX_PIPELINE_RETAINED_VARIANTS:
+    if variant_count != len(value["variants"]):
         raise PipelineResultError(
-            "pipeline.variants exceeds the retained-variant maximum of "
-            f"{MAX_PIPELINE_RETAINED_VARIANTS}."
-        )
-    if variant_count < len(value["variants"]):
-        raise PipelineResultError(
-            "pipeline.variant_count cannot be smaller than the retained "
-            "variant list."
-        )
-    if value["variants_truncated"] != (
-        variant_count > len(value["variants"])
-    ):
-        raise PipelineResultError(
-            "pipeline.variants_truncated does not match variant_count."
+            "pipeline.variant_count must match the complete variant list."
         )
     if value["report_path"] is not None:
         _required_text(
@@ -717,7 +691,6 @@ def _finish_failed_stage(
         result[field]
         for field in (
             "variants",
-            "candidates",
             "annotations",
             "phenotype_results",
             "evidence_objects",
@@ -780,7 +753,7 @@ def _persist_terminal_result(
             status=result["status"],
             source_filename=source_filename,
             warnings=result["warnings"],
-            candidates=result["candidates"],
+            candidates=result["variants"],
             evidence_objects=result["evidence_objects"],
             report_path=result["report_path"],
             database_path=database_path,
@@ -799,21 +772,17 @@ def _persist_terminal_result(
     result["analysis_id"] = record["analysis_id"]
 
 
-def _process_and_prioritize(
+def _process_filtered_variants(
     request: AnalysisInput,
     result: PipelineResult,
     *,
-    top_n: int | None,
-    seed: int | None,
-    sample_name: str | None,
-    max_variants: int | None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
-    """Stream standardized variants into bounded candidate selection."""
+    """Load every variant from the pre-filtered input table."""
 
     result["status"] = "running"
     result["current_stage"] = "vcf_processing"
-    result["progress_percent"] = 10
+    result["progress_percent"] = 15
     _set_stage(
         result,
         "input",
@@ -826,74 +795,32 @@ def _process_and_prioritize(
         "vcf_processing",
         "running",
         progress_percent=0,
-        message="Processing standardized variants.",
+        message="Reading the filtered variant table.",
     )
     _notify_progress(result, progress_callback)
 
-    variant_stream = process_vcf(
-        vcf_path=request["vcf_path"],
-        manual_variant=request["manual_variant"],
-        sample_name=sample_name,
-        max_variants=max_variants,
-    )
-    retained_variants: list[dict[str, object]] = []
-    variant_count = 0
-
-    def track_variants() -> Iterator[VariantData]:
-        nonlocal variant_count
-        for variant in variant_stream:
-            variant_count += 1
-            if (
-                len(retained_variants)
-                < MAX_PIPELINE_RETAINED_VARIANTS
-            ):
-                retained_variants.append(minimize_variant(variant))
-            yield variant
-
-    result["current_stage"] = "prioritization"
-    result["progress_percent"] = 20
-    _set_stage(
-        result,
-        "prioritization",
-        "running",
-        progress_percent=0,
-        message="Selecting bounded MVP candidates.",
-    )
-    _notify_progress(result, progress_callback)
-    candidates = prioritize_variants(
-        track_variants(),
-        top_n=top_n,
-        seed=seed,
-    )
-    if variant_count == 0:
+    if request["input_mode"] == "vcf":
+        raw_variants = list(
+            process_vcf(vcf_path=request["vcf_path"])
+        )
+    else:
+        raw_variants = [
+            dict(variant)
+            for variant in request["manual_variants"] or ()
+        ]
+    if not raw_variants:
         raise PipelineError(
             "Variant processing produced no variants."
         )
 
-    result["variant_count"] = variant_count
-    result["variants"] = retained_variants
-    result["variants_truncated"] = (
-        variant_count > len(retained_variants)
-    )
-    result["candidates"] = [
-        minimize_variant(candidate)
-        for candidate in candidates
+    result["variants"] = [
+        minimize_variant(variant)
+        for variant in raw_variants
     ]
-    if result["variants_truncated"]:
-        result["warnings"].append(
-            "The pipeline retained only the first "
-            f"{MAX_PIPELINE_RETAINED_VARIANTS} of {variant_count} "
-            "parsed variants for display; candidate selection still "
-            "evaluated the complete processed stream."
-        )
+    result["variant_count"] = len(result["variants"])
     LOGGER.info(
-        "event=variant_selection_finished variant_count=%d "
-        "retained_variant_count=%d variants_truncated=%s "
-        "candidate_count=%d",
-        variant_count,
-        len(retained_variants),
-        result["variants_truncated"],
-        len(candidates),
+        "event=filtered_variants_loaded variant_count=%d",
+        result["variant_count"],
     )
 
     _set_stage(
@@ -901,17 +828,12 @@ def _process_and_prioritize(
         "vcf_processing",
         "success",
         progress_percent=100,
-        message=f"Processed {variant_count} variants.",
-    )
-    _set_stage(
-        result,
-        "prioritization",
-        "success",
-        progress_percent=100,
-        message=f"Selected {len(candidates)} candidates.",
+        message=(
+            f"Loaded all {result['variant_count']} filtered variants."
+        ),
     )
     result["current_stage"] = "annotation"
-    result["progress_percent"] = 30
+    result["progress_percent"] = 25
     _notify_progress(result, progress_callback)
 
 
@@ -945,7 +867,7 @@ def _annotate_and_match(
     associations_path: str | Path | None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
-    """Enrich selected candidates and attach optional HPO scores."""
+    """Enrich filtered variants and attach optional HPO scores."""
 
     result["current_stage"] = "annotation"
     result["progress_percent"] = 35
@@ -954,11 +876,11 @@ def _annotate_and_match(
         "annotation",
         "running",
         progress_percent=0,
-        message="Annotating selected candidates.",
+        message="Annotating all filtered variants.",
     )
     _notify_progress(result, progress_callback)
     annotations = annotate_variants(
-        result["candidates"],
+        result["variants"],
         batch_size=annotation_batch_size,
         max_retries=annotation_max_retries,
         session=annotation_session,
@@ -993,7 +915,7 @@ def _annotate_and_match(
         annotation_status,
         progress_percent=100,
         message=(
-            f"Annotated {len(result['annotations'])} candidates"
+            f"Annotated {len(result['annotations'])} variants"
             + (
                 " with source warnings."
                 if annotation_status == "warning"
@@ -1035,7 +957,7 @@ def _annotate_and_match(
         except (PhenotypeError, HPODataError):
             message = (
                 "Phenotype matching was unavailable; annotated "
-                "candidates continued without phenotype scores."
+                "variants continued without phenotype scores."
             )
             result["phenotype_results"] = [
                 dict(annotation)
@@ -1057,8 +979,8 @@ def _annotate_and_match(
             )
         else:
             public_phenotype_results = [
-                dict(candidate)
-                for candidate in phenotype_results
+                dict(variant)
+                for variant in phenotype_results
             ]
             try:
                 validate_no_prohibited_fields(
@@ -1078,7 +1000,7 @@ def _annotate_and_match(
                 progress_percent=100,
                 message=(
                     "Attached phenotype scores to "
-                    f"{len(result['phenotype_results'])} candidates."
+                    f"{len(result['phenotype_results'])} variants."
                 ),
             )
 
@@ -1095,7 +1017,7 @@ def _build_evidence_and_report(
     report_dir: str | Path | None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
-    """Build all Evidence Objects and report the leading candidate."""
+    """Build Evidence Objects and report the first filtered variant."""
 
     result["current_stage"] = "evidence"
     result["progress_percent"] = 65
@@ -1112,7 +1034,7 @@ def _build_evidence_and_report(
     )
     if not evidence_objects:
         raise PipelineError(
-            "Evidence Object construction produced no candidates."
+            "Evidence Object construction produced no variants."
         )
     result["evidence_objects"] = [
         dict(evidence)
@@ -1138,7 +1060,7 @@ def _build_evidence_and_report(
         "llm",
         "running",
         progress_percent=0,
-        message="Interpreting the leading candidate.",
+        message="Interpreting the first filtered variant.",
     )
     _notify_progress(result, progress_callback)
     interpretation = generate_clinical_interpretation(
@@ -1153,7 +1075,7 @@ def _build_evidence_and_report(
         progress_percent=100,
         message=(
             "Generated an evidence-bound interpretation for the "
-            "leading candidate."
+            "first filtered variant."
         ),
     )
 
@@ -1187,7 +1109,7 @@ def _build_evidence_and_report(
         "report",
         "success",
         progress_percent=100,
-        message="Saved the leading-candidate clinical report.",
+        message="Saved the clinical report.",
     )
     result["status"] = (
         "partial"
@@ -1199,31 +1121,22 @@ def _build_evidence_and_report(
     _notify_progress(result, progress_callback)
 
 
-def run_variant_selection(
+def run_variant_processing(
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
-    manual_variant: str | None = None,
-    *,
-    top_n: int | None = None,
-    seed: int | None = None,
-    sample_name: str | None = None,
-    max_variants: int | None = None,
+    manual_variants: Sequence[Mapping[str, object]] | None = None,
 ) -> PipelineResult:
-    """Run Stage 10 through processing and MVP prioritization."""
+    """Load and validate one filtered VCF table."""
 
     request = validate_analysis_input(
         vcf_path=vcf_path,
-        manual_variant=manual_variant,
+        manual_variants=manual_variants,
         phenotypes=phenotypes,
     )
     result = create_pipeline_result()
-    _process_and_prioritize(
+    _process_filtered_variants(
         request,
         result,
-        top_n=top_n,
-        seed=seed,
-        sample_name=sample_name,
-        max_variants=max_variants,
     )
     return validate_pipeline_result(result)
 
@@ -1231,12 +1144,8 @@ def run_variant_selection(
 def run_annotation_and_phenotype(
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
-    manual_variant: str | None = None,
+    manual_variants: Sequence[Mapping[str, object]] | None = None,
     *,
-    top_n: int | None = None,
-    seed: int | None = None,
-    sample_name: str | None = None,
-    max_variants: int | None = None,
     annotation_batch_size: int | None = None,
     annotation_max_retries: int | None = None,
     annotation_session: requests.Session | None = None,
@@ -1247,17 +1156,13 @@ def run_annotation_and_phenotype(
 
     request = validate_analysis_input(
         vcf_path=vcf_path,
-        manual_variant=manual_variant,
+        manual_variants=manual_variants,
         phenotypes=phenotypes,
     )
     result = create_pipeline_result()
-    _process_and_prioritize(
+    _process_filtered_variants(
         request,
         result,
-        top_n=top_n,
-        seed=seed,
-        sample_name=sample_name,
-        max_variants=max_variants,
     )
     _annotate_and_match(
         request,
@@ -1274,12 +1179,8 @@ def run_annotation_and_phenotype(
 def _run_analysis_unpersisted(
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
-    manual_variant: str | None = None,
+    manual_variants: Sequence[Mapping[str, object]] | None = None,
     *,
-    top_n: int | None = None,
-    seed: int | None = None,
-    sample_name: str | None = None,
-    max_variants: int | None = None,
     annotation_batch_size: int | None = None,
     annotation_max_retries: int | None = None,
     annotation_session: requests.Session | None = None,
@@ -1296,7 +1197,7 @@ def _run_analysis_unpersisted(
     try:
         request = validate_analysis_input(
             vcf_path=vcf_path,
-            manual_variant=manual_variant,
+            manual_variants=manual_variants,
             phenotypes=phenotypes,
         )
     except PipelineInputError as exc:
@@ -1323,13 +1224,9 @@ def _run_analysis_unpersisted(
     _notify_progress(result, progress_callback)
 
     try:
-        _process_and_prioritize(
+        _process_filtered_variants(
             request,
             result,
-            top_n=top_n,
-            seed=seed,
-            sample_name=sample_name,
-            max_variants=max_variants,
             progress_callback=progress_callback,
         )
     except VCFProcessingError as exc:
@@ -1339,16 +1236,6 @@ def _run_analysis_unpersisted(
             error=exc,
             default_code="vcf_processing_failed",
             default_message="Variant processing could not be completed.",
-            default_recoverable=False,
-            progress_callback=progress_callback,
-        )
-    except PrioritizationError as exc:
-        return _finish_exception(
-            result,
-            stage="prioritization",
-            error=exc,
-            default_code="prioritization_failed",
-            default_message="Candidate prioritization could not be completed.",
             default_recoverable=False,
             progress_callback=progress_callback,
         )
@@ -1404,7 +1291,7 @@ def _run_analysis_unpersisted(
             error=exc,
             default_code="unexpected_enrichment_error",
             default_message=(
-                "Candidate enrichment stopped because of an unexpected "
+                "Variant enrichment stopped because of an unexpected "
                 "internal error."
             ),
             default_recoverable=False,
@@ -1457,7 +1344,7 @@ def _run_analysis_unpersisted(
             stage="evidence",
             error=exc,
             default_code="evidence_object_failed",
-            default_message="Evidence construction produced no candidates.",
+            default_message="Evidence construction produced no variants.",
             default_recoverable=False,
             progress_callback=progress_callback,
         )
@@ -1480,12 +1367,8 @@ def _run_analysis_unpersisted(
 def run_analysis(
     vcf_path: str | Path | None,
     phenotypes: list[str] | tuple[str, ...],
-    manual_variant: str | None = None,
+    manual_variants: Sequence[Mapping[str, object]] | None = None,
     *,
-    top_n: int | None = None,
-    seed: int | None = None,
-    sample_name: str | None = None,
-    max_variants: int | None = None,
     annotation_batch_size: int | None = None,
     annotation_max_retries: int | None = None,
     annotation_session: requests.Session | None = None,
@@ -1500,9 +1383,9 @@ def run_analysis(
 ) -> PipelineResult:
     """Run the complete pipeline and optionally persist terminal output."""
 
-    if vcf_path is not None and manual_variant is None:
+    if vcf_path is not None and manual_variants is None:
         input_mode = "vcf"
-    elif manual_variant is not None and vcf_path is None:
+    elif manual_variants is not None and vcf_path is None:
         input_mode = "manual"
     else:
         input_mode = "invalid"
@@ -1522,11 +1405,7 @@ def run_analysis(
         result = _run_analysis_unpersisted(
             vcf_path=vcf_path,
             phenotypes=phenotypes,
-            manual_variant=manual_variant,
-            top_n=top_n,
-            seed=seed,
-            sample_name=sample_name,
-            max_variants=max_variants,
+            manual_variants=manual_variants,
             annotation_batch_size=annotation_batch_size,
             annotation_max_retries=annotation_max_retries,
             annotation_session=annotation_session,
@@ -1554,7 +1433,7 @@ def run_analysis(
         ):
             request = validate_analysis_input(
                 vcf_path=vcf_path,
-                manual_variant=manual_variant,
+                manual_variants=manual_variants,
                 phenotypes=phenotypes,
             )
             _persist_terminal_result(
@@ -1588,7 +1467,6 @@ __all__ = [
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
     "MAX_PIPELINE_PHENOTYPES",
-    "MAX_PIPELINE_RETAINED_VARIANTS",
     "MAX_PIPELINE_WARNINGS",
     "PIPELINE_SCHEMA_VERSION",
     "PIPELINE_STAGE_ORDER",
@@ -1604,7 +1482,7 @@ __all__ = [
     "create_pipeline_result",
     "run_analysis",
     "run_annotation_and_phenotype",
-    "run_variant_selection",
+    "run_variant_processing",
     "validate_analysis_input",
     "validate_pipeline_result",
 ]

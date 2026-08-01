@@ -217,11 +217,26 @@ def check_complete_pipeline(
 ) -> None:
     """Run the production pipeline from manual input to saved report."""
 
+    try:
+        chrom, pos, ref, alt = variant.split(":")
+        position = int(pos)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Variant must use CHROM:POS:REF:ALT format."
+        ) from exc
     result = run_analysis(
         vcf_path=None,
-        manual_variant=variant,
+        manual_variants=[
+            {
+                "chrom": chrom,
+                "pos": position,
+                "ref": ref,
+                "alt": alt,
+                "qual": None,
+                "filter": "PASS",
+            }
+        ],
         phenotypes=phenotypes,
-        top_n=1,
     )
     if result["status"] not in {"success", "partial"}:
         raise RuntimeError(

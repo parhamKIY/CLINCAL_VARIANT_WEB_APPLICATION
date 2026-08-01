@@ -16,7 +16,6 @@ from backend.llm import (
     LLMValidationError,
 )
 from backend.logging_config import get_logger
-from backend.prioritization import PrioritizationError
 from backend.report import (
     ClinicalInterpretationError,
     ClinicalReportError,
@@ -71,15 +70,6 @@ def map_pipeline_exception(
             "message": (
                 "The VCF could not be read or validated. Check the file "
                 "format and try again."
-            ),
-            "recoverable": False,
-        }
-    elif isinstance(error, PrioritizationError):
-        public_error = {
-            "code": "prioritization_failed",
-            "message": (
-                "Candidate variants could not be selected from the "
-                "processed input."
             ),
             "recoverable": False,
         }

@@ -56,17 +56,17 @@ def _joined_text(value: object) -> str | None:
     return ", ".join(items) if items else None
 
 
-def build_candidate_rows(
-    candidates: list[dict[str, object]],
+def build_variant_rows(
+    variants: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Return a genotype-free candidate table."""
+    """Return the complete genotype-free filtered input table."""
 
     rows: list[dict[str, object]] = []
-    for candidate in candidates:
-        variant = _variant(candidate)
+    for item in variants:
+        variant = _variant(item)
         rows.append(
             {
-                "Variant": _variant_label(candidate),
+                "Variant": _variant_label(item),
                 "Chromosome": variant.get("chrom"),
                 "Position": variant.get("pos"),
                 "Reference": variant.get("ref"),
@@ -182,17 +182,17 @@ def _evidence_summary_rows(
     return rows
 
 
-def _render_candidate_table(result: PipelineResult) -> None:
-    """Render bounded candidate variants without patient genotypes."""
+def _render_variant_table(result: PipelineResult) -> None:
+    """Render every filtered input variant without patient genotypes."""
 
-    rows = build_candidate_rows(result["candidates"])
+    rows = build_variant_rows(result["variants"])
     if not rows:
-        st.info("No candidate variants were retained.")
+        st.info("No filtered variants were provided.")
         return
     st.dataframe(
         rows,
         hide_index=True,
-        key="candidate_results",
+        key="filtered_variant_results",
         column_order=(
             "Variant",
             "Chromosome",
@@ -208,7 +208,7 @@ def _render_candidate_table(result: PipelineResult) -> None:
         },
     )
     st.caption(
-        "Candidate display excludes VCF genotype and sample fields."
+        "Input display excludes VCF genotype and sample fields."
     )
 
 
@@ -252,7 +252,7 @@ def _render_phenotype_table(result: PipelineResult) -> None:
         return
     if not any(row["Submitted HPO"] for row in rows):
         st.info(
-            "No HPO terms were supplied; candidates continued without "
+            "No HPO terms were supplied; variants continued without "
             "phenotype scoring."
         )
     st.dataframe(
@@ -482,13 +482,8 @@ def render_analysis_results(result: PipelineResult) -> None:
     st.subheader("Analysis results")
     with st.container(horizontal=True):
         st.metric(
-            "Processed variants",
+            "Input variants",
             result["variant_count"],
-            border=True,
-        )
-        st.metric(
-            "Candidates",
-            len(result["candidates"]),
             border=True,
         )
         st.metric(
@@ -502,18 +497,18 @@ def render_analysis_results(result: PipelineResult) -> None:
             border=True,
         )
 
-    candidates_tab, annotations_tab, phenotype_tab, evidence_tab = (
+    variants_tab, annotations_tab, phenotype_tab, evidence_tab = (
         st.tabs(
             (
-                "Candidates",
+                "Input variants",
                 "Annotations",
                 "Phenotype",
                 "Evidence",
             )
         )
     )
-    with candidates_tab:
-        _render_candidate_table(result)
+    with variants_tab:
+        _render_variant_table(result)
     with annotations_tab:
         _render_annotation_table(result)
     with phenotype_tab:
@@ -532,7 +527,7 @@ def render_analysis_results(result: PipelineResult) -> None:
 
 __all__ = [
     "build_annotation_rows",
-    "build_candidate_rows",
+    "build_variant_rows",
     "build_phenotype_rows",
     "render_analysis_results",
 ]

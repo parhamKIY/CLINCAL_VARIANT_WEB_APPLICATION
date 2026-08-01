@@ -12,13 +12,21 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import BinaryIO, Callable, Literal, Protocol
+from typing import (
+    BinaryIO,
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+)
 
 from backend.pipeline import (
     PipelineProgressCallback,
     PipelineResult,
     run_analysis,
 )
+from backend.vcf_processing import MAX_FILTERED_VCF_ROWS
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -45,7 +53,6 @@ class UploadedVCF(Protocol):
 
 SUPPORTED_UPLOAD_SUFFIXES = (".vcf", ".vcf.gz")
 MAX_UPLOAD_FILENAME_CHARACTERS = 255
-MAX_VCF_HEADER_BYTES = 1_000_000
 UPLOAD_VALIDATION_CHUNK_BYTES = 64 * 1024
 VCF_COLUMN_HEADER = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
 
@@ -310,11 +317,31 @@ def _read_upload(uploaded_vcf: UploadedVCF) -> bytes:
 
 
 def _validate_vcf_stream(stream: BinaryIO) -> None:
-    """Validate bounded UTF-8 VCF content and required header lines."""
+    """Validate one UTF-8 filtered VCF containing one to five rows."""
 
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
-    prefix = bytearray()
     total_bytes = 0
+    text_buffer = ""
+    first_line: str | None = None
+    has_column_header = False
+    data_row_count = 0
+
+    def consume_line(line: str) -> None:
+        nonlocal first_line, has_column_header, data_row_count
+        normalized = line.rstrip("\r")
+        if first_line is None:
+            first_line = normalized
+        if normalized.startswith(VCF_COLUMN_HEADER):
+            has_column_header = True
+            return
+        if normalized and not normalized.startswith("#"):
+            data_row_count += 1
+            if data_row_count > MAX_FILTERED_VCF_ROWS:
+                raise FrontendExecutionError(
+                    "The filtered VCF cannot contain more than "
+                    f"{MAX_FILTERED_VCF_ROWS} data rows."
+                )
+
     try:
         while True:
             chunk = stream.read(UPLOAD_VALIDATION_CHUNK_BYTES)
@@ -334,11 +361,13 @@ def _validate_vcf_stream(stream: BinaryIO) -> None:
                 raise FrontendExecutionError(
                     "The uploaded VCF contains invalid binary data."
                 )
-            decoder.decode(chunk)
-            remaining = MAX_VCF_HEADER_BYTES - len(prefix)
-            if remaining > 0:
-                prefix.extend(chunk[:remaining])
-        decoder.decode(b"", final=True)
+            text_buffer += decoder.decode(chunk)
+            while "\n" in text_buffer:
+                line, text_buffer = text_buffer.split("\n", 1)
+                consume_line(line)
+        text_buffer += decoder.decode(b"", final=True)
+        if text_buffer:
+            consume_line(text_buffer)
     except UnicodeDecodeError as exc:
         raise FrontendExecutionError(
             "The uploaded VCF must contain valid UTF-8 text."
@@ -348,18 +377,20 @@ def _validate_vcf_stream(stream: BinaryIO) -> None:
         raise FrontendExecutionError(
             "The uploaded VCF is empty."
         )
-    header_text = prefix.decode("utf-8")
-    if not header_text.startswith("##fileformat=VCFv"):
+    if first_line is None or not first_line.startswith(
+        "##fileformat=VCFv"
+    ):
         raise FrontendExecutionError(
             "The uploaded file does not contain a valid VCF header."
         )
-    if not any(
-        line.startswith(VCF_COLUMN_HEADER)
-        for line in header_text.splitlines()
-    ):
+    if not has_column_header:
         raise FrontendExecutionError(
             "The uploaded file does not contain the required VCF "
             "column header."
+        )
+    if data_row_count == 0:
+        raise FrontendExecutionError(
+            "The filtered VCF must contain at least one data row."
         )
 
 
@@ -469,22 +500,22 @@ def _write_private_upload(
 def execute_analysis(
     *,
     uploaded_vcf: UploadedVCF | None,
-    manual_variant: str | None,
+    manual_variants: Sequence[Mapping[str, object]] | None,
     phenotypes: list[str],
     llm_model: str | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
 
-    if uploaded_vcf is not None and manual_variant is not None:
+    if uploaded_vcf is not None and manual_variants is not None:
         raise FrontendExecutionError(
-            "Choose either a VCF upload or a manual variant."
+            "Choose either a VCF upload or manual table rows."
         )
 
     if uploaded_vcf is None:
         return run_analysis(
             vcf_path=None,
-            manual_variant=manual_variant,
+            manual_variants=manual_variants,
             phenotypes=phenotypes,
             llm_model=llm_model,
             progress_callback=progress_callback,
@@ -517,7 +548,7 @@ def execute_analysis(
             )
             return run_analysis(
                 vcf_path=temporary_path,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=phenotypes,
                 llm_model=llm_model,
                 progress_callback=progress_callback,

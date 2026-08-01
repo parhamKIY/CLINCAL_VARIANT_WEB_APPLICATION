@@ -296,15 +296,6 @@ class Settings:
         "data/hpo",
     )
 
-    # ------------------------------------------------------------------
-    # Pipeline settings
-    # ------------------------------------------------------------------
-
-    TOP_VARIANTS: int = _get_positive_int(
-        "TOP_VARIANTS",
-        10,
-    )
-
     @classmethod
     def create_directories(cls) -> None:
         """

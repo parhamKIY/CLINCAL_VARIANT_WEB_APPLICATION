@@ -28,7 +28,7 @@ PUBLIC_SAMPLE_VCF = (
     PROJECT_ROOT
     / "data"
     / "samples"
-    / "homo_sapiens_clinically_associated.vcf.gz"
+    / "mvp_demo.vcf"
 )
 
 
@@ -38,9 +38,8 @@ class ManualCase(TypedDict):
     name: str
     description: str
     vcf_path: Path | None
-    manual_variant: str | None
+    manual_variants: list[dict[str, object]] | None
     phenotypes: list[str]
-    max_variants: int | None
 
 
 MANUAL_CASES: dict[str, ManualCase] = {
@@ -50,9 +49,17 @@ MANUAL_CASES: dict[str, ManualCase] = {
             "Known formatted variant with one seizure phenotype."
         ),
         "vcf_path": None,
-        "manual_variant": "1:941284:G:A",
+        "manual_variants": [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": None,
+                "filter": "PASS",
+            }
+        ],
         "phenotypes": ["HP:0001250"],
-        "max_variants": None,
     },
     "incomplete-phenotype": {
         "name": "incomplete-phenotype",
@@ -60,19 +67,26 @@ MANUAL_CASES: dict[str, ManualCase] = {
             "Known formatted variant without submitted HPO terms."
         ),
         "vcf_path": None,
-        "manual_variant": "1:941284:G:A",
+        "manual_variants": [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": None,
+                "filter": "PASS",
+            }
+        ],
         "phenotypes": [],
-        "max_variants": None,
     },
     "sample-vcf": {
         "name": "sample-vcf",
         "description": (
-            "Public Ensembl clinically associated VCF sample."
+            "Professor-filtered public VCF table with one variant."
         ),
         "vcf_path": PUBLIC_SAMPLE_VCF,
-        "manual_variant": None,
+        "manual_variants": None,
         "phenotypes": ["HP:0001250"],
-        "max_variants": 500,
     },
 }
 
@@ -147,11 +161,8 @@ def _run_case(
     started_at = perf_counter()
     result = run_analysis(
         vcf_path=vcf_path,
-        manual_variant=case["manual_variant"],
+        manual_variants=case["manual_variants"],
         phenotypes=case["phenotypes"],
-        top_n=1,
-        seed=13,
-        max_variants=case["max_variants"],
     )
     elapsed_seconds = perf_counter() - started_at
     _validate_live_result(

@@ -98,7 +98,7 @@ from backend.pipeline import (
     create_pipeline_result,
     run_analysis,
     run_annotation_and_phenotype,
-    run_variant_selection,
+    run_variant_processing,
     validate_analysis_input,
     validate_pipeline_result,
 )
@@ -107,10 +107,6 @@ from backend.privacy import (
     minimize_variant,
     validate_llm_payload,
     validate_no_prohibited_fields,
-)
-from backend.prioritization import (
-    PrioritizationError,
-    prioritize_variants,
 )
 from backend.report import (
     CLINICAL_DECISION_SUPPORT_NOTICE,
@@ -153,9 +149,9 @@ from backend.report_exports import (
     render_report_pdf,
 )
 from backend.vcf_processing import (
+    MAX_FILTERED_VCF_ROWS,
     VCFProcessingError,
-    normalize_vcf,
-    parse_manual_variant,
+    parse_manual_variants,
     parse_vcf,
     process_vcf,
     validate_vcf,
@@ -168,12 +164,16 @@ from frontend.execution import (
 )
 from frontend.results import (
     build_annotation_rows,
-    build_candidate_rows,
+    build_variant_rows,
     build_phenotype_rows,
 )
 from frontend.report_viewer import (
     ReportViewerError,
     load_report_document,
+)
+from frontend.ui import (
+    _manual_variant_table,
+    _normalize_manual_table,
 )
 
 
@@ -1013,6 +1013,25 @@ def _write_vcf(
     return path
 
 
+def _manual_rows(*variants: str) -> list[dict[str, object]]:
+    """Build manual-table rows from compact test coordinates."""
+
+    rows: list[dict[str, object]] = []
+    for variant in variants:
+        chrom, pos, ref, alt = variant.split(":")
+        rows.append(
+            {
+                "chrom": chrom,
+                "pos": int(pos),
+                "ref": ref,
+                "alt": alt,
+                "qual": None,
+                "filter": "PASS",
+            }
+        )
+    return rows
+
+
 class TestVCFProcessing:
     def test_parse_vcf_splits_multiallelic_records(
         self,
@@ -1034,7 +1053,6 @@ class TestVCFProcessing:
                 "alt": "G",
                 "qual": 99.0,
                 "filter": "PASS",
-                "genotype": None,
             },
             {
                 "chrom": "1",
@@ -1043,11 +1061,10 @@ class TestVCFProcessing:
                 "alt": "T",
                 "qual": 99.0,
                 "filter": "PASS",
-                "genotype": None,
             },
         ]
 
-    def test_parse_compressed_vcf_and_extract_genotype(
+    def test_parse_compressed_vcf_ignores_sample_fields(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1069,56 +1086,27 @@ class TestVCFProcessing:
                 "alt": "G",
                 "qual": None,
                 "filter": "PASS",
-                "genotype": "0/1",
             }
         ]
 
-    def test_requested_sample_is_used(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
-            "\tFORMAT\tSAMPLE_1\tSAMPLE_2\n"
-            "2\t200\t.\tC\tT\t50\tPASS\t.\tGT\t0/0\t1|1\n",
-        )
-
-        variants = parse_vcf(path, sample_name="SAMPLE_2")
-
-        assert variants[0]["genotype"] == "1|1"
-
-    def test_missing_sample_is_rejected(
+    def test_more_than_five_filtered_rows_are_rejected(
         self,
         tmp_path: Path,
     ) -> None:
         path = _write_vcf(
             tmp_path,
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "1\t100\t.\tA\tG\t.\t.\t.\n",
+            + "".join(
+                f"1\t{position}\t.\tA\tG\t.\tPASS\t.\n"
+                for position in range(1, MAX_FILTERED_VCF_ROWS + 2)
+            ),
         )
 
         with pytest.raises(
             VCFProcessingError,
-            match="has no sample columns",
+            match="more than 5 data rows",
         ):
-            parse_vcf(path, sample_name="PATIENT")
-
-    def test_max_variants_limits_streamed_output(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "1\t100\t.\tA\tG,T\t.\t.\t.\n"
-            "1\t200\t.\tC\tT\t.\t.\t.\n",
-        )
-
-        variants = parse_vcf(path, max_variants=2)
-
-        assert len(variants) == 2
-        assert [variant["alt"] for variant in variants] == ["G", "T"]
+            parse_vcf(path)
 
     def test_missing_file_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(
@@ -1150,10 +1138,18 @@ class TestVCFProcessing:
         with pytest.raises(VCFProcessingError):
             parse_vcf(path)
 
-    def test_manual_variant_is_standardized(self) -> None:
-        variants = parse_manual_variant(
-            "chrM:42:a:g,t",
-            genotype="0/1",
+    def test_manual_variant_table_is_standardized(self) -> None:
+        variants = parse_manual_variants(
+            [
+                {
+                    "chrom": "chrM",
+                    "pos": 42,
+                    "ref": "a",
+                    "alt": "g,t",
+                    "qual": 50,
+                    "filter": "PASS",
+                }
+            ]
         )
 
         assert variants == [
@@ -1162,38 +1158,77 @@ class TestVCFProcessing:
                 "pos": 42,
                 "ref": "A",
                 "alt": "G",
-                "qual": None,
+                "qual": 50.0,
                 "filter": "PASS",
-                "genotype": "0/1",
             },
             {
                 "chrom": "MT",
                 "pos": 42,
                 "ref": "A",
                 "alt": "T",
-                "qual": None,
+                "qual": 50.0,
                 "filter": "PASS",
-                "genotype": "0/1",
             },
         ]
 
     @pytest.mark.parametrize(
-        "value",
+        "row",
         [
-            "",
-            "chr1:100:A",
-            "chr1:not-a-position:A:G",
-            "chr1:0:A:G",
-            "chr1:100:?:G",
-            "chr1:100:A:?",
+            {},
+            {
+                "chrom": "1",
+                "pos": 0,
+                "ref": "A",
+                "alt": "G",
+                "qual": None,
+                "filter": None,
+            },
+            {
+                "chrom": "1",
+                "pos": 100,
+                "ref": "?",
+                "alt": "G",
+                "qual": None,
+                "filter": None,
+            },
+            {
+                "chrom": "1",
+                "pos": 100,
+                "ref": "A",
+                "alt": "?",
+                "qual": None,
+                "filter": None,
+            },
+            {
+                "chrom": "1",
+                "pos": 100,
+                "ref": "A",
+                "alt": "G",
+                "qual": float("inf"),
+                "filter": "PASS",
+            },
         ],
     )
-    def test_invalid_manual_variant_is_rejected(
+    def test_invalid_manual_table_row_is_rejected(
         self,
-        value: str,
+        row: dict[str, object],
     ) -> None:
         with pytest.raises(VCFProcessingError):
-            parse_manual_variant(value)
+            parse_manual_variants([row])
+
+    def test_manual_table_rejects_more_than_five_rows(self) -> None:
+        rows = _manual_rows(
+            *[
+                f"1:{position}:A:G"
+                for position in range(1, MAX_FILTERED_VCF_ROWS + 2)
+            ]
+        )
+
+        with pytest.raises(
+            VCFProcessingError,
+            match="more than 5 rows",
+        ):
+            parse_manual_variants(rows)
 
     def test_process_vcf_requires_exactly_one_input(self) -> None:
         with pytest.raises(
@@ -1208,7 +1243,7 @@ class TestVCFProcessing:
         ):
             process_vcf(
                 vcf_path="sample.vcf",
-                manual_variant="1:100:A:G",
+                manual_variants=_manual_rows("1:100:A:G"),
             )
 
     def test_process_vcf_returns_streaming_iterator(
@@ -1226,77 +1261,6 @@ class TestVCFProcessing:
         assert not isinstance(result, list)
         assert list(result)[0]["alt"] == "G"
 
-    def test_process_vcf_skips_normalization_by_default(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "1\t100\t.\tA\tG\t.\tPASS\t.\n",
-        )
-
-        def unexpected_normalization(**_: object) -> Path:
-            raise AssertionError("Normalization should be opt-in.")
-
-        monkeypatch.setattr(
-            "backend.vcf_processing.normalize_vcf",
-            unexpected_normalization,
-        )
-
-        variants = list(process_vcf(vcf_path=path))
-
-        assert variants[0]["pos"] == 100
-
-    def test_enabled_normalization_requires_paths(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "1\t100\t.\tA\tG\t.\tPASS\t.\n",
-        )
-
-        with pytest.raises(
-            VCFProcessingError,
-            match="required when normalization is enabled",
-        ):
-            process_vcf(vcf_path=path, normalize=True)
-
-    def test_manual_input_rejects_bcftools_normalization(self) -> None:
-        with pytest.raises(
-            VCFProcessingError,
-            match="only available for VCF file input",
-        ):
-            process_vcf(
-                manual_variant="1:100:A:G",
-                normalize=True,
-            )
-
-    @pytest.mark.regression
-    def test_reference_sample_vcf_is_parsed(self) -> None:
-        path = (
-            PROJECT_ROOT
-            / "data"
-            / "samples"
-            / "homo_sapiens_clinically_associated.vcf.gz"
-        )
-
-        variants = parse_vcf(path, max_variants=3)
-
-        assert variants[0] == {
-            "chrom": "1",
-            "pos": 941284,
-            "ref": "G",
-            "alt": "A",
-            "qual": None,
-            "filter": None,
-            "genotype": None,
-        }
-        assert len(variants) == 3
-
     @pytest.mark.stage16_mvp
     def test_mvp_demo_vcf_is_safe_and_parseable(self) -> None:
         path = PROJECT_ROOT / "data" / "samples" / "mvp_demo.vcf"
@@ -1311,221 +1275,12 @@ class TestVCFProcessing:
                 "alt": "A",
                 "qual": 100.0,
                 "filter": "PASS",
-                "genotype": None,
             }
         ]
         contents = path.read_text(encoding="utf-8")
         assert "##reference=GRCh38" in contents
         assert "\tFORMAT\t" not in contents
         assert "PATIENT" not in contents
-
-    def test_normalization_requires_bcftools(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        vcf_path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "1\t100\t.\tA\tG\t.\tPASS\t.\n",
-        )
-        reference_path = tmp_path / "reference.fa"
-        reference_path.write_text(
-            ">1\nACGT\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(
-            "backend.vcf_processing.shutil.which",
-            lambda _: None,
-        )
-
-        with pytest.raises(
-            VCFProcessingError,
-            match="bcftools is not installed",
-        ):
-            normalize_vcf(
-                vcf_path,
-                tmp_path / "normalized.vcf.gz",
-                reference_path,
-            )
-
-    def test_normalization_builds_safe_bcftools_command(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        vcf_path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "1\t100\t.\tA\tG\t.\tPASS\t.\n",
-        )
-        reference_path = tmp_path / "reference.fa"
-        reference_path.write_text(
-            ">1\nACGT\n",
-            encoding="utf-8",
-        )
-        output_path = tmp_path / "normalized.vcf.gz"
-
-        monkeypatch.setattr(
-            "backend.vcf_processing.shutil.which",
-            lambda _: "bcftools",
-        )
-
-        def fake_run(
-            command: list[str],
-            **_: object,
-        ) -> SimpleNamespace:
-            assert command[:4] == [
-                "bcftools",
-                "norm",
-                "--check-ref",
-                "e",
-            ]
-            assert "--fasta-ref" in command
-            assert "--multiallelics" in command
-            assert "-any" in command
-            output_path.write_bytes(b"normalized")
-            return SimpleNamespace(returncode=0, stderr="")
-
-        monkeypatch.setattr(
-            "backend.vcf_processing.subprocess.run",
-            fake_run,
-        )
-
-        result = normalize_vcf(
-            vcf_path,
-            output_path,
-            reference_path,
-        )
-
-        assert result == output_path.resolve()
-
-
-class TestPrioritization:
-    @staticmethod
-    def _variant(
-        position: int,
-        *,
-        filter_value: str | None = "PASS",
-        quality: float | None = 50.0,
-    ) -> dict[str, str | int | float | None]:
-        """Build a standardized variant for prioritization tests."""
-        return {
-            "chrom": "1",
-            "pos": position,
-            "ref": "A",
-            "alt": "G",
-            "qual": quality,
-            "filter": filter_value,
-            "genotype": None,
-        }
-
-    def test_empty_input_returns_empty_list(self) -> None:
-        assert prioritize_variants([], top_n=5, seed=1) == []
-
-    def test_input_smaller_than_top_n_keeps_every_variant(self) -> None:
-        variants = [
-            self._variant(100),
-            self._variant(200),
-        ]
-
-        candidates = prioritize_variants(
-            variants,
-            top_n=5,
-            seed=7,
-        )
-
-        assert {item["pos"] for item in candidates} == {100, 200}
-
-    def test_large_input_returns_exact_candidate_count(self) -> None:
-        variants = [
-            self._variant(position)
-            for position in range(1, 101)
-        ]
-
-        candidates = prioritize_variants(
-            variants,
-            top_n=10,
-            seed=42,
-        )
-
-        assert len(candidates) == 10
-        assert len({item["pos"] for item in candidates}) == 10
-
-    def test_same_seed_produces_same_random_selection(self) -> None:
-        variants = [
-            self._variant(position)
-            for position in range(1, 51)
-        ]
-
-        first_result = prioritize_variants(
-            variants,
-            top_n=8,
-            seed=123,
-        )
-        second_result = prioritize_variants(
-            variants,
-            top_n=8,
-            seed=123,
-        )
-
-        assert first_result == second_result
-
-    def test_default_candidate_count_comes_from_config(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(settings, "TOP_VARIANTS", 3)
-        variants = (
-            self._variant(position)
-            for position in range(1, 20)
-        )
-
-        candidates = prioritize_variants(variants, seed=5)
-
-        assert len(candidates) == 3
-
-    def test_filter_and_missing_quality_do_not_affect_random_mvp(
-        self,
-    ) -> None:
-        variants = [
-            self._variant(
-                100,
-                filter_value="LowQual",
-                quality=None,
-            ),
-            self._variant(200),
-        ]
-
-        candidates = prioritize_variants(
-            variants,
-            top_n=2,
-            seed=1,
-        )
-
-        assert {item["pos"] for item in candidates} == {100, 200}
-
-    @pytest.mark.parametrize("top_n", [0, -1, 1.5, True])
-    def test_invalid_top_n_is_rejected(self, top_n: object) -> None:
-        with pytest.raises(
-            PrioritizationError,
-            match="positive integer",
-        ):
-            prioritize_variants(
-                [self._variant(100)],
-                top_n=top_n,  # type: ignore[arg-type]
-            )
-
-    def test_missing_alt_field_is_rejected(self) -> None:
-        variant = self._variant(100)
-        del variant["alt"]
-
-        with pytest.raises(
-            PrioritizationError,
-            match="missing: alt",
-        ):
-            prioritize_variants([variant], top_n=1)
-
 
 class TestPhenotype:
     """Verify the Stage 6 phenotype input contract."""
@@ -6757,7 +6512,7 @@ class TestPipelineContract:
         assert result == {
             "input_mode": "vcf",
             "vcf_path": str(Path("samples/patient.vcf")),
-            "manual_variant": None,
+            "manual_variants": None,
             "phenotypes": [
                 "HP:0001250",
                 "HP:0001263",
@@ -6767,38 +6522,47 @@ class TestPipelineContract:
     def test_manual_analysis_input_is_normalized(self) -> None:
         result = validate_analysis_input(
             vcf_path=None,
-            manual_variant="  2:166848215:C:T  ",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=[],
         )
 
         assert result == {
             "input_mode": "manual",
             "vcf_path": None,
-            "manual_variant": "2:166848215:C:T",
+            "manual_variants": [
+                {
+                    "chrom": "2",
+                    "pos": 166848215,
+                    "ref": "C",
+                    "alt": "T",
+                    "qual": None,
+                    "filter": "PASS",
+                }
+            ],
             "phenotypes": [],
         }
 
     @pytest.mark.parametrize(
-        ("vcf_path", "manual_variant", "message"),
+        ("vcf_path", "manual_variants", "message"),
         [
             (None, None, "Exactly one"),
             (
                 "sample.vcf",
-                "2:166848215:C:T",
+                _manual_rows("2:166848215:C:T"),
                 "Exactly one",
             ),
             (" ", None, "vcf_path must be a non-empty string"),
             (
                 None,
-                " ",
-                "manual_variant must be a non-empty string",
+                [],
+                "At least one",
             ),
         ],
     )
     def test_exactly_one_variant_source_is_required(
         self,
         vcf_path: object,
-        manual_variant: object,
+        manual_variants: object,
         message: str,
     ) -> None:
         with pytest.raises(
@@ -6807,7 +6571,7 @@ class TestPipelineContract:
         ):
             validate_analysis_input(
                 vcf_path=vcf_path,  # type: ignore[arg-type]
-                manual_variant=manual_variant,  # type: ignore[arg-type]
+                manual_variants=manual_variants,  # type: ignore[arg-type]
                 phenotypes=[],
             )
 
@@ -6974,41 +6738,36 @@ class TestPipelineContract:
         json.dumps(validated, allow_nan=False)
 
 
-class TestPipelineVariantSelection:
-    """Verify Stage 10 input processing through prioritization."""
+class TestPipelineVariantProcessing:
+    """Verify direct processing of the professor-filtered variant table."""
 
-    def test_manual_input_flows_to_candidates(self) -> None:
-        result = run_variant_selection(
+    def test_manual_rows_flow_directly_to_annotation(self) -> None:
+        result = run_variant_processing(
             vcf_path=None,
-            manual_variant="chr2:166848215:c:t,g",
+            manual_variants=_manual_rows(
+                "chr2:166848215:c:t",
+                "chr2:166848215:c:g",
+            ),
             phenotypes=["HP:0001250"],
-            top_n=10,
-            seed=7,
         )
 
         assert result["status"] == "running"
         assert result["current_stage"] == "annotation"
-        assert result["progress_percent"] == 30
         assert result["variant_count"] == 2
-        assert result["variants_truncated"] is False
-        assert {
-            variant["alt"]
-            for variant in result["variants"]
-        } == {"T", "G"}
-        assert {
-            candidate["alt"]
-            for candidate in result["candidates"]
-        } == {"T", "G"}
+        assert [variant["alt"] for variant in result["variants"]] == [
+            "T",
+            "G",
+        ]
         stage_statuses = {
             record["stage"]: record["status"]
             for record in result["stages"]
         }
         assert stage_statuses["input"] == "success"
         assert stage_statuses["vcf_processing"] == "success"
-        assert stage_statuses["prioritization"] == "success"
         assert stage_statuses["annotation"] == "pending"
+        assert "prioritization" not in stage_statuses
 
-    def test_vcf_stream_flows_to_bounded_candidates(
+    def test_vcf_rows_preserve_input_order(
         self,
         tmp_path: Path,
     ) -> None:
@@ -7019,70 +6778,22 @@ class TestPipelineVariantSelection:
             "2\t200\t.\tC\tT\t50\tPASS\t.\n",
         )
 
-        result = run_variant_selection(
+        result = run_variant_processing(
             vcf_path=path,
-            manual_variant=None,
+            manual_variants=None,
             phenotypes=[],
-            top_n=2,
-            seed=11,
         )
 
         assert result["variant_count"] == 3
-        assert len(result["variants"]) == 3
-        assert len(result["candidates"]) == 2
-        assert all(
-            {"chrom", "pos", "ref", "alt"}.issubset(candidate)
-            for candidate in result["candidates"]
-        )
+        assert [
+            (variant["chrom"], variant["pos"], variant["alt"])
+            for variant in result["variants"]
+        ] == [
+            ("1", 100, "G"),
+            ("1", 100, "T"),
+            ("2", 200, "T"),
+        ]
         assert result["warnings"] == []
-
-    def test_selection_seed_is_reproducible(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        records = "".join(
-            (
-                f"1\t{position}\t.\tA\tG\t.\tPASS\t.\n"
-            )
-            for position in range(100, 110)
-        )
-        path = _write_vcf(
-            tmp_path,
-            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            f"{records}",
-        )
-
-        first = run_variant_selection(
-            path,
-            [],
-            top_n=3,
-            seed=42,
-        )
-        second = run_variant_selection(
-            path,
-            [],
-            top_n=3,
-            seed=42,
-        )
-
-        assert first["candidates"] == second["candidates"]
-
-    def test_large_stream_retains_only_bounded_preview(self) -> None:
-        alternates = ",".join("T" for _ in range(105))
-
-        result = run_variant_selection(
-            vcf_path=None,
-            manual_variant=f"2:166848215:C:{alternates}",
-            phenotypes=[],
-            top_n=3,
-            seed=1,
-        )
-
-        assert result["variant_count"] == 105
-        assert len(result["variants"]) == 100
-        assert result["variants_truncated"] is True
-        assert len(result["candidates"]) == 3
-        assert "complete processed stream" in result["warnings"][0]
 
     def test_empty_vcf_is_rejected(
         self,
@@ -7097,12 +6808,7 @@ class TestPipelineVariantSelection:
             PipelineError,
             match="produced no variants",
         ):
-            run_variant_selection(
-                path,
-                [],
-                top_n=3,
-                seed=1,
-            )
+            run_variant_processing(path, [])
 
 
 class TestPipelineAnnotationAndPhenotype:
@@ -7129,7 +6835,7 @@ class TestPipelineAnnotationAndPhenotype:
             "warnings": [warning] if warning else [],
         }
 
-    def test_candidates_flow_through_annotation_and_hpo_matching(
+    def test_variants_flow_through_annotation_and_hpo_matching(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -7160,16 +6866,14 @@ class TestPipelineAnnotationAndPhenotype:
 
         result = run_annotation_and_phenotype(
             vcf_path=None,
-            manual_variant="2:166848215:C:T",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=["HP:0001250"],
-            top_n=1,
-            seed=3,
             annotation_max_retries=0,
             ontology_path=ontology_path,
             associations_path=associations_path,
         )
 
-        assert received == result["candidates"]
+        assert received == result["variants"]
         assert len(result["annotations"]) == 1
         assert result["phenotype_results"][0][
             "matched_hpo_terms"
@@ -7188,7 +6892,7 @@ class TestPipelineAnnotationAndPhenotype:
         assert stage_statuses["phenotype"] == "success"
         assert stage_statuses["evidence"] == "pending"
 
-    def test_empty_phenotypes_skip_matching_without_losing_candidates(
+    def test_empty_phenotypes_skip_matching_without_losing_variants(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -7211,10 +6915,8 @@ class TestPipelineAnnotationAndPhenotype:
 
         result = run_annotation_and_phenotype(
             vcf_path=None,
-            manual_variant="2:166848215:C:T",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=[],
-            top_n=1,
-            seed=3,
         )
 
         assert result["phenotype_results"] == result["annotations"]
@@ -7298,10 +7000,8 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="2:166848215:C:T",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=["HP:0001250", "HP:0001263"],
-            top_n=1,
-            seed=9,
             annotation_max_retries=0,
             llm_client=client,
             report_dir=tmp_path / "reports",
@@ -7338,7 +7038,7 @@ class TestCompletePipelineHappyPath:
     def test_invalid_input_returns_frontend_safe_error(self) -> None:
         result = run_analysis(
             vcf_path=None,
-            manual_variant=None,
+            manual_variants=None,
             phenotypes=[],
         )
 
@@ -7349,7 +7049,7 @@ class TestCompletePipelineHappyPath:
                 "stage": "input",
                 "code": "invalid_input",
                 "message": (
-                    "Exactly one of vcf_path or manual_variant must "
+                    "Exactly one of vcf_path or manual_variants must "
                     "be provided."
                 ),
                 "recoverable": False,
@@ -7389,7 +7089,7 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="1:100:A:G",
+            manual_variants=_manual_rows("1:100:A:G"),
             phenotypes=[],
         )
 
@@ -7432,10 +7132,8 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="2:166848215:C:T",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=["HP:0001250", "HP:0001263"],
-            top_n=1,
-            seed=4,
             llm_client=client,
             persist_analysis=False,
         )
@@ -7506,10 +7204,8 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="2:166848215:C:T",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=["HP:0001250"],
-            top_n=1,
-            seed=5,
             llm_client=client,
             report_dir=tmp_path / "reports",
             persist_analysis=False,
@@ -7547,10 +7243,8 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="2:166848215:C:T",
+            manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=[],
-            top_n=1,
-            seed=6,
             persist_analysis=False,
         )
 
@@ -7589,7 +7283,7 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="1:941284:G:A",
+            manual_variants=_manual_rows("1:941284:G:A"),
             phenotypes=[],
             persist_analysis=False,
         )
@@ -7677,10 +7371,8 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="1:100:A:G",
+            manual_variants=_manual_rows("1:100:A:G"),
             phenotypes=["HP:0001250"],
-            top_n=1,
-            seed=10,
             annotation_max_retries=0,
             annotation_session=annotation_session,  # type: ignore[arg-type]
             ontology_path=ontology_path,
@@ -7817,17 +7509,14 @@ class TestStage13IntegrationBoundaries:
 
         result = run_annotation_and_phenotype(
             vcf_path=vcf_path,
-            manual_variant=None,
+            manual_variants=None,
             phenotypes=[],
-            top_n=1,
-            seed=13,
             annotation_max_retries=0,
             annotation_session=session,  # type: ignore[arg-type]
         )
 
         assert result["variant_count"] == 1
         assert "genotype" not in result["variants"][0]
-        assert "genotype" not in result["candidates"][0]
         assert (
             "genotype"
             not in result["annotations"][0]["variant"]
@@ -7847,7 +7536,11 @@ class TestStage13IntegrationBoundaries:
             "status"
         ] == "success"
         assert result["phenotype_results"] == result["annotations"]
-        assert result["stages"][4]["status"] == "skipped"
+        assert next(
+            stage
+            for stage in result["stages"]
+            if stage["stage"] == "phenotype"
+        )["status"] == "skipped"
 
     def test_annotation_to_report_boundary(
         self,
@@ -7894,10 +7587,8 @@ class TestStage13IntegrationBoundaries:
 
         result = run_analysis(
             vcf_path=vcf_path,
-            manual_variant=None,
+            manual_variants=None,
             phenotypes=["HP:0001250"],
-            top_n=1,
-            seed=13,
             annotation_max_retries=0,
             annotation_session=(  # type: ignore[arg-type]
                 self._annotation_session()
@@ -7943,11 +7634,6 @@ class TestSafeErrorHandling:
             (
                 VCFProcessingError("secret patient VCF path"),
                 "vcf_processing_failed",
-                False,
-            ),
-            (
-                PrioritizationError("secret candidate detail"),
-                "prioritization_failed",
                 False,
             ),
             (
@@ -8277,10 +7963,8 @@ class TestPipelineLifecycleLogging:
         try:
             result = run_analysis(
                 vcf_path=None,
-                manual_variant="1:100:A:G",
+                manual_variants=_manual_rows("1:100:A:G"),
                 phenotypes=["HP:0001250"],
-                top_n=1,
-                seed=14,
                 annotation_max_retries=0,
                 annotation_session=(  # type: ignore[arg-type]
                     TestStage13IntegrationBoundaries
@@ -8321,11 +8005,7 @@ class TestPipelineLifecycleLogging:
             "event=analysis_finished status=success "
             f"analysis_id={result['analysis_id']}"
         ) in contents
-        assert (
-            "event=variant_selection_finished variant_count=1 "
-            "retained_variant_count=1 variants_truncated=False "
-            "candidate_count=1"
-        ) in contents
+        assert "event=filtered_variants_loaded variant_count=1" in contents
         assert (
             "event=evidence_build_finished evidence_object_count=1"
         ) in contents
@@ -8362,7 +8042,7 @@ class TestPipelineLifecycleLogging:
         try:
             result = run_analysis(
                 vcf_path=None,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
             for handler in logging.getLogger(
@@ -8415,7 +8095,7 @@ class TestStage14SecurityAcceptance:
         try:
             result = run_analysis(
                 vcf_path=None,
-                manual_variant="1:941284:G:A",
+                manual_variants=_manual_rows("1:941284:G:A"),
                 phenotypes=[],
                 persist_analysis=False,
             )
@@ -8434,7 +8114,7 @@ class TestStage14SecurityAcceptance:
                 "stage": "annotation",
                 "code": "unexpected_enrichment_error",
                 "message": (
-                    "Candidate enrichment stopped because of an "
+                    "Variant enrichment stopped because of an "
                     "unexpected internal error."
                 ),
                 "recoverable": False,
@@ -8490,10 +8170,8 @@ class TestStage13MockedServiceFailures:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variant="1:100:A:G",
+            manual_variants=_manual_rows("1:100:A:G"),
             phenotypes=[],
-            top_n=1,
-            seed=13,
             annotation_max_retries=0,
             annotation_session=session,  # type: ignore[arg-type]
             llm_client=(
@@ -8533,6 +8211,36 @@ class TestFrontendExecution:
             + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
             + "1\t100\t.\tA\tG\t99\tPASS\t.\n"
         ).encode("utf-8")
+
+    def test_manual_editor_normalizes_used_rows_only(self) -> None:
+        table = _manual_variant_table()
+        table.loc[0, ["chrom", "pos", "ref", "alt", "filter"]] = [
+            "chr1",
+            941284,
+            "g",
+            "a",
+            "PASS",
+        ]
+
+        rows = _normalize_manual_table(table)
+
+        assert rows == [
+            {
+                "chrom": "chr1",
+                "pos": 941284,
+                "ref": "g",
+                "alt": "a",
+                "qual": None,
+                "filter": "PASS",
+            }
+        ]
+
+    def test_manual_editor_rejects_partial_rows(self) -> None:
+        table = _manual_variant_table()
+        table.loc[0, "chrom"] = "1"
+
+        with pytest.raises(ValueError, match="Complete CHROM"):
+            _normalize_manual_table(table)
 
     def test_cancelled_job_discards_result_and_new_report(
         self,
@@ -8617,7 +8325,7 @@ class TestFrontendExecution:
         def fake_run_analysis(
             *,
             vcf_path: str | Path | None,
-            manual_variant: str | None,
+            manual_variants: list[dict[str, object]] | None,
             phenotypes: list[str],
             llm_model: str | None,
             progress_callback: PipelineProgressCallback | None,
@@ -8632,7 +8340,7 @@ class TestFrontendExecution:
             observed["directory_mode"] = stat.S_IMODE(
                 temporary_path.parent.stat().st_mode
             )
-            observed["manual_variant"] = manual_variant
+            observed["manual_variants"] = manual_variants
             observed["phenotypes"] = phenotypes
             observed["llm_model"] = llm_model
             observed["callback"] = progress_callback
@@ -8650,14 +8358,14 @@ class TestFrontendExecution:
 
         result = execute_frontend_analysis(
             uploaded_vcf=uploaded,
-            manual_variant=None,
+            manual_variants=None,
             phenotypes=["HP:0001250"],
             progress_callback=callback,
         )
 
         assert result is expected
         assert observed["contents"] == payload
-        assert observed["manual_variant"] is None
+        assert observed["manual_variants"] is None
         assert observed["phenotypes"] == ["HP:0001250"]
         assert observed["llm_model"] is None
         assert observed["callback"] is callback
@@ -8694,7 +8402,7 @@ class TestFrontendExecution:
         with pytest.raises(FrontendExecutionError):
             execute_frontend_analysis(
                 uploaded_vcf=uploaded,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8760,7 +8468,7 @@ class TestFrontendExecution:
         with pytest.raises(FrontendExecutionError, match=message):
             execute_frontend_analysis(
                 uploaded_vcf=uploaded,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8773,9 +8481,34 @@ class TestFrontendExecution:
             with pytest.raises(FrontendExecutionError):
                 execute_frontend_analysis(
                     uploaded_vcf=uploaded,
-                    manual_variant=None,
+                    manual_variants=None,
                     phenotypes=[],
                 )
+
+    def test_upload_with_more_than_five_rows_is_rejected(self) -> None:
+        records = "".join(
+            f"1\t{position}\t.\tA\tG\t99\tPASS\t.\n"
+            for position in range(100, 106)
+        )
+        payload = (
+            MINIMAL_HEADER
+            + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            + records
+        ).encode("utf-8")
+        uploaded = SimpleNamespace(
+            name="patient.vcf",
+            getvalue=lambda: payload,
+        )
+
+        with pytest.raises(
+            FrontendExecutionError,
+            match="cannot contain more than 5",
+        ):
+            execute_frontend_analysis(
+                uploaded_vcf=uploaded,
+                manual_variants=None,
+                phenotypes=[],
+            )
 
     def test_upload_and_uncompressed_size_limits_are_enforced(
         self,
@@ -8793,7 +8526,7 @@ class TestFrontendExecution:
         ):
             execute_frontend_analysis(
                 uploaded_vcf=oversized_upload,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8813,7 +8546,7 @@ class TestFrontendExecution:
         ):
             execute_frontend_analysis(
                 uploaded_vcf=compressed_upload,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8846,7 +8579,7 @@ class TestFrontendExecution:
         with pytest.raises(RuntimeError, match="simulated"):
             execute_frontend_analysis(
                 uploaded_vcf=uploaded,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8872,7 +8605,7 @@ class TestFrontendExecution:
         ):
             execute_frontend_analysis(
                 uploaded_vcf=valid_upload,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8893,7 +8626,7 @@ class TestFrontendExecution:
         ):
             execute_frontend_analysis(
                 uploaded_vcf=valid_upload,
-                manual_variant=None,
+                manual_variants=None,
                 phenotypes=[],
             )
 
@@ -8906,11 +8639,11 @@ class TestFrontendResults:
         variant = annotation["variant"]
         assert isinstance(variant, dict)
 
-        candidate_rows = build_candidate_rows([variant])
+        variant_rows = build_variant_rows([variant])
         annotation_rows = build_annotation_rows([annotation])
         phenotype_rows = build_phenotype_rows([annotation])
 
-        assert candidate_rows == [
+        assert variant_rows == [
             {
                 "Variant": "2:166848215:C:T",
                 "Chromosome": "2",
@@ -8921,7 +8654,7 @@ class TestFrontendResults:
                 "Filter": "PASS",
             }
         ]
-        assert "genotype" not in candidate_rows[0]
+        assert "genotype" not in variant_rows[0]
         assert "raw_api_payload" not in annotation_rows[0]
         assert annotation_rows[0]["Gene"] == "SCN1A"
         assert annotation_rows[0]["ClinVar accession"] == (
@@ -10295,7 +10028,7 @@ class TestFrontendFoundation:
             for field in app.text_input
         )
         assert any(
-            button.label == "Analyze variant"
+            button.label == "Analyze variants"
             for button in app.button
         )
         cancel_button = next(
@@ -10316,7 +10049,7 @@ class TestFrontendFoundation:
         analyze_button = next(
             button
             for button in app.button
-            if button.label == "Analyze variant"
+            if button.label == "Analyze variants"
         )
         analyze_button.click().run(timeout=10)
 
@@ -10375,7 +10108,7 @@ class TestFrontendFoundation:
         )
 
     @pytest.mark.stage16_mvp
-    def test_manual_variant_executes_pipeline(
+    def test_manual_table_executes_pipeline(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -10403,7 +10136,7 @@ class TestFrontendFoundation:
         def fake_execute_analysis(
             *,
             uploaded_vcf: object,
-            manual_variant: str | None,
+            manual_variants: list[dict[str, object]] | None,
             phenotypes: list[str],
             llm_model: str,
             progress_callback: PipelineProgressCallback,
@@ -10411,7 +10144,7 @@ class TestFrontendFoundation:
             received.update(
                 {
                     "uploaded_vcf": uploaded_vcf,
-                    "manual_variant": manual_variant,
+                    "manual_variants": manual_variants,
                     "phenotypes": phenotypes,
                     "llm_model": llm_model,
                 }
@@ -10433,7 +10166,6 @@ class TestFrontendFoundation:
             assert isinstance(variant, dict)
             result["variant_count"] = 1
             result["variants"] = [dict(variant)]
-            result["candidates"] = [dict(variant)]
             result["annotations"] = [annotation]
             result["phenotype_results"] = [annotation]
             result["evidence_objects"] = [
@@ -10446,6 +10178,11 @@ class TestFrontendFoundation:
         monkeypatch.setattr(
             "frontend.ui.execute_analysis",
             fake_execute_analysis,
+        )
+        manual_rows = _manual_rows("1:941284:G:A")
+        monkeypatch.setattr(
+            "frontend.ui._normalize_manual_table",
+            lambda _: manual_rows,
         )
         app = AppTest.from_file(
             str(PROJECT_ROOT / "app.py")
@@ -10526,26 +10263,20 @@ class TestFrontendFoundation:
             for button in app.button
             if button.label == "gpt-5.4-nano"
         ).click().run(timeout=10)
-        app.segmented_control[0].set_value("Manual variant").run(
+        app.segmented_control[0].set_value("Manual table").run(
             timeout=10
         )
-        variant_field = next(
-            field
-            for field in app.text_input
-            if field.label == "Variant"
-        )
-        variant_field.set_value("1:941284:G:A").run(timeout=10)
         analyze_button = next(
             button
             for button in app.button
-            if button.label == "Analyze variant"
+            if button.label == "Analyze variants"
         )
         analyze_button.click().run(timeout=10)
 
         assert not app.exception
         assert received == {
             "uploaded_vcf": None,
-            "manual_variant": "1:941284:G:A",
+            "manual_variants": manual_rows,
             "phenotypes": [],
             "llm_model": "gpt-5.4-nano",
         }
@@ -10560,8 +10291,7 @@ class TestFrontendFoundation:
             metric.label: metric.value
             for metric in app.metric
         } == {
-            "Processed variants": "1",
-            "Candidates": "1",
+            "Input variants": "1",
             "Annotations": "1",
             "Evidence Objects": "1",
             "Gene": "SCN1A",
@@ -10572,7 +10302,7 @@ class TestFrontendFoundation:
             "ClinVar": "Success",
             "ClinGen/GenCC": "Success",
         }
-        assert len(app.dataframe) == 6
+        assert len(app.dataframe) == 7
         assert [button.label for button in app.get("download_button")] == [
             "Download text",
             "Download PDF",

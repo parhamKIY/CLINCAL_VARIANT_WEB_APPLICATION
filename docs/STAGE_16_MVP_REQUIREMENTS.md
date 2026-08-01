@@ -14,9 +14,10 @@ required.
 | MVP requirement | Implementation evidence | Current status |
 | --- | --- | --- |
 | Start the Streamlit application | `app.py`, `frontend/ui.py::render_app`, and the Streamlit shell regression test | Verified offline |
-| Upload a VCF | `frontend/ui.py::_render_variant_input` and `frontend/execution.py::execute_analysis` | Verified offline |
-| Process the VCF | `backend/vcf_processing.py::process_vcf` and VCF validation, gzip, multi-allelic, and boundary tests | Verified offline |
-| Select candidate variants | `backend/prioritization.py::prioritize_variants` and deterministic bounded-selection tests | Verified offline |
+| Upload a filtered VCF | `frontend/ui.py::_render_variant_input` and `frontend/execution.py::execute_analysis` | Verified offline |
+| Enter a filtered table manually | Fixed five-row editor in `frontend/ui.py` and `backend/vcf_processing.py::parse_manual_variants` | Verified offline |
+| Validate and process 1–5 rows | `backend/vcf_processing.py::process_vcf` and VCF validation, gzip, multi-allelic, and row-boundary tests | Verified offline |
+| Annotate every supplied variant | Direct filtered-input handoff in `backend/pipeline.py::run_variant_processing` | Verified offline |
 | Obtain at least one annotation | `backend/annotation.py::annotate_variants` and unified VEP, MyVariant.info, ClinVar, and UCSC GenCC tests | Verified offline and live |
 | Enter phenotypes | Local HPO search and selection controls in `frontend/ui.py` | Verified offline |
 | Build an Evidence Object | `backend/report.py::build_evidence_object` and Stage 7 contract tests | Verified offline |
@@ -42,8 +43,10 @@ found. The remaining work is acceptance and release preparation:
 
 ## Explicit MVP boundaries
 
-The MVP is clinical decision support, not an autonomous diagnosis system. It
-does not include authentication, multiple users, PostgreSQL, background jobs,
+The MVP is clinical decision support, not an autonomous diagnosis system.
+Filtering, optimization, normalization, and clinical ranking are upstream
+responsibilities; this application expects a professor-approved table of one
+to five rows. It does not include authentication, multiple users, PostgreSQL,
 Docker, cloud deployment, or institutional production approval. These remain
 post-MVP work.
 

@@ -2,6 +2,7 @@ pytest
 pytest-cov
 python-dotenv
 python-docx
+pandas
 requests
 reportlab
 streamlit

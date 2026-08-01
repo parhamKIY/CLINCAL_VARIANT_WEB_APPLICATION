@@ -12,7 +12,7 @@ professor-facing workflow.
 [![MVP status](https://img.shields.io/badge/MVP-Stage_16_complete-24708a?style=for-the-badge)](#stage-16-mvp-preparation-complete)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=for-the-badge&logo=python&logoColor=white)](#environment)
 [![Streamlit](https://img.shields.io/badge/Streamlit-frontend-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#stage-11-streamlit-frontend-complete)
-[![Tests](https://img.shields.io/badge/tests-464_passing-2e7d32?style=for-the-badge)](#tests)
+[![Tests](https://img.shields.io/badge/tests-451_passing-2e7d32?style=for-the-badge)](#tests)
 [![Coverage](https://img.shields.io/badge/coverage-87%25+-2e7d32?style=for-the-badge)](#tests)
 [![Security](https://img.shields.io/badge/security-Stage_15_complete-5c6bc0?style=for-the-badge)](#stage-15-security-complete)
 
@@ -38,9 +38,8 @@ professor-facing workflow.
 
 ```mermaid
 flowchart LR
-    A["VCF upload or manual variant"] --> B["Validation and normalization"]
-    B --> C["Bounded candidate prioritization"]
-    C --> D["Multi-source annotation"]
+    A["Filtered VCF upload or manual table (1-5 rows)"] --> B["Validation and standardization"]
+    B --> D["Multi-source annotation of every input variant"]
     D --> E["HPO phenotype matching"]
     E --> F["Sanitized Evidence Objects"]
     F --> G["Provider-neutral LLM interpretation"]
@@ -56,14 +55,14 @@ flowchart LR
     classDef input fill:#e8f4f8,stroke:#24708a,color:#17324d
     classDef evidence fill:#eef1f7,stroke:#5c6bc0,color:#17324d
     classDef output fill:#eaf5eb,stroke:#2e7d32,color:#17324d
-    class A,B,C input
+    class A,B input
     class D,E,F,G evidence
     class H,I,J output
 ```
 
 | Capability | What the MVP provides |
 |---|---|
-| **Variant input** | Streamed `.vcf`/`.vcf.gz` processing and manual `CHROM:POS:REF:ALT` input |
+| **Variant input** | Professor-filtered `.vcf`/`.vcf.gz` upload or a manual VCF-style table, limited to 1–5 rows |
 | **Clinical evidence** | Isolated Ensembl VEP, MyVariant.info, NCBI ClinVar, and UCSC GenCC integrations |
 | **Phenotype correlation** | Local HPO search, normalization, update workflow, and explainable gene matching |
 | **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
@@ -75,19 +74,17 @@ flowchart LR
 ## Current implementation status
 
 - Central configuration is loaded from `.env` through `config.py`.
-- `.vcf` and `.vcf.gz` files are validated and streamed.
+- `.vcf` and `.vcf.gz` files are validated and must contain 1–5 data rows.
 - Multi-allelic records are split into one object per ALT allele.
-- Genotype is extracted when a sample column exists.
-- Manual `CHROM:POS:REF:ALT` input is supported.
-- A `bcftools norm` integration point exists for reference-aware
-  normalization.
-- Normalization is opt-in for the Windows MVP and requires an explicitly
-  matching reference FASTA.
-- The public VCF processing entry point returns an iterator so large files
-  can flow into prioritization without being fully loaded into memory.
-- MVP prioritization uses bounded-memory uniform random selection.
-- Candidate count defaults to `TOP_VARIANTS` and can be overridden per call.
-- Annotation phase one connects candidates to Ensembl VEP in bounded batches.
+- VCF sample, genotype, and patient columns are ignored and never enter the
+  public pipeline result.
+- Manual input uses a five-row VCF-style table with CHROM, POS, REF, ALT,
+  optional QUAL, and optional FILTER columns.
+- Filtering, optimization, and clinical ranking are performed upstream and
+  are intentionally outside this application's responsibility.
+- Every supplied variant proceeds directly to multi-source annotation in the
+  original input order.
+- Annotation phase one connects filtered variants to Ensembl VEP in bounded batches.
 - Annotation phase two queries exact MyVariant.info records and standardizes
   population-frequency evidence.
 - Annotation phase three queries NCBI ClinVar directly and standardizes
@@ -100,15 +97,14 @@ flowchart LR
 - Frontend analyses run in cancellable background jobs; cancellation clears
   partial session output, temporary uploads, and newly generated drafts.
 - Stage 6 provides local HPO search, normalization, gene and disease
-  associations, and explainable phenotype scoring for annotated candidates.
+  associations, and explainable phenotype scoring for annotated variants.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
-The two current files under `data/samples/` are Ensembl reference VCFs.
-They do not contain `FORMAT` or patient sample columns, so their genotype
-output is correctly reported as `None`.
+`data/samples/mvp_demo.vcf` is a one-row public demonstration table that
+matches the current filtered-input contract.
 
 <a id="environment"></a>
 
@@ -202,7 +198,7 @@ symbols, and returns a deterministic gene list for each existing HPO term.
 `calculate_hpo_similarity()` provides an explainable MVP score: the fraction
 of the patient's unique HPO terms that are directly associated with a gene.
 `match_phenotypes()` adds that score, the canonical patient terms, and the
-matched terms to each annotated candidate without modifying source evidence.
+matched terms to each annotated variant without modifying source evidence.
 The disease-annotation loader returns unique disease identifiers and names
 while excluding negated findings and non-phenotypic annotation branches.
 
@@ -223,7 +219,7 @@ clinical, phenotype, provenance, and warning fields. Exact-field validation
 rejects raw VCF fields, raw API payloads, and unapproved personal data, while
 missing evidence remains explicit through `None`, empty lists, and source
 statuses. `build_evidence_object()` and `build_evidence_objects()` now convert
-Stage 5 and Stage 6 candidates into that contract without mutating the source
+Stage 5 and Stage 6 annotated variants into that contract without mutating the source
 objects. They deliberately select only approved fields and reduce nested
 ClinVar and ClinGen evidence to compact representations.
 `sanitize_evidence_object()` removes control characters, normalizes
@@ -347,53 +343,50 @@ path with bundled synthetic evidence and saves the result under `REPORT_DIR`.
 ## 🔄 Stage 10 complete pipeline integration: complete
 
 Stage 10 step 1 defines the public analysis-input and frontend-result contracts
-in `backend/pipeline.py`. Exactly one VCF path or manual variant is accepted,
-while phenotype selections are bounded and normalized without touching the
-filesystem. The versioned result retains variants, candidates, annotations,
+in `backend/pipeline.py`. Exactly one filtered VCF path or manual variant table
+is accepted, while phenotype selections are bounded and normalized without
+touching the filesystem. The versioned result retains variants, annotations,
 phenotype results, Evidence Objects, report path, warnings, and structured
 errors. Stable stage ordering and progress states are JSON-safe and exclude
 exception objects and stack traces.
 
-Stage 10 step 2 connects mutually exclusive VCF or manual input to the existing
-streaming VCF processor and bounded MVP prioritizer. The complete processed
-stream is evaluated by reservoir sampling, while only the first 100 parsed
-variants are retained for frontend display to prevent unbounded memory use.
-The total parsed count and truncation state remain explicit, candidate output
-is copied into the pipeline result, and successful processing advances the
-stable progress contract to the annotation stage.
+Stage 10 step 2 connects mutually exclusive filtered VCF or manual-table input
+to the VCF processor. Both input paths enforce a maximum of five source rows.
+All standardized allele-specific variants are retained in their original input
+order and advance directly to annotation. No filtering, random sampling,
+optimization, or ranking is performed inside the application.
 
-Stage 10 step 3 connects selected candidates to the existing Ensembl VEP,
+Stage 10 step 3 connects every supplied variant to the existing Ensembl VEP,
 MyVariant.info, NCBI ClinVar, and ClinGen/GenCC annotation boundary, then
 passes the standardized annotations into HPO gene matching. Source-level
 annotation warnings remain visible without discarding other source results.
 When no phenotypes are supplied, matching is explicitly marked as skipped and
-the annotated candidates continue unchanged to the Evidence Object stage.
+the annotated variants continue unchanged to the Evidence Object stage.
 
 Stage 10 step 4 adds the public `run_analysis()` happy path. It builds and
-retains one bounded Evidence Object per enriched candidate, sends only the
-leading candidate's sanitized Evidence Object through the provider-neutral LLM
+retains one bounded Evidence Object per enriched variant, sends only the first
+input variant's sanitized Evidence Object through the provider-neutral LLM
 boundary, validates the response, and atomically saves its deterministic
 text report. The result then exposes the saved report path and reaches
-100 percent completion. Until clinical prioritization replaces the documented
-random MVP selector, the leading candidate must not be interpreted as a
-clinically ranked result.
+100 percent completion. Input order is supplied by the upstream clinical
+filtering workflow; this application does not claim that the first row was
+ranked.
 
 Stage 10 step 5 makes `run_analysis()` a frontend-safe execution boundary.
-Expected input, VCF, prioritization, annotation, Evidence Object, LLM, and
-report failures are converted into bounded structured issues without exposing
-exception objects or stack traces. Completed stage outputs remain available,
-later stages are explicitly marked as skipped, and recoverable failures return
-partial results. HPO data or matching failures are recoverable: annotation
-continues into evidence and reporting without phenotype scores. Annotation
-source warnings also remain visible and produce an explicit partial result.
+Expected input, VCF, annotation, Evidence Object, LLM, and report failures are
+converted into bounded structured issues without exposing exception objects or
+stack traces. Completed stage outputs remain available, later stages are
+explicitly marked as skipped, and recoverable failures return partial results.
+HPO data or matching failures are recoverable: annotation continues into
+evidence and reporting without phenotype scores. Annotation source warnings
+also remain visible and produce an explicit partial result.
 
 Stage 10 step 6 finalizes the integration with a complete offline end-to-end
-test that crosses the real processing, prioritization, annotation,
+test that crosses the real processing, annotation,
 phenotype-matching, Evidence Object, LLM, and report boundaries while mocking
 only remote services. A live `--pipeline` smoke mode exercises the same public
 `run_analysis()` entry point with configured production services and verifies
-the saved report. Stage 10 is complete; the temporary random prioritizer
-remains the documented non-clinical MVP limitation.
+the saved report.
 
 <a id="stage-11-streamlit-frontend-complete"></a>
 
@@ -404,8 +397,8 @@ boundary. The root `app.py` delegates rendering to
 `frontend/ui.py`, which configures the
 page, loads local responsive styles, displays the clinical decision-support
 notice, and presents the analysis workflow without duplicating backend logic.
-The interface now accepts either a `.vcf`/`.vcf.gz` upload or a manual
-`CHROM:POS:REF:ALT` variant, supports local HPO term search and phenotype
+The interface now accepts either a filtered `.vcf`/`.vcf.gz` upload or a
+manual five-row VCF-style table, supports local HPO term search and phenotype
 selection, and exposes the coordinated HPO dataset update operation. Input
 submission now starts a cancellable background call to the public
 `run_analysis()` boundary, provides live stage-by-stage progress, retains
@@ -413,7 +406,7 @@ frontend-safe completion or error state across reruns, and removes temporary
 uploaded VCF data after execution. A cancel control stops at the next safe
 pipeline boundary, discards partial in-memory output, and removes temporary
 uploads plus newly generated draft reports. The result
-dashboard displays bounded candidates, standardized annotations, optional HPO
+dashboard displays the filtered input variants, standardized annotations, optional HPO
 scores, sanitized Evidence Objects, source statuses, references, and warnings
 without exposing VCF genotype fields or raw provider payloads. A generated
 plain-text clinical report is loaded only from the configured `REPORT_DIR`,
@@ -424,7 +417,7 @@ Stage 11 step 6 completes the frontend with automated application tests and
 interactive browser verification. The verified paths cover VCF and manual
 input selection, empty-input validation, local HPO search and phenotype
 selection, the coordinated HPO update control, pipeline result persistence,
-candidate and evidence presentation, safe report rendering and download, and
+variant and evidence presentation, safe report rendering and download, and
 responsive layouts without horizontal overflow at desktop, tablet, and mobile
 widths. Remote annotation and LLM calls remain outside the offline UI test
 suite and must be checked separately with the live Stage 10 smoke mode.
@@ -482,7 +475,7 @@ records return explicit database errors rather than partial or unsafe data.
 
 Stage 12 step 6 integrates persistence into the public `run_analysis()`
 boundary. Every terminal result from valid input is saved as one atomic
-transaction containing analysis metadata, genotype-free candidates, sanitized
+transaction containing analysis metadata, genotype-free filtered variants, sanitized
 Evidence Objects, and the optional report reference. The returned pipeline
 result exposes its application-generated `analysis_id`. If local persistence
 fails, the completed clinical output remains available, internal database
@@ -497,9 +490,9 @@ the saved analysis and verifies its report and Evidence Objects.
 Stage 13 step 1 completes the unit-test coverage audit. Central configuration
 now has explicit tests for environment parsing, numeric limits, path
 resolution, directory creation, URL and genome-assembly validation, and
-initialization order. The existing unit suites cover VCF processing,
-prioritization, annotation parsing, phenotype matching, Evidence Objects, and
-LLM error handling. `pytest-cov` provides a repeatable coverage measurement,
+initialization order. The existing unit suites cover filtered VCF processing,
+annotation parsing, phenotype matching, Evidence Objects, and LLM error
+handling. `pytest-cov` provides a repeatable coverage measurement,
 with an initial project-wide minimum of 80%.
 
 Stage 13 step 2 adds explicit offline integration tests for the three required
@@ -520,8 +513,8 @@ user-facing pipeline output.
 
 Stage 13 step 4 adds `tests/manual_stage13_validation.py` for repeatable live
 validation. Its non-identifying matrix covers a known manual variant, missing
-phenotype input, and a bounded run over the bundled public Ensembl clinical
-VCF. It validates report creation, analysis persistence, and retrieval, then
+phenotype input, and the bundled one-row filtered demonstration VCF. It
+validates report creation, analysis persistence, and retrieval, then
 writes a compact JSON record under `output/`. A temporary timeout override
 supports degraded-network testing. Multiple LLM providers are tested by
 changing only the provider settings in `.env` and rerunning the same command.
@@ -567,8 +560,8 @@ and API-error retries record their safe reason, next attempt, and bounded
 delay. URLs, query parameters, coordinates, alleles, genes, provider payloads,
 and transport exception text are never logged.
 
-Stage 14 step 4 adds safe operational outcome logging. Variant processing
-records total, retained, truncated, and candidate counts; Evidence Object
+Stage 14 step 4 adds safe operational outcome logging. Filtered variant
+processing records only the input-derived variant count; Evidence Object
 construction records only its count. Provider-neutral LLM calls record
 duration, outcome, message count, token limit, optional usage totals, and
 bounded error type without prompts, responses, or provider exception text.
@@ -633,8 +626,8 @@ apply the institution's production ACL policy before real patient data is
 used.
 
 Stage 15 step 4 adds an explicit clinical-data minimization boundary in
-`backend/privacy.py`. Genotype and sample fields are removed immediately after
-internal candidate selection, so public pipeline variants, annotations,
+`backend/privacy.py`. Genotype and sample fields are excluded during filtered
+input parsing, so public pipeline variants, annotations,
 progress snapshots, frontend state, Evidence Objects, reports, and database
 records retain only approved non-sample fields. Pipeline-result validation
 recursively rejects genotype, patient, sample, source-filename, raw-VCF, and
@@ -849,35 +842,14 @@ functions remain isolated in `backend/vcf_processing.py`, allowing the
 parser implementation to be replaced later without changing the
 pipeline interface.
 
-### Normalization limitation
+### Upstream filtered-input contract
 
-> [!WARNING]
-> Reference-aware normalization is implemented but is not active in the
-> current Windows MVP environment.
+> [!IMPORTANT]
+> Variant filtering, reference-aware normalization, optimization, and clinical
+> ranking occur before this application receives the data.
 
-Reference-aware normalization is optional during MVP parsing but must be
-enabled before clinical annotation whenever reference-aware left alignment
-or representation normalization is required. It needs:
-
-- a matching reference genome FASTA;
-- `bcftools` available on `PATH`.
-
-`bcftools` is not installed in the current Windows environment, so the
-normalization command is implemented and error-tested but has not yet
-been executed against a reference FASTA.
-
-### Temporary prioritization strategy
-
-> [!CAUTION]
-> Reservoir sampling is a bounded-memory MVP placeholder, not a clinically
-> valid ranking method.
-
-`backend/prioritization.py` currently uses reservoir sampling. This keeps
-memory usage bounded while giving each parsed variant an equal chance of
-selection.
-
-Random selection is only an MVP placeholder. It is not a clinically valid
-ranking algorithm. The pipeline calls only `prioritize_variants()`, so the
-internal strategy can later be replaced with configurable frequency,
-functional-impact, phenotype, gene-disease, and inheritance scoring without
-changing the pipeline interface.
+The application accepts a professor-approved filtered table containing one to
+five VCF rows. It validates and standardizes those rows, splits multi-allelic
+ALT values, and annotates every resulting allele in the supplied order. The
+first listed allele is used for the single generated interpretation report;
+the application does not claim that it was ranked internally.

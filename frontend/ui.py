@@ -1,8 +1,11 @@
 """Presentation-only Streamlit interface for the analysis pipeline."""
 
+from math import isfinite
+from numbers import Integral, Real
 from pathlib import Path
 from typing import TypedDict, cast
 
+import pandas as pd
 import streamlit as st
 
 from backend.error_handling import safe_ui_error_message
@@ -13,6 +16,7 @@ from backend.phenotype import (
     search_hpo_terms,
     update_hpo_data,
 )
+from backend.vcf_processing import MAX_FILTERED_VCF_ROWS
 from config import settings
 from frontend.execution import (
     AnalysisJob,
@@ -34,7 +38,15 @@ DECISION_SUPPORT_NOTICE = (
 )
 STYLES_PATH = Path(__file__).with_name("styles.css")
 VCF_INPUT_MODE = "VCF upload"
-MANUAL_INPUT_MODE = "Manual variant"
+MANUAL_INPUT_MODE = "Manual table"
+MANUAL_VARIANT_COLUMNS = (
+    "chrom",
+    "pos",
+    "ref",
+    "alt",
+    "qual",
+    "filter",
+)
 SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 PIPELINE_RESULT_KEY = "pipeline_result"
@@ -115,7 +127,6 @@ LLM_MODEL_ADVANTAGES = {
 PIPELINE_STAGE_LABELS = {
     "input": "Input validation",
     "vcf_processing": "VCF processing",
-    "prioritization": "Candidate prioritization",
     "annotation": "Variant annotation",
     "phenotype": "Phenotype matching",
     "evidence": "Evidence construction",
@@ -136,7 +147,7 @@ class AnalysisSubmission(TypedDict):
     """One validated frontend request ready for pipeline execution."""
 
     uploaded_vcf: UploadedVCF | None
-    manual_variant: str | None
+    manual_variants: list[dict[str, object]] | None
     phenotypes: list[str]
     llm_model: str
 
@@ -235,10 +246,10 @@ def _render_workflow_overview() -> None:
 
     stages = (
         "Input",
-        "Prioritization",
         "Annotation",
         "Phenotype",
         "Evidence",
+        "Interpretation",
         "Report",
     )
     for row_start in range(0, len(stages), 3):
@@ -460,10 +471,122 @@ def _is_supported_vcf_filename(filename: str) -> bool:
     )
 
 
+def _manual_variant_table() -> pd.DataFrame:
+    """Return five blank rows with stable editor column types."""
+
+    return pd.DataFrame(
+        {
+            "chrom": pd.Series(
+                [""] * MAX_FILTERED_VCF_ROWS,
+                dtype="string",
+            ),
+            "pos": pd.Series(
+                [pd.NA] * MAX_FILTERED_VCF_ROWS,
+                dtype="Int64",
+            ),
+            "ref": pd.Series(
+                [""] * MAX_FILTERED_VCF_ROWS,
+                dtype="string",
+            ),
+            "alt": pd.Series(
+                [""] * MAX_FILTERED_VCF_ROWS,
+                dtype="string",
+            ),
+            "qual": pd.Series(
+                [pd.NA] * MAX_FILTERED_VCF_ROWS,
+                dtype="Float64",
+            ),
+            "filter": pd.Series(
+                [""] * MAX_FILTERED_VCF_ROWS,
+                dtype="string",
+            ),
+        }
+    )
+
+
+def _is_blank_table_value(value: object) -> bool:
+    """Return whether one editor cell is unused."""
+
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return bool(pd.isna(value))
+
+
+def _normalize_manual_table(
+    table: object,
+) -> list[dict[str, object]]:
+    """Convert used editor rows into the backend manual-table contract."""
+
+    if (
+        not isinstance(table, pd.DataFrame)
+        or tuple(table.columns) != MANUAL_VARIANT_COLUMNS
+    ):
+        raise ValueError("The manual variant table is invalid.")
+    rows: list[dict[str, object]] = []
+    for row_index, raw_row in enumerate(
+        table.to_dict(orient="records")
+    ):
+        if all(
+            _is_blank_table_value(raw_row[column])
+            for column in MANUAL_VARIANT_COLUMNS
+        ):
+            continue
+        required = ("chrom", "pos", "ref", "alt")
+        if any(
+            _is_blank_table_value(raw_row[column])
+            for column in required
+        ):
+            raise ValueError(
+                f"Complete CHROM, POS, REF, and ALT in row "
+                f"{row_index + 1}."
+            )
+        raw_position = raw_row["pos"]
+        if (
+            isinstance(raw_position, bool)
+            or not isinstance(raw_position, Integral)
+            or int(raw_position) <= 0
+        ):
+            raise ValueError(
+                f"POS in row {row_index + 1} must be a positive integer."
+            )
+        raw_quality = raw_row["qual"]
+        quality: float | None = None
+        if not _is_blank_table_value(raw_quality):
+            if (
+                isinstance(raw_quality, bool)
+                or not isinstance(raw_quality, Real)
+                or not isfinite(float(raw_quality))
+                or float(raw_quality) < 0
+            ):
+                raise ValueError(
+                    f"QUAL in row {row_index + 1} must be non-negative."
+                )
+            quality = float(raw_quality)
+        rows.append(
+            {
+                "chrom": str(raw_row["chrom"]).strip(),
+                "pos": int(raw_position),
+                "ref": str(raw_row["ref"]).strip(),
+                "alt": str(raw_row["alt"]).strip(),
+                "qual": quality,
+                "filter": (
+                    None
+                    if _is_blank_table_value(raw_row["filter"])
+                    else str(raw_row["filter"]).strip()
+                ),
+            }
+        )
+    if not rows:
+        raise ValueError("Enter at least one manual variant row.")
+    return rows
+
+
 def _prepare_input(
     input_mode: str,
     uploaded_vcf: object | None,
-    manual_variant: str,
+    manual_table: object,
     llm_model: str,
 ) -> AnalysisSubmission | None:
     """Validate frontend presence rules and build one submission."""
@@ -484,23 +607,22 @@ def _prepare_input(
         _clear_analysis_result()
         return {
             "uploaded_vcf": cast(UploadedVCF, uploaded_vcf),
-            "manual_variant": None,
+            "manual_variants": None,
             "phenotypes": phenotype_ids,
             "llm_model": llm_model,
         }
 
-    normalized_variant = manual_variant.strip()
-    if not normalized_variant:
-        st.error(
-            "Enter a variant in CHROM:POS:REF:ALT format before analysis."
-        )
+    try:
+        normalized_variants = _normalize_manual_table(manual_table)
+    except ValueError as exc:
+        st.error(str(exc))
         _clear_analysis_result()
         return None
 
     _clear_analysis_result()
     return {
         "uploaded_vcf": None,
-        "manual_variant": normalized_variant,
+        "manual_variants": normalized_variants,
         "phenotypes": phenotype_ids,
         "llm_model": llm_model,
     }
@@ -529,7 +651,7 @@ def _render_variant_input(
 
         with st.form("analysis_input_form", border=False):
             uploaded_vcf = None
-            manual_variant = ""
+            manual_table: object = _manual_variant_table()
             if input_mode == VCF_INPUT_MODE:
                 uploaded_vcf = st.file_uploader(
                     "VCF file",
@@ -537,16 +659,50 @@ def _render_variant_input(
                     key="vcf_upload",
                     help=(
                         "Accepted formats: .vcf and .vcf.gz. "
+                        f"The filtered file must contain 1 to "
+                        f"{MAX_FILTERED_VCF_ROWS} data rows. Every row is "
+                        "annotated; the report focuses on the first listed "
+                        "variant. "
                         f"Maximum size: "
                         f"{settings.MAX_UPLOAD_BYTES // 1_000_000} MB."
                     ),
                 )
             else:
-                manual_variant = st.text_input(
-                    "Variant",
-                    key="manual_variant",
-                    placeholder="1:941284:G:A",
-                    help="Use CHROM:POS:REF:ALT format.",
+                st.caption(
+                    "Enter up to five already-filtered variants. "
+                    "CHROM, POS, REF, and ALT are required. Every row "
+                    "is annotated; the report focuses on the first listed "
+                    "variant."
+                )
+                manual_table = st.data_editor(
+                    _manual_variant_table(),
+                    key="manual_variant_table",
+                    hide_index=True,
+                    num_rows="fixed",
+                    width="stretch",
+                    column_config={
+                        "chrom": st.column_config.TextColumn("CHROM"),
+                        "pos": st.column_config.NumberColumn(
+                            "POS",
+                            min_value=1,
+                            step=1,
+                            format="%d",
+                        ),
+                        "ref": st.column_config.TextColumn("REF"),
+                        "alt": st.column_config.TextColumn(
+                            "ALT",
+                            help=(
+                                "Use a nucleotide allele or a supported "
+                                "symbolic allele such as <DEL>."
+                            ),
+                        ),
+                        "qual": st.column_config.NumberColumn(
+                            "QUAL",
+                            min_value=0,
+                            format="%.2f",
+                        ),
+                        "filter": st.column_config.TextColumn("FILTER"),
+                    },
                 )
 
             with st.container(
@@ -555,7 +711,7 @@ def _render_variant_input(
                 gap="small",
             ):
                 submitted = st.form_submit_button(
-                    "Analyze variant",
+                    "Analyze variants",
                     type="primary",
                     icon=":material/biotech:",
                     width="stretch",
@@ -582,7 +738,7 @@ def _render_variant_input(
             return _prepare_input(
                 input_mode or VCF_INPUT_MODE,
                 uploaded_vcf,
-                manual_variant,
+                manual_table,
                 llm_model,
             )
     return None
@@ -664,7 +820,7 @@ def _start_submission(
     ) -> PipelineResult:
         return execute_analysis(
             uploaded_vcf=submission["uploaded_vcf"],
-            manual_variant=submission["manual_variant"],
+            manual_variants=submission["manual_variants"],
             phenotypes=submission["phenotypes"],
             llm_model=submission["llm_model"],
             progress_callback=progress_callback,
