@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import tomllib
 import zipfile
 from copy import deepcopy
@@ -138,6 +139,7 @@ from backend.report import (
     generate_clinical_interpretation,
     generate_and_save_clinical_report,
     render_clinical_report_markdown,
+    render_clinical_report_text,
     save_clinical_report,
     sanitize_evidence_object,
     validate_and_sanitize_clinical_interpretation,
@@ -160,6 +162,7 @@ from backend.vcf_processing import (
 )
 from config import settings
 from frontend.execution import (
+    AnalysisJob,
     FrontendExecutionError,
     execute_analysis as execute_frontend_analysis,
 )
@@ -6324,6 +6327,27 @@ class TestClinicalReportComposition:
 
         assert first == second
 
+    def test_text_renderer_removes_markdown_syntax(self) -> None:
+        report = build_clinical_report(
+            TestEvidenceObject._complete_evidence_object(),
+            self._response(),
+        )
+        report["warnings"] = ["Synthetic report warning."]
+
+        report_text = render_clinical_report_text(report)
+
+        assert report_text.startswith(
+            "Clinical Variant Interpretation Report\n"
+            "======================================\n"
+        )
+        assert "\nCase Summary\n------------\n" in report_text
+        assert "\nReport warnings\n~~~~~~~~~~~~~~~\n" in report_text
+        assert not any(
+            line.startswith("#")
+            for line in report_text.splitlines()
+        )
+        assert "Synthetic report warning." in report_text
+
     def test_evidence_values_are_markdown_escaped(self) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()
         evidence["gene"] = "SCN1A *untrusted*"
@@ -6348,7 +6372,7 @@ class TestClinicalReportComposition:
 
 
 class TestClinicalReportStorage:
-    """Verify safe deterministic Stage 9 Markdown persistence."""
+    """Verify safe deterministic Stage 9 text persistence."""
 
     @staticmethod
     def _report() -> dict[str, object]:
@@ -6374,14 +6398,14 @@ class TestClinicalReportStorage:
 
         assert first == second
         assert first.parent == (tmp_path / "reports").resolve()
-        assert first.suffix == ".md"
+        assert first.suffix == ".txt"
         assert first.name.startswith(
             "clinical-report-grch38-2-166848215-c-t-"
         )
         assert first.read_text(encoding="utf-8") == (
-            render_clinical_report_markdown(report)
+            render_clinical_report_text(report)
         )
-        assert list(first.parent.glob("*.md")) == [first]
+        assert list(first.parent.glob("*.txt")) == [first]
         assert list(first.parent.glob("*.tmp")) == []
         if os.name == "posix":
             assert stat.S_IMODE(first.parent.stat().st_mode) == 0o700
@@ -6434,7 +6458,7 @@ class TestClinicalReportStorage:
         )
 
         assert first != second
-        assert len(list(tmp_path.glob("*.md"))) == 2
+        assert len(list(tmp_path.glob("*.txt"))) == 2
 
     def test_deterministic_path_collision_never_overwrites(
         self,
@@ -6564,18 +6588,18 @@ class TestStage9EndToEnd:
             client=LLMClient(adapter),
             report_dir=tmp_path,
         )
-        markdown = path.read_text(encoding="utf-8")
+        report_text = path.read_text(encoding="utf-8")
 
         assert evidence == original
         assert len(adapter.requests) == 1
         assert path.parent == tmp_path.resolve()
-        assert "## Case Summary" in markdown
-        assert "## Medical Disclaimer" in markdown
-        assert "VCV000012345.1" in markdown
-        assert "HP:0001250" in markdown
-        assert "genotype" not in markdown
-        assert "raw_internal_detail" not in markdown
-        assert "patient_name" not in markdown
+        assert "Case Summary\n------------" in report_text
+        assert "Medical Disclaimer\n------------------" in report_text
+        assert "VCV000012345.1" in report_text
+        assert "HP:0001250" in report_text
+        assert "genotype" not in report_text
+        assert "raw_internal_detail" not in report_text
+        assert "patient_name" not in report_text
 
     def test_repeated_end_to_end_run_is_idempotent(
         self,
@@ -6602,7 +6626,7 @@ class TestStage9EndToEnd:
 
         assert first == second
         assert len(adapter.requests) == 2
-        assert len(list(tmp_path.glob("*.md"))) == 1
+        assert len(list(tmp_path.glob("*.txt"))) == 1
 
     def test_llm_failure_creates_no_report(
         self,
@@ -7826,15 +7850,15 @@ class TestStage13IntegrationBoundaries:
             client=self._llm_client(),
             report_dir=tmp_path / "reports",
         )
-        markdown = report_path.read_text(encoding="utf-8")
+        report_text = report_path.read_text(encoding="utf-8")
 
         assert evidence["gene"] == "SCN1A"
         assert evidence["clinvar_accession"] == "VCV000000123.4"
         assert report_path.is_file()
-        assert "SCN1A" in markdown
-        assert "VCV000000123.4" in markdown
-        assert "## Medical Disclaimer" in markdown
-        assert "genotype" not in markdown
+        assert "SCN1A" in report_text
+        assert "VCV000000123.4" in report_text
+        assert "Medical Disclaimer\n------------------" in report_text
+        assert "genotype" not in report_text
 
     def test_complete_vcf_pipeline_persists_retrievable_output(
         self,
@@ -8495,6 +8519,53 @@ class TestFrontendExecution:
             + "1\t100\t.\tA\tG\t99\tPASS\t.\n"
         ).encode("utf-8")
 
+    def test_cancelled_job_discards_result_and_new_report(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        report_directory = tmp_path / "reports"
+        report_directory.mkdir()
+        report_path = (
+            report_directory
+            / "clinical-report-grch38-1-941284-g-a-draft.txt"
+        )
+        first_progress = threading.Event()
+        continue_analysis = threading.Event()
+
+        def runner(
+            callback: PipelineProgressCallback,
+        ) -> PipelineResult:
+            result = create_pipeline_result()
+            result["status"] = "running"
+            result["current_stage"] = "annotation"
+            result["progress_percent"] = 35
+            callback(result)
+            first_progress.set()
+            assert continue_analysis.wait(2)
+            report_path.write_text(
+                "Cancelled draft",
+                encoding="utf-8",
+            )
+            result["report_path"] = str(report_path)
+            result["current_stage"] = "completed"
+            result["progress_percent"] = 100
+            callback(result)
+            return result
+
+        job = AnalysisJob(runner, report_dir=report_directory)
+        job.start()
+        assert first_progress.wait(2)
+        assert job.request_cancel()
+        continue_analysis.set()
+        job.join(2)
+
+        view = job.view()
+        assert view.state == "cancelled"
+        assert view.latest_result is None
+        assert view.result is None
+        assert view.cleanup_warning is None
+        assert not report_path.exists()
+
     @pytest.mark.parametrize(
         ("filename", "payload", "expected_name"),
         [
@@ -8849,14 +8920,17 @@ class TestFrontendReportViewer:
     """Verify secure generated-report loading."""
 
     @pytest.mark.stage16_mvp
-    def test_markdown_report_loads_with_download_bytes(
+    def test_text_report_loads_with_download_bytes(
         self,
         tmp_path: Path,
     ) -> None:
         report_directory = tmp_path / "reports"
         report_directory.mkdir()
-        report_path = report_directory / "clinical-report.md"
-        report_text = "# Clinical report\n\nEvidence-based summary."
+        report_path = report_directory / "clinical-report.txt"
+        report_text = (
+            "Clinical report\n===============\n\n"
+            "Evidence-based summary."
+        )
         report_path.write_text(report_text, encoding="utf-8")
 
         document = load_report_document(
@@ -8864,8 +8938,8 @@ class TestFrontendReportViewer:
             report_dir=report_directory,
         )
 
-        assert document.filename == "clinical-report.md"
-        assert document.markdown == report_text
+        assert document.filename == "clinical-report.txt"
+        assert document.text == report_text
         assert document.data == report_path.read_bytes()
 
     @pytest.mark.stage16_mvp
@@ -8934,12 +9008,12 @@ This report requires review by a qualified healthcare professional.
     ) -> None:
         report_directory = tmp_path / "reports"
         report_directory.mkdir()
-        outside_report = tmp_path / "outside.md"
-        outside_report.write_text("# Outside", encoding="utf-8")
+        outside_report = tmp_path / "outside.txt"
+        outside_report.write_text("Outside", encoding="utf-8")
 
         with pytest.raises(
             ReportViewerError,
-            match="not an approved Markdown file",
+            match="not an approved text file",
         ):
             load_report_document(
                 outside_report,
@@ -8952,7 +9026,7 @@ This report requires review by a qualified healthcare professional.
     ) -> None:
         report_directory = tmp_path / "reports"
         report_directory.mkdir()
-        oversized_report = report_directory / "oversized.md"
+        oversized_report = report_directory / "oversized.txt"
         oversized_report.write_bytes(
             b"x" * (MAX_CLINICAL_REPORT_MARKDOWN_BYTES + 1)
         )
@@ -10209,6 +10283,12 @@ class TestFrontendFoundation:
             button.label == "Analyze variant"
             for button in app.button
         )
+        cancel_button = next(
+            button
+            for button in app.button
+            if button.label == "Cancel"
+        )
+        assert cancel_button.disabled
 
     @pytest.mark.stage16_mvp
     def test_missing_vcf_is_rejected_before_pipeline_execution(
@@ -10233,6 +10313,52 @@ class TestFrontendFoundation:
         )
         assert not app.success
 
+    def test_cancel_button_requests_active_analysis(self) -> None:
+        first_progress = threading.Event()
+        continue_analysis = threading.Event()
+
+        def runner(
+            callback: PipelineProgressCallback,
+        ) -> PipelineResult:
+            result = create_pipeline_result()
+            result["status"] = "running"
+            result["current_stage"] = "annotation"
+            result["progress_percent"] = 35
+            callback(result)
+            first_progress.set()
+            assert continue_analysis.wait(2)
+            callback(result)
+            return result
+
+        job = AnalysisJob(runner)
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        app.session_state["analysis_job"] = job
+        job.start()
+        assert first_progress.wait(2)
+        app.run(timeout=10)
+
+        cancel_button = next(
+            button
+            for button in app.button
+            if button.label == "Cancel"
+        )
+        assert not cancel_button.disabled
+        cancel_button.click().run(timeout=10)
+        assert job.view().state == "cancelling"
+
+        continue_analysis.set()
+        job.join(2)
+        app.run(timeout=10)
+
+        assert job.view().state == "cancelled"
+        assert app.session_state["pipeline_result"] is None
+        assert any(
+            "Analysis cancelled" in message.value
+            for message in app.info
+        )
+
     @pytest.mark.stage16_mvp
     def test_manual_variant_executes_pipeline(
         self,
@@ -10242,9 +10368,10 @@ class TestFrontendFoundation:
         received: dict[str, object] = {}
         report_directory = tmp_path / "reports"
         report_directory.mkdir()
-        report_path = report_directory / "clinical-report.md"
+        report_path = report_directory / "clinical-report.txt"
         report_path.write_text(
-            "# Clinical report\n\nEvidence-based summary.",
+            "Clinical report\n===============\n\n"
+            "Evidence-based summary.",
             encoding="utf-8",
         )
         monkeypatch.setattr(
@@ -10432,7 +10559,7 @@ class TestFrontendFoundation:
         }
         assert len(app.dataframe) == 6
         assert [button.label for button in app.get("download_button")] == [
-            "Download Markdown",
+            "Download text",
             "Download PDF",
             "Download Word",
         ]

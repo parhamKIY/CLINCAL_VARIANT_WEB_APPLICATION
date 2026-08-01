@@ -42,7 +42,7 @@ http://127.0.0.1:8501
 6. Select **Analyze variant**.
 7. Show the pipeline progress, candidate variant, annotation sources,
    phenotype evidence, Evidence Object, and clinical report.
-8. Select **Download Markdown report** and open the downloaded file.
+8. Select **Download text** and open the downloaded `.txt` file.
 
 The test input represents the public GRCh38 variant:
 

@@ -163,15 +163,19 @@ def check_clinical_report() -> None:
     report_path = generate_and_save_clinical_report(
         _synthetic_evidence_object()
     )
-    markdown = report_path.read_text(encoding="utf-8")
-    headings = [
-        line.removeprefix("## ")
-        for line in markdown.splitlines()
-        if line.startswith("## ")
-    ]
+    report_text = report_path.read_text(encoding="utf-8")
+    report_lines = report_text.splitlines()
     expected_headings = [
         title
         for _, title in CLINICAL_REPORT_SECTION_ORDER
+    ]
+    headings = [
+        line
+        for index, line in enumerate(report_lines[:-1])
+        if (
+            line in expected_headings
+            and report_lines[index + 1] == "-" * len(line)
+        )
     ]
     if headings != expected_headings:
         raise RuntimeError(
@@ -185,7 +189,7 @@ def check_clinical_report() -> None:
     detected_expansions = {
         phrase
         for phrase in forbidden_expansions
-        if phrase.casefold() in markdown.casefold()
+        if phrase.casefold() in report_text.casefold()
     }
     if detected_expansions:
         raise RuntimeError(
@@ -201,9 +205,9 @@ def check_clinical_report() -> None:
 
     print("Clinical report: OK")
     print(f"Saved report: {report_path}")
-    print(f"Saved bytes: {len(markdown.encode('utf-8'))}")
+    print(f"Saved bytes: {len(report_text.encode('utf-8'))}")
     print("--- Report output ---")
-    print(markdown.rstrip())
+    print(report_text.rstrip())
     print("--- End report output ---")
 
 

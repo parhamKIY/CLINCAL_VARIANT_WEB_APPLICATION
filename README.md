@@ -45,7 +45,7 @@ flowchart LR
     E --> F["Sanitized Evidence Objects"]
     F --> G["Provider-neutral LLM interpretation"]
     G --> H["Validated clinical report"]
-    H --> I["Markdown, PDF, and Word"]
+    H --> I["Text, PDF, and Word"]
     H --> J["SQLite persistence"]
 
     D1["Ensembl VEP"] --> D
@@ -67,7 +67,7 @@ flowchart LR
 | **Clinical evidence** | Isolated Ensembl VEP, MyVariant.info, NCBI ClinVar, and UCSC GenCC integrations |
 | **Phenotype correlation** | Local HPO search, normalization, update workflow, and explainable gene matching |
 | **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
-| **Reporting** | Validated Markdown plus local PDF and Word exports |
+| **Reporting** | Validated plain text plus local PDF and Word exports |
 | **Safety** | Data minimization, bounded storage, secret scanning, safe errors, and security acceptance gates |
 
 ---
@@ -97,11 +97,13 @@ flowchart LR
   claims.
 - External-source failures are isolated so evidence from another source is
   preserved.
+- Frontend analyses run in cancellable background jobs; cancellation clears
+  partial session output, temporary uploads, and newly generated drafts.
 - Stage 6 provides local HPO search, normalization, gene and disease
   associations, and explainable phenotype scoring for annotated candidates.
-- Generated clinical reports can be downloaded as Markdown, PDF, or Word.
+- Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
-  Markdown report, without additional provider calls or clinical data.
+  text report, without additional provider calls or clinical data.
 - VCF processing tests are stored in `tests/test_pipeline.py`.
 
 The two current files under `data/samples/` are Ensembl reference VCFs.
@@ -318,15 +320,15 @@ live `--clinical` smoke mode now passes provider output through this same
 production validator.
 
 Stage 9 step 3 composes the validated `ClinicalReport` and renders deterministic
-Markdown. Case, variant, gene, consequence, clinical evidence, phenotype,
+structured plain text. Case, variant, gene, consequence, clinical evidence, phenotype,
 source status, warnings, references, and disclaimer content are built directly
 from the sanitized Evidence Object. Only the validated interpretation and
 limitations narratives come from the LLM. References are normalized and
-deduplicated, missing evidence is explicit, evidence values are Markdown
-escaped, and nested unsafe headings, code fences, or raw HTML are rejected.
+deduplicated, missing evidence is explicit, evidence values are safely
+normalized, and nested unsafe headings, code fences, or raw HTML are rejected.
 
-Stage 9 step 4 saves rendered reports as deterministic UTF-8 Markdown under the
-configured `REPORT_DIR`. Filenames contain bounded assembly and variant slugs
+Stage 9 step 4 saves rendered reports as deterministic UTF-8 `.txt` files under
+the configured `REPORT_DIR`. Filenames contain bounded assembly and variant slugs
 plus a SHA-256 content identifier. Publication uses a fully written temporary
 file and an atomic no-overwrite link, so repeated saves are idempotent while a
 different pre-existing file is never replaced. Paths cannot escape the report
@@ -371,7 +373,7 @@ Stage 10 step 4 adds the public `run_analysis()` happy path. It builds and
 retains one bounded Evidence Object per enriched candidate, sends only the
 leading candidate's sanitized Evidence Object through the provider-neutral LLM
 boundary, validates the response, and atomically saves its deterministic
-Markdown report. The result then exposes the saved report path and reaches
+text report. The result then exposes the saved report path and reaches
 100 percent completion. Until clinical prioritization replaces the documented
 random MVP selector, the leading candidate must not be interpreted as a
 clinically ranked result.
@@ -405,13 +407,16 @@ notice, and presents the analysis workflow without duplicating backend logic.
 The interface now accepts either a `.vcf`/`.vcf.gz` upload or a manual
 `CHROM:POS:REF:ALT` variant, supports local HPO term search and phenotype
 selection, and exposes the coordinated HPO dataset update operation. Input
-submission now calls the public `run_analysis()` boundary, provides live
-stage-by-stage progress, retains frontend-safe completion or error state across
-reruns, and removes temporary uploaded VCF data after execution. The result
+submission now starts a cancellable background call to the public
+`run_analysis()` boundary, provides live stage-by-stage progress, retains
+frontend-safe completion or error state across reruns, and removes temporary
+uploaded VCF data after execution. A cancel control stops at the next safe
+pipeline boundary, discards partial in-memory output, and removes temporary
+uploads plus newly generated draft reports. The result
 dashboard displays bounded candidates, standardized annotations, optional HPO
 scores, sanitized Evidence Objects, source statuses, references, and warnings
 without exposing VCF genotype fields or raw provider payloads. A generated
-Markdown clinical report is loaded only from the configured `REPORT_DIR`,
+plain-text clinical report is loaded only from the configured `REPORT_DIR`,
 rendered in the application, and offered as a bounded download without
 exposing its server path.
 
@@ -461,7 +466,7 @@ when any item is invalid.
 
 Stage 12 step 4 adds `save_report()` for secure report references. The
 database stores only a portable filename rather than an absolute server path.
-The referenced file must be a regular, non-symlinked, bounded UTF-8 Markdown
+The referenced file must be a regular, non-symlinked, bounded UTF-8 text
 report directly inside the configured `REPORT_DIR` and must follow the
 generated clinical-report filename convention. Missing parent analyses,
 outside paths, nested files, duplicate references, empty files, invalid UTF-8,
@@ -783,7 +788,7 @@ Run the complete live Stage 8 interpretation using bundled synthetic evidence:
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py --clinical
 ```
 
-Run the complete live Stage 9 report workflow and save its Markdown output:
+Run the complete live Stage 9 report workflow and save its text output:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_llm_smoke.py --report

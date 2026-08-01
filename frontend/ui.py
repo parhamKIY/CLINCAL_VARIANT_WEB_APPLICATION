@@ -6,7 +6,7 @@ from typing import TypedDict, cast
 import streamlit as st
 
 from backend.error_handling import safe_ui_error_message
-from backend.pipeline import PipelineResult
+from backend.pipeline import PipelineProgressCallback, PipelineResult
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
@@ -15,7 +15,7 @@ from backend.phenotype import (
 )
 from config import settings
 from frontend.execution import (
-    FrontendExecutionError,
+    AnalysisJob,
     UploadedVCF,
     execute_analysis,
 )
@@ -38,6 +38,9 @@ MANUAL_INPUT_MODE = "Manual variant"
 SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 PIPELINE_RESULT_KEY = "pipeline_result"
+ANALYSIS_JOB_KEY = "analysis_job"
+ANALYSIS_NOTICE_KEY = "analysis_notice"
+ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
 LLM_MODEL_KEY = "selected_llm_model"
 LLM_PINNED_MODELS = (
     "gpt-5.4-mini",
@@ -170,6 +173,9 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(SELECTED_HPO_KEY, [])
     st.session_state.setdefault(HPO_RESULTS_KEY, [])
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
+    st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
+    st.session_state.setdefault(ANALYSIS_NOTICE_KEY, None)
+    st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     model_options = _llm_model_options()
     if st.session_state.get(LLM_MODEL_KEY) not in model_options:
         st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL
@@ -180,6 +186,22 @@ def _clear_analysis_result() -> None:
 
     st.session_state[PIPELINE_RESULT_KEY] = None
     st.session_state.pop("selected_evidence_object", None)
+
+
+def _analysis_job() -> AnalysisJob | None:
+    """Return the current background job when one exists."""
+
+    job = st.session_state.get(ANALYSIS_JOB_KEY)
+    return job if isinstance(job, AnalysisJob) else None
+
+
+def _cancel_active_analysis() -> None:
+    """Request cooperative cancellation from the active worker."""
+
+    job = _analysis_job()
+    if job is not None:
+        job.request_cancel()
+    _clear_analysis_result()
 
 
 def _load_styles() -> None:
@@ -485,6 +507,11 @@ def _render_variant_input(
             width="stretch",
         )
 
+        job = _analysis_job()
+        job_state = job.view().state if job is not None else None
+        job_present = job is not None
+        cancellation_pending = job_state == "cancelling"
+
         with st.form("analysis_input_form", border=False):
             uploaded_vcf = None
             manual_variant = ""
@@ -507,12 +534,34 @@ def _render_variant_input(
                     help="Use CHROM:POS:REF:ALT format.",
                 )
 
-            submitted = st.form_submit_button(
-                "Analyze variant",
-                type="primary",
-                icon=":material/biotech:",
-                width="stretch",
-            )
+            with st.container(
+                horizontal=True,
+                horizontal_alignment="distribute",
+                gap="small",
+            ):
+                submitted = st.form_submit_button(
+                    "Analyze variant",
+                    type="primary",
+                    icon=":material/biotech:",
+                    width="stretch",
+                    disabled=job_present,
+                )
+                st.form_submit_button(
+                    "Cancelling..." if cancellation_pending else "Cancel",
+                    key="cancel_analysis",
+                    icon=":material/cancel:",
+                    width="stretch",
+                    disabled=(
+                        not job_present
+                        or job_state not in {"running", "cancelling"}
+                        or cancellation_pending
+                    ),
+                    help=(
+                        "Stop the active analysis and remove its "
+                        "temporary files and unpublished draft output."
+                    ),
+                    on_click=_cancel_active_analysis,
+                )
 
         if submitted:
             return _prepare_input(
@@ -587,101 +636,116 @@ def _render_pipeline_status(result: PipelineResult) -> None:
     _render_pipeline_issues(result)
 
 
-def _execute_submission(
+def _start_submission(
     submission: AnalysisSubmission,
-) -> PipelineResult | None:
-    """Run the complete pipeline with live progress feedback."""
+) -> None:
+    """Start one cancellable background analysis."""
 
-    st.subheader("Analysis status")
-    status = st.status("Starting analysis", expanded=True)
-    progress_bar = status.progress(
-        0,
-        text="Preparing the analysis request",
-    )
-    emitted_updates: set[tuple[str, str, str | None]] = set()
+    if _analysis_job() is not None:
+        return
 
-    def update_progress(snapshot: PipelineResult) -> None:
-        progress = snapshot["progress_percent"]
-        current_stage = snapshot["current_stage"]
-        progress_bar.progress(
-            progress,
-            text=f"{progress}% complete",
-        )
-        if current_stage == "completed":
-            return
-
-        record = next(
-            stage
-            for stage in snapshot["stages"]
-            if stage["stage"] == current_stage
-        )
-        label = PIPELINE_STAGE_LABELS[current_stage]
-        status.update(
-            label=f"Running {label.casefold()}",
-            state="running",
-            expanded=True,
-        )
-        for stage_record in snapshot["stages"]:
-            if stage_record["status"] == "pending":
-                continue
-            event = (
-                stage_record["stage"],
-                stage_record["status"],
-                stage_record["message"],
-            )
-            if event in emitted_updates:
-                continue
-            emitted_updates.add(event)
-            stage_label = PIPELINE_STAGE_LABELS[
-                stage_record["stage"]
-            ]
-            icon = PIPELINE_STATUS_ICONS[stage_record["status"]]
-            message = (
-                stage_record["message"]
-                or stage_record["status"].title()
-            )
-            status.write(
-                f"{icon} **{stage_label}:** {message}"
-            )
-
-    try:
-        result = execute_analysis(
+    def runner(
+        progress_callback: PipelineProgressCallback,
+    ) -> PipelineResult:
+        return execute_analysis(
             uploaded_vcf=submission["uploaded_vcf"],
             manual_variant=submission["manual_variant"],
             phenotypes=submission["phenotypes"],
             llm_model=submission["llm_model"],
-            progress_callback=update_progress,
+            progress_callback=progress_callback,
         )
-    except FrontendExecutionError as exc:
-        status.update(
-            label="Analysis could not start",
-            state="error",
-            expanded=True,
-        )
-        status.error(str(exc))
-        st.session_state[PIPELINE_RESULT_KEY] = None
-        return None
-    except Exception:
-        status.update(
-            label="Analysis could not complete",
-            state="error",
-            expanded=True,
-        )
-        status.error(
-            "An unexpected internal error stopped the analysis."
-        )
-        st.session_state[PIPELINE_RESULT_KEY] = None
-        return None
 
-    st.session_state[PIPELINE_RESULT_KEY] = result
-    progress_bar.progress(
-        result["progress_percent"],
-        text=f"{result['progress_percent']}% complete",
+    _clear_analysis_result()
+    st.session_state[ANALYSIS_NOTICE_KEY] = None
+    job = AnalysisJob(runner)
+    st.session_state[ANALYSIS_JOB_KEY] = job
+    job.start()
+
+
+def _finish_analysis_job(job: AnalysisJob) -> None:
+    """Transfer one terminal job outcome into session state."""
+
+    view = job.view()
+    if view.state == "completed":
+        st.session_state[PIPELINE_RESULT_KEY] = view.result
+    else:
+        st.session_state[PIPELINE_RESULT_KEY] = None
+
+    if view.state == "cancelled":
+        st.session_state[ANALYSIS_NOTICE_KEY] = (
+            view.cleanup_warning
+            or (
+                "Analysis cancelled. Temporary uploads and draft "
+                "outputs were removed."
+            )
+        )
+        st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = (
+            "warning" if view.cleanup_warning else "info"
+        )
+    elif view.state == "error":
+        st.session_state[ANALYSIS_NOTICE_KEY] = (
+            view.error_message
+            or "An unexpected internal error stopped the analysis."
+        )
+        st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"
+
+    st.session_state[ANALYSIS_JOB_KEY] = None
+    st.rerun()
+
+
+@st.fragment(run_every=0.5)
+def _render_analysis_job(job: AnalysisJob) -> None:
+    """Poll and render one cancellable background analysis."""
+
+    view = job.view()
+    if view.state in {"completed", "cancelled", "error"}:
+        _finish_analysis_job(job)
+
+    st.subheader("Analysis status")
+    result = view.latest_result
+    progress = result["progress_percent"] if result is not None else 0
+    progress_text = (
+        "Cancellation requested"
+        if view.state == "cancelling"
+        else (
+            f"{progress}% complete"
+            if result is not None
+            else "Preparing the analysis request"
+        )
     )
-    label, state, expanded = _result_status(result)
-    status.update(label=label, state=state, expanded=expanded)
-    _render_pipeline_issues(result)
-    return result
+    st.progress(progress, text=progress_text)
+    status = st.status(
+        (
+            "Cancelling analysis"
+            if view.state == "cancelling"
+            else "Analysis in progress"
+        ),
+        state="running",
+        expanded=True,
+    )
+    if result is not None:
+        _write_stage_records(status, result)
+    if view.state == "cancelling":
+        status.info(
+            "The current bounded operation will stop at the next safe "
+            "cancellation point."
+        )
+
+
+def _render_analysis_notice() -> None:
+    """Render and consume one terminal background-job notice."""
+
+    notice = st.session_state.get(ANALYSIS_NOTICE_KEY)
+    if not isinstance(notice, str) or not notice:
+        return
+    level = st.session_state.get(ANALYSIS_NOTICE_LEVEL_KEY, "info")
+    if level == "error":
+        st.error(notice)
+    elif level == "warning":
+        st.warning(notice)
+    else:
+        st.info(notice)
+    st.session_state[ANALYSIS_NOTICE_KEY] = None
 
 
 def render_app() -> None:
@@ -716,9 +780,14 @@ def render_app() -> None:
     _render_hpo_picker()
     st.divider()
 
+    _render_analysis_notice()
     pipeline_result: PipelineResult | None = None
     if submission is not None:
-        pipeline_result = _execute_submission(submission)
+        _start_submission(submission)
+        st.rerun()
+    analysis_job = _analysis_job()
+    if analysis_job is not None:
+        _render_analysis_job(analysis_job)
     elif st.session_state[PIPELINE_RESULT_KEY] is not None:
         pipeline_result = cast(
             PipelineResult,

@@ -1,4 +1,4 @@
-"""Bounded, offline PDF and Word exports for clinical Markdown reports."""
+"""Bounded, offline PDF and Word exports for clinical text reports."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ MAX_REPORT_EXPORT_OUTPUT_BYTES = 5 * 1024 * 1024
 DEFAULT_REPORT_TITLE = "Clinical Variant Interpretation Report"
 
 _HEADING_PATTERN = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
+_HEADING_UNDERLINE_PATTERN = re.compile(r"^([=\-~])\1{2,}$")
 _BULLET_PATTERN = re.compile(r"^\s*[-*+]\s+(.+?)\s*$")
 _CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MARKDOWN_ESCAPE_PATTERN = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>])")
@@ -46,17 +47,19 @@ class ReportExportError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ReportBlock:
-    """One normalized structural block from the generated Markdown."""
+    """One normalized structural block from the generated report."""
 
     kind: str
     text: str
     level: int = 0
 
 
-def _normalize_report_markdown(markdown: str) -> str:
-    if not isinstance(markdown, str):
+def _normalize_report_text(report_text: str) -> str:
+    if not isinstance(report_text, str):
         raise ReportExportError("Report content must be text.")
-    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = (
+        report_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    )
     if not normalized:
         raise ReportExportError("Report content is empty.")
     if len(normalized.encode("utf-8")) > MAX_REPORT_EXPORT_INPUT_BYTES:
@@ -76,7 +79,7 @@ def _plain_text(value: str) -> str:
     )
 
 
-def _parse_report_blocks(markdown: str) -> list[ReportBlock]:
+def _parse_report_blocks(report_text: str) -> list[ReportBlock]:
     blocks: list[ReportBlock] = []
     paragraph_lines: list[str] = []
 
@@ -90,11 +93,33 @@ def _parse_report_blocks(markdown: str) -> list[ReportBlock]:
             )
             paragraph_lines.clear()
 
-    for raw_line in markdown.splitlines():
+    lines = report_text.splitlines()
+    line_index = 0
+    while line_index < len(lines):
+        raw_line = lines[line_index]
         line = raw_line.strip()
         if not line:
             flush_paragraph()
+            line_index += 1
             continue
+        if line_index + 1 < len(lines):
+            underline = _HEADING_UNDERLINE_PATTERN.fullmatch(
+                lines[line_index + 1].strip()
+            )
+            if underline:
+                flush_paragraph()
+                level = {"=": 1, "-": 2, "~": 3}[
+                    underline.group(1)
+                ]
+                blocks.append(
+                    ReportBlock(
+                        kind="heading",
+                        text=_plain_text(line),
+                        level=level,
+                    )
+                )
+                line_index += 2
+                continue
         heading = _HEADING_PATTERN.match(line)
         if heading:
             flush_paragraph()
@@ -105,6 +130,7 @@ def _parse_report_blocks(markdown: str) -> list[ReportBlock]:
                     level=len(heading.group(1)),
                 )
             )
+            line_index += 1
             continue
         bullet = _BULLET_PATTERN.match(line)
         if bullet:
@@ -115,8 +141,10 @@ def _parse_report_blocks(markdown: str) -> list[ReportBlock]:
                     text=_plain_text(bullet.group(1)),
                 )
             )
+            line_index += 1
             continue
         paragraph_lines.append(line)
+        line_index += 1
 
     flush_paragraph()
     return blocks
@@ -153,13 +181,13 @@ def _pdf_footer(canvas: object, document: object) -> None:
 
 
 def render_report_pdf(
-    markdown: str,
+    report_text: str,
     *,
     title: str = DEFAULT_REPORT_TITLE,
 ) -> bytes:
-    """Render validated report Markdown as an in-memory PDF document."""
+    """Render validated report text as an in-memory PDF document."""
 
-    normalized = _normalize_report_markdown(markdown)
+    normalized = _normalize_report_text(report_text)
     blocks = _parse_report_blocks(normalized)
     output = BytesIO()
     document = SimpleDocTemplate(
@@ -359,13 +387,13 @@ def _configure_docx(document: Document) -> None:
 
 
 def render_report_docx(
-    markdown: str,
+    report_text: str,
     *,
     title: str = DEFAULT_REPORT_TITLE,
 ) -> bytes:
-    """Render validated report Markdown as an in-memory Word document."""
+    """Render validated report text as an in-memory Word document."""
 
-    normalized = _normalize_report_markdown(markdown)
+    normalized = _normalize_report_text(report_text)
     blocks = _parse_report_blocks(normalized)
     document = Document()
     _configure_docx(document)

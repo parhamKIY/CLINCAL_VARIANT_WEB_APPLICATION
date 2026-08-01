@@ -5,11 +5,14 @@ from __future__ import annotations
 import codecs
 import gzip
 import os
+import threading
 import zlib
+from copy import deepcopy
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Callable, Literal, Protocol
 
 from backend.pipeline import (
     PipelineProgressCallback,
@@ -27,6 +30,10 @@ class FrontendExecutionError(RuntimeError):
     """Raised when a frontend input cannot be prepared safely."""
 
 
+class AnalysisCancelled(BaseException):
+    """Stop one cooperative background analysis without error output."""
+
+
 class UploadedVCF(Protocol):
     """Minimal uploaded-file contract required by the execution bridge."""
 
@@ -41,6 +48,218 @@ MAX_UPLOAD_FILENAME_CHARACTERS = 255
 MAX_VCF_HEADER_BYTES = 1_000_000
 UPLOAD_VALIDATION_CHUNK_BYTES = 64 * 1024
 VCF_COLUMN_HEADER = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+
+AnalysisJobState = Literal[
+    "running",
+    "cancelling",
+    "cancelled",
+    "completed",
+    "error",
+]
+AnalysisRunner = Callable[
+    [PipelineProgressCallback],
+    PipelineResult,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisJobView:
+    """Thread-safe public view of one frontend analysis job."""
+
+    state: AnalysisJobState
+    latest_result: PipelineResult | None
+    result: PipelineResult | None
+    error_message: str | None
+    cleanup_warning: str | None
+
+
+def _existing_report_paths(
+    report_directory: Path,
+) -> frozenset[Path]:
+    """Snapshot existing managed reports before a cancellable run."""
+
+    try:
+        resolved_directory = report_directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return frozenset()
+    if (
+        not resolved_directory.is_dir()
+        or resolved_directory.is_symlink()
+    ):
+        return frozenset()
+
+    existing: set[Path] = set()
+    try:
+        candidates = resolved_directory.glob(
+            "clinical-report-*.txt"
+        )
+        for candidate in candidates:
+            if candidate.is_file() and not candidate.is_symlink():
+                existing.add(candidate.resolve(strict=True))
+    except (OSError, RuntimeError):
+        return frozenset()
+    return frozenset(existing)
+
+
+class AnalysisJob:
+    """Run one analysis in the background with cooperative cancellation."""
+
+    def __init__(
+        self,
+        runner: AnalysisRunner,
+        *,
+        report_dir: str | Path | None = None,
+    ) -> None:
+        self._runner = runner
+        self._report_directory = Path(
+            settings.REPORT_DIR if report_dir is None else report_dir
+        ).expanduser()
+        self._existing_reports = _existing_report_paths(
+            self._report_directory
+        )
+        self._cancel_event = threading.Event()
+        self._lock = threading.Lock()
+        self._state: AnalysisJobState = "running"
+        self._latest_result: PipelineResult | None = None
+        self._result: PipelineResult | None = None
+        self._error_message: str | None = None
+        self._cleanup_warning: str | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name="clinical-variant-analysis",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        """Start the background worker exactly once."""
+
+        self._thread.start()
+
+    def request_cancel(self) -> bool:
+        """Request cancellation while the job is still active."""
+
+        with self._lock:
+            if self._state not in {"running", "cancelling"}:
+                return False
+            if (
+                self._latest_result is not None
+                and self._latest_result["current_stage"] == "completed"
+            ):
+                return False
+            self._state = "cancelling"
+            self._cancel_event.set()
+            return True
+
+    def view(self) -> AnalysisJobView:
+        """Return an isolated snapshot safe for Streamlit rendering."""
+
+        with self._lock:
+            return AnalysisJobView(
+                state=self._state,
+                latest_result=deepcopy(self._latest_result),
+                result=deepcopy(self._result),
+                error_message=self._error_message,
+                cleanup_warning=self._cleanup_warning,
+            )
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for completion in tests or controlled shutdown paths."""
+
+        self._thread.join(timeout)
+
+    def _capture_progress(self, result: PipelineResult) -> None:
+        with self._lock:
+            self._latest_result = deepcopy(result)
+        if self._cancel_event.is_set():
+            raise AnalysisCancelled
+
+    def _cancelled_report_path(
+        self,
+        result: PipelineResult | None,
+    ) -> Path | None:
+        candidate_result = result
+        if candidate_result is None:
+            with self._lock:
+                candidate_result = deepcopy(self._latest_result)
+        if candidate_result is None:
+            return None
+        raw_path = candidate_result.get("report_path")
+        if not isinstance(raw_path, str) or not raw_path:
+            return None
+        return Path(raw_path)
+
+    def _remove_cancelled_report(
+        self,
+        result: PipelineResult | None,
+    ) -> str | None:
+        candidate = self._cancelled_report_path(result)
+        if candidate is None:
+            return None
+        try:
+            if candidate.is_symlink():
+                raise OSError
+            resolved_directory = self._report_directory.resolve(
+                strict=True
+            )
+            resolved_candidate = candidate.resolve(strict=True)
+            if resolved_candidate in self._existing_reports:
+                return None
+            if (
+                resolved_candidate.parent != resolved_directory
+                or resolved_candidate.suffix.casefold() != ".txt"
+                or not resolved_candidate.name.startswith(
+                    "clinical-report-"
+                )
+                or not resolved_candidate.is_file()
+            ):
+                raise OSError
+            resolved_candidate.unlink()
+        except (OSError, RuntimeError):
+            return (
+                "The analysis was cancelled, but one generated draft "
+                "could not be removed."
+            )
+        return None
+
+    def _mark_cancelled(
+        self,
+        result: PipelineResult | None = None,
+    ) -> None:
+        cleanup_warning = self._remove_cancelled_report(result)
+        with self._lock:
+            self._state = "cancelled"
+            self._latest_result = None
+            self._result = None
+            self._cleanup_warning = cleanup_warning
+
+    def _run(self) -> None:
+        try:
+            if self._cancel_event.is_set():
+                raise AnalysisCancelled
+            result = self._runner(self._capture_progress)
+            if self._cancel_event.is_set():
+                self._mark_cancelled(result)
+                return
+        except AnalysisCancelled:
+            self._mark_cancelled()
+            return
+        except FrontendExecutionError as exc:
+            with self._lock:
+                self._state = "error"
+                self._error_message = str(exc)
+            return
+        except Exception:
+            with self._lock:
+                self._state = "error"
+                self._error_message = (
+                    "An unexpected internal error stopped the analysis."
+                )
+            return
+
+        with self._lock:
+            self._state = "completed"
+            self._latest_result = deepcopy(result)
+            self._result = deepcopy(result)
 
 
 def _validate_upload_filename(filename: object) -> str:
@@ -312,6 +531,10 @@ def execute_analysis(
 
 
 __all__ = [
+    "AnalysisCancelled",
+    "AnalysisJob",
+    "AnalysisJobState",
+    "AnalysisJobView",
     "FrontendExecutionError",
     "UploadedVCF",
     "execute_analysis",

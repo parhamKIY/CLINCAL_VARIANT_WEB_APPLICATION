@@ -53,7 +53,8 @@ MAX_EVIDENCE_URL_LENGTH = 2_048
 MAX_CLINICAL_REPORT_REFERENCES = 50
 MAX_CLINICAL_INTERPRETATION_CHARS = 32_000
 MAX_CLINICAL_INTERPRETATION_SECTION_CHARS = 8_000
-MAX_CLINICAL_REPORT_MARKDOWN_BYTES = 256 * 1024
+MAX_CLINICAL_REPORT_TEXT_BYTES = 256 * 1024
+MAX_CLINICAL_REPORT_MARKDOWN_BYTES = MAX_CLINICAL_REPORT_TEXT_BYTES
 
 CLINICAL_DECISION_SUPPORT_NOTICE = (
     "AI-generated decision-support summary based only on the supplied "
@@ -1698,6 +1699,117 @@ def render_clinical_report_markdown(report_object: object) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+_MARKDOWN_FRAGMENT_ESCAPE_PATTERN = re.compile(
+    r"\\([\\`*_{}\[\]()#+\-.!>])"
+)
+_MARKDOWN_FRAGMENT_LINK_PATTERN = re.compile(
+    r"\[([^\]\n]+)\]\(([^)\n]+)\)"
+)
+
+
+def _markdown_fragment_to_plain_text(value: str) -> str:
+    """Convert validated report fragments into readable plain text."""
+
+    converted_lines: list[str] = []
+    for raw_line in value.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("### "):
+            title = line[4:].strip()
+            converted_lines.extend((title, "~" * len(title)))
+            continue
+        line = _MARKDOWN_FRAGMENT_LINK_PATTERN.sub(
+            r"\1 (\2)",
+            line,
+        )
+        line = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", line)
+        line = re.sub(r"__([^_\n]+)__", r"\1", line)
+        line = re.sub(r"`([^`\n]+)`", r"\1", line)
+        line = _MARKDOWN_FRAGMENT_ESCAPE_PATTERN.sub(r"\1", line)
+        converted_lines.append(line)
+    return "\n".join(converted_lines)
+
+
+def _render_report_references_text(
+    references: list[ClinicalReportReference],
+) -> str:
+    """Render deterministic references without Markdown escaping."""
+
+    return _markdown_fragment_to_plain_text(
+        _render_report_references(references)
+    )
+
+
+def render_clinical_report_text(report_object: object) -> str:
+    """Render one validated ClinicalReport as structured plain text."""
+
+    report = validate_clinical_report(report_object)
+    render_clinical_report_markdown(report)
+    title = "Clinical Variant Interpretation Report"
+    model = (
+        _markdown_fragment_to_plain_text(str(report["llm_model"]))
+        if report["llm_model"] is not None
+        else "Not available in the supplied evidence."
+    )
+    metadata_title = "Report metadata"
+    lines = [
+        title,
+        "=" * len(title),
+        "",
+        metadata_title,
+        "-" * len(metadata_title),
+        f"Report schema: {report['schema_version']}",
+        (
+            "Evidence schema: "
+            f"{report['source_evidence_schema_version']}"
+        ),
+        (
+            "Interpretation prompt: "
+            f"{report['interpretation_prompt_version']}"
+        ),
+        f"LLM model: {model}",
+        (
+            "Assembly: "
+            f"{_markdown_fragment_to_plain_text(report['assembly'])}"
+        ),
+    ]
+    for key, section_title in CLINICAL_REPORT_SECTION_ORDER:
+        lines.extend(
+            (
+                "",
+                section_title,
+                "-" * len(section_title),
+                "",
+            )
+        )
+        if key == "references":
+            lines.append(
+                _render_report_references_text(report["references"])
+            )
+        elif key == "disclaimer":
+            lines.append(report["disclaimer"])
+        else:
+            lines.append(
+                _markdown_fragment_to_plain_text(
+                    report["sections"][key]
+                )
+            )
+            if key == "limitations" and report["warnings"]:
+                warning_title = "Report warnings"
+                lines.extend(
+                    (
+                        "",
+                        warning_title,
+                        "~" * len(warning_title),
+                    )
+                )
+                lines.extend(
+                    "- "
+                    + _markdown_fragment_to_plain_text(warning)
+                    for warning in report["warnings"]
+                )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _report_filename(report: ClinicalReport) -> str:
     """Build a bounded deterministic filename from report content."""
 
@@ -1732,12 +1844,12 @@ def _report_filename(report: ClinicalReport) -> str:
         slug(variant["alt"], 16),
         digest,
     )
-    return f"clinical-report-{'-'.join(components)}.md"
+    return f"clinical-report-{'-'.join(components)}.txt"
 
 
 def _read_existing_report(
     target: Path,
-    expected_markdown: str,
+    expected_text: str,
 ) -> bool:
     """Return true for an identical file and reject unsafe collisions."""
 
@@ -1748,12 +1860,12 @@ def _read_existing_report(
             "The deterministic report target is not a regular file."
         )
     try:
-        existing_markdown = target.read_text(encoding="utf-8")
+        existing_text = target.read_text(encoding="utf-8")
     except OSError as exc:
         raise ClinicalReportStorageError(
             "The existing clinical report could not be read."
         ) from exc
-    if existing_markdown != expected_markdown:
+    if existing_text != expected_text:
         raise ClinicalReportStorageError(
             "A different file already exists at the deterministic "
             "clinical report path."
@@ -1766,17 +1878,17 @@ def save_clinical_report(
     *,
     report_dir: str | Path | None = None,
 ) -> Path:
-    """Atomically save deterministic UTF-8 Markdown without overwriting."""
+    """Atomically save deterministic UTF-8 text without overwriting."""
 
     report = validate_clinical_report(report_object)
-    markdown = render_clinical_report_markdown(report)
+    report_text = render_clinical_report_text(report)
     if (
-        len(markdown.encode("utf-8"))
-        > MAX_CLINICAL_REPORT_MARKDOWN_BYTES
+        len(report_text.encode("utf-8"))
+        > MAX_CLINICAL_REPORT_TEXT_BYTES
     ):
         raise ClinicalReportStorageError(
             "Rendered clinical report exceeds the maximum size of "
-            f"{MAX_CLINICAL_REPORT_MARKDOWN_BYTES} bytes."
+            f"{MAX_CLINICAL_REPORT_TEXT_BYTES} bytes."
         )
 
     destination = Path(
@@ -1812,7 +1924,7 @@ def save_clinical_report(
         raise ClinicalReportStorageError(
             "The clinical report path escaped its destination directory."
         )
-    if _read_existing_report(target, markdown):
+    if _read_existing_report(target, report_text):
         try:
             target.chmod(PRIVATE_FILE_MODE)
         except OSError as exc:
@@ -1833,7 +1945,7 @@ def save_clinical_report(
             dir=destination,
             delete=False,
         ) as temporary_file:
-            temporary_file.write(markdown)
+            temporary_file.write(report_text)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
             temporary_path = Path(temporary_file.name)
@@ -1843,7 +1955,7 @@ def save_clinical_report(
             os.link(temporary_path, target)
             target_created = True
         except FileExistsError:
-            if not _read_existing_report(target, markdown):
+            if not _read_existing_report(target, report_text):
                 raise ClinicalReportStorageError(
                     "The clinical report target could not be published."
                 )

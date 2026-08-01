@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from backend.pipeline import PipelineResult
-from backend.report import MAX_CLINICAL_REPORT_MARKDOWN_BYTES
+from backend.report import MAX_CLINICAL_REPORT_TEXT_BYTES
 from backend.report_exports import (
     ReportExportError,
     render_report_docx,
@@ -26,7 +26,7 @@ class ReportDocument:
     """Bounded report contents prepared for viewing and download."""
 
     filename: str
-    markdown: str
+    text: str
     data: bytes
 
 
@@ -35,7 +35,7 @@ def load_report_document(
     *,
     report_dir: str | Path | None = None,
 ) -> ReportDocument:
-    """Load one UTF-8 Markdown report confined to the report directory."""
+    """Load one UTF-8 text report confined to the report directory."""
 
     allowed_directory = (
         Path(report_dir)
@@ -52,10 +52,10 @@ def load_report_document(
     if (
         not resolved_path.is_relative_to(allowed_directory)
         or not resolved_path.is_file()
-        or resolved_path.suffix.casefold() != ".md"
+        or resolved_path.suffix.casefold() != ".txt"
     ):
         raise ReportViewerError(
-            "The generated report path is not an approved Markdown file."
+            "The generated report path is not an approved text file."
         )
 
     try:
@@ -67,21 +67,23 @@ def load_report_document(
 
     if not report_data:
         raise ReportViewerError("The generated report is empty.")
-    if len(report_data) > MAX_CLINICAL_REPORT_MARKDOWN_BYTES:
+    if len(report_data) > MAX_CLINICAL_REPORT_TEXT_BYTES:
         raise ReportViewerError(
             "The generated report exceeds the display size limit."
         )
     try:
-        markdown = report_data.decode("utf-8")
+        report_text = report_data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ReportViewerError(
             "The generated report is not valid UTF-8 text."
         ) from exc
-    markdown = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    report_text = (
+        report_text.replace("\r\n", "\n").replace("\r", "\n")
+    )
 
     return ReportDocument(
         filename=resolved_path.name,
-        markdown=markdown,
+        text=report_text,
         data=report_data,
     )
 
@@ -106,14 +108,14 @@ def render_report_viewer(result: PipelineResult) -> None:
     with st.container(border=True):
         st.caption(f"Generated report: {report.filename}")
         try:
-            pdf_data = render_report_pdf(report.markdown)
-            docx_data = render_report_docx(report.markdown)
+            pdf_data = render_report_pdf(report.text)
+            docx_data = render_report_docx(report.text)
         except ReportExportError:
             pdf_data = None
             docx_data = None
             st.warning(
                 "PDF and Word exports are temporarily unavailable. "
-                "The Markdown report remains available."
+                "The text report remains available."
             )
 
         with st.container(
@@ -122,11 +124,11 @@ def render_report_viewer(result: PipelineResult) -> None:
             gap="small",
         ):
             st.download_button(
-                "Download Markdown",
+                "Download text",
                 data=report.data,
                 file_name=report.filename,
-                mime="text/markdown",
-                key="download_clinical_report_markdown",
+                mime="text/plain",
+                key="download_clinical_report_text",
                 icon=":material/download:",
                 on_click="ignore",
             )
@@ -159,15 +161,15 @@ def render_report_viewer(result: PipelineResult) -> None:
                     on_click="ignore",
                 )
         st.divider()
-        st.markdown(report.markdown)
+        st.markdown(report.text)
 
     with st.expander(
-        "Markdown source",
-        icon=":material/code:",
+        "Plain-text source",
+        icon=":material/text_snippet:",
     ):
         st.code(
-            report.markdown,
-            language="markdown",
+            report.text,
+            language="text",
             wrap_lines=True,
         )
 

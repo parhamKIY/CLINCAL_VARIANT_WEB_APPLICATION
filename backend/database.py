@@ -14,7 +14,7 @@ from typing import TypedDict
 from uuid import uuid4
 
 from backend.report import (
-    MAX_CLINICAL_REPORT_MARKDOWN_BYTES,
+    MAX_CLINICAL_REPORT_TEXT_BYTES,
     MAX_EVIDENCE_ALLELE_LENGTH,
     EvidenceObject,
     EvidenceObjectError,
@@ -59,7 +59,8 @@ _CANDIDATE_ALLOWED_FIELDS = frozenset(
     }
 )
 _REPORT_FILENAME_PATTERN = re.compile(
-    r"clinical-report-[A-Za-z0-9][A-Za-z0-9.-]{0,239}\.md"
+    r"clinical-report-[A-Za-z0-9][A-Za-z0-9.-]{0,239}"
+    r"\.(?:txt|md)"
 )
 DATABASE_TABLES = {
     "analyses": (
@@ -944,14 +945,14 @@ def _validate_report_reference(
         is None
     ):
         raise DatabaseValidationError(
-            "Report references must point to a generated Markdown "
+            "Report references must point to a generated report "
             "file directly inside the configured report directory."
         )
 
     try:
         with resolved_path.open("rb") as report_file:
             report_data = report_file.read(
-                MAX_CLINICAL_REPORT_MARKDOWN_BYTES + 1
+                MAX_CLINICAL_REPORT_TEXT_BYTES + 1
             )
     except OSError as exc:
         raise DatabaseValidationError(
@@ -961,7 +962,7 @@ def _validate_report_reference(
         raise DatabaseValidationError(
             "The generated report file is empty."
         )
-    if len(report_data) > MAX_CLINICAL_REPORT_MARKDOWN_BYTES:
+    if len(report_data) > MAX_CLINICAL_REPORT_TEXT_BYTES:
         raise DatabaseValidationError(
             "The generated report file exceeds the storage limit."
         )
