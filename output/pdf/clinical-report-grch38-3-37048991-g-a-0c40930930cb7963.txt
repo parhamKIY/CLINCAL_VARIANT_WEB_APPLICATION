@@ -1,0 +1,116 @@
+Clinical Variant Interpretation Report
+======================================
+
+Report metadata
+---------------
+Report schema: 1.0
+Evidence schema: 1.0
+Interpretation prompt: 1.1
+LLM model: gemini-3.1-flash-lite
+Assembly: GRCh38
+
+Case Summary
+------------
+
+- Provided HPO terms: HP:0002315
+- Matched HPO terms: HP:0002315
+
+Variant Summary
+---------------
+
+- Assembly: GRCh38
+- Variant: 3:37048991 G>A
+- Population frequency: Not available in the supplied evidence.
+
+Gene and Consequence
+--------------------
+
+- Gene: MLH1
+- Gene ID: ENSG00000076242
+- Transcript: ENST00000231790
+- Consequence: missense_variant
+- Impact: MODERATE
+- Protein change: ENSP00000231790.3:p.Glu693Lys
+
+Clinical Evidence
+-----------------
+
+ClinVar
+~~~~~~~
+- Accession: Not available in the supplied evidence.
+- Clinical significance: Not available in the supplied evidence.
+- Review status: Not available in the supplied evidence.
+- Conditions: Not available in the supplied evidence.
+
+ClinGen
+~~~~~~~
+- Disease: Lynch syndrome; Disease ID: MONDO:0005835; Classification: Definitive; Mode of inheritance: Autosomal dominant
+- Disease: mismatch repair cancer syndrome 1; Disease ID: MONDO:0010159; Classification: Definitive; Mode of inheritance: Autosomal recessive
+- Disease: hereditary breast carcinoma; Disease ID: MONDO:0016419; Classification: Refuted Evidence; Mode of inheritance: Autosomal dominant
+
+Phenotype Correlation
+---------------------
+
+- Phenotype score: 1
+- Provided HPO terms: HP:0002315
+- Matched HPO terms: HP:0002315
+
+Interpretation
+--------------
+
+The provided evidence identifies the *MLH1* gene as having a definitive role in Lynch syndrome and mismatch repair cancer syndrome 1. However, the evidence does not contain a specific functional or clinical classification for the *MLH1* p.Glu693Lys variant itself.
+
+Limitations
+-----------
+
+* No specific variant-level classification (e.g., pathogenic/benign) is available in the provided evidence.
+* NCBI ClinVar did not return an exact result for this variant.
+* Population frequency data is not available.
+
+Evidence source availability
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- vep: success
+- myvariant: success
+- clinvar: not_found
+- clingen: success
+
+Report warnings
+~~~~~~~~~~~~~~~
+- NCBI ClinVar returned no exact result for this variant.
+
+References
+----------
+
+- Ensembl VEP — https://rest.ensembl.org/vep/homo_sapiens/region
+- MyVariant.info — https://myvariant.info/v1/variant/chr3%3Ag.37048991G%3EA?assembly=hg38
+- ClinGen Gene-Disease Validity via UCSC GenCC — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_24c5d3f4-2bb6-4beb-a781-52bd6962ca41-2022-06-20T17:00:00.000Z
+- ClinGen Gene-Disease Validity via UCSC GenCC — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_a313ad2e-5c2a-4bb4-bed4-3b4f9b5095df-2018-10-09T15:06:23.105Z
+- ClinGen Gene-Disease Validity via UCSC GenCC — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_c27a22e4-fc45-4888-8b1d-625bc649697c-2023-12-21T18:00:00.000Z
+- ClinGen — MONDO:0005835 — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_24c5d3f4-2bb6-4beb-a781-52bd6962ca41-2022-06-20T17:00:00.000Z
+- PubMed — PMID:8673133
+- PubMed — PMID:10096563
+- PubMed — PMID:18566915
+- PubMed — PMID:24802709
+- PubMed — PMID:33335961
+- ClinGen — MONDO:0010159 — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_a313ad2e-5c2a-4bb4-bed4-3b4f9b5095df-2018-10-09T15:06:23.105Z
+- PubMed — PMID:9500552
+- PubMed — PMID:9927033
+- PubMed — PMID:9927034
+- PubMed — PMID:10763829
+- PubMed — PMID:11389087
+- PubMed — PMID:11809679
+- PubMed — PMID:14762794
+- PubMed — PMID:15139004
+- PubMed — PMID:15340263
+- PubMed — PMID:17440981
+- PubMed — PMID:18593904
+- PubMed — PMID:22692065
+- ClinGen — MONDO:0016419 — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_c27a22e4-fc45-4888-8b1d-625bc649697c-2023-12-21T18:00:00.000Z
+- PubMed — PMID:28418444
+- PubMed — PMID:33471991
+- PubMed — PMID:35172496
+
+Medical Disclaimer
+------------------
+
+AI-generated decision-support summary based only on the supplied Evidence Object. It is not a diagnosis or treatment recommendation and requires review by a qualified healthcare professional.

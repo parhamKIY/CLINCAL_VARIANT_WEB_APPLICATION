@@ -1,0 +1,117 @@
+Clinical Variant Interpretation Report
+======================================
+
+Report metadata
+---------------
+Report schema: 1.0
+Evidence schema: 1.0
+Interpretation prompt: 1.1
+LLM model: gpt-5.4-mini
+Assembly: GRCh38
+
+Case Summary
+------------
+
+- Provided HPO terms: HP:0034270
+- Matched HPO terms: Not available in the supplied evidence.
+
+Variant Summary
+---------------
+
+- Assembly: GRCh38
+- Variant: MT:14560 G>C
+- Population frequency: Not available in the supplied evidence.
+
+Gene and Consequence
+--------------------
+
+- Gene: MT-ND6
+- Gene ID: ENSG00000198695
+- Transcript: ENST00000361681
+- Consequence: synonymous_variant
+- Impact: LOW
+- Protein change: ENSP00000354665.2:p.Val38=
+
+Clinical Evidence
+-----------------
+
+ClinVar
+~~~~~~~
+- Accession: Not available in the supplied evidence.
+- Clinical significance: Not available in the supplied evidence.
+- Review status: Not available in the supplied evidence.
+- Conditions: Not available in the supplied evidence.
+
+ClinGen
+~~~~~~~
+- Disease: Leigh syndrome; Disease ID: MONDO:0009723; Classification: Definitive; Mode of inheritance: Mitochondrial
+- Disease: mitochondrial disease; Disease ID: MONDO:0044970; Classification: Definitive; Mode of inheritance: Mitochondrial
+
+Phenotype Correlation
+---------------------
+
+- Phenotype score: 0
+- Provided HPO terms: HP:0034270
+- Matched HPO terms: Not available in the supplied evidence.
+
+Interpretation
+--------------
+
+- The evidence object provides gene-disease validity evidence for MT-ND6, but it does not provide a variant-specific clinical classification for this MT-ND6 synonymous variant.
+- ClinVar and MyVariant.info returned no exact result for this variant.
+- Based on the supplied evidence alone, a definitive variant interpretation is unsupported.
+
+Limitations
+-----------
+
+- Variant-specific pathogenicity evidence is not provided.
+- No ClinVar accession, review status, or significance is available.
+- No population frequency is available.
+- The meaning of HP:0034270 is not expanded in the supplied evidence.
+- Warnings note that MyVariant.info and NCBI ClinVar returned no exact result for this variant.
+
+Evidence source availability
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- vep: success
+- myvariant: not_found
+- clinvar: not_found
+- clingen: success
+
+Report warnings
+~~~~~~~~~~~~~~~
+- MyVariant.info returned no exact result for this variant.
+- NCBI ClinVar returned no exact result for this variant.
+
+References
+----------
+
+- Ensembl VEP — https://rest.ensembl.org/vep/homo_sapiens/region
+- ClinGen Gene-Disease Validity via UCSC GenCC — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_836f975f-27f5-47c9-a58e-35089b6b39e6-2021-05-17T04:00:00.000Z
+- ClinGen Gene-Disease Validity via UCSC GenCC — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_7f581c96-e3cc-49bb-aa2b-98650efa4157-2023-05-03T16:00:00.000Z
+- ClinGen — MONDO:0009723 — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_836f975f-27f5-47c9-a58e-35089b6b39e6-2021-05-17T04:00:00.000Z
+- PubMed — PMID:8622678
+- PubMed — PMID:10894222
+- PubMed — PMID:14595656
+- PubMed — PMID:14684687
+- PubMed — PMID:15576045
+- PubMed — PMID:17535832
+- PubMed — PMID:19062322
+- PubMed — PMID:19103152
+- PubMed — PMID:20019223
+- PubMed — PMID:21196529
+- PubMed — PMID:21749722
+- PubMed — PMID:23129651
+- PubMed — PMID:23813926
+- PubMed — PMID:25356405
+- PubMed — PMID:27509854
+- PubMed — PMID:33536343
+- ClinGen — MONDO:0044970 — https://search.clinicalgenome.org/kb/gene-validity/CGGV:assertion_7f581c96-e3cc-49bb-aa2b-98650efa4157-2023-05-03T16:00:00.000Z
+- PubMed — PMID:2018041
+- PubMed — PMID:11133798
+- PubMed — PMID:21364701
+- PubMed — PMID:30741831
+
+Medical Disclaimer
+------------------
+
+AI-generated decision-support summary based only on the supplied Evidence Object. It is not a diagnosis or treatment recommendation and requires review by a qualified healthcare professional.
