@@ -767,8 +767,23 @@ class TestStage15NetworkRuntimeSecurity:
         assert server["maxMessageSize"] == 25
         assert server["enableStaticServing"] is False
         assert client["showErrorDetails"] == "none"
-        assert client["toolbarMode"] == "minimal"
+        assert client["toolbarMode"] == "viewer"
         assert browser["gatherUsageStats"] is False
+
+    def test_streamlit_offers_light_and_dark_themes(self) -> None:
+        with (
+            PROJECT_ROOT / ".streamlit" / "config.toml"
+        ).open("rb") as stream:
+            configuration = tomllib.load(stream)
+
+        light_theme = configuration["theme"]["light"]
+        dark_theme = configuration["theme"]["dark"]
+        assert light_theme["backgroundColor"] == "#FFFFFF"
+        assert light_theme["textColor"] == "#17324D"
+        assert dark_theme["backgroundColor"] == "#0D1117"
+        assert dark_theme["textColor"] == "#E6EDF3"
+        assert "sidebar" in light_theme
+        assert "sidebar" in dark_theme
 
     def test_app_validates_configuration_before_starting_ui(
         self,

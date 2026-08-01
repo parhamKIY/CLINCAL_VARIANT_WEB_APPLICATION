@@ -1,10 +1,35 @@
 [theme]
-base = "light"
+font = "sans serif"
+baseRadius = "medium"
+buttonRadius = "medium"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
 primaryColor = "#2B6F93"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F7FAFB"
 textColor = "#17324D"
-font = "sans serif"
+borderColor = "#D7E2E8"
+
+[theme.dark]
+primaryColor = "#58A6FF"
+backgroundColor = "#0D1117"
+secondaryBackgroundColor = "#161B22"
+textColor = "#E6EDF3"
+borderColor = "#344657"
+
+[theme.light.sidebar]
+backgroundColor = "#F7FAFB"
+secondaryBackgroundColor = "#EDF3F6"
+textColor = "#17324D"
+borderColor = "#D7E2E8"
+
+[theme.dark.sidebar]
+backgroundColor = "#0A0F14"
+secondaryBackgroundColor = "#161B22"
+textColor = "#E6EDF3"
+borderColor = "#344657"
 
 [server]
 headless = true
@@ -17,7 +42,7 @@ enableStaticServing = false
 
 [client]
 showErrorDetails = "none"
-toolbarMode = "minimal"
+toolbarMode = "viewer"
 
 [browser]
 gatherUsageStats = false

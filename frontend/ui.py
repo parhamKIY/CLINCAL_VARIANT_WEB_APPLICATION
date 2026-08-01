@@ -215,6 +215,21 @@ def _load_styles() -> None:
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
+def _render_appearance_status() -> None:
+    """Show where the native per-user light/dark selector lives."""
+
+    st.subheader("Appearance")
+    st.badge(
+        "Light / Dark",
+        icon=":material/contrast:",
+        color="blue",
+    )
+    st.caption(
+        "Switch between Light and Dark from the app menu: "
+        "⋮ → Settings → Theme."
+    )
+
+
 def _render_workflow_overview() -> None:
     """Show the backend stages the frontend will orchestrate."""
 
@@ -769,6 +784,8 @@ def render_app() -> None:
         st.write(settings.APP_NAME)
         st.caption(f"Genome assembly: {settings.GENOME_ASSEMBLY}")
         st.caption("Pipeline: ready")
+        st.divider()
+        _render_appearance_status()
         st.divider()
         _render_hpo_update_control()
 
