@@ -4,6 +4,7 @@ import math
 import re
 import time
 from collections.abc import Iterable, Iterator
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
 from urllib.parse import quote
@@ -28,6 +29,7 @@ MAX_CLINGEN_PMIDS = 50
 CLINVAR_REQUEST_INTERVAL = 0.34
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
+VEP_PROVIDER_NAME = "Ensembl VEP"
 MYVARIANT_ASSEMBLIES = {
     "GRCh37": "hg19",
     "GRCh38": "hg38",
@@ -1229,25 +1231,89 @@ def _extract_response_token(response: dict[str, Any]) -> str | None:
     return fields[2]
 
 
+def _retrieval_timestamp() -> str:
+    """Return one UTC timestamp for provider provenance."""
+
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _optional_text(value: Any) -> str | None:
+    """Normalize one optional provider string."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _optional_score(value: Any) -> float | None:
+    """Normalize one optional finite predictor score."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        return None
+    return float(value)
+
+
+def _clean_predictors(
+    transcript: dict[str, Any],
+) -> dict[str, dict[str, str | float | None]]:
+    """Keep only enabled VEP predictor results with explicit missingness."""
+
+    predictors: dict[str, dict[str, str | float | None]] = {}
+    for predictor in ("sift", "polyphen"):
+        prediction = _optional_text(
+            transcript.get(f"{predictor}_prediction")
+        )
+        score = _optional_score(
+            transcript.get(f"{predictor}_score")
+        )
+        if prediction is not None or score is not None:
+            predictors[predictor] = {
+                "prediction": prediction,
+                "score": score,
+            }
+    return predictors
+
+
 def _clean_transcript(
     transcript: dict[str, Any],
 ) -> dict[str, Any]:
     """Keep only transcript evidence used by later pipeline stages."""
-    consequence_terms = transcript.get("consequence_terms")
-    if not isinstance(consequence_terms, list):
-        consequence_terms = []
+    raw_consequence_terms = transcript.get("consequence_terms")
+    consequence_terms = (
+        [
+            term.strip()
+            for term in raw_consequence_terms
+            if isinstance(term, str) and term.strip()
+        ]
+        if isinstance(raw_consequence_terms, list)
+        else []
+    )
 
     return {
-        "gene_symbol": transcript.get("gene_symbol"),
-        "gene_id": transcript.get("gene_id"),
-        "transcript_id": transcript.get("transcript_id"),
-        "biotype": transcript.get("biotype"),
+        "gene_symbol": _optional_text(transcript.get("gene_symbol")),
+        "gene_id": _optional_text(transcript.get("gene_id")),
+        "transcript_id": _optional_text(
+            transcript.get("transcript_id")
+        ),
+        "biotype": _optional_text(transcript.get("biotype")),
         "consequence_terms": consequence_terms,
-        "impact": transcript.get("impact"),
-        "hgvsc": transcript.get("hgvsc"),
-        "hgvsp": transcript.get("hgvsp"),
+        "impact": _optional_text(transcript.get("impact")),
+        "hgvsc": _optional_text(transcript.get("hgvsc")),
+        "hgvsp": _optional_text(transcript.get("hgvsp")),
         "canonical": transcript.get("canonical") == 1,
-        "mane_select": transcript.get("mane_select"),
+        "mane_select": _optional_text(transcript.get("mane_select")),
+        "mane_plus_clinical": _optional_text(
+            transcript.get("mane_plus_clinical")
+        ),
+        "predictors": _clean_predictors(transcript),
     }
 
 
@@ -1315,6 +1381,7 @@ def _base_annotation(
     *,
     status: str,
     warning: str | None = None,
+    retrieved_at: str | None = None,
 ) -> AnnotationData:
     """Build a stable annotation object for success or failure states."""
     warnings_list = [warning] if warning else []
@@ -1327,11 +1394,21 @@ def _base_annotation(
         "transcript": None,
         "consequence": None,
         "impact": None,
+        "hgvsc": None,
+        "hgvsp": None,
         "protein_change": None,
+        "is_canonical": None,
+        "mane_select": None,
+        "mane_plus_clinical": None,
+        "predictors": {},
         "population_frequency": None,
         "sources": {
             "vep": {
                 "status": status,
+                "provider": VEP_PROVIDER_NAME,
+                "provider_version": None,
+                "retrieved_at": retrieved_at or _retrieval_timestamp(),
+                "assembly": settings.GENOME_ASSEMBLY,
                 "most_severe_consequence": None,
                 "transcript_consequences": [],
                 "total_transcript_consequences": 0,
@@ -1428,6 +1505,9 @@ def _standardize_vep_response(
     annotation["consequence"] = most_severe
     annotation["sources"]["vep"].update(
         {
+            "provider_version": _optional_text(
+                response.get("version")
+            ),
             "most_severe_consequence": most_severe,
             "transcript_consequences": stored_transcripts,
             "total_transcript_consequences": len(
@@ -1455,7 +1535,17 @@ def _standardize_vep_response(
             "gene_id": representative.get("gene_id"),
             "transcript": representative.get("transcript_id"),
             "impact": representative.get("impact"),
+            "hgvsc": representative.get("hgvsc"),
+            "hgvsp": representative.get("hgvsp"),
             "protein_change": representative.get("hgvsp"),
+            "is_canonical": representative.get("canonical"),
+            "mane_select": representative.get("mane_select"),
+            "mane_plus_clinical": representative.get(
+                "mane_plus_clinical"
+            ),
+            "predictors": dict(
+                representative.get("predictors", {})
+            ),
         }
     )
     return annotation

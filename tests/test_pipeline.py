@@ -2785,6 +2785,12 @@ class TestAnnotation:
                     "hgvsc": "ENST000001:c.100A>G",
                     "hgvsp": "ENSP000001:p.Lys34Arg",
                     "canonical": 1,
+                    "mane_select": "NM_000001.2",
+                    "mane_plus_clinical": "NM_000001.3",
+                    "sift_prediction": "deleterious",
+                    "sift_score": 0.01,
+                    "polyphen_prediction": "probably_damaging",
+                    "polyphen_score": 0.99,
                 }
             ],
         }
@@ -2966,9 +2972,35 @@ class TestAnnotation:
         assert annotations[0]["transcript"] == "ENST000001"
         assert annotations[0]["consequence"] == "missense_variant"
         assert annotations[0]["impact"] == "MODERATE"
+        assert annotations[0]["hgvsc"] == "ENST000001:c.100A>G"
+        assert annotations[0]["hgvsp"] == "ENSP000001:p.Lys34Arg"
         assert annotations[0]["protein_change"] == "ENSP000001:p.Lys34Arg"
-        assert annotations[0]["sources"]["vep"]["status"] == "success"
-        assert "input" not in annotations[0]["sources"]["vep"]
+        assert annotations[0]["is_canonical"] is True
+        assert annotations[0]["mane_select"] == "NM_000001.2"
+        assert (
+            annotations[0]["mane_plus_clinical"]
+            == "NM_000001.3"
+        )
+        assert annotations[0]["predictors"] == {
+            "sift": {
+                "prediction": "deleterious",
+                "score": 0.01,
+            },
+            "polyphen": {
+                "prediction": "probably_damaging",
+                "score": 0.99,
+            },
+        }
+        vep = annotations[0]["sources"]["vep"]
+        assert vep["status"] == "success"
+        assert vep["provider"] == "Ensembl VEP"
+        assert vep["provider_version"] is None
+        assert vep["assembly"] == "GRCh38"
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+            vep["retrieved_at"],
+        )
+        assert "input" not in vep
         assert session.post_calls[0]["verify"] is True
         assert session.post_calls[0]["params"] == {
             "canonical": 1,
@@ -3054,6 +3086,8 @@ class TestAnnotation:
 
         assert annotation["assembly"] == "GRCh37"
         assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["vep"]["assembly"] == "GRCh37"
+        assert "mane" not in session.post_calls[0]["params"]
         assert (
             session.myvariant_get_calls[0]["params"]["assembly"]
             == "hg19"
@@ -3743,7 +3777,13 @@ class TestAnnotation:
             "transcript",
             "consequence",
             "impact",
+            "hgvsc",
+            "hgvsp",
             "protein_change",
+            "is_canonical",
+            "mane_select",
+            "mane_plus_clinical",
+            "predictors",
             "population_frequency",
             "sources",
             "references",
@@ -3937,6 +3977,15 @@ class TestAnnotation:
 
         assert annotations[0]["sources"]["vep"]["status"] == "error"
         assert "request failed" in annotations[0]["warnings"][0]
+        assert (
+            annotations[0]["sources"]["vep"]["provider"]
+            == "Ensembl VEP"
+        )
+        assert (
+            annotations[0]["sources"]["vep"]["provider_version"]
+            is None
+        )
+        assert annotations[0]["sources"]["vep"]["retrieved_at"]
 
     def test_http_error_does_not_stop_the_pipeline(self) -> None:
         session = FakeSession(
@@ -3952,6 +4001,33 @@ class TestAnnotation:
         assert len(annotations) == 1
         assert annotations[0]["sources"]["vep"]["status"] == "error"
         assert "HTTP 400" in annotations[0]["warnings"][0]
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_warning"),
+        [
+            (ValueError("invalid JSON"), "invalid JSON"),
+            ({}, "unexpected response structure"),
+            ([None], "unexpected response structure"),
+        ],
+    )
+    def test_invalid_vep_response_returns_structured_error(
+        self,
+        payload: object,
+        expected_warning: str,
+    ) -> None:
+        session = FakeSession([FakeResponse(200, payload)])
+
+        annotations = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )
+
+        assert annotations[0]["sources"]["vep"]["status"] == "error"
+        assert any(
+            expected_warning in warning
+            for warning in annotations[0]["warnings"]
+        )
 
     def test_empty_vep_response_is_marked_not_found(self) -> None:
         session = FakeSession([FakeResponse(200, [])])

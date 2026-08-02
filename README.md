@@ -71,6 +71,21 @@ flowchart LR
 
 ---
 
+## API-first continuation
+
+Stage 16 remains the verified implementation baseline. The API-first
+continuation is a migration plan, not a description of features that already
+exist. The repository audit and the exact `KEEP`, `MODIFY`, `BYPASS`,
+`VERIFY`, and `NEW` boundaries are recorded in
+[`docs/STAGE_19_REPOSITORY_REALITY_CHECK.md`](docs/STAGE_19_REPOSITORY_REALITY_CHECK.md).
+
+The target contract will require exactly five independently interpreted
+variants and two report views. The current contract still accepts one to five
+filtered source rows, builds Evidence Objects for every resulting allele, and
+generates one LLM interpretation and one report for the first allele.
+
+---
+
 ## Current implementation status
 
 - Central configuration is loaded from `.env` through `config.py`.
@@ -164,8 +179,10 @@ NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 - NCBI E-utility requests limited to fewer than three requests per second;
 - request timeout and limited retries for transient failures;
 - structured per-variant error output without stopping the whole pipeline;
-- cleaned transcript, gene, consequence, impact, HGVS protein change, and
-  source-reference fields;
+- cleaned transcript, gene, consequence, impact, HGVSc, HGVSp, canonical,
+  MANE Select, MANE Plus Clinical, and available SIFT/PolyPhen fields;
+- explicit VEP provider, assembly, retrieval time, and nullable provider
+  version metadata for success, missing, and failure outcomes;
 - standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
 - standardized ClinVar VCV/RCV/SCV accessions, germline clinical
   significance, review status, evaluation date, and conditions;
@@ -174,6 +191,9 @@ NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
   criteria URL, PMID, and report fields;
 - unified multi-source output with independent failure isolation;
 - no raw API response is passed to later pipeline stages.
+
+The Stage 22 verification and exact schema additions are recorded in
+[`docs/STAGE_22_VEP_ANNOTATION_HARDENING.md`](docs/STAGE_22_VEP_ANNOTATION_HARDENING.md).
 
 Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks
 through the production annotation path:
