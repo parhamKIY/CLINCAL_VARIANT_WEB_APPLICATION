@@ -107,6 +107,16 @@ def _genebe_fields(
     )
 
 
+def _cspec_fields(
+    annotation: dict[str, object],
+) -> tuple[object, object]:
+    """Extract CSpec availability without interpreting rule content."""
+
+    sources = _dictionary(annotation.get("sources"))
+    cspec = _dictionary(sources.get("cspec"))
+    return cspec.get("status"), cspec.get("specification_count", 0)
+
+
 def build_annotation_rows(
     annotations: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -118,6 +128,7 @@ def build_annotation_rows(
         genebe_status, genebe_classification = _genebe_fields(
             annotation
         )
+        cspec_status, cspec_count = _cspec_fields(annotation)
         warnings = annotation.get("warnings")
         rows.append(
             {
@@ -135,6 +146,8 @@ def build_annotation_rows(
                 ),
                 "ClinVar accession": accession,
                 "ClinVar significance": significance,
+                "CSpec status": cspec_status,
+                "CSpec specifications": cspec_count,
                 "Warnings": (
                     len(warnings) if isinstance(warnings, list) else 0
                 ),
@@ -253,6 +266,8 @@ def _render_annotation_table(result: PipelineResult) -> None:
             "Population frequency",
             "ClinVar accession",
             "ClinVar significance",
+            "CSpec status",
+            "CSpec specifications",
             "Warnings",
         ),
         column_config={
@@ -260,6 +275,9 @@ def _render_annotation_table(result: PipelineResult) -> None:
                 format="%.6g"
             ),
             "Warnings": st.column_config.NumberColumn(format="%d"),
+            "CSpec specifications": st.column_config.NumberColumn(
+                format="%d"
+            ),
         },
     )
 

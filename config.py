@@ -197,6 +197,11 @@ class Settings:
         "https://genome-euro.ucsc.edu/cgi-bin/hubApi",
     ).strip().rstrip("/")
 
+    CSPEC_BASE_URL: str = os.getenv(
+        "CSPEC_BASE_URL",
+        "https://cspec.clinicalgenome.org/cspec",
+    ).strip().rstrip("/")
+
     HPO_ONTOLOGY_URL: str = os.getenv(
         "HPO_ONTOLOGY_URL",
         "https://purl.obolibrary.org/obo/hp.obo",
@@ -352,6 +357,7 @@ class Settings:
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
+            "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
             "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (
                 cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE

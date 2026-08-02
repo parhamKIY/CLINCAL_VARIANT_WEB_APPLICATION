@@ -456,6 +456,10 @@ class TestConfiguration:
                 "CLINVAR_BASE_URL",
                 "https://clinvar.example/api#fragment",
             ),
+            (
+                "CSPEC_BASE_URL",
+                "http://cspec.example/api",
+            ),
         ],
     )
     def test_external_service_urls_reject_unsafe_transport_metadata(
@@ -909,12 +913,14 @@ class FakeSession:
         get_responses: list[object] | None = None,
         clinvar_responses: list[object] | None = None,
         clingen_responses: list[object] | None = None,
+        cspec_responses: list[object] | None = None,
     ) -> None:
         self.responses = list(responses)
         self.genebe_responses = list(genebe_responses or [])
         self.get_responses = list(get_responses or [])
         self.clinvar_responses = list(clinvar_responses or [])
         self.clingen_responses = list(clingen_responses or [])
+        self.cspec_responses = list(cspec_responses or [])
         self.calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
         self.genebe_post_calls: list[dict[str, object]] = []
@@ -922,6 +928,7 @@ class FakeSession:
         self.myvariant_get_calls: list[dict[str, object]] = []
         self.clinvar_get_calls: list[dict[str, object]] = []
         self.clingen_get_calls: list[dict[str, object]] = []
+        self.cspec_get_calls: list[dict[str, object]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
@@ -974,6 +981,7 @@ class FakeSession:
         is_clingen = url == (
             f"{settings.CLINGEN_BASE_URL}/getData/track"
         )
+        is_cspec = url.startswith(f"{settings.CSPEC_BASE_URL}/")
         is_clinvar = url.endswith(
             ("/esearch.fcgi", "/esummary.fcgi")
         )
@@ -993,6 +1001,19 @@ class FakeSession:
                     },
                 )
             response = self.clingen_responses.pop(0)
+        elif is_cspec:
+            self.cspec_get_calls.append(call)
+            if not self.cspec_responses:
+                return FakeResponse(
+                    404,
+                    {
+                        "status": {
+                            "code": 404,
+                            "name": "Not Found",
+                        }
+                    },
+                )
+            response = self.cspec_responses.pop(0)
         elif is_clinvar:
             self.clinvar_get_calls.append(call)
             if not self.clinvar_responses:
@@ -3059,6 +3080,106 @@ class TestAnnotation:
             "itemsReturned": len(gencc_records),
         }
 
+    @staticmethod
+    def _cspec_specification(
+        *,
+        identifier: str = "GN001",
+        gene: str = "GENE1",
+        disease: str = "MONDO:0000001",
+        status: str = "Released",
+    ) -> dict[str, object]:
+        """Build one linked CSpec specification summary."""
+        return {
+            "entId": identifier,
+            "entType": "SequenceVariantInterpretation",
+            "ldhId": "135637585",
+            "modified": "2026-07-20T17:44:18.542Z",
+            "entContent": {
+                "approvedOn": "2025-11-20T20:05:07.488Z",
+                "namespace": identifier,
+                "title": (
+                    f"ClinGen {gene} Expert Panel Specifications "
+                    "Version 2.4"
+                ),
+                "shortTitle": f"{gene} VCEP ACMG/AMP Specifications",
+                "version": "2.4",
+                "specificationSource": (
+                    "https://clinicalgenome.org/site/assets/files/"
+                    "example/specification.pdf"
+                ),
+                "states": [
+                    {
+                        "current": True,
+                        "name": status,
+                    }
+                ],
+                "doi": {
+                    "conceptDoi": "10.5281/zenodo.21421487",
+                    "docDoi": "10.5281/zenodo.21421509",
+                    "keywords": [
+                        {"subject": gene},
+                        {"subject": disease},
+                    ],
+                    "authors": [
+                        {
+                            "role": {"id": "researchgroup"},
+                            "person_or_org": {
+                                "name": f"{gene} VCEP",
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+
+    @classmethod
+    def _cspec_gene_response(
+        cls,
+        *,
+        gene: str = "GENE1",
+        specifications: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """Build one exact CSpec Gene entity response."""
+        linked = (
+            specifications
+            if specifications is not None
+            else [cls._cspec_specification(gene=gene)]
+        )
+        return {
+            "data": {
+                "entId": gene,
+                "entType": "Gene",
+                "ldFor": {
+                    "SequenceVariantInterpretation": linked,
+                },
+            },
+            "status": {"code": 200, "name": "OK"},
+        }
+
+    @classmethod
+    def _cspec_disease_response(
+        cls,
+        *,
+        disease: str = "MONDO:0000001",
+        specifications: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """Build one exact CSpec Disease entity response."""
+        linked = (
+            specifications
+            if specifications is not None
+            else [cls._cspec_specification(disease=disease)]
+        )
+        return {
+            "data": {
+                "entId": disease,
+                "entType": "Disease",
+                "ldFor": {
+                    "SequenceVariantInterpretation": linked,
+                },
+            },
+            "status": {"code": 200, "name": "OK"},
+        }
+
     def test_successful_vep_response_is_standardized(self) -> None:
         session = FakeSession(
             [
@@ -3153,6 +3274,8 @@ class TestAnnotation:
             ("clinvar", "success"),
             ("clingen", "running"),
             ("clingen", "success"),
+            ("cspec", "running"),
+            ("cspec", "success"),
         ]
 
     def test_failed_clinvar_variant_is_retried_automatically(
@@ -4098,12 +4221,28 @@ class TestAnnotation:
 
         clingen = annotation["sources"]["clingen"]
         assert clingen["status"] == "success"
+        assert clingen["provider"] == "ClinGen"
+        assert clingen["provider_version"] is None
         assert clingen["data_provider"] == "UCSC GenCC"
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+            clingen["retrieved_at"],
+        )
+        assert clingen["assembly"] == "GRCh38"
+        assert clingen["query_region"] == {
+            "assembly": "hg38",
+            "chromosome": "chr1",
+            "start": 99,
+            "end": 100,
+            "coordinate_system": "0-based half-open",
+        }
         assert clingen["query_gene"] == "GENE1"
         assert clingen["gene"] == "GENE1"
         assert clingen["gene_id"] == "HGNC:1"
         assert clingen["curation_count"] == 1
         assert clingen["curations_truncated"] is False
+        assert clingen["context_type"] == "gene_disease_validity"
+        assert clingen["classification_effect"] == "context_only"
         assert session.clingen_get_calls[0]["verify"] is True
         assert clingen["curations"] == [
             {
@@ -4341,6 +4480,284 @@ class TestAnnotation:
         )
         assert session.clingen_get_calls == []
 
+    def test_successful_cspec_context_is_standardized_without_rules(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+            cspec_responses=[
+                FakeResponse(200, self._cspec_gene_response()),
+                FakeResponse(200, self._cspec_disease_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "success"
+        assert cspec["provider"] == "ClinGen CSpec Registry"
+        assert cspec["provider_version"] is None
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+            cspec["retrieved_at"],
+        )
+        assert cspec["query_gene"] == "GENE1"
+        assert cspec["query_disease_ids"] == ["MONDO:0000001"]
+        assert cspec["disease_queries_truncated"] is False
+        assert cspec["specification_available"] is True
+        assert cspec["specification_count"] == 1
+        assert cspec["specifications_truncated"] is False
+        assert cspec["context_type"] == (
+            "gene_disease_acmg_specification"
+        )
+        assert cspec["classification_effect"] == "context_only"
+        assert cspec["rule_logic_applied"] is False
+        assert cspec["specifications"] == [
+            {
+                "specification_id": "GN001",
+                "title": (
+                    "ClinGen GENE1 Expert Panel Specifications "
+                    "Version 2.4"
+                ),
+                "short_title": (
+                    "GENE1 VCEP ACMG/AMP Specifications"
+                ),
+                "version": "2.4",
+                "status": "Released",
+                "vcep": "GENE1 VCEP",
+                "approved_at": "2025-11-20T20:05:07.488Z",
+                "modified_at": "2026-07-20T17:44:18.542Z",
+                "source_document_url": (
+                    "https://clinicalgenome.org/site/assets/files/"
+                    "example/specification.pdf"
+                ),
+                "specification_url": (
+                    f"{settings.CSPEC_BASE_URL}/"
+                    "SequenceVariantInterpretation/id/GN001"
+                ),
+                "concept_doi": "10.5281/zenodo.21421487",
+                "document_doi": "10.5281/zenodo.21421509",
+                "matched_disease_ids": ["MONDO:0000001"],
+                "scope_match": "gene_and_disease",
+                "applicable_to_disease_context": True,
+            }
+        ]
+        assert len(session.cspec_get_calls) == 2
+        assert session.cspec_get_calls[0]["url"].endswith(
+            "/Gene/id/GENE1"
+        )
+        assert session.cspec_get_calls[1]["url"].endswith(
+            "/Disease/id/MONDO%3A0000001"
+        )
+        assert all(
+            call["verify"] is True
+            for call in session.cspec_get_calls
+        )
+        assert "criteria" not in json.dumps(cspec).casefold()
+        assert annotation["references"][-1] == {
+            "source": "ClinGen CSpec Registry",
+            "url": (
+                f"{settings.CSPEC_BASE_URL}/"
+                "SequenceVariantInterpretation/id/GN001"
+            ),
+        }
+
+    def test_cspec_gene_only_scope_does_not_claim_disease_match(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[
+                FakeResponse(200, self._cspec_gene_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "success"
+        assert cspec["query_disease_ids"] == []
+        specification = cspec["specifications"][0]
+        assert specification["scope_match"] == "gene_only"
+        assert specification["applicable_to_disease_context"] is None
+        assert specification["matched_disease_ids"] == []
+
+    def test_cspec_disease_mismatch_is_explicit_context_only(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+            cspec_responses=[
+                FakeResponse(200, self._cspec_gene_response()),
+                FakeResponse(
+                    200,
+                    self._cspec_disease_response(
+                        specifications=[
+                            self._cspec_specification(
+                                identifier="GN999"
+                            )
+                        ]
+                    ),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        specification = annotation["sources"]["cspec"][
+            "specifications"
+        ][0]
+        assert specification["scope_match"] == "gene_only"
+        assert specification["applicable_to_disease_context"] is False
+        assert specification["matched_disease_ids"] == []
+        assert annotation["sources"]["cspec"][
+            "rule_logic_applied"
+        ] is False
+
+    def test_cspec_draft_is_not_reported_as_available(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[
+                FakeResponse(
+                    200,
+                    self._cspec_gene_response(
+                        specifications=[
+                            self._cspec_specification(
+                                status="Pilot Rules In Prep"
+                            )
+                        ]
+                    ),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "not_found"
+        assert cspec["specification_available"] is False
+        assert cspec["specifications"] == []
+
+    def test_cspec_missing_gene_record_is_valid_missingness(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[
+                FakeResponse(
+                    404,
+                    {
+                        "status": {
+                            "code": 404,
+                            "name": "Not Found",
+                        }
+                    },
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "not_found"
+        assert cspec["specification_available"] is False
+        assert cspec["specifications"] == []
+        assert cspec["rule_logic_applied"] is False
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_warning"),
+        [
+            (ValueError("invalid JSON"), "invalid JSON"),
+            ([], "unexpected response structure"),
+            (
+                {
+                    "data": {
+                        "entId": "OTHER",
+                        "entType": "Gene",
+                    },
+                    "status": {"code": 200},
+                },
+                "non-matching entity",
+            ),
+        ],
+    )
+    def test_cspec_invalid_response_is_isolated(
+        self,
+        payload: object,
+        expected_warning: str,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert (
+            annotation["sources"]["cspec"]["status"]
+            == "invalid_response"
+        )
+        assert any(
+            expected_warning in warning
+            for warning in annotation["warnings"]
+        )
+
+    def test_cspec_timeout_is_retried_then_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "backend.annotation.time.sleep",
+            delays.append,
+        )
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[
+                requests.Timeout("temporary timeout"),
+                FakeResponse(200, self._cspec_gene_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=1,
+        )[0]
+
+        assert annotation["sources"]["cspec"]["status"] == "success"
+        assert len(session.cspec_get_calls) == 2
+        assert delays == [1.0]
+
     @pytest.mark.regression
     def test_unified_multi_source_annotation_is_complete_and_clean(
         self,
@@ -4394,6 +4811,7 @@ class TestAnnotation:
             "myvariant": "success",
             "clinvar": "success",
             "clingen": "success",
+            "cspec": "not_found",
         }
         assert annotation["gene"] == "GENE1"
         assert annotation["consequence"] == "missense_variant"
@@ -8213,6 +8631,18 @@ class TestCompletePipelineHappyPath:
                     ),
                 )
             ],
+            cspec_responses=[
+                FakeResponse(
+                    200,
+                    TestAnnotation._cspec_gene_response(
+                        gene="SCN1A"
+                    ),
+                ),
+                FakeResponse(
+                    200,
+                    TestAnnotation._cspec_disease_response(),
+                ),
+            ],
         )
         client = LLMClient(
             FakeLLMAdapter(
@@ -8258,6 +8688,7 @@ class TestCompletePipelineHappyPath:
         assert len(annotation_session.myvariant_get_calls) == 1
         assert len(annotation_session.clinvar_get_calls) == 2
         assert len(annotation_session.clingen_get_calls) == 1
+        assert len(annotation_session.cspec_get_calls) == 2
         assert all(
             stage["status"] == "success"
             for stage in result["stages"]
@@ -8338,6 +8769,18 @@ class TestStage13IntegrationBoundaries:
                     TestAnnotation._clingen_response(gene="SCN1A"),
                 )
             ],
+            cspec_responses=[
+                FakeResponse(
+                    200,
+                    TestAnnotation._cspec_gene_response(
+                        gene="SCN1A"
+                    ),
+                ),
+                FakeResponse(
+                    200,
+                    TestAnnotation._cspec_disease_response(),
+                ),
+            ],
         )
 
     @staticmethod
@@ -8392,6 +8835,7 @@ class TestStage13IntegrationBoundaries:
             "myvariant": "success",
             "clinvar": "success",
             "clingen": "success",
+            "cspec": "success",
             "llm": "pending",
         }
         assert result["annotations"][0]["sources"]["vep"][
@@ -8743,6 +9187,8 @@ class TestAnnotationApiLogging:
             ("ncbi_clinvar", "search_variant"),
             ("ncbi_clinvar", "summarize_variant"),
             ("ucsc_gencc", "lookup_gene_validity"),
+            ("clingen_cspec", "lookup_gene"),
+            ("clingen_cspec", "lookup_disease"),
         )
         for service, operation in expected_calls:
             assert (
@@ -8750,7 +9196,7 @@ class TestAnnotationApiLogging:
                 f"operation={operation} attempt=1 outcome=success"
                 in contents
             )
-        assert len(re.findall(r"duration_ms=\d+", contents)) == 6
+        assert len(re.findall(r"duration_ms=\d+", contents)) == 8
         assert "http_status=200" in contents
         assert settings.VEP_BASE_URL not in contents
         assert "1:100:A:G" not in contents
@@ -9567,6 +10013,8 @@ class TestFrontendResults:
         assert annotation_rows[0]["ClinVar accession"] == (
             "VCV000012345.1"
         )
+        assert annotation_rows[0]["CSpec status"] is None
+        assert annotation_rows[0]["CSpec specifications"] == 0
         assert phenotype_rows[0]["Phenotype score"] == 0.5
         assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"
 
@@ -10955,6 +11403,7 @@ class TestFrontendFoundation:
             "myvariant": ("warning", "Completed with one warning."),
             "clinvar": ("error", "Failed for all 5 variants."),
             "clingen": ("skipped", "Not called."),
+            "cspec": ("success", "Found one released specification."),
             "llm": ("pending", "Waiting for annotation."),
         }
         for record in result["api_statuses"]:
@@ -10979,6 +11428,7 @@ class TestFrontendFoundation:
             "MyVariant.info",
             "NCBI ClinVar",
             "ClinGen/GenCC (UCSC)",
+            "ClinGen CSpec Registry",
             "LLM API",
         ):
             assert source in rendered

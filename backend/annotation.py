@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -30,6 +30,8 @@ MAX_CLINVAR_CONDITIONS = 10
 MAX_CLINVAR_ACCESSIONS = 20
 MAX_CLINGEN_CURATIONS = 25
 MAX_CLINGEN_PMIDS = 50
+MAX_CSPEC_SPECIFICATIONS = 10
+MAX_CSPEC_DISEASE_QUERIES = 10
 CLINVAR_REQUEST_INTERVAL = 0.34
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
@@ -122,6 +124,8 @@ CLINVAR_REFSEQ_VERSIONS = {
     },
 }
 CLINGEN_GENE_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CSPEC_IDENTIFIER_PATTERN = re.compile(r"^GN[0-9]+$")
+MONDO_IDENTIFIER_PATTERN = re.compile(r"^MONDO:[0-9]{7}$")
 CLINGEN_UCSC_ASSEMBLIES = {
     "GRCh37": "hg19",
     "GRCh38": "hg38",
@@ -153,6 +157,7 @@ ANNOTATION_SERVICE_LOG_NAMES = {
     "myvariant": "myvariant",
     "clinvar": "ncbi_clinvar",
     "clingen": "ucsc_gencc",
+    "cspec": "clingen_cspec",
 }
 ANNOTATION_SOURCE_LABELS = {
     "vep": "Ensembl VEP",
@@ -160,6 +165,7 @@ ANNOTATION_SOURCE_LABELS = {
     "myvariant": "MyVariant.info",
     "clinvar": "NCBI ClinVar",
     "clingen": "ClinGen/GenCC",
+    "cspec": "ClinGen CSpec Registry",
 }
 _CLINVAR_RATE_LOCK = Lock()
 _LAST_CLINVAR_REQUEST_AT = 0.0
@@ -179,6 +185,10 @@ class GeneBeResponseError(AnnotationServiceError):
 
 class ClinVarResponseError(AnnotationServiceError):
     """Raised when ClinVar returns malformed or non-matching evidence."""
+
+
+class CSpecResponseError(AnnotationServiceError):
+    """Raised when CSpec returns malformed or non-matching metadata."""
 
 
 # ---------------------------------------------------------------------------
@@ -1413,6 +1423,124 @@ def _get_clingen_gene_validity(
 
 
 # ---------------------------------------------------------------------------
+# ClinGen Criteria Specification Registry client
+# ---------------------------------------------------------------------------
+
+def _get_cspec_entity(
+    session: requests.Session,
+    entity_type: str,
+    identifier: str,
+    max_retries: int,
+) -> dict[str, Any] | None:
+    """Retrieve one exact public CSpec entity with bounded retries."""
+    endpoint = (
+        f"{settings.CSPEC_BASE_URL}/{entity_type}/id/"
+        f"{quote(identifier, safe='')}"
+    )
+
+    for attempt in range(max_retries + 1):
+        response: requests.Response | None = None
+        started_at = time.perf_counter()
+
+        try:
+            response = session.get(
+                endpoint,
+                headers={"Accept": "application/json"},
+                timeout=settings.REQUEST_TIMEOUT,
+                verify=True,
+            )
+        except requests.RequestException as exc:
+            _log_api_call(
+                service="clingen_cspec",
+                operation=f"lookup_{entity_type.casefold()}",
+                attempt=attempt,
+                started_at=started_at,
+                exception=exc,
+            )
+            if attempt >= max_retries:
+                raise AnnotationServiceError(
+                    "ClinGen CSpec request failed because the service "
+                    "was unavailable."
+                ) from exc
+
+            delay = _retry_delay(attempt)
+            _log_api_retry(
+                service="clingen_cspec",
+                operation=f"lookup_{entity_type.casefold()}",
+                attempt=attempt,
+                reason=(
+                    "timeout"
+                    if isinstance(exc, requests.Timeout)
+                    else "network_error"
+                ),
+                delay_seconds=delay,
+            )
+            time.sleep(delay)
+            continue
+
+        _log_api_call(
+            service="clingen_cspec",
+            operation=f"lookup_{entity_type.casefold()}",
+            attempt=attempt,
+            started_at=started_at,
+            response=response,
+        )
+        if response.status_code in TRANSIENT_HTTP_STATUSES:
+            if attempt < max_retries:
+                delay = _retry_delay(attempt, response)
+                _log_api_retry(
+                    service="clingen_cspec",
+                    operation=f"lookup_{entity_type.casefold()}",
+                    attempt=attempt,
+                    reason=f"http_{response.status_code}",
+                    delay_seconds=delay,
+                )
+                time.sleep(delay)
+                continue
+
+        if response.status_code == 404:
+            return None
+
+        if not 200 <= response.status_code < 300:
+            raise AnnotationServiceError(
+                "ClinGen CSpec returned HTTP "
+                f"{response.status_code}."
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise CSpecResponseError(
+                "ClinGen CSpec returned invalid JSON."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise CSpecResponseError(
+                "ClinGen CSpec returned an unexpected response structure."
+            )
+
+        data = payload.get("data")
+        status = payload.get("status")
+        if (
+            not isinstance(data, dict)
+            or not isinstance(status, dict)
+            or status.get("code") != 200
+            or data.get("entType") != entity_type
+            or str(data.get("entId", "")).casefold()
+            != identifier.casefold()
+        ):
+            raise CSpecResponseError(
+                "ClinGen CSpec returned a non-matching entity."
+            )
+
+        return data
+
+    raise AnnotationServiceError(
+        "ClinGen CSpec retry loop ended unexpectedly."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Response cleaning and unified evidence output
 # ---------------------------------------------------------------------------
 
@@ -1684,14 +1812,37 @@ def _base_annotation(
             },
             "clingen": {
                 "status": "pending",
+                "provider": "ClinGen",
+                "provider_version": None,
                 "data_provider": "UCSC GenCC",
+                "retrieved_at": None,
+                "assembly": settings.GENOME_ASSEMBLY,
+                "query_region": None,
                 "query_gene": None,
                 "gene": None,
                 "gene_id": None,
+                "context_type": "gene_disease_validity",
+                "classification_effect": "context_only",
                 "curations": [],
                 "curation_count": 0,
                 "curations_truncated": False,
-            }
+            },
+            "cspec": {
+                "status": "pending",
+                "provider": "ClinGen CSpec Registry",
+                "provider_version": None,
+                "retrieved_at": None,
+                "query_gene": None,
+                "query_disease_ids": [],
+                "disease_queries_truncated": False,
+                "specification_available": False,
+                "specifications": [],
+                "specification_count": 0,
+                "specifications_truncated": False,
+                "context_type": "gene_disease_acmg_specification",
+                "classification_effect": "context_only",
+                "rule_logic_applied": False,
+            },
         },
         "references": [
             {
@@ -2727,16 +2878,31 @@ def _annotate_with_clingen(
     max_retries: int,
 ) -> None:
     """Add isolated ClinGen gene-disease validity evidence."""
+    source = annotation["sources"]["clingen"]
+    source["retrieved_at"] = _retrieval_timestamp()
+    region = _to_clingen_ucsc_region(annotation["variant"])
+    if region is not None:
+        chromosome, start, end = region
+        source["query_region"] = {
+            "assembly": CLINGEN_UCSC_ASSEMBLIES[
+                settings.GENOME_ASSEMBLY
+            ],
+            "chromosome": chromosome,
+            "start": start,
+            "end": end,
+            "coordinate_system": "0-based half-open",
+        }
+
     gene = _select_clingen_gene(annotation)
     if gene is None:
-        annotation["sources"]["clingen"]["status"] = "not_applicable"
+        source["status"] = "not_applicable"
         annotation["warnings"].append(
             "ClinGen was not queried because no unambiguous gene symbol "
             "was available."
         )
         return
 
-    annotation["sources"]["clingen"]["query_gene"] = gene
+    source["query_gene"] = gene
 
     try:
         records, unsupported_warning = _get_clingen_gene_validity(
@@ -2746,12 +2912,12 @@ def _annotate_with_clingen(
             max_retries,
         )
         if unsupported_warning is not None:
-            annotation["sources"]["clingen"]["status"] = "unsupported"
+            source["status"] = "unsupported"
             annotation["warnings"].append(unsupported_warning)
             return
 
         if records is None or not records:
-            annotation["sources"]["clingen"]["status"] = "not_found"
+            source["status"] = "not_found"
             annotation["warnings"].append(
                 "UCSC GenCC returned no exact ClinGen validity claims "
                 f"for {gene} at this locus."
@@ -2769,7 +2935,346 @@ def _annotate_with_clingen(
             "error_type=%s",
             type(exc).__name__,
         )
-        annotation["sources"]["clingen"]["status"] = "error"
+        source["status"] = "error"
+        annotation["warnings"].append(str(exc))
+
+
+def _collect_cspec_disease_ids(
+    annotation: AnnotationData,
+) -> tuple[list[str], bool]:
+    """Collect bounded MONDO context from direct clinical sources."""
+    disease_ids: list[str] = []
+
+    clingen_curations = (
+        annotation.get("sources", {})
+        .get("clingen", {})
+        .get("curations", [])
+    )
+    if isinstance(clingen_curations, list):
+        for curation in clingen_curations:
+            if not isinstance(curation, dict):
+                continue
+            disease_id = curation.get("disease_id")
+            if (
+                isinstance(disease_id, str)
+                and MONDO_IDENTIFIER_PATTERN.fullmatch(disease_id.strip())
+                and disease_id.strip() not in disease_ids
+            ):
+                disease_ids.append(disease_id.strip())
+
+    clinvar_conditions = (
+        annotation.get("sources", {})
+        .get("clinvar", {})
+        .get("conditions", [])
+    )
+    if isinstance(clinvar_conditions, list):
+        for condition in clinvar_conditions:
+            if not isinstance(condition, dict):
+                continue
+            identifiers = condition.get("identifiers")
+            if not isinstance(identifiers, list):
+                continue
+            for identifier in identifiers:
+                if not isinstance(identifier, dict):
+                    continue
+                source = identifier.get("source")
+                value = identifier.get("id")
+                if (
+                    isinstance(source, str)
+                    and source.strip().casefold() == "mondo"
+                    and isinstance(value, str)
+                    and MONDO_IDENTIFIER_PATTERN.fullmatch(value.strip())
+                    and value.strip() not in disease_ids
+                ):
+                    disease_ids.append(value.strip())
+
+    return (
+        disease_ids[:MAX_CSPEC_DISEASE_QUERIES],
+        len(disease_ids) > MAX_CSPEC_DISEASE_QUERIES,
+    )
+
+
+def _current_cspec_state(content: dict[str, Any]) -> str | None:
+    """Return the explicitly current CSpec workflow state."""
+    states = content.get("states")
+    if not isinstance(states, list):
+        return None
+
+    for state in states:
+        if (
+            isinstance(state, dict)
+            and state.get("current") is True
+        ):
+            return _optional_clingen_string(state.get("name"))
+    return None
+
+
+def _cspec_vcep_name(content: dict[str, Any]) -> str | None:
+    """Extract the VCEP research-group name from DOI metadata."""
+    doi = content.get("doi")
+    if not isinstance(doi, dict):
+        return None
+    authors = doi.get("authors")
+    if not isinstance(authors, list):
+        return None
+
+    for author in authors:
+        if not isinstance(author, dict):
+            continue
+        role = author.get("role")
+        person_or_org = author.get("person_or_org")
+        if (
+            isinstance(role, dict)
+            and role.get("id") == "researchgroup"
+            and isinstance(person_or_org, dict)
+        ):
+            return _optional_clingen_string(
+                person_or_org.get("name")
+            )
+    return None
+
+
+def _cspec_doi(
+    content: dict[str, Any],
+    field: str,
+) -> str | None:
+    """Read one DOI identifier without retaining full DOI metadata."""
+    doi = content.get("doi")
+    if not isinstance(doi, dict):
+        return None
+    return _optional_clingen_string(doi.get(field))
+
+
+def _cspec_source_url(value: Any) -> str | None:
+    """Keep only an HTTPS CSpec source-document URL."""
+    url = _optional_clingen_string(value)
+    if url is None:
+        return None
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").casefold()
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or not (
+            hostname == "clinicalgenome.org"
+            or hostname.endswith(".clinicalgenome.org")
+            or hostname == "genome.network"
+            or hostname.endswith(".genome.network")
+        )
+    ):
+        return None
+    return url
+
+
+def _linked_cspec_records(
+    entity: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate linked CSpec specification summaries."""
+    linked = entity.get("ldFor")
+    if linked is None:
+        return []
+    if not isinstance(linked, dict):
+        raise CSpecResponseError(
+            "ClinGen CSpec returned invalid linked specification data."
+        )
+
+    records = linked.get("SequenceVariantInterpretation", [])
+    if not isinstance(records, list) or any(
+        not isinstance(record, dict)
+        for record in records
+    ):
+        raise CSpecResponseError(
+            "ClinGen CSpec returned invalid linked specification data."
+        )
+    return records
+
+
+def _linked_cspec_ids(
+    disease_entity: dict[str, Any],
+) -> set[str]:
+    """Return exact CSpec identifiers linked to one MONDO disease."""
+    identifiers: set[str] = set()
+    for record in _linked_cspec_records(disease_entity):
+        identifier = record.get("entId")
+        if (
+            isinstance(identifier, str)
+            and CSPEC_IDENTIFIER_PATTERN.fullmatch(identifier)
+        ):
+            identifiers.add(identifier)
+    return identifiers
+
+
+def _standardize_cspec_record(
+    record: dict[str, Any],
+    *,
+    disease_matches: list[str],
+    has_disease_context: bool,
+) -> dict[str, Any] | None:
+    """Reduce one released specification to auditable context metadata."""
+    identifier = record.get("entId")
+    content = record.get("entContent")
+    if (
+        not isinstance(identifier, str)
+        or not CSPEC_IDENTIFIER_PATTERN.fullmatch(identifier)
+        or record.get("entType") != "SequenceVariantInterpretation"
+        or not isinstance(content, dict)
+    ):
+        raise CSpecResponseError(
+            "ClinGen CSpec returned an invalid specification summary."
+        )
+
+    current_state = _current_cspec_state(content)
+    if current_state != "Released":
+        return None
+
+    title = _optional_clingen_string(content.get("title"))
+    version = _optional_clingen_string(content.get("version"))
+    if title is None or version is None:
+        raise CSpecResponseError(
+            "ClinGen CSpec returned incomplete released specification "
+            "metadata."
+        )
+
+    specification_url = (
+        f"{settings.CSPEC_BASE_URL}/"
+        f"SequenceVariantInterpretation/id/{identifier}"
+    )
+    return {
+        "specification_id": identifier,
+        "title": title,
+        "short_title": _optional_clingen_string(
+            content.get("shortTitle")
+        ),
+        "version": version,
+        "status": current_state,
+        "vcep": _cspec_vcep_name(content),
+        "approved_at": _optional_clingen_string(
+            content.get("approvedOn")
+        ),
+        "modified_at": _optional_clingen_string(record.get("modified")),
+        "source_document_url": _cspec_source_url(
+            content.get("specificationSource")
+        ),
+        "specification_url": specification_url,
+        "concept_doi": _cspec_doi(content, "conceptDoi"),
+        "document_doi": _cspec_doi(content, "docDoi"),
+        "matched_disease_ids": disease_matches,
+        "scope_match": (
+            "gene_and_disease" if disease_matches else "gene_only"
+        ),
+        "applicable_to_disease_context": (
+            bool(disease_matches)
+            if has_disease_context
+            else None
+        ),
+    }
+
+
+def _annotate_with_cspec(
+    annotation: AnnotationData,
+    session: requests.Session,
+    max_retries: int,
+) -> None:
+    """Add CSpec availability metadata without applying ACMG rules."""
+    source = annotation["sources"]["cspec"]
+    source["retrieved_at"] = _retrieval_timestamp()
+    gene = _select_clingen_gene(annotation)
+    if gene is None:
+        source["status"] = "not_applicable"
+        annotation["warnings"].append(
+            "ClinGen CSpec was not queried because no unambiguous gene "
+            "symbol was available."
+        )
+        return
+
+    disease_ids, disease_queries_truncated = _collect_cspec_disease_ids(
+        annotation
+    )
+    source["query_gene"] = gene
+    source["query_disease_ids"] = disease_ids
+    source["disease_queries_truncated"] = disease_queries_truncated
+
+    try:
+        gene_entity = _get_cspec_entity(
+            session,
+            "Gene",
+            gene,
+            max_retries,
+        )
+        if gene_entity is None:
+            source["status"] = "not_found"
+            return
+
+        disease_links: dict[str, set[str]] = {}
+        for disease_id in disease_ids:
+            disease_entity = _get_cspec_entity(
+                session,
+                "Disease",
+                disease_id,
+                max_retries,
+            )
+            disease_links[disease_id] = (
+                _linked_cspec_ids(disease_entity)
+                if disease_entity is not None
+                else set()
+            )
+
+        raw_records = _linked_cspec_records(gene_entity)
+        specifications: list[dict[str, Any]] = []
+        for record in raw_records:
+            identifier = record.get("entId")
+            disease_matches = [
+                disease_id
+                for disease_id, linked_ids in disease_links.items()
+                if isinstance(identifier, str)
+                and identifier in linked_ids
+            ]
+            standardized = _standardize_cspec_record(
+                record,
+                disease_matches=disease_matches,
+                has_disease_context=bool(disease_ids),
+            )
+            if standardized is not None:
+                specifications.append(standardized)
+
+        if not specifications:
+            source["status"] = "not_found"
+            return
+
+        retained = specifications[:MAX_CSPEC_SPECIFICATIONS]
+        source.update(
+            {
+                "status": "success",
+                "specification_available": True,
+                "specifications": retained,
+                "specification_count": len(specifications),
+                "specifications_truncated": (
+                    len(specifications) > len(retained)
+                ),
+            }
+        )
+
+        for specification in retained:
+            annotation["references"].append(
+                {
+                    "source": "ClinGen CSpec Registry",
+                    "url": specification["specification_url"],
+                }
+            )
+
+    except AnnotationServiceError as exc:
+        LOGGER.error(
+            "event=annotation_source_failed service=clingen_cspec "
+            "error_type=%s",
+            type(exc).__name__,
+        )
+        source_status = (
+            "invalid_response"
+            if isinstance(exc, CSpecResponseError)
+            else "unavailable"
+        )
+        source["status"] = source_status
         annotation["warnings"].append(str(exc))
 
 
@@ -2998,7 +3503,7 @@ def annotate_variants(
     session: requests.Session | None = None,
     progress_callback: AnnotationProgressCallback | None = None,
 ) -> list[AnnotationData]:
-    """Annotate with VEP, GeneBe, MyVariant, ClinVar, and ClinGen evidence.
+    """Annotate with VEP, GeneBe, MyVariant, ClinVar, ClinGen, and CSpec evidence.
 
     Each external source fails independently and raw source payloads are not
     retained in the returned standardized evidence.
@@ -3247,6 +3752,45 @@ def annotate_variants(
             "clingen",
             clingen_status,
             clingen_message,
+        )
+
+        _notify_annotation_progress(
+            progress_callback,
+            "cspec",
+            "running",
+            "Checking ClinGen CSpec guideline availability.",
+        )
+        cspec_baselines = deepcopy(annotations)
+        for annotation in annotations:
+            _annotate_with_cspec(
+                annotation,
+                active_session,
+                resolved_retries,
+            )
+        cspec_retry_rounds = _retry_failed_source_annotations(
+            annotations,
+            source="cspec",
+            max_retries=resolved_retries,
+            retry_variant=lambda index: _retry_annotation_copy(
+                cspec_baselines[index],
+                lambda candidate: _annotate_with_cspec(
+                    candidate,
+                    active_session,
+                    0,
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
+        cspec_status, cspec_message = _source_progress_summary(
+            annotations,
+            "cspec",
+            retry_rounds=cspec_retry_rounds,
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "cspec",
+            cspec_status,
+            cspec_message,
         )
     finally:
         if owns_session:

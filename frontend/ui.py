@@ -157,6 +157,7 @@ API_SOURCE_LABELS = {
     "myvariant": "MyVariant.info",
     "clinvar": "NCBI ClinVar",
     "clingen": "ClinGen/GenCC (UCSC)",
+    "cspec": "ClinGen CSpec Registry",
     "llm": "LLM API",
 }
 API_STATUS_LABELS = {

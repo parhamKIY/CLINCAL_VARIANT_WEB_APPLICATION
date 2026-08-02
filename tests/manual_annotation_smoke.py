@@ -22,7 +22,8 @@ def _parse_arguments() -> argparse.Namespace:
     """Read an optional CHROM:POS:REF:ALT value from the command line."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run one live VEP, MyVariant, ClinVar, and ClinGen request."
+            "Run one live VEP, GeneBe, MyVariant, ClinVar, ClinGen, "
+            "and CSpec request."
         ),
     )
     parser.add_argument(
@@ -72,9 +73,11 @@ def check_production_annotation(variant_text: str) -> None:
     myvariant_result = annotation["sources"]["myvariant"]
     clinvar_result = annotation["sources"]["clinvar"]
     clingen_result = annotation["sources"]["clingen"]
+    cspec_result = annotation["sources"]["cspec"]
 
     print(f"VEP endpoint: {settings.VEP_BASE_URL}")
     print(f"ClinGen/GenCC endpoint: {settings.CLINGEN_BASE_URL}")
+    print(f"ClinGen CSpec endpoint: {settings.CSPEC_BASE_URL}")
     print(f"Assembly: {settings.GENOME_ASSEMBLY}")
     print(f"Variant: {variant_text}")
     print(f"Response time: {elapsed_seconds:.2f} seconds")
@@ -82,6 +85,7 @@ def check_production_annotation(variant_text: str) -> None:
     print(f"MyVariant.info status: {myvariant_result['status']}")
     print(f"NCBI ClinVar status: {clinvar_result['status']}")
     print(f"ClinGen/GenCC status: {clingen_result['status']}")
+    print(f"ClinGen CSpec status: {cspec_result['status']}")
 
     if vep_result["status"] != "success":
         warning_text = "; ".join(annotation["warnings"]) or "No details"
@@ -103,6 +107,12 @@ def check_production_annotation(variant_text: str) -> None:
         warning_text = "; ".join(annotation["warnings"]) or "No details"
         raise RuntimeError(
             f"ClinGen annotation failed: {warning_text}"
+        )
+
+    if cspec_result["status"] not in {"success", "not_found"}:
+        warning_text = "; ".join(annotation["warnings"]) or "No details"
+        raise RuntimeError(
+            f"ClinGen CSpec lookup failed: {warning_text}"
         )
 
     # Print only the cleaned fields used by the application, not the raw API
@@ -141,6 +151,17 @@ def check_production_annotation(variant_text: str) -> None:
             f"{clingen_result['gene']} - {curation['disease']} "
             f"({curation['classification']})"
         )
+    print(
+        "ClinGen CSpec specification count: "
+        f"{cspec_result['specification_count']}"
+    )
+    for specification in cspec_result["specifications"]:
+        print(
+            "ClinGen CSpec guideline: "
+            f"{specification['title']} "
+            f"(version {specification['version']}, "
+            f"scope {specification['scope_match']})"
+        )
 
 
 def main() -> int:
@@ -155,7 +176,10 @@ def main() -> int:
 
     checks = (
         (
-            "VEP, MyVariant.info, ClinVar, and ClinGen",
+            (
+                "VEP, GeneBe, MyVariant.info, ClinVar, ClinGen, "
+                "and CSpec"
+            ),
             lambda: check_production_annotation(arguments.variant),
         ),
     )

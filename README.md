@@ -52,6 +52,7 @@ flowchart LR
     D3["MyVariant.info"] --> D
     D4["NCBI ClinVar"] --> D
     D5["UCSC GenCC"] --> D
+    D6["ClinGen CSpec"] --> D
 
     classDef input fill:#e8f4f8,stroke:#24708a,color:#17324d
     classDef evidence fill:#eef1f7,stroke:#5c6bc0,color:#17324d
@@ -64,7 +65,7 @@ flowchart LR
 | Capability | What the MVP provides |
 |---|---|
 | **Variant input** | Professor-filtered `.vcf`/`.vcf.gz` upload or a manual VCF-style table, limited to 1–5 rows |
-| **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, and UCSC GenCC integrations |
+| **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, UCSC GenCC, and ClinGen CSpec integrations |
 | **Phenotype correlation** | Local HPO search, normalization, update workflow, and explainable gene matching |
 | **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
 | **Reporting** | Validated plain text plus local PDF and Word exports |
@@ -119,6 +120,9 @@ generates one LLM interpretation and one report for the first allele.
 - Annotation phase five queries ClinGen-submitted GenCC records through
   the UCSC European REST API and standardizes exact gene-disease validity
   claims.
+- Annotation phase six queries the ClinGen CSpec Registry for released
+  VCEP specification metadata matching the gene and available MONDO disease
+  context. It does not apply CSpec rules.
 - External-source failures are isolated so evidence from another source is
   preserved.
 - Frontend analyses run in cancellable background jobs; cancellation clears
@@ -172,7 +176,8 @@ The conventional command remains supported:
 ## 🧬 Stage 5 annotation: complete
 
 `backend/annotation.py` currently integrates Ensembl VEP, GeneBe,
-MyVariant.info, NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
+MyVariant.info, NCBI ClinVar, ClinGen-submitted UCSC GenCC evidence, and the
+ClinGen CSpec Registry:
 
 - explicit GRCh37/GRCh38 assembly configuration;
 - POST batching with Ensembl's 200-variant maximum;
@@ -199,6 +204,9 @@ MyVariant.info, NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 - exact UCSC assembly, coordinate, ClinGen submitter, and gene-symbol
   matching with standardized disease, classification, inheritance,
   criteria URL, PMID, and report fields;
+- direct CSpec gene and MONDO disease queries with released VCEP
+  specification ID, version, approval, DOI, scope-match, and provenance
+  metadata retained as context only;
 - unified multi-source output with independent failure isolation;
 - no raw API response is passed to later pipeline stages.
 
@@ -216,8 +224,11 @@ The Stage 24 direct ClinVar query, missingness, provenance, and conflict
 contract is recorded in
 [`docs/STAGE_24_DIRECT_CLINVAR_INTEGRATION.md`](docs/STAGE_24_DIRECT_CLINVAR_INTEGRATION.md).
 
-Run live Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, and ClinGen checks
-through the production annotation path:
+The Stage 25 ClinGen context and CSpec availability contract is recorded in
+[`docs/STAGE_25_CLINGEN_CSPEC_UPGRADE.md`](docs/STAGE_25_CLINGEN_CSPEC_UPGRADE.md).
+
+Run live Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, ClinGen, and CSpec
+checks through the production annotation path:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_annotation_smoke.py

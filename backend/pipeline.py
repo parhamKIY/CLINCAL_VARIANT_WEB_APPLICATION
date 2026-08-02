@@ -121,6 +121,7 @@ PIPELINE_API_ORDER = (
     "myvariant",
     "clinvar",
     "clingen",
+    "cspec",
     "llm",
 )
 
