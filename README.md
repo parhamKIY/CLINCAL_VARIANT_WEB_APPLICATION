@@ -180,7 +180,9 @@ MyVariant.info, NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 - direct ClinVar ESearch and ESummary queries using exact assembly-specific
   HGVS identifiers;
 - NCBI E-utility requests limited to fewer than three requests per second;
-- request timeout and limited retries for transient failures;
+- request timeout plus bounded automatic retries for failed
+  variant/provider pairs, including failures that occur after response
+  validation, while successful variant results are preserved;
 - structured per-variant error output without stopping the whole pipeline;
 - cleaned transcript, gene, consequence, impact, HGVSc, HGVSp, canonical,
   MANE Select, MANE Plus Clinical, and available SIFT/PolyPhen fields;
@@ -198,6 +200,10 @@ MyVariant.info, NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
   criteria URL, PMID, and report fields;
 - unified multi-source output with independent failure isolation;
 - no raw API response is passed to later pipeline stages.
+
+The live API panel reports automatic retry rounds without requiring user
+interaction. LLM generation also uses its own bounded retry budget configured
+by `LLM_MAX_RETRIES`.
 
 The Stage 22 verification and exact schema additions are recorded in
 [`docs/STAGE_22_VEP_ANNOTATION_HARDENING.md`](docs/STAGE_22_VEP_ANNOTATION_HARDENING.md).

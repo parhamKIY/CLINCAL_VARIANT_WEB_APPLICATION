@@ -4,6 +4,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator
+from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Literal
@@ -143,6 +144,23 @@ AnnotationProgressCallback = Callable[
     [str, AnnotationProgressStatus, str],
     None,
 ]
+FAILED_SOURCE_STATUSES = frozenset(
+    {"error", "unavailable", "invalid_response"}
+)
+ANNOTATION_SERVICE_LOG_NAMES = {
+    "vep": "ensembl_vep",
+    "genebe": "genebe",
+    "myvariant": "myvariant",
+    "clinvar": "ncbi_clinvar",
+    "clingen": "ucsc_gencc",
+}
+ANNOTATION_SOURCE_LABELS = {
+    "vep": "Ensembl VEP",
+    "genebe": "GeneBe",
+    "myvariant": "MyVariant.info",
+    "clinvar": "NCBI ClinVar",
+    "clingen": "ClinGen/GenCC",
+}
 _CLINVAR_RATE_LOCK = Lock()
 _LAST_CLINVAR_REQUEST_AT = 0.0
 
@@ -2684,6 +2702,8 @@ def _notify_annotation_progress(
 def _source_progress_summary(
     annotations: list[AnnotationData],
     source: str,
+    *,
+    retry_rounds: int = 0,
 ) -> tuple[AnnotationProgressStatus, str]:
     """Summarize provider availability separately from evidence presence."""
 
@@ -2693,18 +2713,43 @@ def _source_progress_summary(
         for annotation in annotations
     ]
     failed = sum(
-        status in {"error", "unavailable", "invalid_response"}
+        status in FAILED_SOURCE_STATUSES
         for status in statuses
     )
     unsupported = statuses.count("unsupported")
     not_found = statuses.count("not_found")
 
+    retry_suffix = (
+        f" after {retry_rounds} automatic "
+        f"{'retry' if retry_rounds == 1 else 'retries'}"
+        if retry_rounds
+        else ""
+    )
     if failed == total and total:
-        return "error", f"Failed for all {total} variants."
+        return (
+            "error",
+            f"Failed for all {total} variants{retry_suffix}.",
+        )
 
     details: list[str] = []
     if failed:
-        details.append(f"{failed} failed")
+        failed_variants = [
+            _variant_progress_label(annotation["variant"])
+            for annotation, status in zip(
+                annotations,
+                statuses,
+                strict=True,
+            )
+            if status in FAILED_SOURCE_STATUSES
+        ]
+        details.append(
+            f"{failed} failed"
+            + (
+                f" ({', '.join(failed_variants)})"
+                if failed_variants
+                else ""
+            )
+        )
     if unsupported:
         details.append(f"{unsupported} unsupported")
     if not_found:
@@ -2713,9 +2758,142 @@ def _source_progress_summary(
     if details:
         return (
             "warning" if failed or unsupported else "success",
-            f"Completed {total} variants; {', '.join(details)}.",
+            f"Completed {total} variants{retry_suffix}; "
+            f"{', '.join(details)}.",
         )
-    return "success", f"Completed all {total} variants."
+    return (
+        "success",
+        f"Completed all {total} variants{retry_suffix}.",
+    )
+
+
+def _variant_progress_label(variant: dict[str, Any]) -> str:
+    """Return one compact non-identifying genomic variant label."""
+
+    return (
+        f"{variant.get('chrom')}:{variant.get('pos')} "
+        f"{variant.get('ref')}>{variant.get('alt')}"
+    )
+
+
+def _source_failed(
+    annotation: AnnotationData,
+    source: str,
+) -> bool:
+    """Return whether one provider attempt ended in an actual failure."""
+
+    return (
+        annotation["sources"][source]["status"]
+        in FAILED_SOURCE_STATUSES
+    )
+
+
+def _retry_failed_source_annotations(
+    annotations: list[AnnotationData],
+    *,
+    source: str,
+    max_retries: int,
+    retry_variant: Callable[[int], AnnotationData],
+    progress_callback: AnnotationProgressCallback | None,
+) -> int:
+    """Automatically retry only failed variant/provider pairs."""
+
+    failed_indices = [
+        index
+        for index, annotation in enumerate(annotations)
+        if _source_failed(annotation, source)
+    ]
+    retry_rounds = 0
+
+    for retry_index in range(max_retries):
+        if not failed_indices:
+            break
+        retry_rounds = retry_index + 1
+        failed_count = len(failed_indices)
+        label = ANNOTATION_SOURCE_LABELS[source]
+        _notify_annotation_progress(
+            progress_callback,
+            source,
+            "running",
+            (
+                f"{label} is automatically retrying {failed_count} "
+                f"failed {'variant' if failed_count == 1 else 'variants'} "
+                f"(retry {retry_rounds} of {max_retries})."
+            ),
+        )
+        delay = _retry_delay(retry_index)
+        _log_api_retry(
+            service=ANNOTATION_SERVICE_LOG_NAMES[source],
+            operation="retry_failed_variants",
+            attempt=retry_index,
+            reason="variant_failure",
+            delay_seconds=delay,
+        )
+        time.sleep(delay)
+
+        for index in failed_indices:
+            annotations[index] = retry_variant(index)
+
+        failed_indices = [
+            index
+            for index in failed_indices
+            if _source_failed(annotations[index], source)
+        ]
+
+    return retry_rounds
+
+
+def _annotate_vep_variant_once(
+    variant: VariantData,
+    session: requests.Session,
+) -> AnnotationData:
+    """Retry one failed VEP variant without restarting successful variants."""
+
+    token = "cv_retry_0"
+    try:
+        responses = _post_vep_batch(
+            session,
+            [_to_vep_input(token, variant)],
+            0,
+        )
+    except AnnotationServiceError as exc:
+        LOGGER.error(
+            "event=annotation_source_failed "
+            "service=ensembl_vep error_type=%s",
+            type(exc).__name__,
+        )
+        return _base_annotation(
+            variant,
+            status="error",
+            warning=str(exc),
+        )
+
+    response = next(
+        (
+            candidate
+            for candidate in responses
+            if _extract_response_token(candidate) == token
+        ),
+        None,
+    )
+    if response is None:
+        return _base_annotation(
+            variant,
+            status="not_found",
+            warning="Ensembl VEP returned no result for this variant.",
+        )
+    return _standardize_vep_response(variant, response)
+
+
+def _retry_annotation_copy(
+    baseline: AnnotationData,
+    annotate: Callable[[AnnotationData], None],
+) -> AnnotationData:
+    """Run one isolated retry without retaining warnings from older attempts."""
+
+    candidate = deepcopy(baseline)
+    annotate(candidate)
+    return candidate
 
 
 def annotate_variants(
@@ -2801,9 +2979,20 @@ def annotate_variants(
                     )
                 )
 
+        vep_retry_rounds = _retry_failed_source_annotations(
+            annotations,
+            source="vep",
+            max_retries=resolved_retries,
+            retry_variant=lambda index: _annotate_vep_variant_once(
+                annotations[index]["variant"],
+                active_session,
+            ),
+            progress_callback=progress_callback,
+        )
         vep_status, vep_message = _source_progress_summary(
             annotations,
             "vep",
+            retry_rounds=vep_retry_rounds,
         )
         _notify_annotation_progress(
             progress_callback,
@@ -2817,14 +3006,30 @@ def annotate_variants(
             "running",
             "Sending variants to GeneBe.",
         )
+        genebe_baselines = deepcopy(annotations)
         _annotate_with_genebe(
             annotations,
             active_session,
             resolved_retries,
         )
+        genebe_retry_rounds = _retry_failed_source_annotations(
+            annotations,
+            source="genebe",
+            max_retries=resolved_retries,
+            retry_variant=lambda index: _retry_annotation_copy(
+                genebe_baselines[index],
+                lambda candidate: _annotate_with_genebe(
+                    [candidate],
+                    active_session,
+                    0,
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
         genebe_status, genebe_message = _source_progress_summary(
             annotations,
             "genebe",
+            retry_rounds=genebe_retry_rounds,
         )
         _notify_annotation_progress(
             progress_callback,
@@ -2839,15 +3044,31 @@ def annotate_variants(
             "running",
             "Querying MyVariant.info.",
         )
+        myvariant_baselines = deepcopy(annotations)
         for annotation in annotations:
             _annotate_with_myvariant(
                 annotation,
                 active_session,
                 resolved_retries,
             )
+        myvariant_retry_rounds = _retry_failed_source_annotations(
+            annotations,
+            source="myvariant",
+            max_retries=resolved_retries,
+            retry_variant=lambda index: _retry_annotation_copy(
+                myvariant_baselines[index],
+                lambda candidate: _annotate_with_myvariant(
+                    candidate,
+                    active_session,
+                    0,
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
         myvariant_status, myvariant_message = _source_progress_summary(
             annotations,
             "myvariant",
+            retry_rounds=myvariant_retry_rounds,
         )
         _notify_annotation_progress(
             progress_callback,
@@ -2862,15 +3083,31 @@ def annotate_variants(
             "running",
             "Querying NCBI ClinVar.",
         )
+        clinvar_baselines = deepcopy(annotations)
         for annotation in annotations:
             _annotate_with_clinvar(
                 annotation,
                 active_session,
                 resolved_retries,
             )
+        clinvar_retry_rounds = _retry_failed_source_annotations(
+            annotations,
+            source="clinvar",
+            max_retries=resolved_retries,
+            retry_variant=lambda index: _retry_annotation_copy(
+                clinvar_baselines[index],
+                lambda candidate: _annotate_with_clinvar(
+                    candidate,
+                    active_session,
+                    0,
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
         clinvar_status, clinvar_message = _source_progress_summary(
             annotations,
             "clinvar",
+            retry_rounds=clinvar_retry_rounds,
         )
         _notify_annotation_progress(
             progress_callback,
@@ -2885,15 +3122,31 @@ def annotate_variants(
             "running",
             "Querying ClinGen/GenCC through UCSC.",
         )
+        clingen_baselines = deepcopy(annotations)
         for annotation in annotations:
             _annotate_with_clingen(
                 annotation,
                 active_session,
                 resolved_retries,
             )
+        clingen_retry_rounds = _retry_failed_source_annotations(
+            annotations,
+            source="clingen",
+            max_retries=resolved_retries,
+            retry_variant=lambda index: _retry_annotation_copy(
+                clingen_baselines[index],
+                lambda candidate: _annotate_with_clingen(
+                    candidate,
+                    active_session,
+                    0,
+                ),
+            ),
+            progress_callback=progress_callback,
+        )
         clingen_status, clingen_message = _source_progress_summary(
             annotations,
             "clingen",
+            retry_rounds=clingen_retry_rounds,
         )
         _notify_annotation_progress(
             progress_callback,

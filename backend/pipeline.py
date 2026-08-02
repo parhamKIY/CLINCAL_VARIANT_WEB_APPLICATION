@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -54,6 +55,7 @@ from backend.vcf_processing import (
     parse_manual_variants,
     process_vcf,
 )
+from config import settings
 
 
 PIPELINE_SCHEMA_VERSION = "1.3"
@@ -1200,26 +1202,64 @@ def _build_evidence_and_report(
         f"Generating the interpretation with {selected_model}.",
     )
     _notify_progress(result, progress_callback)
-    try:
-        interpretation = generate_clinical_interpretation(
-            leading_evidence,
-            client=llm_client,
-            model=llm_model,
-        )
-    except Exception:
-        _set_api_status(
-            result,
-            "llm",
-            "error",
-            "The LLM API did not complete the interpretation.",
-        )
-        _notify_progress(result, progress_callback)
-        raise
+    for attempt in range(settings.LLM_MAX_RETRIES + 1):
+        try:
+            interpretation = generate_clinical_interpretation(
+                leading_evidence,
+                client=llm_client,
+                model=llm_model,
+            )
+            break
+        except Exception:
+            if attempt >= settings.LLM_MAX_RETRIES:
+                _set_api_status(
+                    result,
+                    "llm",
+                    "error",
+                    (
+                        "The LLM API failed after "
+                        f"{settings.LLM_MAX_RETRIES} automatic "
+                        f"{'retry' if settings.LLM_MAX_RETRIES == 1 else 'retries'}."
+                    ),
+                )
+                _notify_progress(result, progress_callback)
+                raise
+
+            delay = min(float(2**attempt), 5.0)
+            next_attempt = attempt + 2
+            total_attempts = settings.LLM_MAX_RETRIES + 1
+            _set_api_status(
+                result,
+                "llm",
+                "running",
+                (
+                    f"Attempt {attempt + 1} failed; retrying "
+                    f"automatically ({next_attempt} of "
+                    f"{total_attempts}) in {delay:g} seconds."
+                ),
+            )
+            LOGGER.warning(
+                "event=llm_retry_scheduled next_attempt=%d "
+                "reason=generation_failure delay_ms=%d",
+                next_attempt,
+                round(delay * 1000),
+            )
+            _notify_progress(result, progress_callback)
+            time.sleep(delay)
     _set_api_status(
         result,
         "llm",
         "success",
-        f"Completed the interpretation with {selected_model}.",
+        (
+            f"Completed the interpretation with {selected_model}"
+            + (
+                f" after {attempt} automatic "
+                f"{'retry' if attempt == 1 else 'retries'}"
+                if attempt
+                else ""
+            )
+            + "."
+        ),
     )
     _set_stage(
         result,

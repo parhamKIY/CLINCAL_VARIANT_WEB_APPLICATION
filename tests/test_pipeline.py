@@ -3146,6 +3146,58 @@ class TestAnnotation:
             ("clingen", "success"),
         ]
 
+    def test_failed_clinvar_variant_is_retried_automatically(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("backend.annotation.time.sleep", lambda _: None)
+        events: list[tuple[str, str, str]] = []
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(
+                        spdi="NC_000001.11:99:A:T",
+                    ),
+                ),
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=1,
+            progress_callback=lambda source, status, message: (
+                events.append((source, status, message))
+            ),
+        )[0]
+
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert len(session.clinvar_get_calls) == 4
+        assert not any(
+            "did not return exactly one record" in warning
+            for warning in annotation["warnings"]
+        )
+        assert any(
+            source == "clinvar"
+            and status == "running"
+            and "automatically retrying 1 failed variant" in message
+            for source, status, message in events
+        )
+        assert any(
+            source == "clinvar"
+            and status == "success"
+            and "after 1 automatic retry" in message
+            for source, status, message in events
+        )
+
     def test_successful_myvariant_response_is_standardized(self) -> None:
         session = FakeSession(
             [FakeResponse(200, [self._vep_response()])],
@@ -4423,6 +4475,7 @@ class TestAnnotation:
             [
                 requests.Timeout("temporary timeout"),
                 requests.Timeout("final timeout"),
+                requests.Timeout("automatic retry timeout"),
             ]
         )
         monkeypatch.setattr(
@@ -4437,6 +4490,7 @@ class TestAnnotation:
         )
 
         assert annotations[0]["sources"]["vep"]["status"] == "error"
+        assert len(session.post_calls) == 3
         assert "request failed" in annotations[0]["warnings"][0]
         assert (
             annotations[0]["sources"]["vep"]["provider"]
@@ -7654,6 +7708,71 @@ class TestCompletePipelineHappyPath:
             for record in result["stages"]
         )
         json.dumps(result, allow_nan=False)
+
+    def test_llm_failure_is_retried_automatically(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        interpretation_attempts = 0
+        delays: list[float] = []
+
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for variant in variants:  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._pipeline_candidate()
+                candidate["variant"] = dict(variant)
+                annotations.append(candidate)
+            return annotations
+
+        def flaky_interpretation(
+            *_: object,
+            **__: object,
+        ) -> LLMResponse:
+            nonlocal interpretation_attempts
+            interpretation_attempts += 1
+            if interpretation_attempts == 1:
+                raise LLMTimeoutError("temporary timeout")
+            return LLMResponse(
+                content=(
+                    TestClinicalInterpretationValidation
+                    ._valid_markdown()
+                ),
+                model="retry-test-model",
+            )
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.generate_clinical_interpretation",
+            flaky_interpretation,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.time.sleep",
+            delays.append,
+        )
+        monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 1)
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variants=_manual_rows("2:166848215:C:T"),
+            phenotypes=[],
+            report_dir=tmp_path / "reports",
+            persist_analysis=False,
+        )
+
+        assert result["status"] == "success"
+        assert interpretation_attempts == 2
+        assert delays == [1.0]
+        assert result["api_statuses"][-1]["status"] == "success"
+        assert "after 1 automatic retry" in (
+            result["api_statuses"][-1]["message"]
+        )
 
     def test_invalid_input_returns_frontend_safe_error(self) -> None:
         result = run_analysis(

@@ -984,8 +984,9 @@ def _render_api_statuses(result: PipelineResult) -> None:
     with st.container(border=True):
         st.markdown("**External API status**")
         st.caption(
-            "This panel updates during analysis and distinguishes API "
-            "failures from successful requests with missing evidence."
+            "This panel updates during analysis. Failed API attempts "
+            "are retried automatically; successful requests with "
+            "missing evidence are not treated as failures."
         )
         for record in result["api_statuses"]:
             status = record["status"]
