@@ -3,10 +3,10 @@
 import math
 import re
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import requests
@@ -133,6 +133,16 @@ IMPACT_PRIORITY = {
 }
 
 AnnotationData = dict[str, Any]
+AnnotationProgressStatus = Literal[
+    "running",
+    "success",
+    "warning",
+    "error",
+]
+AnnotationProgressCallback = Callable[
+    [str, AnnotationProgressStatus, str],
+    None,
+]
 _CLINVAR_RATE_LOCK = Lock()
 _LAST_CLINVAR_REQUEST_AT = 0.0
 
@@ -2655,12 +2665,66 @@ def _annotate_with_clingen(
 # Public annotation entry point
 # ---------------------------------------------------------------------------
 
+def _notify_annotation_progress(
+    callback: AnnotationProgressCallback | None,
+    source: str,
+    status: AnnotationProgressStatus,
+    message: str,
+) -> None:
+    """Publish one source-level progress update without blocking annotation."""
+
+    if callback is None:
+        return
+    try:
+        callback(source, status, message)
+    except Exception:
+        return
+
+
+def _source_progress_summary(
+    annotations: list[AnnotationData],
+    source: str,
+) -> tuple[AnnotationProgressStatus, str]:
+    """Summarize provider availability separately from evidence presence."""
+
+    total = len(annotations)
+    statuses = [
+        str(annotation["sources"][source]["status"])
+        for annotation in annotations
+    ]
+    failed = sum(
+        status in {"error", "unavailable", "invalid_response"}
+        for status in statuses
+    )
+    unsupported = statuses.count("unsupported")
+    not_found = statuses.count("not_found")
+
+    if failed == total and total:
+        return "error", f"Failed for all {total} variants."
+
+    details: list[str] = []
+    if failed:
+        details.append(f"{failed} failed")
+    if unsupported:
+        details.append(f"{unsupported} unsupported")
+    if not_found:
+        details.append(f"{not_found} with no exact record")
+
+    if details:
+        return (
+            "warning" if failed or unsupported else "success",
+            f"Completed {total} variants; {', '.join(details)}.",
+        )
+    return "success", f"Completed all {total} variants."
+
+
 def annotate_variants(
     variants: Iterable[VariantData],
     *,
     batch_size: int | None = None,
     max_retries: int | None = None,
     session: requests.Session | None = None,
+    progress_callback: AnnotationProgressCallback | None = None,
 ) -> list[AnnotationData]:
     """Annotate with VEP, GeneBe, MyVariant, ClinVar, and ClinGen evidence.
 
@@ -2674,6 +2738,12 @@ def annotate_variants(
     annotations: list[AnnotationData] = []
 
     try:
+        _notify_annotation_progress(
+            progress_callback,
+            "vep",
+            "running",
+            "Sending variants to Ensembl VEP.",
+        )
         for batch in _iter_batches(variants, resolved_batch_size):
             vep_inputs = [
                 _to_vep_input(token, variant)
@@ -2731,28 +2801,106 @@ def annotate_variants(
                     )
                 )
 
+        vep_status, vep_message = _source_progress_summary(
+            annotations,
+            "vep",
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "vep",
+            vep_status,
+            vep_message,
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "genebe",
+            "running",
+            "Sending variants to GeneBe.",
+        )
         _annotate_with_genebe(
             annotations,
             active_session,
             resolved_retries,
         )
+        genebe_status, genebe_message = _source_progress_summary(
+            annotations,
+            "genebe",
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "genebe",
+            genebe_status,
+            genebe_message,
+        )
 
+        _notify_annotation_progress(
+            progress_callback,
+            "myvariant",
+            "running",
+            "Querying MyVariant.info.",
+        )
         for annotation in annotations:
             _annotate_with_myvariant(
                 annotation,
                 active_session,
                 resolved_retries,
             )
+        myvariant_status, myvariant_message = _source_progress_summary(
+            annotations,
+            "myvariant",
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "myvariant",
+            myvariant_status,
+            myvariant_message,
+        )
+
+        _notify_annotation_progress(
+            progress_callback,
+            "clinvar",
+            "running",
+            "Querying NCBI ClinVar.",
+        )
+        for annotation in annotations:
             _annotate_with_clinvar(
                 annotation,
                 active_session,
                 resolved_retries,
             )
+        clinvar_status, clinvar_message = _source_progress_summary(
+            annotations,
+            "clinvar",
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "clinvar",
+            clinvar_status,
+            clinvar_message,
+        )
+
+        _notify_annotation_progress(
+            progress_callback,
+            "clingen",
+            "running",
+            "Querying ClinGen/GenCC through UCSC.",
+        )
+        for annotation in annotations:
             _annotate_with_clingen(
                 annotation,
                 active_session,
                 resolved_retries,
             )
+        clingen_status, clingen_message = _source_progress_summary(
+            annotations,
+            "clingen",
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "clingen",
+            clingen_status,
+            clingen_message,
+        )
     finally:
         if owns_session:
             active_session.close()

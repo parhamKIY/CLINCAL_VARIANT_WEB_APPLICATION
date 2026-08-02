@@ -12,7 +12,11 @@ from uuid import uuid4
 
 import requests
 
-from backend.annotation import AnnotationError, annotate_variants
+from backend.annotation import (
+    AnnotationError,
+    AnnotationProgressStatus,
+    annotate_variants,
+)
 from backend.database import DatabaseError, save_complete_analysis
 from backend.error_handling import (
     PipelineError,
@@ -52,7 +56,7 @@ from backend.vcf_processing import (
 )
 
 
-PIPELINE_SCHEMA_VERSION = "1.2"
+PIPELINE_SCHEMA_VERSION = "1.3"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -67,6 +71,14 @@ PipelineStatus = Literal[
     "error",
 ]
 PipelineStageStatus = Literal[
+    "pending",
+    "running",
+    "success",
+    "warning",
+    "error",
+    "skipped",
+]
+PipelineAPIStatus = Literal[
     "pending",
     "running",
     "success",
@@ -91,6 +103,7 @@ PIPELINE_STAGE_STATUS_VALUES = {
     "error",
     "skipped",
 }
+PIPELINE_API_STATUS_VALUES = PIPELINE_STAGE_STATUS_VALUES
 PIPELINE_STAGE_ORDER = (
     "input",
     "vcf_processing",
@@ -99,6 +112,14 @@ PIPELINE_STAGE_ORDER = (
     "evidence",
     "llm",
     "report",
+)
+PIPELINE_API_ORDER = (
+    "vep",
+    "genebe",
+    "myvariant",
+    "clinvar",
+    "clingen",
+    "llm",
 )
 
 
@@ -120,6 +141,14 @@ class PipelineStageRecord(TypedDict):
     message: str | None
 
 
+class PipelineAPIRecord(TypedDict):
+    """Live status for one external API used by the analysis."""
+
+    source: str
+    status: PipelineAPIStatus
+    message: str | None
+
+
 class PipelineIssue(TypedDict):
     """Frontend-safe error without an exception or stack trace."""
 
@@ -137,6 +166,7 @@ class PipelineResult(TypedDict):
     current_stage: str
     progress_percent: int
     stages: list[PipelineStageRecord]
+    api_statuses: list[PipelineAPIRecord]
     variant_count: int
     variants: list[dict[str, object]]
     annotations: list[dict[str, object]]
@@ -155,6 +185,7 @@ ANALYSIS_INPUT_FIELDS = frozenset(AnalysisInput.__required_keys__)
 PIPELINE_STAGE_FIELDS = frozenset(
     PipelineStageRecord.__required_keys__
 )
+PIPELINE_API_FIELDS = frozenset(PipelineAPIRecord.__required_keys__)
 PIPELINE_ISSUE_FIELDS = frozenset(PipelineIssue.__required_keys__)
 PIPELINE_RESULT_FIELDS = frozenset(PipelineResult.__required_keys__)
 
@@ -297,6 +328,14 @@ def create_pipeline_result() -> PipelineResult:
             }
             for stage in PIPELINE_STAGE_ORDER
         ],
+        "api_statuses": [
+            {
+                "source": source,
+                "status": "pending",
+                "message": "Waiting for the required pipeline stage.",
+            }
+            for source in PIPELINE_API_ORDER
+        ],
         "variant_count": 0,
         "variants": [],
         "annotations": [],
@@ -365,6 +404,54 @@ def _validate_stage_records(value: object) -> None:
     if tuple(actual_order) != PIPELINE_STAGE_ORDER:
         raise PipelineResultError(
             "pipeline.stages must use the required stage order."
+        )
+
+
+def _validate_api_records(value: object) -> None:
+    """Validate the fixed external API status contract."""
+
+    if not isinstance(value, list):
+        raise PipelineResultError(
+            "pipeline.api_statuses must be a list."
+        )
+    if len(value) != len(PIPELINE_API_ORDER):
+        raise PipelineResultError(
+            "pipeline.api_statuses must contain every external API."
+        )
+
+    actual_order: list[str] = []
+    for index, record in enumerate(value):
+        path = f"pipeline.api_statuses[{index}]"
+        if not isinstance(record, dict):
+            raise PipelineResultError(
+                f"{path} must be a dictionary."
+            )
+        _exact_fields(
+            record,
+            PIPELINE_API_FIELDS,
+            path,
+            PipelineResultError,
+        )
+        source = _required_text(
+            record["source"],
+            f"{path}.source",
+            PipelineResultError,
+        )
+        actual_order.append(source)
+        if record["status"] not in PIPELINE_API_STATUS_VALUES:
+            raise PipelineResultError(
+                f"{path}.status is unsupported."
+            )
+        if record["message"] is not None:
+            _required_text(
+                record["message"],
+                f"{path}.message",
+                PipelineResultError,
+            )
+
+    if tuple(actual_order) != PIPELINE_API_ORDER:
+        raise PipelineResultError(
+            "pipeline.api_statuses must use the required API order."
         )
 
 
@@ -457,6 +544,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         )
 
     _validate_stage_records(value["stages"])
+    _validate_api_records(value["api_statuses"])
     variant_count = value["variant_count"]
     if (
         isinstance(variant_count, bool)
@@ -599,6 +687,22 @@ def _set_stage(
         )
 
 
+def _set_api_status(
+    result: PipelineResult,
+    source: str,
+    status: PipelineAPIStatus,
+    message: str,
+) -> None:
+    """Update one known external API status."""
+
+    api_index = PIPELINE_API_ORDER.index(source)
+    result["api_statuses"][api_index] = {
+        "source": source,
+        "status": status,
+        "message": " ".join(message.split())[:500],
+    }
+
+
 def _append_warning(
     result: PipelineResult,
     message: str,
@@ -685,6 +789,22 @@ def _finish_failed_stage(
                 "skipped",
                 progress_percent=0,
                 message=f"Skipped because {stage} did not complete.",
+            )
+
+    for api_record in result["api_statuses"]:
+        if api_record["status"] == "running":
+            _set_api_status(
+                result,
+                api_record["source"],
+                "error",
+                f"Stopped because {stage} did not complete.",
+            )
+        elif api_record["status"] == "pending":
+            _set_api_status(
+                result,
+                api_record["source"],
+                "skipped",
+                f"Not called because {stage} did not complete.",
             )
 
     has_retained_output = any(
@@ -879,11 +999,21 @@ def _annotate_and_match(
         message="Annotating all filtered variants.",
     )
     _notify_progress(result, progress_callback)
+
+    def update_annotation_progress(
+        source: str,
+        status: AnnotationProgressStatus,
+        message: str,
+    ) -> None:
+        _set_api_status(result, source, status, message)
+        _notify_progress(result, progress_callback)
+
     annotations = annotate_variants(
         result["variants"],
         batch_size=annotation_batch_size,
         max_retries=annotation_max_retries,
         session=annotation_session,
+        progress_callback=update_annotation_progress,
     )
     public_annotations = [
         dict(annotation)
@@ -1062,11 +1192,34 @@ def _build_evidence_and_report(
         progress_percent=0,
         message="Interpreting the first filtered variant.",
     )
+    selected_model = llm_model or "the configured model"
+    _set_api_status(
+        result,
+        "llm",
+        "running",
+        f"Generating the interpretation with {selected_model}.",
+    )
     _notify_progress(result, progress_callback)
-    interpretation = generate_clinical_interpretation(
-        leading_evidence,
-        client=llm_client,
-        model=llm_model,
+    try:
+        interpretation = generate_clinical_interpretation(
+            leading_evidence,
+            client=llm_client,
+            model=llm_model,
+        )
+    except Exception:
+        _set_api_status(
+            result,
+            "llm",
+            "error",
+            "The LLM API did not complete the interpretation.",
+        )
+        _notify_progress(result, progress_callback)
+        raise
+    _set_api_status(
+        result,
+        "llm",
+        "success",
+        f"Completed the interpretation with {selected_model}.",
     )
     _set_stage(
         result,
@@ -1078,6 +1231,7 @@ def _build_evidence_and_report(
             "first filtered variant."
         ),
     )
+    _notify_progress(result, progress_callback)
 
     result["current_stage"] = "report"
     result["progress_percent"] = 90
@@ -1468,8 +1622,11 @@ __all__ = [
     "MAX_PIPELINE_ERRORS",
     "MAX_PIPELINE_PHENOTYPES",
     "MAX_PIPELINE_WARNINGS",
+    "PIPELINE_API_ORDER",
     "PIPELINE_SCHEMA_VERSION",
     "PIPELINE_STAGE_ORDER",
+    "PipelineAPIRecord",
+    "PipelineAPIStatus",
     "PipelineError",
     "PipelineInputError",
     "PipelineIssue",

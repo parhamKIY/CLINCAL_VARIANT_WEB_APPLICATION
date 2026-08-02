@@ -88,6 +88,7 @@ from backend.phenotype import (
     validate_hpo_id,
 )
 from backend.pipeline import (
+    PIPELINE_API_ORDER,
     PIPELINE_SCHEMA_VERSION,
     PIPELINE_STAGE_ORDER,
     PipelineError,
@@ -3108,6 +3109,42 @@ class TestAnnotation:
             "protein": 1,
             "mane": 1,
         }
+
+    def test_source_progress_reports_each_api_in_execution_order(
+        self,
+    ) -> None:
+        events: list[tuple[str, str, str]] = []
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+        )
+
+        annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+            progress_callback=lambda source, status, message: (
+                events.append((source, status, message))
+            ),
+        )
+
+        assert [
+            (source, status)
+            for source, status, _ in events
+        ] == [
+            ("vep", "running"),
+            ("vep", "success"),
+            ("genebe", "running"),
+            ("genebe", "success"),
+            ("myvariant", "running"),
+            ("myvariant", "success"),
+            ("clinvar", "running"),
+            ("clinvar", "success"),
+            ("clingen", "running"),
+            ("clingen", "success"),
+        ]
 
     def test_successful_myvariant_response_is_standardized(self) -> None:
         session = FakeSession(
@@ -7164,6 +7201,14 @@ class TestPipelineContract:
             record["status"] == "pending"
             for record in result["stages"]
         )
+        assert [
+            record["source"]
+            for record in result["api_statuses"]
+        ] == list(PIPELINE_API_ORDER)
+        assert all(
+            record["status"] == "pending"
+            for record in result["api_statuses"]
+        )
         assert result["report_path"] is None
         assert result["analysis_id"] is None
         assert result["errors"] == []
@@ -7241,6 +7286,19 @@ class TestPipelineContract:
         with pytest.raises(
             PipelineResultError,
             match="required stage order",
+        ):
+            validate_pipeline_result(result)
+
+    def test_api_order_is_fixed(self) -> None:
+        result = create_pipeline_result()
+        result["api_statuses"][0], result["api_statuses"][1] = (
+            result["api_statuses"][1],
+            result["api_statuses"][0],
+        )
+
+        with pytest.raises(
+            PipelineResultError,
+            match="required API order",
         ):
             validate_pipeline_result(result)
 
@@ -7574,6 +7632,13 @@ class TestCompletePipelineHappyPath:
             "alt": "T",
         }
         assert len(adapter.requests) == 1
+        assert result["api_statuses"][-1] == {
+            "source": "llm",
+            "status": "success",
+            "message": (
+                "Completed the interpretation with the configured model."
+            ),
+        }
         assert "BEGIN_EVIDENCE_OBJECT_JSON" in (
             adapter.requests[0].messages[1].content
         )
@@ -8078,6 +8143,18 @@ class TestStage13IntegrationBoundaries:
         )
         assert "PATIENT" not in json.dumps(result)
         assert result["annotations"][0]["gene"] == "SCN1A"
+        api_statuses = {
+            record["source"]: record["status"]
+            for record in result["api_statuses"]
+        }
+        assert api_statuses == {
+            "vep": "success",
+            "genebe": "success",
+            "myvariant": "success",
+            "clinvar": "success",
+            "clingen": "success",
+            "llm": "pending",
+        }
         assert result["annotations"][0]["sources"]["vep"][
             "status"
         ] == "success"
@@ -10628,6 +10705,46 @@ class TestFrontendFoundation:
             if button.label == "Cancel"
         )
         assert cancel_button.disabled
+
+    def test_external_api_status_panel_shows_each_service_state(
+        self,
+    ) -> None:
+        result = create_pipeline_result()
+        statuses = {
+            "vep": ("success", "Completed all 5 variants."),
+            "genebe": ("running", "Sending variants to GeneBe."),
+            "myvariant": ("warning", "Completed with one warning."),
+            "clinvar": ("error", "Failed for all 5 variants."),
+            "clingen": ("skipped", "Not called."),
+            "llm": ("pending", "Waiting for annotation."),
+        }
+        for record in result["api_statuses"]:
+            status, message = statuses[record["source"]]
+            record["status"] = status  # type: ignore[assignment]
+            record["message"] = message
+
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        app.session_state["pipeline_result"] = result
+        app.run(timeout=10)
+
+        assert not app.exception
+        rendered = "\n".join(
+            markdown.value
+            for markdown in app.markdown
+        )
+        for source in (
+            "Ensembl VEP",
+            "GeneBe",
+            "MyVariant.info",
+            "NCBI ClinVar",
+            "ClinGen/GenCC (UCSC)",
+            "LLM API",
+        ):
+            assert source in rendered
+        assert "GeneBe — In progress" in rendered
+        assert "NCBI ClinVar — Failed" in rendered
 
     @pytest.mark.stage16_mvp
     def test_missing_vcf_is_rejected_before_pipeline_execution(
