@@ -401,6 +401,11 @@ class TestConfiguration:
                 "cannot exceed Ensembl's limit",
             ),
             (
+                "GENEBE_EMAIL",
+                "user@example.test",
+                "must be configured together",
+            ),
+            (
                 "LOG_LEVEL",
                 "VERBOSE",
                 "LOG_LEVEL must be",
@@ -437,6 +442,10 @@ class TestConfiguration:
             (
                 "VEP_BASE_URL",
                 "https://user:password@vep.example/api",
+            ),
+            (
+                "GENEBE_BASE_URL",
+                "http://genebe.example/api",
             ),
             (
                 "MYVARIANT_BASE_URL",
@@ -895,16 +904,19 @@ class FakeSession:
         self,
         responses: list[object],
         *,
+        genebe_responses: list[object] | None = None,
         get_responses: list[object] | None = None,
         clinvar_responses: list[object] | None = None,
         clingen_responses: list[object] | None = None,
     ) -> None:
         self.responses = list(responses)
+        self.genebe_responses = list(genebe_responses or [])
         self.get_responses = list(get_responses or [])
         self.clinvar_responses = list(clinvar_responses or [])
         self.clingen_responses = list(clingen_responses or [])
         self.calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
+        self.genebe_post_calls: list[dict[str, object]] = []
         self.get_calls: list[dict[str, object]] = []
         self.myvariant_get_calls: list[dict[str, object]] = []
         self.clinvar_get_calls: list[dict[str, object]] = []
@@ -914,8 +926,38 @@ class FakeSession:
     def post(self, url: str, **kwargs: object) -> FakeResponse:
         call = {"method": "POST", "url": url, **kwargs}
         self.calls.append(call)
-        self.post_calls.append(call)
-        response = self.responses.pop(0)
+        is_genebe = url == (
+            f"{settings.GENEBE_BASE_URL}/api-public/v1/variants"
+        )
+        if is_genebe:
+            self.genebe_post_calls.append(call)
+            if not self.genebe_responses:
+                request_variants = kwargs.get("json")
+                assert isinstance(request_variants, list)
+                return FakeResponse(
+                    200,
+                    {
+                        "variants": [
+                            {
+                                **variant,
+                                "effect": None,
+                                "transcript": None,
+                                "gene_symbol": None,
+                                "consequences": [],
+                                "acmg_classification": None,
+                                "acmg_criteria": None,
+                                "acmg_score": None,
+                            }
+                            for variant in request_variants
+                            if isinstance(variant, dict)
+                        ],
+                        "message": None,
+                    },
+                )
+            response = self.genebe_responses.pop(0)
+        else:
+            self.post_calls.append(call)
+            response = self.responses.pop(0)
 
         if isinstance(response, Exception):
             raise response
@@ -2825,6 +2867,63 @@ class TestAnnotation:
         }
 
     @staticmethod
+    def _genebe_variant_response(
+        *,
+        chrom: str = "1",
+        position: int = 100,
+        reference: str = "A",
+        alternate: str = "G",
+        transcript: str = "NM_000001.2",
+    ) -> dict[str, object]:
+        """Build one documented GeneBe variant response."""
+
+        return {
+            "chr": chrom,
+            "pos": position,
+            "ref": reference,
+            "alt": alternate,
+            "effect": "missense_variant",
+            "transcript": transcript,
+            "gene_symbol": "GENE1",
+            "gene_hgnc_id": 1,
+            "consequences": [
+                {
+                    "canonical": True,
+                    "protein_coding": True,
+                    "consequences": ["missense_variant"],
+                    "gene_symbol": "GENE1",
+                    "gene_hgnc_id": 1,
+                    "hgvs_c": "c.100A>G",
+                    "hgvs_p": "p.Lys34Arg",
+                    "transcript": transcript,
+                    "protein_id": "NP_000001.1",
+                    "mane_select": "ENST000001.2",
+                    "mane_plus": "ENST000001.3",
+                    "biotype": "protein_coding",
+                }
+            ],
+            "frequency_reference_population": 0.0002,
+            "hom_count_reference_population": 0,
+            "allele_count_reference_population": 3,
+            "gnomad_exomes_af": 0.0001,
+            "gnomad_genomes_af": 0.0002,
+            "computational_score_selected": 0.94,
+            "computational_prediction_selected": "Pathogenic",
+            "computational_source_selected": "MetaRNN",
+            "splice_score_selected": 0.01,
+            "splice_prediction_selected": "Benign",
+            "splice_source_selected": "max_spliceai",
+            "revel_score": 0.91,
+            "revel_prediction": "Pathogenic",
+            "acmg_score": 7.0,
+            "acmg_classification": "Likely pathogenic",
+            "acmg_criteria": "PS3, PM2, PP3",
+            "clinvar_classification": "Uncertain significance",
+            "clinvar_review_status": "criteria provided",
+            "clinvar_disease": "Example disease",
+        }
+
+    @staticmethod
     def _clinvar_search_response(
         identifiers: list[str] | None = None,
     ) -> dict[str, object]:
@@ -3056,6 +3155,294 @@ class TestAnnotation:
         assert annotation["references"][-1]["source"] == "MyVariant.info"
         assert annotation["references"][-1]["url"].endswith(
             "chr1%3Ag.100A%3EG?assembly=hg38"
+        )
+
+    @pytest.mark.regression
+    def test_successful_genebe_batch_is_independent_and_standardized(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            genebe_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "variants": [
+                            self._genebe_variant_response()
+                        ],
+                        "message": None,
+                    },
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        genebe = annotation["sources"]["genebe"]
+        assert genebe["status"] == "success"
+        assert genebe["provider"] == "GeneBe"
+        assert genebe["provider_version"] is None
+        assert genebe["request_assembly"] == "GRCh38"
+        assert genebe["returned_variant"] == {
+            "chrom": "1",
+            "pos": 100,
+            "ref": "A",
+            "alt": "G",
+        }
+        assert genebe["representation_mismatch"] is False
+        assert genebe["transcript_mismatch"] is True
+        assert genebe["gene"] == "GENE1"
+        assert genebe["gene_hgnc_id"] == 1
+        assert genebe["transcript"] == "NM_000001.2"
+        assert genebe["effect"] == "missense_variant"
+        assert genebe["automated_acmg_classification"] == (
+            "Likely pathogenic"
+        )
+        assert genebe["automated_acmg_criteria"] == [
+            "PS3",
+            "PM2",
+            "PP3",
+        ]
+        assert genebe["automated_acmg_score"] == 7.0
+        assert genebe["population_annotations"] == {
+            "frequency_reference_population": 0.0002,
+            "gnomad_exomes_af": 0.0001,
+            "gnomad_genomes_af": 0.0002,
+            "hom_count_reference_population": 0,
+            "allele_count_reference_population": 3,
+        }
+        assert genebe["predictor_annotations"]["computational_selected"] == {
+            "score": 0.94,
+            "prediction": "Pathogenic",
+            "source": "MetaRNN",
+        }
+        assert genebe["clinvar_derived"] == {
+            "upstream_source": "ClinVar",
+            "classification": "Uncertain significance",
+            "review_status": "criteria provided",
+            "disease": "Example disease",
+        }
+        assert genebe["consequences"][0]["hgvs_c"] == "c.100A>G"
+        assert genebe["consequences"][0]["hgvs_p"] == "p.Lys34Arg"
+        assert genebe["retrieved_at"].endswith("Z")
+
+        # GeneBe is independent evidence and cannot overwrite VEP.
+        assert annotation["transcript"] == "ENST000001"
+        assert annotation["hgvsc"] == "ENST000001:c.100A>G"
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["references"][-1] == {
+            "source": "GeneBe automated annotation",
+            "url": (
+                "https://api.genebe.net/cloud/"
+                "api-public/v1/variants"
+            ),
+        }
+
+        assert len(session.genebe_post_calls) == 1
+        call = session.genebe_post_calls[0]
+        assert call["params"] == {
+            "genome": "hg38",
+            "useRefseq": "true",
+            "useEnsembl": "true",
+            "omitAcmg": "false",
+            "omitCsq": "false",
+            "omitBasic": "false",
+            "omitAdvanced": "false",
+            "omitNormalization": "false",
+            "allGenes": "false",
+        }
+        assert call["json"] == [
+            {
+                "chr": "1",
+                "pos": 100,
+                "ref": "A",
+                "alt": "G",
+            }
+        ]
+        assert call["auth"] is None
+        assert call["timeout"] == settings.REQUEST_TIMEOUT
+        assert call["verify"] is True
+
+    def test_genebe_uses_optional_basic_authentication(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "GENEBE_EMAIL",
+            "researcher@example.test",
+        )
+        monkeypatch.setattr(settings, "GENEBE_API_KEY", "test-key")
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+        )
+
+        annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )
+
+        assert session.genebe_post_calls[0]["auth"] == (
+            "researcher@example.test",
+            "test-key",
+        )
+
+    def test_genebe_uses_hg19_and_records_changed_representation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "GENOME_ASSEMBLY",
+            "GRCh37",
+        )
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [self._vep_response(assembly="GRCh37")],
+                )
+            ],
+            genebe_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "variants": [
+                            self._genebe_variant_response(
+                                position=101
+                            )
+                        ],
+                        "message": None,
+                    },
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        genebe = annotation["sources"]["genebe"]
+        assert session.genebe_post_calls[0]["params"]["genome"] == "hg19"
+        assert genebe["request_assembly"] == "GRCh37"
+        assert genebe["representation_mismatch"] is True
+        assert genebe["returned_variant"]["pos"] == 101
+
+    def test_genebe_timeout_retries_without_losing_vep(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            genebe_responses=[
+                requests.Timeout("temporary timeout"),
+                FakeResponse(
+                    200,
+                    {
+                        "variants": [
+                            self._genebe_variant_response()
+                        ],
+                        "message": None,
+                    },
+                ),
+            ],
+        )
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "backend.annotation.time.sleep",
+            delays.append,
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=1,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["genebe"]["status"] == "success"
+        assert len(session.genebe_post_calls) == 2
+        assert delays == [1.0]
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_warning"),
+        [
+            (ValueError("invalid JSON"), "invalid JSON"),
+            ([], "unexpected response structure"),
+            ({"variants": []}, "unexpected variant count"),
+            (
+                {"variants": [{"chr": "1", "pos": 0}]},
+                "invalid variant representation",
+            ),
+        ],
+    )
+    def test_genebe_invalid_response_is_isolated(
+        self,
+        payload: object,
+        expected_warning: str,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            genebe_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["genebe"]["status"] == (
+            "invalid_response"
+        )
+        assert annotation["sources"]["myvariant"]["status"] == "not_found"
+        assert any(
+            expected_warning in warning
+            for warning in annotation["warnings"]
+        )
+
+    def test_genebe_http_failure_preserves_all_other_sources(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            genebe_responses=[
+                FakeResponse(500, {"message": "unavailable"})
+            ],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["genebe"]["status"] == "unavailable"
+        assert annotation["sources"]["vep"]["status"] == "success"
+        assert annotation["sources"]["myvariant"]["status"] == "success"
+        assert annotation["sources"]["clinvar"]["status"] == "success"
+        assert annotation["sources"]["clingen"]["status"] == "success"
+        assert any(
+            "GeneBe returned HTTP 500" in warning
+            for warning in annotation["warnings"]
         )
 
     def test_myvariant_uses_explicit_grch37_assembly(
@@ -3794,6 +4181,7 @@ class TestAnnotation:
             for source, evidence in annotation["sources"].items()
         } == {
             "vep": "success",
+            "genebe": "success",
             "myvariant": "success",
             "clinvar": "success",
             "clingen": "success",
@@ -3820,6 +4208,7 @@ class TestAnnotation:
             for reference in annotation["references"]
         } == {
             "Ensembl VEP",
+            "GeneBe automated annotation",
             "MyVariant.info",
             "NCBI ClinVar",
             "ClinGen Gene-Disease Validity via UCSC GenCC",
@@ -3894,12 +4283,47 @@ class TestAnnotation:
 
         assert len(annotations) == 2
         assert len(session.post_calls) == 1
+        assert len(session.genebe_post_calls) == 1
         assert len(session.myvariant_get_calls) == 2
         assert len(session.clinvar_get_calls) == 2
         assert len(session.clingen_get_calls) == 2
         request_json = session.post_calls[0]["json"]
         assert isinstance(request_json, dict)
         assert len(request_json["variants"]) == 2
+
+    @pytest.mark.regression
+    def test_genebe_batches_all_five_variants_in_one_request(
+        self,
+    ) -> None:
+        variants = [
+            self._variant(position)
+            for position in range(100, 105)
+        ]
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [
+                        self._vep_response(f"cv_{index}")
+                        for index in range(5)
+                    ],
+                )
+            ]
+        )
+
+        annotations = annotate_variants(
+            variants,
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )
+
+        assert len(annotations) == 5
+        assert len(session.genebe_post_calls) == 1
+        assert len(session.genebe_post_calls[0]["json"]) == 5
+        assert all(
+            annotation["sources"]["genebe"]["status"] == "success"
+            for annotation in annotations
+        )
 
     def test_batch_size_splits_requests(self) -> None:
         session = FakeSession(
@@ -7998,6 +8422,7 @@ class TestAnnotationApiLogging:
         assert annotations[0]["gene"] == "SCN1A"
         expected_calls = (
             ("ensembl_vep", "annotate_batch"),
+            ("genebe", "annotate_batch"),
             ("myvariant", "lookup_variant"),
             ("ncbi_clinvar", "search_variant"),
             ("ncbi_clinvar", "summarize_variant"),
@@ -8009,7 +8434,7 @@ class TestAnnotationApiLogging:
                 f"operation={operation} attempt=1 outcome=success"
                 in contents
             )
-        assert len(re.findall(r"duration_ms=\d+", contents)) == 5
+        assert len(re.findall(r"duration_ms=\d+", contents)) == 6
         assert "http_status=200" in contents
         assert settings.VEP_BASE_URL not in contents
         assert "1:100:A:G" not in contents

@@ -9,6 +9,7 @@ from backend.pipeline import PipelineResult
 
 SOURCE_LABELS = {
     "vep": "VEP",
+    "genebe": "GeneBe",
     "myvariant": "MyVariant.info",
     "clinvar": "ClinVar",
     "clingen": "ClinGen/GenCC",
@@ -93,6 +94,19 @@ def _clinvar_fields(
     return accession, significance
 
 
+def _genebe_fields(
+    annotation: dict[str, object],
+) -> tuple[object, object]:
+    """Extract independent GeneBe status and automated classification."""
+
+    sources = _dictionary(annotation.get("sources"))
+    genebe = _dictionary(sources.get("genebe"))
+    return (
+        genebe.get("status"),
+        genebe.get("automated_acmg_classification"),
+    )
+
+
 def build_annotation_rows(
     annotations: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -101,6 +115,9 @@ def build_annotation_rows(
     rows: list[dict[str, object]] = []
     for annotation in annotations:
         accession, significance = _clinvar_fields(annotation)
+        genebe_status, genebe_classification = _genebe_fields(
+            annotation
+        )
         warnings = annotation.get("warnings")
         rows.append(
             {
@@ -109,6 +126,10 @@ def build_annotation_rows(
                 "Consequence": annotation.get("consequence"),
                 "Impact": annotation.get("impact"),
                 "Protein change": annotation.get("protein_change"),
+                "GeneBe status": genebe_status,
+                "GeneBe automated classification": (
+                    genebe_classification
+                ),
                 "Population frequency": annotation.get(
                     "population_frequency"
                 ),

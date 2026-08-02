@@ -1,0 +1,12 @@
+##fileformat=VCFv4.2
+##reference=GRCh38
+##contig=<ID=1,length=248956422>
+##contig=<ID=6,length=170805979>
+##contig=<ID=19,length=58617616>
+##FILTER=<ID=PASS,Description="All filters passed">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	941284	rs571654307	G	A	.	PASS	.
+1	11796321	rs1801133	G	A	.	PASS	.
+1	169549811	rs6025	C	T	.	PASS	.
+6	26092913	rs1800562	G	A	.	PASS	.
+19	44908684	rs429358	T	C	.	PASS	.

@@ -169,6 +169,19 @@ class Settings:
         "https://rest.ensembl.org",
     ).strip().rstrip("/")
 
+    GENEBE_BASE_URL: str = os.getenv(
+        "GENEBE_BASE_URL",
+        "https://api.genebe.net/cloud",
+    ).strip().rstrip("/")
+
+    GENEBE_EMAIL: str | None = (
+        os.getenv("GENEBE_EMAIL", "").strip() or None
+    )
+
+    GENEBE_API_KEY: str | None = (
+        os.getenv("GENEBE_API_KEY", "").strip() or None
+    )
+
     MYVARIANT_BASE_URL: str = os.getenv(
         "MYVARIANT_BASE_URL",
         "https://myvariant.info/v1",
@@ -330,6 +343,7 @@ class Settings:
         url_settings = {
             "LLM_BASE_URL": cls.LLM_BASE_URL,
             "VEP_BASE_URL": cls.VEP_BASE_URL,
+            "GENEBE_BASE_URL": cls.GENEBE_BASE_URL,
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
@@ -376,6 +390,14 @@ class Settings:
         if cls.GENOME_ASSEMBLY not in {"GRCh37", "GRCh38"}:
             raise RuntimeError(
                 "GENOME_ASSEMBLY must be GRCh37 or GRCh38."
+            )
+
+        if (cls.GENEBE_EMAIL is None) != (
+            cls.GENEBE_API_KEY is None
+        ):
+            raise RuntimeError(
+                "GENEBE_EMAIL and GENEBE_API_KEY must be configured "
+                "together."
             )
 
         if cls.VEP_BATCH_SIZE > 200:

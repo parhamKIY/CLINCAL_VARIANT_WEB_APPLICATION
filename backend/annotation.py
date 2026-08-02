@@ -20,7 +20,10 @@ LOGGER = get_logger("annotation")
 
 # Ensembl documents a maximum of 200 variants per POST request.
 MAX_VEP_BATCH_SIZE = 200
+MAX_GENEBE_BATCH_SIZE = 1_000
 MAX_STORED_TRANSCRIPTS = 10
+MAX_GENEBE_CONSEQUENCES = 10
+MAX_GENEBE_ACMG_CRITERIA = 50
 MAX_CLINVAR_SEARCH_RESULTS = 20
 MAX_CLINVAR_CONDITIONS = 10
 MAX_CLINVAR_ACCESSIONS = 20
@@ -30,6 +33,11 @@ CLINVAR_REQUEST_INTERVAL = 0.34
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
 VEP_PROVIDER_NAME = "Ensembl VEP"
+GENEBE_PROVIDER_NAME = "GeneBe"
+GENEBE_GENOMES = {
+    "GRCh37": "hg19",
+    "GRCh38": "hg38",
+}
 MYVARIANT_ASSEMBLIES = {
     "GRCh37": "hg19",
     "GRCh38": "hg38",
@@ -135,6 +143,10 @@ class AnnotationError(ValueError):
 
 class AnnotationServiceError(RuntimeError):
     """Raised when an external annotation service cannot be used."""
+
+
+class GeneBeResponseError(AnnotationServiceError):
+    """Raised when GeneBe returns an invalid successful response."""
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +454,160 @@ def _post_vep_batch(
 
     raise AnnotationServiceError(
         "Ensembl VEP retry loop ended unexpectedly."
+    )
+
+
+# ---------------------------------------------------------------------------
+# GeneBe HTTP client
+# ---------------------------------------------------------------------------
+
+def _to_genebe_variant(variant: VariantData) -> dict[str, Any]:
+    """Build one documented GeneBe CPRA request object."""
+
+    chromosome = str(variant["chrom"]).strip()
+    if chromosome.upper() == "MT":
+        chromosome = "M"
+    return {
+        "chr": chromosome,
+        "pos": int(variant["pos"]),
+        "ref": str(variant["ref"]).strip().upper(),
+        "alt": str(variant["alt"]).strip().upper(),
+    }
+
+
+def _post_genebe_batch(
+    session: requests.Session,
+    variants: list[dict[str, Any]],
+    max_retries: int,
+) -> list[dict[str, Any]]:
+    """Send one GeneBe batch with bounded reliability controls."""
+
+    endpoint = (
+        f"{settings.GENEBE_BASE_URL}/api-public/v1/variants"
+    )
+    params = {
+        "genome": GENEBE_GENOMES[settings.GENOME_ASSEMBLY],
+        "useRefseq": "true",
+        "useEnsembl": "true",
+        "omitAcmg": "false",
+        "omitCsq": "false",
+        "omitBasic": "false",
+        "omitAdvanced": "false",
+        "omitNormalization": "false",
+        "allGenes": "false",
+    }
+    auth = (
+        (
+            settings.GENEBE_EMAIL,
+            settings.GENEBE_API_KEY,
+        )
+        if (
+            settings.GENEBE_EMAIL is not None
+            and settings.GENEBE_API_KEY is not None
+        )
+        else None
+    )
+
+    for attempt in range(max_retries + 1):
+        response: requests.Response | None = None
+        started_at = time.perf_counter()
+        try:
+            response = session.post(
+                endpoint,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                params=params,
+                json=variants,
+                auth=auth,
+                timeout=settings.REQUEST_TIMEOUT,
+                verify=True,
+            )
+        except requests.RequestException as exc:
+            _log_api_call(
+                service="genebe",
+                operation="annotate_batch",
+                attempt=attempt,
+                started_at=started_at,
+                exception=exc,
+            )
+            if attempt >= max_retries:
+                raise AnnotationServiceError(
+                    "GeneBe request failed because the service was "
+                    "unavailable."
+                ) from exc
+
+            delay = _retry_delay(attempt)
+            _log_api_retry(
+                service="genebe",
+                operation="annotate_batch",
+                attempt=attempt,
+                reason=(
+                    "timeout"
+                    if isinstance(exc, requests.Timeout)
+                    else "network_error"
+                ),
+                delay_seconds=delay,
+            )
+            time.sleep(delay)
+            continue
+
+        _log_api_call(
+            service="genebe",
+            operation="annotate_batch",
+            attempt=attempt,
+            started_at=started_at,
+            response=response,
+        )
+        if (
+            response.status_code in TRANSIENT_HTTP_STATUSES
+            and attempt < max_retries
+        ):
+            delay = _retry_delay(attempt, response)
+            _log_api_retry(
+                service="genebe",
+                operation="annotate_batch",
+                attempt=attempt,
+                reason=f"http_{response.status_code}",
+                delay_seconds=delay,
+            )
+            time.sleep(delay)
+            continue
+
+        if not 200 <= response.status_code < 300:
+            raise AnnotationServiceError(
+                f"GeneBe returned HTTP {response.status_code}."
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GeneBeResponseError(
+                "GeneBe returned invalid JSON."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise GeneBeResponseError(
+                "GeneBe returned an unexpected response structure."
+            )
+        response_variants = payload.get("variants")
+        if (
+            not isinstance(response_variants, list)
+            or any(
+                not isinstance(item, dict)
+                for item in response_variants
+            )
+            or len(response_variants) != len(variants)
+        ):
+            raise GeneBeResponseError(
+                "GeneBe returned an unexpected variant count or "
+                "response structure."
+            )
+        return response_variants
+
+    raise AnnotationServiceError(
+        "GeneBe retry loop ended unexpectedly."
     )
 
 
@@ -1414,6 +1580,34 @@ def _base_annotation(
                 "total_transcript_consequences": 0,
                 "transcripts_truncated": False,
             },
+            "genebe": {
+                "status": "pending",
+                "provider": GENEBE_PROVIDER_NAME,
+                "provider_version": None,
+                "retrieved_at": None,
+                "request_assembly": settings.GENOME_ASSEMBLY,
+                "returned_variant": None,
+                "representation_mismatch": False,
+                "transcript_mismatch": False,
+                "gene": None,
+                "gene_hgnc_id": None,
+                "transcript": None,
+                "effect": None,
+                "consequences": [],
+                "total_consequences": 0,
+                "consequences_truncated": False,
+                "automated_acmg_classification": None,
+                "automated_acmg_criteria": [],
+                "automated_acmg_score": None,
+                "population_annotations": {},
+                "predictor_annotations": {},
+                "clinvar_derived": {
+                    "upstream_source": "ClinVar",
+                    "classification": None,
+                    "review_status": None,
+                    "disease": None,
+                },
+            },
             "myvariant": {
                 "status": "pending",
                 "variant_id": None,
@@ -1549,6 +1743,363 @@ def _standardize_vep_response(
         }
     )
     return annotation
+
+
+def _optional_integer(value: Any) -> int | None:
+    """Normalize one optional non-negative provider count."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+    ):
+        return None
+    return value
+
+
+def _clean_genebe_consequence(
+    consequence: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep one bounded GeneBe transcript consequence."""
+
+    raw_terms = consequence.get("consequences")
+    terms = (
+        [
+            term.strip()
+            for term in raw_terms
+            if isinstance(term, str) and term.strip()
+        ][:20]
+        if isinstance(raw_terms, list)
+        else []
+    )
+    canonical = consequence.get("canonical")
+    protein_coding = consequence.get("protein_coding")
+    return {
+        "gene": _optional_text(consequence.get("gene_symbol")),
+        "gene_hgnc_id": _optional_integer(
+            consequence.get("gene_hgnc_id")
+        ),
+        "transcript": _optional_text(
+            consequence.get("transcript")
+        ),
+        "protein_id": _optional_text(
+            consequence.get("protein_id")
+        ),
+        "biotype": _optional_text(consequence.get("biotype")),
+        "consequence_terms": terms,
+        "hgvs_c": _optional_text(consequence.get("hgvs_c")),
+        "hgvs_p": _optional_text(consequence.get("hgvs_p")),
+        "canonical": (
+            canonical if isinstance(canonical, bool) else None
+        ),
+        "protein_coding": (
+            protein_coding
+            if isinstance(protein_coding, bool)
+            else None
+        ),
+        "mane_select": _optional_text(
+            consequence.get("mane_select")
+        ),
+        "mane_plus_clinical": _optional_text(
+            consequence.get("mane_plus")
+        ),
+    }
+
+
+def _clean_genebe_criteria(value: Any) -> list[str]:
+    """Normalize GeneBe ACMG criteria without interpreting them."""
+
+    if isinstance(value, str):
+        raw_criteria: Iterable[Any] = value.split(",")
+    elif isinstance(value, list):
+        raw_criteria = value
+    else:
+        return []
+
+    criteria: list[str] = []
+    for raw_criterion in raw_criteria:
+        criterion = _optional_text(raw_criterion)
+        if criterion is None or criterion in criteria:
+            continue
+        criteria.append(criterion)
+        if len(criteria) >= MAX_GENEBE_ACMG_CRITERIA:
+            break
+    return criteria
+
+
+def _clean_genebe_population(
+    response: dict[str, Any],
+) -> dict[str, float | int]:
+    """Select documented population fields from GeneBe."""
+
+    population: dict[str, float | int] = {}
+    for field in (
+        "frequency_reference_population",
+        "gnomad_exomes_af",
+        "gnomad_genomes_af",
+    ):
+        value = _optional_score(response.get(field))
+        if value is not None and 0.0 <= value <= 1.0:
+            population[field] = value
+
+    for field in (
+        "hom_count_reference_population",
+        "allele_count_reference_population",
+        "gnomad_exomes_ac",
+        "gnomad_genomes_ac",
+        "gnomad_exomes_homalt",
+        "gnomad_genomes_homalt",
+        "gnomad_mito_homoplasmic",
+        "gnomad_mito_heteroplasmic",
+    ):
+        value = _optional_integer(response.get(field))
+        if value is not None:
+            population[field] = value
+    return population
+
+
+def _clean_genebe_predictors(
+    response: dict[str, Any],
+) -> dict[str, dict[str, str | float | None]]:
+    """Select documented GeneBe predictor results."""
+
+    predictors: dict[str, dict[str, str | float | None]] = {}
+    predictor_fields = {
+        "computational_selected": (
+            "computational_score_selected",
+            "computational_prediction_selected",
+            "computational_source_selected",
+        ),
+        "splice_selected": (
+            "splice_score_selected",
+            "splice_prediction_selected",
+            "splice_source_selected",
+        ),
+        "revel": (
+            "revel_score",
+            "revel_prediction",
+            None,
+        ),
+        "alphamissense": (
+            "alphamissense_score",
+            "alphamissense_prediction",
+            None,
+        ),
+        "bayesdel_noaf": (
+            "bayesdelnoaf_score",
+            "bayesdelnoaf_prediction",
+            None,
+        ),
+        "phylop_100way": (
+            "phylop100way_score",
+            "phylop100way_prediction",
+            None,
+        ),
+        "spliceai_max": (
+            "spliceai_max_score",
+            "spliceai_max_prediction",
+            None,
+        ),
+        "dbscsnv_ada": (
+            "dbscsnv_ada_score",
+            "dbscsnv_ada_prediction",
+            None,
+        ),
+    }
+    for name, (score_field, prediction_field, source_field) in (
+        predictor_fields.items()
+    ):
+        score = _optional_score(response.get(score_field))
+        prediction = _optional_text(
+            response.get(prediction_field)
+        )
+        source = (
+            _optional_text(response.get(source_field))
+            if source_field is not None
+            else None
+        )
+        if score is None and prediction is None and source is None:
+            continue
+        predictors[name] = {
+            "score": score,
+            "prediction": prediction,
+            "source": source,
+        }
+    return predictors
+
+
+def _standardize_genebe_response(
+    annotation: AnnotationData,
+    response: dict[str, Any],
+) -> None:
+    """Attach independent, cleaned GeneBe evidence to one annotation."""
+
+    chromosome = _normalize_chromosome(response.get("chr"))
+    position = response.get("pos")
+    reference = _optional_text(response.get("ref"))
+    alternate = _optional_text(response.get("alt"))
+    if (
+        chromosome is None
+        or isinstance(position, bool)
+        or not isinstance(position, int)
+        or position <= 0
+        or reference is None
+        or alternate is None
+    ):
+        raise GeneBeResponseError(
+            "GeneBe returned an invalid variant representation."
+        )
+
+    returned_variant = {
+        "chrom": chromosome,
+        "pos": position,
+        "ref": reference.upper(),
+        "alt": alternate.upper(),
+    }
+    input_variant = {
+        "chrom": _normalize_chromosome(
+            annotation["variant"]["chrom"]
+        ),
+        "pos": int(annotation["variant"]["pos"]),
+        "ref": str(annotation["variant"]["ref"]).upper(),
+        "alt": str(annotation["variant"]["alt"]).upper(),
+    }
+
+    raw_consequences = response.get("consequences")
+    cleaned_consequences = (
+        [
+            _clean_genebe_consequence(item)
+            for item in raw_consequences
+            if isinstance(item, dict)
+        ]
+        if isinstance(raw_consequences, list)
+        else []
+    )
+    stored_consequences = cleaned_consequences[
+        :MAX_GENEBE_CONSEQUENCES
+    ]
+    gene = _optional_text(response.get("gene_symbol"))
+    transcript = _optional_text(response.get("transcript"))
+    vep_transcript = _optional_text(annotation.get("transcript"))
+
+    annotation["sources"]["genebe"].update(
+        {
+            "status": "success",
+            "provider_version": _optional_text(
+                response.get("version")
+            ),
+            "retrieved_at": _retrieval_timestamp(),
+            "returned_variant": returned_variant,
+            "representation_mismatch": (
+                returned_variant != input_variant
+            ),
+            "transcript_mismatch": (
+                transcript is not None
+                and vep_transcript is not None
+                and transcript != vep_transcript
+            ),
+            "gene": gene,
+            "gene_hgnc_id": _optional_integer(
+                response.get("gene_hgnc_id")
+            ),
+            "transcript": transcript,
+            "effect": _optional_text(response.get("effect")),
+            "consequences": stored_consequences,
+            "total_consequences": len(cleaned_consequences),
+            "consequences_truncated": (
+                len(stored_consequences)
+                < len(cleaned_consequences)
+            ),
+            "automated_acmg_classification": _optional_text(
+                response.get("acmg_classification")
+            ),
+            "automated_acmg_criteria": _clean_genebe_criteria(
+                response.get("acmg_criteria")
+            ),
+            "automated_acmg_score": _optional_score(
+                response.get("acmg_score")
+            ),
+            "population_annotations": _clean_genebe_population(
+                response
+            ),
+            "predictor_annotations": _clean_genebe_predictors(
+                response
+            ),
+            "clinvar_derived": {
+                "upstream_source": "ClinVar",
+                "classification": _optional_text(
+                    response.get("clinvar_classification")
+                ),
+                "review_status": _optional_text(
+                    response.get("clinvar_review_status")
+                ),
+                "disease": _optional_text(
+                    response.get("clinvar_disease")
+                ),
+            },
+        }
+    )
+    annotation["references"].append(
+        {
+            "source": "GeneBe automated annotation",
+            "url": (
+                f"{settings.GENEBE_BASE_URL}"
+                "/api-public/v1/variants"
+            ),
+        }
+    )
+
+
+def _annotate_with_genebe(
+    annotations: list[AnnotationData],
+    session: requests.Session,
+    max_retries: int,
+) -> None:
+    """Batch GeneBe evidence without overwriting VEP annotations."""
+
+    for offset in range(0, len(annotations), MAX_GENEBE_BATCH_SIZE):
+        batch = annotations[offset:offset + MAX_GENEBE_BATCH_SIZE]
+        request_variants = [
+            _to_genebe_variant(annotation["variant"])
+            for annotation in batch
+        ]
+        try:
+            responses = _post_genebe_batch(
+                session,
+                request_variants,
+                max_retries,
+            )
+        except AnnotationServiceError as exc:
+            LOGGER.error(
+                "event=annotation_source_failed service=genebe "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+            for annotation in batch:
+                annotation["sources"]["genebe"].update(
+                    {
+                        "status": (
+                            "invalid_response"
+                            if isinstance(exc, GeneBeResponseError)
+                            else "unavailable"
+                        ),
+                        "retrieved_at": _retrieval_timestamp(),
+                    }
+                )
+                annotation["warnings"].append(str(exc))
+            continue
+
+        for annotation, response in zip(batch, responses, strict=True):
+            try:
+                _standardize_genebe_response(annotation, response)
+            except AnnotationServiceError as exc:
+                annotation["sources"]["genebe"].update(
+                    {
+                        "status": "invalid_response",
+                        "retrieved_at": _retrieval_timestamp(),
+                    }
+                )
+                annotation["warnings"].append(str(exc))
 
 
 def _iter_source_records(value: Any) -> Iterator[dict[str, Any]]:
@@ -2111,7 +2662,7 @@ def annotate_variants(
     max_retries: int | None = None,
     session: requests.Session | None = None,
 ) -> list[AnnotationData]:
-    """Annotate with VEP, MyVariant, ClinVar, and ClinGen evidence.
+    """Annotate with VEP, GeneBe, MyVariant, ClinVar, and ClinGen evidence.
 
     Each external source fails independently and raw source payloads are not
     retained in the returned standardized evidence.
@@ -2179,6 +2730,12 @@ def annotate_variants(
                         response,
                     )
                 )
+
+        _annotate_with_genebe(
+            annotations,
+            active_session,
+            resolved_retries,
+        )
 
         for annotation in annotations:
             _annotate_with_myvariant(

@@ -48,9 +48,10 @@ flowchart LR
     H --> J["SQLite persistence"]
 
     D1["Ensembl VEP"] --> D
-    D2["MyVariant.info"] --> D
-    D3["NCBI ClinVar"] --> D
-    D4["UCSC GenCC"] --> D
+    D2["GeneBe"] --> D
+    D3["MyVariant.info"] --> D
+    D4["NCBI ClinVar"] --> D
+    D5["UCSC GenCC"] --> D
 
     classDef input fill:#e8f4f8,stroke:#24708a,color:#17324d
     classDef evidence fill:#eef1f7,stroke:#5c6bc0,color:#17324d
@@ -63,7 +64,7 @@ flowchart LR
 | Capability | What the MVP provides |
 |---|---|
 | **Variant input** | Professor-filtered `.vcf`/`.vcf.gz` upload or a manual VCF-style table, limited to 1–5 rows |
-| **Clinical evidence** | Isolated Ensembl VEP, MyVariant.info, NCBI ClinVar, and UCSC GenCC integrations |
+| **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, and UCSC GenCC integrations |
 | **Phenotype correlation** | Local HPO search, normalization, update workflow, and explainable gene matching |
 | **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
 | **Reporting** | Validated plain text plus local PDF and Word exports |
@@ -109,11 +110,13 @@ generates one LLM interpretation and one report for the first allele.
 - Every supplied variant proceeds directly to multi-source annotation in the
   original input order.
 - Annotation phase one connects filtered variants to Ensembl VEP in bounded batches.
-- Annotation phase two queries exact MyVariant.info records and standardizes
+- Annotation phase two requests independent GeneBe batch annotation and
+  automated ACMG evidence without overwriting VEP.
+- Annotation phase three queries exact MyVariant.info records and standardizes
   population-frequency evidence.
-- Annotation phase three queries NCBI ClinVar directly and standardizes
+- Annotation phase four queries NCBI ClinVar directly and standardizes
   germline classification and review evidence.
-- Annotation phase four queries ClinGen-submitted GenCC records through
+- Annotation phase five queries ClinGen-submitted GenCC records through
   the UCSC European REST API and standardizes exact gene-disease validity
   claims.
 - External-source failures are isolated so evidence from another source is
@@ -168,8 +171,8 @@ The conventional command remains supported:
 
 ## 🧬 Stage 5 annotation: complete
 
-`backend/annotation.py` currently integrates Ensembl VEP, MyVariant.info,
-NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
+`backend/annotation.py` currently integrates Ensembl VEP, GeneBe,
+MyVariant.info, NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 
 - explicit GRCh37/GRCh38 assembly configuration;
 - POST batching with Ensembl's 200-variant maximum;
@@ -183,6 +186,10 @@ NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
   MANE Select, MANE Plus Clinical, and available SIFT/PolyPhen fields;
 - explicit VEP provider, assembly, retrieval time, and nullable provider
   version metadata for success, missing, and failure outcomes;
+- GeneBe batch requests with optional Basic authentication, explicit
+  hg19/hg38 input assembly, response-count validation,
+  representation/transcript mismatch metadata, and cleaned consequence,
+  automated ACMG, population, predictor, and ClinVar-derived fields;
 - standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
 - standardized ClinVar VCV/RCV/SCV accessions, germline clinical
   significance, review status, evaluation date, and conditions;
@@ -195,7 +202,10 @@ NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
 The Stage 22 verification and exact schema additions are recorded in
 [`docs/STAGE_22_VEP_ANNOTATION_HARDENING.md`](docs/STAGE_22_VEP_ANNOTATION_HARDENING.md).
 
-Run live Ensembl VEP, MyVariant.info, NCBI ClinVar, and ClinGen checks
+The Stage 23 GeneBe contract and source-independence rules are recorded in
+[`docs/STAGE_23_GENEBE_INTEGRATION.md`](docs/STAGE_23_GENEBE_INTEGRATION.md).
+
+Run live Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, and ClinGen checks
 through the production annotation path:
 
 ```powershell
@@ -386,7 +396,7 @@ order and advance directly to annotation. No filtering, random sampling,
 optimization, or ranking is performed inside the application.
 
 Stage 10 step 3 connects every supplied variant to the existing Ensembl VEP,
-MyVariant.info, NCBI ClinVar, and ClinGen/GenCC annotation boundary, then
+GeneBe, MyVariant.info, NCBI ClinVar, and ClinGen/GenCC annotation boundary, then
 passes the standardized annotations into HPO gene matching. Source-level
 annotation warnings remain visible without discarding other source results.
 When no phenotypes are supplied, matching is explicitly marked as skipped and
@@ -535,9 +545,9 @@ network services.
 Stage 13 step 3 enforces mocked service isolation for the complete automated
 suite. An automatic test guard fails immediately if any test attempts an
 unmocked HTTP request. A degraded-network pipeline test verifies that
-MyVariant.info, ClinVar, and ClinGen/GenCC connection failures remain isolated:
-validated VEP evidence still reaches a partial clinical report, source statuses
-remain explicit, and private transport exception details do not enter
+GeneBe, MyVariant.info, ClinVar, and ClinGen/GenCC connection failures remain
+isolated: validated VEP evidence still reaches a partial clinical report,
+source statuses remain explicit, and private transport exception details do not enter
 user-facing pipeline output.
 
 Stage 13 step 4 adds `tests/manual_stage13_validation.py` for repeatable live
@@ -582,7 +592,7 @@ VCF data, and stage error messages are deliberately excluded from lifecycle
 logs.
 
 Stage 14 step 3 adds structured external API telemetry for Ensembl VEP,
-MyVariant.info, NCBI ClinVar, and UCSC GenCC. Every request records only the
+GeneBe, MyVariant.info, NCBI ClinVar, and UCSC GenCC. Every request records only the
 service, bounded operation name, attempt number, outcome, elapsed
 milliseconds, HTTP status, and configured timeout. Timeout, connection, HTTP,
 and API-error retries record their safe reason, next attempt, and bounded
