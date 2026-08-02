@@ -37,6 +37,8 @@ SOURCE_STATUS_VALUES = {
     "not_found",
     "not_applicable",
     "unsupported",
+    "unavailable",
+    "invalid_response",
     "error",
 }
 MAX_EVIDENCE_HPO_TERMS = 50

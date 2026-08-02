@@ -194,7 +194,8 @@ MyVariant.info, NCBI ClinVar, and ClinGen-submitted UCSC GenCC evidence:
   automated ACMG, population, predictor, and ClinVar-derived fields;
 - standardized gnomAD, ExAC, and exact-ALT dbSNP population frequencies;
 - standardized ClinVar VCV/RCV/SCV accessions, germline clinical
-  significance, review status, evaluation date, and conditions;
+  significance, review status, evaluation date, conditions, direct-source
+  provenance, and explicit aggregate conflict status;
 - exact UCSC assembly, coordinate, ClinGen submitter, and gene-symbol
   matching with standardized disease, classification, inheritance,
   criteria URL, PMID, and report fields;
@@ -210,6 +211,10 @@ The Stage 22 verification and exact schema additions are recorded in
 
 The Stage 23 GeneBe contract and source-independence rules are recorded in
 [`docs/STAGE_23_GENEBE_INTEGRATION.md`](docs/STAGE_23_GENEBE_INTEGRATION.md).
+
+The Stage 24 direct ClinVar query, missingness, provenance, and conflict
+contract is recorded in
+[`docs/STAGE_24_DIRECT_CLINVAR_INTEGRATION.md`](docs/STAGE_24_DIRECT_CLINVAR_INTEGRATION.md).
 
 Run live Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, and ClinGen checks
 through the production annotation path:

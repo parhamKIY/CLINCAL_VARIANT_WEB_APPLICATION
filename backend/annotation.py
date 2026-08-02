@@ -177,6 +177,10 @@ class GeneBeResponseError(AnnotationServiceError):
     """Raised when GeneBe returns an invalid successful response."""
 
 
+class ClinVarResponseError(AnnotationServiceError):
+    """Raised when ClinVar returns malformed or non-matching evidence."""
+
+
 # ---------------------------------------------------------------------------
 # Input validation and batching
 # ---------------------------------------------------------------------------
@@ -991,12 +995,12 @@ def _get_clinvar_json(
         try:
             payload = response.json()
         except ValueError as exc:
-            raise AnnotationServiceError(
+            raise ClinVarResponseError(
                 "NCBI ClinVar returned invalid JSON."
             ) from exc
 
         if not isinstance(payload, dict):
-            raise AnnotationServiceError(
+            raise ClinVarResponseError(
                 "NCBI ClinVar returned an unexpected response structure."
             )
 
@@ -1043,7 +1047,7 @@ def _search_clinvar_ids(
     )
     result = payload.get("esearchresult")
     if not isinstance(result, dict):
-        raise AnnotationServiceError(
+        raise ClinVarResponseError(
             "NCBI ClinVar search returned an unexpected response structure."
         )
 
@@ -1052,7 +1056,7 @@ def _search_clinvar_ids(
     try:
         count = int(raw_count)
     except (TypeError, ValueError) as exc:
-        raise AnnotationServiceError(
+        raise ClinVarResponseError(
             "NCBI ClinVar search returned an invalid result count."
         ) from exc
 
@@ -1060,7 +1064,7 @@ def _search_clinvar_ids(
         return []
 
     if count > MAX_CLINVAR_SEARCH_RESULTS:
-        raise AnnotationServiceError(
+        raise ClinVarResponseError(
             "NCBI ClinVar returned too many records for one exact variant."
         )
 
@@ -1072,7 +1076,7 @@ def _search_clinvar_ids(
             for identifier in identifiers
         )
     ):
-        raise AnnotationServiceError(
+        raise ClinVarResponseError(
             "NCBI ClinVar search returned invalid Variation IDs."
         )
 
@@ -1098,7 +1102,7 @@ def _get_clinvar_summaries(
     )
     result = payload.get("result")
     if not isinstance(result, dict):
-        raise AnnotationServiceError(
+        raise ClinVarResponseError(
             "NCBI ClinVar summary returned an unexpected response structure."
         )
 
@@ -1109,7 +1113,7 @@ def _get_clinvar_summaries(
             not isinstance(summary, dict)
             or str(summary.get("uid", "")) != identifier
         ):
-            raise AnnotationServiceError(
+            raise ClinVarResponseError(
                 "NCBI ClinVar summary omitted a requested Variation ID."
             )
         summaries.append(summary)
@@ -1173,7 +1177,7 @@ def _select_exact_clinvar_record(
             matches.append((summary, measure))
 
     if len(matches) != 1:
-        raise AnnotationServiceError(
+        raise ClinVarResponseError(
             "NCBI ClinVar did not return exactly one record matching the "
             "requested assembly, chromosome, position, REF, and ALT."
         )
@@ -1646,6 +1650,14 @@ def _base_annotation(
             },
             "clinvar": {
                 "status": "pending",
+                "direct_verification_status": "pending",
+                "provider": "NCBI ClinVar",
+                "provider_version": None,
+                "api": "NCBI E-utilities",
+                "api_version": "ESummary 2.0",
+                "source_type": "direct",
+                "retrieved_at": None,
+                "assembly": settings.GENOME_ASSEMBLY,
                 "query_hgvs": None,
                 "variation_id": None,
                 "accession": None,
@@ -1658,7 +1670,17 @@ def _base_annotation(
                 "condition_count": 0,
                 "conditions_truncated": False,
                 "scv_accessions": [],
+                "scv_accession_count": 0,
+                "scv_accessions_truncated": False,
                 "rcv_accessions": [],
+                "rcv_accession_count": 0,
+                "rcv_accessions_truncated": False,
+                "conflicting_submissions": {
+                    "status": "unknown",
+                    "detected": None,
+                    "basis": "aggregate_review_status",
+                    "details": None,
+                },
             },
             "clingen": {
                 "status": "pending",
@@ -2318,22 +2340,60 @@ def _bounded_string_list(
     maximum: int,
 ) -> list[str]:
     """Keep a bounded, ordered list of unique non-empty strings."""
+    return _bounded_string_list_with_count(value, maximum)[0]
+
+
+def _bounded_string_list_with_count(
+    value: Any,
+    maximum: int,
+) -> tuple[list[str], int]:
+    """Return a bounded unique string list and its untruncated count."""
     if not isinstance(value, list):
-        return []
+        return [], 0
 
     cleaned: list[str] = []
+    seen: set[str] = set()
+    total = 0
     for item in value:
-        if (
-            isinstance(item, str)
-            and item.strip()
-            and item.strip() not in cleaned
-        ):
-            cleaned.append(item.strip())
+        if isinstance(item, str) and item.strip():
+            normalized = item.strip()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            total += 1
+            if len(cleaned) < maximum:
+                cleaned.append(normalized)
 
-        if len(cleaned) == maximum:
-            break
+    return cleaned, total
 
-    return cleaned
+
+def _clinvar_conflict_evidence(
+    review_status: str | None,
+    significance: str | None,
+) -> dict[str, Any]:
+    """Map only explicit aggregate ClinVar conflict language."""
+    normalized_status = (
+        review_status.casefold()
+        if isinstance(review_status, str)
+        else ""
+    )
+
+    if "no conflict" in normalized_status:
+        status = "no_conflict"
+        detected: bool | None = False
+    elif "conflict" in normalized_status:
+        status = "conflicting"
+        detected = True
+    else:
+        status = "unknown"
+        detected = None
+
+    return {
+        "status": status,
+        "detected": detected,
+        "basis": "aggregate_review_status",
+        "details": significance if detected else None,
+    }
 
 
 def _clean_clinvar_conditions(
@@ -2439,9 +2499,23 @@ def _standardize_clinvar_response(
     ):
         accession_version = None
 
+    scv_accessions, scv_accession_count = (
+        _bounded_string_list_with_count(
+            supporting.get("scv"),
+            MAX_CLINVAR_ACCESSIONS,
+        )
+    )
+    rcv_accessions, rcv_accession_count = (
+        _bounded_string_list_with_count(
+            supporting.get("rcv"),
+            MAX_CLINVAR_ACCESSIONS,
+        )
+    )
+
     annotation["sources"]["clinvar"].update(
         {
             "status": "success",
+            "direct_verification_status": "verified",
             "query_hgvs": hgvs,
             "variation_id": variation_id,
             "accession": accession,
@@ -2453,13 +2527,19 @@ def _standardize_clinvar_response(
             "conditions": conditions,
             "condition_count": condition_count,
             "conditions_truncated": condition_count > len(conditions),
-            "scv_accessions": _bounded_string_list(
-                supporting.get("scv"),
-                MAX_CLINVAR_ACCESSIONS,
+            "scv_accessions": scv_accessions,
+            "scv_accession_count": scv_accession_count,
+            "scv_accessions_truncated": (
+                scv_accession_count > len(scv_accessions)
             ),
-            "rcv_accessions": _bounded_string_list(
-                supporting.get("rcv"),
-                MAX_CLINVAR_ACCESSIONS,
+            "rcv_accessions": rcv_accessions,
+            "rcv_accession_count": rcv_accession_count,
+            "rcv_accessions_truncated": (
+                rcv_accession_count > len(rcv_accessions)
+            ),
+            "conflicting_submissions": _clinvar_conflict_evidence(
+                review_status,
+                significance,
             ),
         }
     )
@@ -2482,6 +2562,12 @@ def _annotate_with_clinvar(
     max_retries: int,
 ) -> None:
     """Add isolated direct ClinVar evidence to one annotation."""
+    source = annotation["sources"]["clinvar"]
+    source["retrieved_at"] = _retrieval_timestamp()
+    identifiers = _to_clinvar_identifiers(annotation["variant"])
+    if identifiers is not None:
+        source["query_hgvs"] = identifiers[0]
+
     try:
         summary, _, hgvs, unsupported_warning = _get_clinvar(
             session,
@@ -2494,17 +2580,25 @@ def _annotate_with_clinvar(
             "error_type=%s",
             type(exc).__name__,
         )
-        annotation["sources"]["clinvar"]["status"] = "error"
+        source_status = (
+            "invalid_response"
+            if isinstance(exc, ClinVarResponseError)
+            else "unavailable"
+        )
+        source["status"] = source_status
+        source["direct_verification_status"] = source_status
         annotation["warnings"].append(str(exc))
         return
 
     if unsupported_warning is not None:
-        annotation["sources"]["clinvar"]["status"] = "unsupported"
+        source["status"] = "unsupported"
+        source["direct_verification_status"] = "unsupported"
         annotation["warnings"].append(unsupported_warning)
         return
 
     if summary is None or hgvs is None:
-        annotation["sources"]["clinvar"]["status"] = "not_found"
+        source["status"] = "not_found"
+        source["direct_verification_status"] = "no_record"
         annotation["warnings"].append(
             "NCBI ClinVar returned no exact result for this variant."
         )

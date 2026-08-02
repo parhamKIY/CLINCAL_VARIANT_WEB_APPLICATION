@@ -2943,6 +2943,12 @@ class TestAnnotation:
         variation_id: str = "123",
         assembly: str = "GRCh38",
         spdi: str = "NC_000001.11:99:A:G",
+        significance: str = "Pathogenic",
+        review_status: str = (
+            "criteria provided, multiple submitters, no conflicts"
+        ),
+        scv_accessions: list[str] | None = None,
+        rcv_accessions: list[str] | None = None,
     ) -> dict[str, object]:
         """Build a standardized ClinVar ESummary response."""
         summary = {
@@ -2965,13 +2971,16 @@ class TestAnnotation:
                 }
             ],
             "supporting_submissions": {
-                "scv": ["SCV000000001", "SCV000000002"],
-                "rcv": ["RCV000000001"],
+                "scv": scv_accessions or [
+                    "SCV000000001",
+                    "SCV000000002",
+                ],
+                "rcv": rcv_accessions or ["RCV000000001"],
             },
             "germline_classification": {
-                "description": "Pathogenic",
+                "description": significance,
                 "last_evaluated": "2025/01/02 00:00",
-                "review_status": "reviewed by expert panel",
+                "review_status": review_status,
                 "trait_set": [
                     {
                         "trait_name": "Example disease",
@@ -3734,17 +3743,29 @@ class TestAnnotation:
         )[0]
 
         clinvar = annotation["sources"]["clinvar"]
+        retrieved_at = clinvar.pop("retrieved_at")
+        assert isinstance(retrieved_at, str)
+        assert retrieved_at.endswith("Z")
         assert session.clinvar_get_calls[0]["verify"] is True
         assert annotation["sources"]["myvariant"]["status"] == "not_found"
         assert clinvar == {
             "status": "success",
+            "direct_verification_status": "verified",
+            "provider": "NCBI ClinVar",
+            "provider_version": None,
+            "api": "NCBI E-utilities",
+            "api_version": "ESummary 2.0",
+            "source_type": "direct",
+            "assembly": "GRCh38",
             "query_hgvs": "NC_000001.11:g.100A>G",
             "variation_id": "123",
             "accession": "VCV000000123",
             "accession_version": "VCV000000123.4",
             "gene": "GENE1",
             "clinical_significance": "Pathogenic",
-            "review_status": "reviewed by expert panel",
+            "review_status": (
+                "criteria provided, multiple submitters, no conflicts"
+            ),
             "last_evaluated": "2025/01/02 00:00",
             "conditions": [
                 {
@@ -3763,7 +3784,17 @@ class TestAnnotation:
                 "SCV000000001",
                 "SCV000000002",
             ],
+            "scv_accession_count": 2,
+            "scv_accessions_truncated": False,
             "rcv_accessions": ["RCV000000001"],
+            "rcv_accession_count": 1,
+            "rcv_accessions_truncated": False,
+            "conflicting_submissions": {
+                "status": "no_conflict",
+                "detected": False,
+                "basis": "aggregate_review_status",
+                "details": None,
+            },
         }
         assert "germline_classification" not in clinvar
         assert session.clinvar_get_calls[0]["params"] == {
@@ -3853,7 +3884,16 @@ class TestAnnotation:
 
         assert annotation["sources"]["vep"]["status"] == "success"
         assert annotation["sources"]["myvariant"]["status"] == "success"
-        assert annotation["sources"]["clinvar"]["status"] == "error"
+        assert (
+            annotation["sources"]["clinvar"]["status"]
+            == "invalid_response"
+        )
+        assert (
+            annotation["sources"]["clinvar"][
+                "direct_verification_status"
+            ]
+            == "invalid_response"
+        )
         assert any(
             "did not return exactly one record" in warning
             for warning in annotation["warnings"]
@@ -3883,7 +3923,10 @@ class TestAnnotation:
         )[0]
 
         assert annotation["sources"]["vep"]["status"] == "success"
-        assert annotation["sources"]["clinvar"]["status"] == "error"
+        assert (
+            annotation["sources"]["clinvar"]["status"]
+            == "invalid_response"
+        )
         assert any(
             expected_warning in warning
             for warning in annotation["warnings"]
@@ -3936,7 +3979,13 @@ class TestAnnotation:
 
         assert annotation["sources"]["vep"]["status"] == "success"
         assert annotation["sources"]["myvariant"]["status"] == "success"
-        assert annotation["sources"]["clinvar"]["status"] == "error"
+        assert annotation["sources"]["clinvar"]["status"] == "unavailable"
+        assert (
+            annotation["sources"]["clinvar"][
+                "direct_verification_status"
+            ]
+            == "unavailable"
+        )
         assert any(
             "HTTP 500" in warning
             for warning in annotation["warnings"]
@@ -3960,7 +4009,78 @@ class TestAnnotation:
         )[0]
 
         assert annotation["sources"]["clinvar"]["status"] == "not_found"
+        assert (
+            annotation["sources"]["clinvar"][
+                "direct_verification_status"
+            ]
+            == "no_record"
+        )
+        assert (
+            annotation["sources"]["clinvar"]["clinical_significance"]
+            is None
+        )
         assert len(session.clinvar_get_calls) == 1
+
+    def test_clinvar_conflict_is_explicit_and_does_not_overwrite_genebe(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            genebe_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "variants": [
+                            {
+                                **self._genebe_variant_response(),
+                                "acmg_classification": (
+                                    "Likely pathogenic"
+                                ),
+                            }
+                        ],
+                        "message": None,
+                    },
+                )
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(
+                        significance=(
+                            "Conflicting classifications of "
+                            "pathogenicity"
+                        ),
+                        review_status=(
+                            "criteria provided, conflicting "
+                            "classifications"
+                        ),
+                    ),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["genebe"][
+            "automated_acmg_classification"
+        ] == "Likely pathogenic"
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["clinical_significance"] == (
+            "Conflicting classifications of pathogenicity"
+        )
+        assert clinvar["conflicting_submissions"] == {
+            "status": "conflicting",
+            "detected": True,
+            "basis": "aggregate_review_status",
+            "details": (
+                "Conflicting classifications of pathogenicity"
+            ),
+        }
 
     def test_successful_clingen_response_is_standardized(self) -> None:
         session = FakeSession(
@@ -4284,7 +4404,7 @@ class TestAnnotation:
         )
         assert (
             annotation["sources"]["clinvar"]["review_status"]
-            == "reviewed by expert panel"
+            == "criteria provided, multiple submitters, no conflicts"
         )
         assert (
             annotation["sources"]["clingen"]["curations"][0][
@@ -8940,7 +9060,7 @@ class TestStage13MockedServiceFailures:
         assert evidence["source_statuses"] == {
             "vep": "success",
             "myvariant": "error",
-            "clinvar": "error",
+            "clinvar": "unavailable",
             "clingen": "error",
         }
         assert evidence["gene"] == "SCN1A"
