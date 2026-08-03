@@ -2,20 +2,24 @@
 
 import csv
 import hashlib
+import math
 import os
 import re
 import shutil
 import tempfile
+import time
 from collections import Counter
-from collections.abc import Iterable
-from datetime import date
+from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 import requests
 
+from backend.logging_config import get_logger
 from config import settings
 
 
@@ -59,7 +63,24 @@ MIN_HPO_GENE_ASSOCIATION_TERMS = 10_000
 MIN_HPO_DISEASE_ANNOTATION_TERMS = 10_000
 MAX_PATIENT_HPO_TERMS = 50
 HPO_DOWNLOAD_CHUNK_SIZE = 64 * 1024
+PHEN2GENE_PROVIDER_NAME = "Phen2Gene"
+PHEN2GENE_WEIGHT_MODEL = "sk"
+PHEN2GENE_CACHE_TTL_SECONDS = 60 * 60
+PHEN2GENE_CACHE_MAX_ENTRIES = 32
+PHEN2GENE_MAX_RESULTS = 50_000
+PHEN2GENE_MAX_PROVIDER_WARNINGS = 10
+PHEN2GENE_TRANSIENT_HTTP_STATUSES = {
+    408,
+    429,
+    500,
+    502,
+    503,
+    504,
+}
+LOGGER = get_logger("phenotype")
 _HPO_UPDATE_LOCK = Lock()
+_PHEN2GENE_CACHE_LOCK = Lock()
+_PHEN2GENE_CACHE: dict[str, dict[str, object]] = {}
 
 
 class PhenotypeError(ValueError):
@@ -68,6 +89,14 @@ class PhenotypeError(ValueError):
 
 class HPODataError(RuntimeError):
     """Raised when the configured HPO ontology cannot be loaded."""
+
+
+class Phen2GeneError(RuntimeError):
+    """Raised when Phen2Gene input or provider output is invalid."""
+
+    def __init__(self, message: str, *, attempts: int = 0) -> None:
+        super().__init__(message)
+        self.attempts = attempts
 
 
 class HPOTerm(TypedDict):
@@ -113,6 +142,41 @@ class HPOGeneSimilarityResult(TypedDict):
     matched_hpo_terms: list[str]
     match_count: int
     phenotype_score: float
+
+
+Phen2GeneAvailability = Literal[
+    "available",
+    "partial",
+    "unavailable",
+]
+
+
+class Phen2GeneEvidence(TypedDict):
+    """Bounded Phen2Gene evidence attached to one annotated gene."""
+
+    availability: Phen2GeneAvailability
+    gene: str | None
+    gene_id: str | None
+    rank: int | None
+    score: float | None
+    status: str | None
+    hpo_terms: list[str]
+    weight_model: str
+    provider: str
+    provider_version: str | None
+    retrieved_at: str | None
+    cache_hit: bool
+    warnings: list[str]
+
+
+class Phen2GeneEnrichmentResult(TypedDict):
+    """Analysis-level Phen2Gene result with per-variant evidence."""
+
+    variants: list[dict[str, Any]]
+    availability: Phen2GeneAvailability
+    message: str
+    request_attempts: int
+    cache_hit: bool
 
 
 class HPODisease(TypedDict):
@@ -789,6 +853,747 @@ def match_phenotypes(
         matched_annotations.append(scored_annotation)
 
     return matched_annotations
+
+
+def clear_phen2gene_cache() -> None:
+    """Clear the bounded in-process Phen2Gene response cache."""
+
+    with _PHEN2GENE_CACHE_LOCK:
+        _PHEN2GENE_CACHE.clear()
+
+
+def _phen2gene_cache_key(
+    hpo_ids: Sequence[str],
+    target_genes: Sequence[str],
+) -> str:
+    """Build a non-identifying cache key without retaining HPO terms."""
+
+    material = "\x1f".join(
+        (
+            settings.PHEN2GENE_BASE_URL,
+            PHEN2GENE_WEIGHT_MODEL,
+            *sorted(hpo_ids),
+            *sorted(gene.casefold() for gene in target_genes),
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _get_cached_phen2gene_result(
+    cache_key: str,
+) -> dict[str, object] | None:
+    """Return a fresh isolated cache entry or remove an expired one."""
+
+    now = time.monotonic()
+    with _PHEN2GENE_CACHE_LOCK:
+        entry = _PHEN2GENE_CACHE.get(cache_key)
+        if entry is None:
+            return None
+        cached_at = entry.get("cached_at")
+        if (
+            isinstance(cached_at, bool)
+            or not isinstance(cached_at, (int, float))
+            or now - float(cached_at)
+            > PHEN2GENE_CACHE_TTL_SECONDS
+        ):
+            _PHEN2GENE_CACHE.pop(cache_key, None)
+            return None
+        return deepcopy(entry)
+
+
+def _store_cached_phen2gene_result(
+    cache_key: str,
+    *,
+    gene_results: Mapping[str, Mapping[str, object]],
+    provider_warning_count: int,
+    retrieved_at: str,
+) -> None:
+    """Store only bounded normalized results, never the raw API payload."""
+
+    entry: dict[str, object] = {
+        "cached_at": time.monotonic(),
+        "gene_results": deepcopy(dict(gene_results)),
+        "provider_warning_count": provider_warning_count,
+        "retrieved_at": retrieved_at,
+    }
+    with _PHEN2GENE_CACHE_LOCK:
+        if (
+            cache_key not in _PHEN2GENE_CACHE
+            and len(_PHEN2GENE_CACHE)
+            >= PHEN2GENE_CACHE_MAX_ENTRIES
+        ):
+            oldest_key = min(
+                _PHEN2GENE_CACHE,
+                key=lambda key: float(
+                    _PHEN2GENE_CACHE[key].get(
+                        "cached_at",
+                        0.0,
+                    )
+                ),
+            )
+            _PHEN2GENE_CACHE.pop(oldest_key, None)
+        _PHEN2GENE_CACHE[cache_key] = entry
+
+
+def _positive_integer(
+    value: object,
+    *,
+    field: str,
+) -> int:
+    """Normalize one positive provider integer."""
+
+    if isinstance(value, bool):
+        raise Phen2GeneError(
+            f"Phen2Gene {field} must be a positive integer."
+        )
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise Phen2GeneError(
+            f"Phen2Gene {field} must be a positive integer."
+        ) from exc
+    if normalized <= 0 or str(normalized) != str(value).strip():
+        raise Phen2GeneError(
+            f"Phen2Gene {field} must be a positive integer."
+        )
+    return normalized
+
+
+def _phen2gene_score(value: object) -> float:
+    """Normalize one finite, non-negative Phen2Gene score."""
+
+    if isinstance(value, bool):
+        raise Phen2GeneError(
+            "Phen2Gene score must be a non-negative number."
+        )
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise Phen2GeneError(
+            "Phen2Gene score must be a non-negative number."
+        ) from exc
+    if not math.isfinite(normalized) or normalized < 0:
+        raise Phen2GeneError(
+            "Phen2Gene score must be a non-negative number."
+        )
+    return normalized
+
+
+def _optional_phen2gene_gene_id(value: object) -> str | None:
+    """Normalize the provider's optional numeric or symbolic gene ID."""
+
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    if (
+        len(normalized) > 64
+        or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*",
+            normalized,
+        )
+        is None
+    ):
+        raise Phen2GeneError(
+            "Phen2Gene gene identifier has an invalid format."
+        )
+    return normalized
+
+
+def _normalize_phen2gene_payload(
+    payload: object,
+    target_genes: Sequence[str],
+) -> tuple[dict[str, dict[str, object]], int]:
+    """Retain only validated rows for genes present in the analysis."""
+
+    if not isinstance(payload, dict):
+        raise Phen2GeneError(
+            "Phen2Gene returned an invalid response object."
+        )
+    results = payload.get("results")
+    provider_errors = payload.get("errors")
+    if not isinstance(results, list) or not isinstance(
+        provider_errors,
+        list,
+    ):
+        raise Phen2GeneError(
+            "Phen2Gene returned an invalid response structure."
+        )
+    if len(results) > PHEN2GENE_MAX_RESULTS:
+        raise Phen2GeneError(
+            "Phen2Gene returned too many gene results."
+        )
+
+    target_keys = {
+        gene.casefold()
+        for gene in target_genes
+    }
+    normalized_results: dict[str, dict[str, object]] = {}
+    invalid_target_rows = 0
+    valid_gene_rows = 0
+
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        gene_value = row.get("Gene")
+        if not isinstance(gene_value, str):
+            continue
+        gene = gene_value.strip()
+        if (
+            not gene
+            or len(gene) > 64
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]*",
+                gene,
+            )
+            is None
+        ):
+            continue
+        valid_gene_rows += 1
+        gene_key = gene.casefold()
+        if gene_key not in target_keys:
+            continue
+
+        try:
+            rank = _positive_integer(
+                row.get("Rank"),
+                field="rank",
+            )
+            score = _phen2gene_score(row.get("Score"))
+            gene_id = _optional_phen2gene_gene_id(
+                row.get("Gene ID")
+            )
+            status_value = row.get("Status")
+            if not isinstance(status_value, str):
+                raise Phen2GeneError(
+                    "Phen2Gene status must be text."
+                )
+            status = " ".join(status_value.split())
+            if not status or len(status) > 100:
+                raise Phen2GeneError(
+                    "Phen2Gene status has an invalid format."
+                )
+        except Phen2GeneError:
+            invalid_target_rows += 1
+            continue
+
+        current = normalized_results.get(gene_key)
+        if current is None or rank < current["rank"]:
+            normalized_results[gene_key] = {
+                "gene": gene,
+                "gene_id": gene_id,
+                "rank": rank,
+                "score": score,
+                "status": status,
+            }
+
+    if results and valid_gene_rows == 0:
+        raise Phen2GeneError(
+            "Phen2Gene returned no valid gene rows."
+        )
+
+    provider_warning_count = min(
+        sum(
+            isinstance(error, str) and bool(error.strip())
+            for error in provider_errors
+        )
+        + invalid_target_rows,
+        PHEN2GENE_MAX_PROVIDER_WARNINGS,
+    )
+    return normalized_results, provider_warning_count
+
+
+def _phen2gene_retry_delay(
+    attempt: int,
+    response: requests.Response | None = None,
+) -> float:
+    """Return one bounded retry delay."""
+
+    if response is not None:
+        retry_after = response.headers.get(
+            "Retry-After",
+            "",
+        ).strip()
+        if retry_after.isdigit():
+            return min(float(retry_after), 10.0)
+    return min(float(2**attempt), 4.0)
+
+
+def _log_phen2gene_attempt(
+    *,
+    attempt: int,
+    outcome: str,
+    started_at: float,
+    status_code: int | None,
+    timeout: int,
+) -> None:
+    """Log bounded provider telemetry without HPO or gene values."""
+
+    LOGGER.info(
+        "event=external_api_request service=phen2gene "
+        "operation=prioritize_genes attempt=%d outcome=%s "
+        "duration_ms=%d http_status=%s timeout_seconds=%d",
+        attempt + 1,
+        outcome,
+        int((time.perf_counter() - started_at) * 1000),
+        status_code,
+        timeout,
+    )
+
+
+def _fetch_phen2gene_results(
+    hpo_ids: Sequence[str],
+    target_genes: Sequence[str],
+    *,
+    timeout: int,
+    max_retries: int,
+    session: requests.Session | None,
+) -> tuple[
+    dict[str, dict[str, object]],
+    int,
+    str,
+    int,
+]:
+    """Query Phen2Gene once per attempt and normalize bounded evidence."""
+
+    owns_session = session is None
+    client = requests.Session() if session is None else session
+    last_error: Phen2GeneError | None = None
+
+    try:
+        for attempt in range(max_retries + 1):
+            started_at = time.perf_counter()
+            response: requests.Response | None = None
+            try:
+                response = client.get(
+                    settings.PHEN2GENE_BASE_URL,
+                    params={
+                        "HPO_list": ";".join(hpo_ids),
+                        "weight_model": PHEN2GENE_WEIGHT_MODEL,
+                    },
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=timeout,
+                )
+            except requests.RequestException as exc:
+                _log_phen2gene_attempt(
+                    attempt=attempt,
+                    outcome="request_error",
+                    started_at=started_at,
+                    status_code=None,
+                    timeout=timeout,
+                )
+                last_error = Phen2GeneError(
+                    "Phen2Gene request failed.",
+                    attempts=attempt + 1,
+                )
+                if attempt < max_retries:
+                    time.sleep(
+                        _phen2gene_retry_delay(attempt)
+                    )
+                    continue
+                raise last_error from exc
+
+            if (
+                response.status_code
+                in PHEN2GENE_TRANSIENT_HTTP_STATUSES
+            ):
+                _log_phen2gene_attempt(
+                    attempt=attempt,
+                    outcome="transient_http_error",
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    timeout=timeout,
+                )
+                last_error = Phen2GeneError(
+                    "Phen2Gene was temporarily unavailable.",
+                    attempts=attempt + 1,
+                )
+                if attempt < max_retries:
+                    time.sleep(
+                        _phen2gene_retry_delay(
+                            attempt,
+                            response,
+                        )
+                    )
+                    continue
+                raise last_error
+
+            if not 200 <= response.status_code < 300:
+                _log_phen2gene_attempt(
+                    attempt=attempt,
+                    outcome="http_error",
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    timeout=timeout,
+                )
+                raise Phen2GeneError(
+                    "Phen2Gene returned an unsuccessful response.",
+                    attempts=attempt + 1,
+                )
+
+            try:
+                payload = response.json()
+                gene_results, warning_count = (
+                    _normalize_phen2gene_payload(
+                        payload,
+                        target_genes,
+                    )
+                )
+            except (ValueError, Phen2GeneError) as exc:
+                _log_phen2gene_attempt(
+                    attempt=attempt,
+                    outcome="invalid_response",
+                    started_at=started_at,
+                    status_code=response.status_code,
+                    timeout=timeout,
+                )
+                last_error = Phen2GeneError(
+                    "Phen2Gene returned an invalid response.",
+                    attempts=attempt + 1,
+                )
+                if attempt < max_retries:
+                    time.sleep(
+                        _phen2gene_retry_delay(attempt)
+                    )
+                    continue
+                raise last_error from exc
+
+            _log_phen2gene_attempt(
+                attempt=attempt,
+                outcome="success",
+                started_at=started_at,
+                status_code=response.status_code,
+                timeout=timeout,
+            )
+            retrieved_at = datetime.now(
+                timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+            return (
+                gene_results,
+                warning_count,
+                retrieved_at,
+                attempt + 1,
+            )
+    finally:
+        if owns_session:
+            client.close()
+
+    raise last_error or Phen2GeneError(
+        "Phen2Gene request ended unexpectedly."
+    )
+
+
+def _phen2gene_evidence(
+    *,
+    gene: str | None,
+    hpo_ids: Sequence[str],
+    result: Mapping[str, object] | None,
+    provider_available: bool,
+    provider_warning_count: int,
+    retrieved_at: str | None,
+    cache_hit: bool,
+) -> Phen2GeneEvidence:
+    """Build one explicit Phen2Gene evidence or missingness object."""
+
+    warnings: list[str] = []
+    if gene is None:
+        availability: Phen2GeneAvailability = "unavailable"
+        warnings.append(
+            "Phen2Gene could not be evaluated because annotation "
+            "provided no gene."
+        )
+    elif not provider_available:
+        availability = "unavailable"
+        warnings.append(
+            "Phen2Gene evidence is unavailable; absence must not be "
+            "treated as a negative phenotype relationship."
+        )
+    elif result is None:
+        availability = "partial"
+        warnings.append(
+            "Phen2Gene returned no result for the annotated gene; "
+            "this does not mean the phenotype is unrelated."
+        )
+    elif provider_warning_count:
+        availability = "partial"
+        warnings.append(
+            "Phen2Gene completed with provider-reported input "
+            "warnings."
+        )
+    else:
+        availability = "available"
+
+    return {
+        "availability": availability,
+        "gene": (
+            str(result["gene"])
+            if result is not None
+            else gene
+        ),
+        "gene_id": (
+            str(result["gene_id"])
+            if result is not None
+            and result["gene_id"] is not None
+            else None
+        ),
+        "rank": (
+            int(result["rank"])
+            if result is not None
+            else None
+        ),
+        "score": (
+            float(result["score"])
+            if result is not None
+            else None
+        ),
+        "status": (
+            str(result["status"])
+            if result is not None
+            else None
+        ),
+        "hpo_terms": list(hpo_ids),
+        "weight_model": PHEN2GENE_WEIGHT_MODEL,
+        "provider": PHEN2GENE_PROVIDER_NAME,
+        "provider_version": None,
+        "retrieved_at": retrieved_at,
+        "cache_hit": cache_hit,
+        "warnings": warnings,
+    }
+
+
+def enrich_with_phen2gene(
+    annotations: Iterable[dict[str, Any]],
+    hpo_ids: list[str] | tuple[str, ...],
+    *,
+    ontology_path: str | Path | None = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+    session: requests.Session | None = None,
+    use_cache: bool = True,
+) -> Phen2GeneEnrichmentResult:
+    """Attach Phen2Gene evidence without ranking input variants."""
+
+    if isinstance(annotations, (str, bytes, dict)):
+        raise Phen2GeneError(
+            "Annotations must be an iterable of dictionaries."
+        )
+    try:
+        annotation_items = list(annotations)
+    except TypeError as exc:
+        raise Phen2GeneError(
+            "Annotations must be an iterable of dictionaries."
+        ) from exc
+    if any(
+        not isinstance(annotation, dict)
+        for annotation in annotation_items
+    ):
+        raise Phen2GeneError(
+            "Every annotation must be a dictionary."
+        )
+
+    terms = normalize_phenotypes(
+        hpo_ids,
+        ontology_path=ontology_path,
+    )
+    canonical_hpo_ids = [term["id"] for term in terms]
+    resolved_timeout = (
+        settings.REQUEST_TIMEOUT
+        if timeout is None
+        else timeout
+    )
+    resolved_retries = (
+        settings.ANNOTATION_MAX_RETRIES
+        if max_retries is None
+        else max_retries
+    )
+    if (
+        isinstance(resolved_timeout, bool)
+        or not isinstance(resolved_timeout, int)
+        or resolved_timeout <= 0
+    ):
+        raise Phen2GeneError(
+            "Phen2Gene timeout must be a positive integer."
+        )
+    if (
+        isinstance(resolved_retries, bool)
+        or not isinstance(resolved_retries, int)
+        or resolved_retries < 0
+    ):
+        raise Phen2GeneError(
+            "Phen2Gene max_retries must be a non-negative integer."
+        )
+    if not isinstance(use_cache, bool):
+        raise Phen2GeneError(
+            "Phen2Gene use_cache must be a boolean."
+        )
+
+    genes: list[str | None] = []
+    target_genes: list[str] = []
+    seen_gene_keys: set[str] = set()
+    for annotation in annotation_items:
+        gene_value = annotation.get("gene")
+        gene = (
+            gene_value.strip()
+            if isinstance(gene_value, str)
+            and gene_value.strip()
+            else None
+        )
+        genes.append(gene)
+        if gene is None:
+            continue
+        gene_key = gene.casefold()
+        if gene_key not in seen_gene_keys:
+            target_genes.append(gene)
+            seen_gene_keys.add(gene_key)
+
+    if not target_genes:
+        variants = []
+        for annotation, gene in zip(annotation_items, genes):
+            enriched = dict(annotation)
+            enriched["phen2gene"] = _phen2gene_evidence(
+                gene=gene,
+                hpo_ids=canonical_hpo_ids,
+                result=None,
+                provider_available=False,
+                provider_warning_count=0,
+                retrieved_at=None,
+                cache_hit=False,
+            )
+            variants.append(enriched)
+        return {
+            "variants": variants,
+            "availability": "unavailable",
+            "message": (
+                "Phen2Gene was not called because no annotated genes "
+                "were available."
+            ),
+            "request_attempts": 0,
+            "cache_hit": False,
+        }
+
+    cache_key = _phen2gene_cache_key(
+        canonical_hpo_ids,
+        target_genes,
+    )
+    cached = (
+        _get_cached_phen2gene_result(cache_key)
+        if use_cache
+        else None
+    )
+    cache_hit = cached is not None
+    provider_available = True
+    request_attempts = 0
+    if cached is not None:
+        gene_results = cached.get("gene_results")
+        provider_warning_count = cached.get(
+            "provider_warning_count"
+        )
+        retrieved_at = cached.get("retrieved_at")
+        if (
+            not isinstance(gene_results, dict)
+            or isinstance(provider_warning_count, bool)
+            or not isinstance(provider_warning_count, int)
+            or not isinstance(retrieved_at, str)
+        ):
+            clear_phen2gene_cache()
+            cached = None
+            cache_hit = False
+
+    if cached is None:
+        try:
+            (
+                gene_results,
+                provider_warning_count,
+                retrieved_at,
+                request_attempts,
+            ) = _fetch_phen2gene_results(
+                canonical_hpo_ids,
+                target_genes,
+                timeout=resolved_timeout,
+                max_retries=resolved_retries,
+                session=session,
+            )
+        except Phen2GeneError as exc:
+            gene_results = {}
+            provider_warning_count = 0
+            retrieved_at = None
+            provider_available = False
+            request_attempts = exc.attempts
+        else:
+            if use_cache:
+                _store_cached_phen2gene_result(
+                    cache_key,
+                    gene_results=gene_results,
+                    provider_warning_count=(
+                        provider_warning_count
+                    ),
+                    retrieved_at=retrieved_at,
+                )
+
+    enriched_variants: list[dict[str, Any]] = []
+    availability_values: list[Phen2GeneAvailability] = []
+    matched_count = 0
+    for annotation, gene in zip(annotation_items, genes):
+        result = (
+            gene_results.get(gene.casefold())
+            if gene is not None
+            else None
+        )
+        evidence = _phen2gene_evidence(
+            gene=gene,
+            hpo_ids=canonical_hpo_ids,
+            result=result,
+            provider_available=provider_available,
+            provider_warning_count=provider_warning_count,
+            retrieved_at=retrieved_at,
+            cache_hit=cache_hit,
+        )
+        enriched = dict(annotation)
+        enriched["phen2gene"] = evidence
+        enriched_variants.append(enriched)
+        availability_values.append(evidence["availability"])
+        if result is not None:
+            matched_count += 1
+
+    if not provider_available:
+        overall_availability: Phen2GeneAvailability = (
+            "unavailable"
+        )
+        message = (
+            "Phen2Gene was unavailable after bounded automatic "
+            "attempts; variants retained explicit missingness."
+        )
+    elif all(
+        availability == "available"
+        for availability in availability_values
+    ):
+        overall_availability = "available"
+        source = "cache" if cache_hit else "provider"
+        message = (
+            f"Phen2Gene matched all {len(enriched_variants)} variants "
+            f"from one analysis-level {source} result."
+        )
+    else:
+        overall_availability = "partial"
+        source = "cache" if cache_hit else "provider"
+        message = (
+            f"Phen2Gene matched {matched_count} of "
+            f"{len(enriched_variants)} variants from one "
+            f"analysis-level {source} result; missing results are "
+            "not negative evidence."
+        )
+
+    return {
+        "variants": enriched_variants,
+        "availability": overall_availability,
+        "message": message,
+        "request_attempts": request_attempts,
+        "cache_hit": cache_hit,
+    }
 
 
 @lru_cache(maxsize=4)

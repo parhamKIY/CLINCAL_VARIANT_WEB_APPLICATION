@@ -75,8 +75,12 @@ from backend.logging_config import (
 )
 from backend.phenotype import (
     HPODataError,
+    PHEN2GENE_PROVIDER_NAME,
+    Phen2GeneError,
     PhenotypeError,
     calculate_hpo_similarity,
+    clear_phen2gene_cache,
+    enrich_with_phen2gene,
     get_diseases_for_hpo,
     get_genes_for_hpo,
     lookup_hpo_term,
@@ -459,6 +463,10 @@ class TestConfiguration:
             (
                 "CSPEC_BASE_URL",
                 "http://cspec.example/api",
+            ),
+            (
+                "PHEN2GENE_BASE_URL",
+                "http://phen2gene.example/api",
             ),
         ],
     )
@@ -1041,6 +1049,52 @@ class FakeSession:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakePhen2GeneSession:
+    """Return queued Phen2Gene responses without a network call."""
+
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+        self.closed = False
+
+    def get(self, url: str, **kwargs: object) -> FakeResponse:
+        self.calls.append({"url": url, **kwargs})
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, FakeResponse)
+        return response
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _successful_phen2gene_session(
+    gene: str = "SCN1A",
+) -> FakePhen2GeneSession:
+    """Build one deterministic successful Phen2Gene session."""
+
+    return FakePhen2GeneSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "results": [
+                        {
+                            "Gene": gene,
+                            "Gene ID": "6323",
+                            "Rank": "1",
+                            "Score": "0.95",
+                            "Status": "SeedGene",
+                        }
+                    ],
+                    "errors": [],
+                },
+            )
+        ]
+    )
 
 
 class FakeLLMAdapter:
@@ -2808,6 +2862,254 @@ class TestPhenotype:
                 association_url_template=(
                     "https://example.test/phenotype_to_genes.txt"
                 ),
+            )
+
+    @staticmethod
+    def _phen2gene_payload(
+        *genes: tuple[str, str, str, str, str],
+        errors: list[str] | None = None,
+    ) -> dict[str, object]:
+        """Build one official-shape Phen2Gene API response."""
+
+        return {
+            "results": [
+                {
+                    "Gene": gene,
+                    "Gene ID": gene_id,
+                    "Rank": rank,
+                    "Score": score,
+                    "Status": status,
+                }
+                for gene, gene_id, rank, score, status in genes
+            ],
+            "errors": list(errors or []),
+        }
+
+    @pytest.mark.regression
+    def test_phen2gene_queries_hpo_set_once_and_preserves_variant_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        session = FakePhen2GeneSession(
+            [
+                FakeResponse(
+                    200,
+                    self._phen2gene_payload(
+                        ("BRCA1", "672", "2", "0.75", "SeedGene"),
+                        (
+                            "SCN1A",
+                            "SCN1A",
+                            "1",
+                            "0.95",
+                            "SeedGene",
+                        ),
+                    ),
+                )
+            ]
+        )
+        annotations = [
+            {"variant": {"pos": 100}, "gene": "SCN1A"},
+            {"variant": {"pos": 200}, "gene": "BRCA1"},
+        ]
+
+        result = enrich_with_phen2gene(
+            annotations,
+            ["HP:0001250", "HP:0001263"],
+            ontology_path=ontology_path,
+            max_retries=0,
+            session=session,  # type: ignore[arg-type]
+            use_cache=False,
+        )
+
+        assert len(session.calls) == 1
+        assert session.calls[0]["url"] == settings.PHEN2GENE_BASE_URL
+        assert session.calls[0]["params"] == {
+            "HPO_list": "HP:0001250;HP:0001263",
+            "weight_model": "sk",
+        }
+        assert [
+            variant["variant"]["pos"]  # type: ignore[index]
+            for variant in result["variants"]
+        ] == [100, 200]
+        first = result["variants"][0]["phen2gene"]
+        assert first == {
+            "availability": "available",
+            "gene": "SCN1A",
+            "gene_id": "SCN1A",
+            "rank": 1,
+            "score": 0.95,
+            "status": "SeedGene",
+            "hpo_terms": ["HP:0001250", "HP:0001263"],
+            "weight_model": "sk",
+            "provider": PHEN2GENE_PROVIDER_NAME,
+            "provider_version": None,
+            "retrieved_at": first["retrieved_at"],  # type: ignore[index]
+            "cache_hit": False,
+            "warnings": [],
+        }
+        assert result["availability"] == "available"
+        assert result["request_attempts"] == 1
+        json.dumps(result, allow_nan=False)
+
+    def test_phen2gene_no_hit_is_partial_not_negative(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        session = FakePhen2GeneSession(
+            [
+                FakeResponse(
+                    200,
+                    self._phen2gene_payload(
+                        ("BRCA1", "672", "1", "0.75", "SeedGene"),
+                    ),
+                )
+            ]
+        )
+
+        result = enrich_with_phen2gene(
+            [{"gene": "SCN1A"}],
+            ["HP:0001250"],
+            ontology_path=ontology_path,
+            max_retries=0,
+            session=session,  # type: ignore[arg-type]
+            use_cache=False,
+        )
+
+        evidence = result["variants"][0]["phen2gene"]
+        assert evidence["availability"] == "partial"  # type: ignore[index]
+        assert evidence["score"] is None  # type: ignore[index]
+        assert "does not mean" in evidence["warnings"][0]  # type: ignore[index]
+        assert result["availability"] == "partial"
+
+    def test_phen2gene_retries_transient_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "backend.phenotype.time.sleep",
+            delays.append,
+        )
+        session = FakePhen2GeneSession(
+            [
+                requests.Timeout("private timeout detail"),
+                FakeResponse(
+                    200,
+                    self._phen2gene_payload(
+                        ("SCN1A", "6323", "1", "0.9", "SeedGene"),
+                    ),
+                ),
+            ]
+        )
+
+        result = enrich_with_phen2gene(
+            [{"gene": "SCN1A"}],
+            ["HP:0001250"],
+            ontology_path=ontology_path,
+            max_retries=1,
+            session=session,  # type: ignore[arg-type]
+            use_cache=False,
+        )
+
+        assert len(session.calls) == 2
+        assert delays == [1.0]
+        assert result["request_attempts"] == 2
+        assert result["availability"] == "available"
+        assert "private timeout detail" not in json.dumps(result)
+
+    def test_phen2gene_failure_retains_explicit_missingness(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        session = FakePhen2GeneSession(
+            [requests.ConnectionError("private host detail")]
+        )
+
+        result = enrich_with_phen2gene(
+            [{"variant": {"pos": 100}, "gene": "SCN1A"}],
+            ["HP:0001250"],
+            ontology_path=ontology_path,
+            max_retries=0,
+            session=session,  # type: ignore[arg-type]
+            use_cache=False,
+        )
+
+        assert result["availability"] == "unavailable"
+        assert result["variants"][0]["variant"] == {"pos": 100}
+        evidence = result["variants"][0]["phen2gene"]
+        assert evidence["availability"] == "unavailable"  # type: ignore[index]
+        assert "negative" in evidence["warnings"][0]  # type: ignore[index]
+        assert "private host detail" not in json.dumps(result)
+
+    def test_phen2gene_reuses_normalized_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        clear_phen2gene_cache()
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        session = FakePhen2GeneSession(
+            [
+                FakeResponse(
+                    200,
+                    self._phen2gene_payload(
+                        ("SCN1A", "6323", "1", "0.9", "SeedGene"),
+                    ),
+                )
+            ]
+        )
+        try:
+            first = enrich_with_phen2gene(
+                [{"gene": "SCN1A"}],
+                ["HP:0001250"],
+                ontology_path=ontology_path,
+                max_retries=0,
+                session=session,  # type: ignore[arg-type]
+            )
+            second = enrich_with_phen2gene(
+                [{"gene": "SCN1A"}],
+                ["HP:0001250"],
+                ontology_path=ontology_path,
+                max_retries=0,
+                session=session,  # type: ignore[arg-type]
+            )
+        finally:
+            clear_phen2gene_cache()
+
+        assert len(session.calls) == 1
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is True
+        assert second["request_attempts"] == 0
+        assert second["variants"][0]["phen2gene"]["cache_hit"] is True  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        ("timeout", "max_retries", "use_cache"),
+        [
+            (0, 0, True),
+            (30, -1, True),
+            (30, 0, "yes"),
+        ],
+    )
+    def test_invalid_phen2gene_options_are_rejected(
+        self,
+        tmp_path: Path,
+        timeout: object,
+        max_retries: object,
+        use_cache: object,
+    ) -> None:
+        ontology_path = self._write_hpo_fixture(tmp_path)
+        with pytest.raises(Phen2GeneError):
+            enrich_with_phen2gene(
+                [{"gene": "SCN1A"}],
+                ["HP:0001250"],
+                ontology_path=ontology_path,
+                timeout=timeout,  # type: ignore[arg-type]
+                max_retries=max_retries,  # type: ignore[arg-type]
+                use_cache=use_cache,  # type: ignore[arg-type]
             )
 
 
@@ -8068,6 +8370,16 @@ class TestPipelineAnnotationAndPhenotype:
             "backend.pipeline.annotate_variants",
             fake_annotate,
         )
+        phen2gene_session = FakePhen2GeneSession(
+            [
+                FakeResponse(
+                    200,
+                    TestPhenotype._phen2gene_payload(
+                        ("SCN1A", "6323", "1", "0.98", "SeedGene"),
+                    ),
+                )
+            ]
+        )
 
         result = run_annotation_and_phenotype(
             vcf_path=None,
@@ -8076,6 +8388,9 @@ class TestPipelineAnnotationAndPhenotype:
             annotation_max_retries=0,
             ontology_path=ontology_path,
             associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=phen2gene_session,  # type: ignore[arg-type]
+            phen2gene_use_cache=False,
         )
 
         assert received == result["variants"]
@@ -8086,6 +8401,14 @@ class TestPipelineAnnotationAndPhenotype:
         assert result["phenotype_results"][0][
             "phenotype_score"
         ] == 1.0
+        assert result["phenotype_results"][0]["phen2gene"]["score"] == 0.98  # type: ignore[index]
+        assert len(phen2gene_session.calls) == 1
+        phen2gene_status = next(
+            record
+            for record in result["api_statuses"]
+            if record["source"] == "phen2gene"
+        )
+        assert phen2gene_status["status"] == "success"
         assert result["status"] == "running"
         assert result["current_stage"] == "evidence"
         assert result["progress_percent"] == 60
@@ -8096,6 +8419,69 @@ class TestPipelineAnnotationAndPhenotype:
         assert stage_statuses["annotation"] == "success"
         assert stage_statuses["phenotype"] == "success"
         assert stage_statuses["evidence"] == "pending"
+
+    def test_phen2gene_failure_isolated_from_local_phenotype_results(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            return [
+                self._annotation(dict(variant))
+                for variant in variants  # type: ignore[union-attr]
+            ]
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        session = FakePhen2GeneSession(
+            [requests.ConnectionError("private provider detail")]
+        )
+
+        result = run_annotation_and_phenotype(
+            vcf_path=None,
+            manual_variants=_manual_rows("2:166848215:C:T"),
+            phenotypes=["HP:0001250"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=session,  # type: ignore[arg-type]
+            phen2gene_use_cache=False,
+        )
+
+        assert len(result["phenotype_results"]) == 1
+        assert result["phenotype_results"][0][
+            "phenotype_score"
+        ] == 1.0
+        assert result["phenotype_results"][0]["phen2gene"][  # type: ignore[index]
+            "availability"
+        ] == "unavailable"
+        assert next(
+            record["status"]
+            for record in result["api_statuses"]
+            if record["source"] == "phen2gene"
+        ) == "error"
+        assert result["errors"] == [
+            {
+                "stage": "phenotype",
+                "code": "phen2gene_unavailable",
+                "message": (
+                    "Phen2Gene was unavailable; local HPO matching "
+                    "and all annotation evidence were retained."
+                ),
+                "recoverable": True,
+            }
+        ]
+        assert "private provider detail" not in json.dumps(result)
 
     def test_empty_phenotypes_skip_matching_without_losing_variants(
         self,
@@ -8208,6 +8594,11 @@ class TestCompletePipelineHappyPath:
             manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=["HP:0001250", "HP:0001263"],
             annotation_max_retries=0,
+            phen2gene_max_retries=0,
+            phen2gene_session=(  # type: ignore[arg-type]
+                _successful_phen2gene_session()
+            ),
+            phen2gene_use_cache=False,
             llm_client=client,
             report_dir=tmp_path / "reports",
             persist_analysis=False,
@@ -8411,6 +8802,11 @@ class TestCompletePipelineHappyPath:
             vcf_path=None,
             manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=["HP:0001250", "HP:0001263"],
+            phen2gene_max_retries=0,
+            phen2gene_session=(  # type: ignore[arg-type]
+                _successful_phen2gene_session()
+            ),
+            phen2gene_use_cache=False,
             llm_client=client,
             persist_analysis=False,
         )
@@ -8666,6 +9062,11 @@ class TestCompletePipelineHappyPath:
             annotation_session=annotation_session,  # type: ignore[arg-type]
             ontology_path=ontology_path,
             associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=(  # type: ignore[arg-type]
+                _successful_phen2gene_session()
+            ),
+            phen2gene_use_cache=False,
             llm_client=client,
             report_dir=tmp_path / "reports",
             database_path=tmp_path / "analysis.sqlite3",
@@ -8836,6 +9237,7 @@ class TestStage13IntegrationBoundaries:
             "clinvar": "success",
             "clingen": "success",
             "cspec": "success",
+            "phen2gene": "skipped",
             "llm": "pending",
         }
         assert result["annotations"][0]["sources"]["vep"][
@@ -8910,6 +9312,11 @@ class TestStage13IntegrationBoundaries:
             ),
             ontology_path=ontology_path,
             associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=(  # type: ignore[arg-type]
+                _successful_phen2gene_session()
+            ),
+            phen2gene_use_cache=False,
             llm_client=self._llm_client(),
             report_dir=report_directory,
             database_path=database_path,
@@ -9290,6 +9697,11 @@ class TestPipelineLifecycleLogging:
                 ),
                 ontology_path=ontology_path,
                 associations_path=associations_path,
+                phen2gene_max_retries=0,
+                phen2gene_session=(  # type: ignore[arg-type]
+                    _successful_phen2gene_session()
+                ),
+                phen2gene_use_cache=False,
                 llm_client=(
                     TestStage13IntegrationBoundaries._llm_client()
                 ),
@@ -9989,6 +10401,12 @@ class TestFrontendResults:
 
     def test_result_rows_exclude_raw_and_genotype_fields(self) -> None:
         annotation = TestEvidenceObject._complete_candidate()
+        annotation["phen2gene"] = {
+            "availability": "available",
+            "rank": 12,
+            "score": 0.81,
+            "status": "SeedGene",
+        }
         variant = annotation["variant"]
         assert isinstance(variant, dict)
 
@@ -10017,6 +10435,13 @@ class TestFrontendResults:
         assert annotation_rows[0]["CSpec specifications"] == 0
         assert phenotype_rows[0]["Phenotype score"] == 0.5
         assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"
+        assert phenotype_rows[0]["Phen2Gene availability"] == (
+            "available"
+        )
+        assert phenotype_rows[0]["Phen2Gene score"] == 0.81
+        assert phenotype_rows[0][
+            "Phen2Gene rank (service metadata)"
+        ] == 12
 
 
 class TestFrontendReportViewer:
@@ -11404,6 +11829,7 @@ class TestFrontendFoundation:
             "clinvar": ("error", "Failed for all 5 variants."),
             "clingen": ("skipped", "Not called."),
             "cspec": ("success", "Found one released specification."),
+            "phen2gene": ("success", "Matched all 5 variants."),
             "llm": ("pending", "Waiting for annotation."),
         }
         for record in result["api_statuses"]:
@@ -11429,6 +11855,7 @@ class TestFrontendFoundation:
             "NCBI ClinVar",
             "ClinGen/GenCC (UCSC)",
             "ClinGen CSpec Registry",
+            "Phen2Gene",
             "LLM API",
         ):
             assert source in rendered

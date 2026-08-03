@@ -12,8 +12,8 @@ professor-facing workflow.
 [![MVP status](https://img.shields.io/badge/MVP-Stage_16_complete-24708a?style=for-the-badge)](#stage-16-mvp-preparation-complete)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=for-the-badge&logo=python&logoColor=white)](#environment)
 [![Streamlit](https://img.shields.io/badge/Streamlit-frontend-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#stage-11-streamlit-frontend-complete)
-[![Tests](https://img.shields.io/badge/tests-451_passing-2e7d32?style=for-the-badge)](#tests)
-[![Coverage](https://img.shields.io/badge/coverage-87%25+-2e7d32?style=for-the-badge)](#tests)
+[![Tests](https://img.shields.io/badge/tests-497_pass%2C_1_workspace_failure-e6a23c?style=for-the-badge)](#tests)
+[![Coverage](https://img.shields.io/badge/coverage-92.08%25-2e7d32?style=for-the-badge)](#tests)
 [![Security](https://img.shields.io/badge/security-Stage_15_complete-5c6bc0?style=for-the-badge)](#stage-15-security-complete)
 
 </div>
@@ -53,6 +53,7 @@ flowchart LR
     D4["NCBI ClinVar"] --> D
     D5["UCSC GenCC"] --> D
     D6["ClinGen CSpec"] --> D
+    E1["Phen2Gene"] --> E
 
     classDef input fill:#e8f4f8,stroke:#24708a,color:#17324d
     classDef evidence fill:#eef1f7,stroke:#5c6bc0,color:#17324d
@@ -66,7 +67,7 @@ flowchart LR
 |---|---|
 | **Variant input** | Professor-filtered `.vcf`/`.vcf.gz` upload or a manual VCF-style table, limited to 1–5 rows |
 | **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, UCSC GenCC, and ClinGen CSpec integrations |
-| **Phenotype correlation** | Local HPO search, normalization, update workflow, and explainable gene matching |
+| **Phenotype correlation** | Local HPO search and explainable matching plus one analysis-level Phen2Gene query |
 | **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
 | **Reporting** | Validated plain text plus local PDF and Word exports |
 | **Safety** | Data minimization, bounded storage, secret scanning, safe errors, and security acceptance gates |
@@ -75,16 +76,16 @@ flowchart LR
 
 ## API-first continuation
 
-Stage 16 remains the verified implementation baseline. The API-first
-continuation is a migration plan, not a description of features that already
-exist. The repository audit and the exact `KEEP`, `MODIFY`, `BYPASS`,
-`VERIFY`, and `NEW` boundaries are recorded in
+Stage 27 Phen2Gene integration is implemented. Stages 28 and later remain
+planned until the code and tests for each stage are completed. The repository
+audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
+are recorded in
 [`docs/STAGE_19_REPOSITORY_REALITY_CHECK.md`](docs/STAGE_19_REPOSITORY_REALITY_CHECK.md).
 
-The target contract will require exactly five independently interpreted
-variants and two report views. The current contract still accepts one to five
-filtered source rows, builds Evidence Objects for every resulting allele, and
-generates one LLM interpretation and one report for the first allele.
+The target contract will retain up to five independently interpreted variants
+and two report views. The current contract accepts one to five filtered source
+rows, builds Evidence Objects for every resulting allele, and generates one
+LLM interpretation and one report for the first allele.
 
 ---
 
@@ -129,6 +130,9 @@ generates one LLM interpretation and one report for the first allele.
   partial session output, temporary uploads, and newly generated drafts.
 - Stage 6 provides local HPO search, normalization, gene and disease
   associations, and explainable phenotype scoring for annotated variants.
+- Stage 27 submits the canonical HPO set to Phen2Gene once per analysis and
+  attaches bounded gene score, provider rank metadata, status, provenance,
+  and explicit missingness to every variant without reordering variants.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
@@ -269,6 +273,27 @@ annotations from the same official release, validates all three before
 installation, rejects downgrades, preserves the previous files, and rolls back
 a partial installation. This keeps phenotype terms, gene associations, and
 disease annotations release-compatible.
+
+<a id="stage-27-phen2gene-integration-complete"></a>
+
+## Stage 27 Phen2Gene integration: complete
+
+`enrich_with_phen2gene()` sends the canonical patient HPO set to the official
+Phen2Gene REST API once per analysis. It retains only the entered variants'
+annotated genes from the provider response and records the normalized gene,
+gene identifier, provider rank, score, and status. Provider rank remains
+metadata and never reorders variants or changes pathogenicity.
+
+Each variant receives `available`, `partial`, or `unavailable` missingness,
+nullable provider-version provenance, retrieval time, cache state, and bounded
+warnings. No hit is explicitly not interpreted as an unrelated phenotype.
+Requests use the central timeout, bounded automatic retries, an in-process
+normalized-response cache, and provider failure isolation. The Streamlit
+phenotype table and external API panel expose the new evidence without
+displaying raw API payloads.
+
+The exact contract and verification evidence are recorded in
+[`docs/STAGE_27_PHEN2GENE_INTEGRATION.md`](docs/STAGE_27_PHEN2GENE_INTEGRATION.md).
 
 <a id="stage-7-evidence-object-complete"></a>
 
@@ -418,8 +443,9 @@ order and advance directly to annotation. No filtering, random sampling,
 optimization, or ranking is performed inside the application.
 
 Stage 10 step 3 connects every supplied variant to the existing Ensembl VEP,
-GeneBe, MyVariant.info, NCBI ClinVar, and ClinGen/GenCC annotation boundary, then
-passes the standardized annotations into HPO gene matching. Source-level
+GeneBe, MyVariant.info, NCBI ClinVar, and ClinGen/GenCC annotation boundary,
+then passes the standardized annotations into local HPO gene matching and one
+analysis-level Phen2Gene request. Source-level
 annotation warnings remain visible without discarding other source results.
 When no phenotypes are supplied, matching is explicitly marked as skipped and
 the annotated variants continue unchanged to the Evidence Object stage.
@@ -614,8 +640,8 @@ VCF data, and stage error messages are deliberately excluded from lifecycle
 logs.
 
 Stage 14 step 3 adds structured external API telemetry for Ensembl VEP,
-GeneBe, MyVariant.info, NCBI ClinVar, and UCSC GenCC. Every request records only the
-service, bounded operation name, attempt number, outcome, elapsed
+GeneBe, MyVariant.info, NCBI ClinVar, UCSC GenCC, and Phen2Gene. Every request
+records only the service, bounded operation name, attempt number, outcome, elapsed
 milliseconds, HTTP status, and configured timeout. Timeout, connection, HTTP,
 and API-error retries record their safe reason, next attempt, and bounded
 delay. URLs, query parameters, coordinates, alleles, genes, provider payloads,

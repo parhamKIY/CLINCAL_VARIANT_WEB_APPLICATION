@@ -202,6 +202,11 @@ class Settings:
         "https://cspec.clinicalgenome.org/cspec",
     ).strip().rstrip("/")
 
+    PHEN2GENE_BASE_URL: str = os.getenv(
+        "PHEN2GENE_BASE_URL",
+        "https://phen2gene.wglab.org/api",
+    ).strip().rstrip("/")
+
     HPO_ONTOLOGY_URL: str = os.getenv(
         "HPO_ONTOLOGY_URL",
         "https://purl.obolibrary.org/obo/hp.obo",
@@ -358,6 +363,7 @@ class Settings:
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
+            "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
             "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (
                 cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE

@@ -163,6 +163,7 @@ def build_phenotype_rows(
 
     rows: list[dict[str, object]] = []
     for result in phenotype_results:
+        phen2gene = _dictionary(result.get("phen2gene"))
         rows.append(
             {
                 "Variant": _variant_label(result),
@@ -178,6 +179,14 @@ def build_phenotype_rows(
                 "Submitted HPO": _joined_text(
                     result.get("hpo_terms")
                 ),
+                "Phen2Gene availability": phen2gene.get(
+                    "availability"
+                ),
+                "Phen2Gene score": phen2gene.get("score"),
+                "Phen2Gene rank (service metadata)": (
+                    phen2gene.get("rank")
+                ),
+                "Phen2Gene gene status": phen2gene.get("status"),
             }
         )
     return rows
@@ -305,13 +314,27 @@ def _render_phenotype_table(result: PipelineResult) -> None:
             "Matched terms",
             "Matched HPO",
             "Submitted HPO",
+            "Phen2Gene availability",
+            "Phen2Gene score",
+            "Phen2Gene rank (service metadata)",
+            "Phen2Gene gene status",
         ),
         column_config={
             "Phenotype score": st.column_config.NumberColumn(
                 format="percent"
             ),
             "Matched terms": st.column_config.NumberColumn(format="%d"),
+            "Phen2Gene score": st.column_config.NumberColumn(
+                format="%.6f"
+            ),
+            "Phen2Gene rank (service metadata)": (
+                st.column_config.NumberColumn(format="%d")
+            ),
         },
+    )
+    st.caption(
+        "Phen2Gene rank is provider metadata for the annotated gene; "
+        "it does not reorder variants or change pathogenicity."
     )
 
 

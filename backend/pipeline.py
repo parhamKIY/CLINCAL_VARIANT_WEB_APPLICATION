@@ -33,7 +33,9 @@ from backend.logging_config import (
 )
 from backend.phenotype import (
     HPODataError,
+    Phen2GeneError,
     PhenotypeError,
+    enrich_with_phen2gene,
     match_phenotypes,
 )
 from backend.privacy import (
@@ -58,7 +60,7 @@ from backend.vcf_processing import (
 from config import settings
 
 
-PIPELINE_SCHEMA_VERSION = "1.3"
+PIPELINE_SCHEMA_VERSION = "1.4"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -122,6 +124,7 @@ PIPELINE_API_ORDER = (
     "clinvar",
     "clingen",
     "cspec",
+    "phen2gene",
     "llm",
 )
 
@@ -988,6 +991,9 @@ def _annotate_and_match(
     annotation_session: requests.Session | None,
     ontology_path: str | Path | None,
     associations_path: str | Path | None,
+    phen2gene_max_retries: int | None,
+    phen2gene_session: requests.Session | None,
+    phen2gene_use_cache: bool,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Enrich filtered variants and attach optional HPO scores."""
@@ -1064,6 +1070,12 @@ def _annotate_and_match(
             dict(annotation)
             for annotation in result["annotations"]
         ]
+        _set_api_status(
+            result,
+            "phen2gene",
+            "skipped",
+            "Not called because no HPO phenotypes were supplied.",
+        )
         _set_stage(
             result,
             "phenotype",
@@ -1103,6 +1115,12 @@ def _annotate_and_match(
                 message=message,
                 recoverable=True,
             )
+            _set_api_status(
+                result,
+                "phen2gene",
+                "skipped",
+                "Not called because local HPO validation was unavailable.",
+            )
             _set_stage(
                 result,
                 "phenotype",
@@ -1111,6 +1129,92 @@ def _annotate_and_match(
                 message=message,
             )
         else:
+            _set_api_status(
+                result,
+                "phen2gene",
+                "running",
+                "Submitting the analysis HPO set once to Phen2Gene.",
+            )
+            _notify_progress(result, progress_callback)
+            try:
+                phen2gene_result = enrich_with_phen2gene(
+                    phenotype_results,
+                    request["phenotypes"],
+                    ontology_path=ontology_path,
+                    max_retries=phen2gene_max_retries,
+                    session=phen2gene_session,
+                    use_cache=phen2gene_use_cache,
+                )
+            except (
+                Phen2GeneError,
+                PhenotypeError,
+                HPODataError,
+            ):
+                message = (
+                    "Phen2Gene evidence could not be produced; local "
+                    "HPO matching results were retained."
+                )
+                _set_api_status(
+                    result,
+                    "phen2gene",
+                    "error",
+                    message,
+                )
+                _record_issue(
+                    result,
+                    stage="phenotype",
+                    code="phen2gene_unavailable",
+                    message=message,
+                    recoverable=True,
+                )
+                phenotype_status: PipelineStageStatus = "warning"
+                phenotype_message = (
+                    "Attached local phenotype scores to "
+                    f"{len(phenotype_results)} variants; Phen2Gene "
+                    "was unavailable."
+                )
+            else:
+                phenotype_results = phen2gene_result["variants"]
+                phen2gene_availability = phen2gene_result[
+                    "availability"
+                ]
+                if phen2gene_availability == "available":
+                    api_status: PipelineAPIStatus = "success"
+                    phenotype_status = "success"
+                elif (
+                    phen2gene_availability == "unavailable"
+                    and phen2gene_result["request_attempts"] == 0
+                ):
+                    api_status = "skipped"
+                    phenotype_status = "warning"
+                elif phen2gene_availability == "unavailable":
+                    api_status = "error"
+                    phenotype_status = "warning"
+                    _record_issue(
+                        result,
+                        stage="phenotype",
+                        code="phen2gene_unavailable",
+                        message=(
+                            "Phen2Gene was unavailable; local HPO "
+                            "matching and all annotation evidence were "
+                            "retained."
+                        ),
+                        recoverable=True,
+                    )
+                else:
+                    api_status = "warning"
+                    phenotype_status = "warning"
+                _set_api_status(
+                    result,
+                    "phen2gene",
+                    api_status,
+                    phen2gene_result["message"],
+                )
+                phenotype_message = (
+                    "Attached local and Phen2Gene phenotype evidence "
+                    f"to {len(phenotype_results)} variants."
+                )
+
             public_phenotype_results = [
                 dict(variant)
                 for variant in phenotype_results
@@ -1129,12 +1233,9 @@ def _annotate_and_match(
             _set_stage(
                 result,
                 "phenotype",
-                "success",
+                phenotype_status,
                 progress_percent=100,
-                message=(
-                    "Attached phenotype scores to "
-                    f"{len(result['phenotype_results'])} variants."
-                ),
+                message=phenotype_message,
             )
 
     result["current_stage"] = "evidence"
@@ -1346,6 +1447,9 @@ def run_annotation_and_phenotype(
     annotation_session: requests.Session | None = None,
     ontology_path: str | Path | None = None,
     associations_path: str | Path | None = None,
+    phen2gene_max_retries: int | None = None,
+    phen2gene_session: requests.Session | None = None,
+    phen2gene_use_cache: bool = True,
 ) -> PipelineResult:
     """Run Stage 10 through annotation and optional HPO matching."""
 
@@ -1367,6 +1471,9 @@ def run_annotation_and_phenotype(
         annotation_session=annotation_session,
         ontology_path=ontology_path,
         associations_path=associations_path,
+        phen2gene_max_retries=phen2gene_max_retries,
+        phen2gene_session=phen2gene_session,
+        phen2gene_use_cache=phen2gene_use_cache,
     )
     return validate_pipeline_result(result)
 
@@ -1381,6 +1488,9 @@ def _run_analysis_unpersisted(
     annotation_session: requests.Session | None = None,
     ontology_path: str | Path | None = None,
     associations_path: str | Path | None = None,
+    phen2gene_max_retries: int | None = None,
+    phen2gene_session: requests.Session | None = None,
+    phen2gene_use_cache: bool = True,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     report_dir: str | Path | None = None,
@@ -1467,6 +1577,9 @@ def _run_analysis_unpersisted(
             annotation_session=annotation_session,
             ontology_path=ontology_path,
             associations_path=associations_path,
+            phen2gene_max_retries=phen2gene_max_retries,
+            phen2gene_session=phen2gene_session,
+            phen2gene_use_cache=phen2gene_use_cache,
             progress_callback=progress_callback,
         )
     except AnnotationError as exc:
@@ -1569,6 +1682,9 @@ def run_analysis(
     annotation_session: requests.Session | None = None,
     ontology_path: str | Path | None = None,
     associations_path: str | Path | None = None,
+    phen2gene_max_retries: int | None = None,
+    phen2gene_session: requests.Session | None = None,
+    phen2gene_use_cache: bool = True,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     report_dir: str | Path | None = None,
@@ -1606,6 +1722,9 @@ def run_analysis(
             annotation_session=annotation_session,
             ontology_path=ontology_path,
             associations_path=associations_path,
+            phen2gene_max_retries=phen2gene_max_retries,
+            phen2gene_session=phen2gene_session,
+            phen2gene_use_cache=phen2gene_use_cache,
             llm_client=llm_client,
             llm_model=llm_model,
             report_dir=report_dir,

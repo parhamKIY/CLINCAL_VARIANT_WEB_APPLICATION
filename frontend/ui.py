@@ -158,6 +158,7 @@ API_SOURCE_LABELS = {
     "clinvar": "NCBI ClinVar",
     "clingen": "ClinGen/GenCC (UCSC)",
     "cspec": "ClinGen CSpec Registry",
+    "phen2gene": "Phen2Gene",
     "llm": "LLM API",
 }
 API_STATUS_LABELS = {
