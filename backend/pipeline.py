@@ -18,6 +18,7 @@ from backend.annotation import (
     AnnotationProgressStatus,
     annotate_variants,
 )
+from backend.conditional_enrichment import enrich_conditionally
 from backend.database import DatabaseError, save_complete_analysis
 from backend.error_handling import (
     PipelineError,
@@ -61,7 +62,7 @@ from backend.vcf_processing import (
 from config import settings
 
 
-PIPELINE_SCHEMA_VERSION = "1.8"
+PIPELINE_SCHEMA_VERSION = "1.9"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -1373,6 +1374,8 @@ def _build_evidence_and_report(
     llm_client: LLMClient | None,
     llm_model: str | None,
     report_dir: str | Path | None,
+    gnomad_session: requests.Session | None = None,
+    literature_session: requests.Session | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Build Evidence Objects and report the first filtered variant."""
@@ -1387,6 +1390,16 @@ def _build_evidence_and_report(
         message="Building bounded Evidence Objects.",
     )
     _notify_progress(result, progress_callback)
+    preliminary_evidence = build_evidence_objects(
+        result["phenotype_results"]
+    )
+    conditional_result = enrich_conditionally(
+        result["phenotype_results"],
+        preliminary_evidence,
+        gnomad_session=gnomad_session,
+        literature_session=literature_session,
+    )
+    result["phenotype_results"] = conditional_result["variants"]
     evidence_objects = build_evidence_objects(
         result["phenotype_results"]
     )
@@ -1407,7 +1420,11 @@ def _build_evidence_and_report(
         "evidence",
         "success",
         progress_percent=100,
-        message=f"Built {len(evidence_objects)} Evidence Objects.",
+        message=(
+            f"Built {len(evidence_objects)} Evidence Objects; "
+            f"conditional enrichment ran for "
+            f"{conditional_result['triggered_count']} variants."
+        ),
     )
 
     leading_evidence = evidence_objects[0]
@@ -1618,6 +1635,8 @@ def _run_analysis_unpersisted(
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
     mydisease_session: requests.Session | None = None,
+    gnomad_session: requests.Session | None = None,
+    literature_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     report_dir: str | Path | None = None,
@@ -1740,6 +1759,8 @@ def _run_analysis_unpersisted(
             llm_client=llm_client,
             llm_model=llm_model,
             report_dir=report_dir,
+            gnomad_session=gnomad_session,
+            literature_session=literature_session,
             progress_callback=progress_callback,
         )
     except EvidenceObjectError as exc:
@@ -1814,6 +1835,8 @@ def run_analysis(
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
     mydisease_session: requests.Session | None = None,
+    gnomad_session: requests.Session | None = None,
+    literature_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     report_dir: str | Path | None = None,
@@ -1855,6 +1878,8 @@ def run_analysis(
             phen2gene_session=phen2gene_session,
             phen2gene_use_cache=phen2gene_use_cache,
             mydisease_session=mydisease_session,
+            gnomad_session=gnomad_session,
+            literature_session=literature_session,
             llm_client=llm_client,
             llm_model=llm_model,
             report_dir=report_dir,

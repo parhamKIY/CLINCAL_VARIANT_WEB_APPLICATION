@@ -237,6 +237,41 @@ class Settings:
         50,
     )
 
+    GNOMAD_BASE_URL: str = os.getenv(
+        "GNOMAD_BASE_URL",
+        "https://gnomad.broadinstitute.org/api",
+    ).strip().rstrip("/")
+
+    LITVAR_BASE_URL: str = os.getenv(
+        "LITVAR_BASE_URL",
+        "https://www.ncbi.nlm.nih.gov/research/litvar2-api",
+    ).strip().rstrip("/")
+
+    PUBMED_BASE_URL: str = os.getenv(
+        "PUBMED_BASE_URL",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+    ).strip().rstrip("/")
+
+    CONDITIONAL_ENRICHMENT_TIMEOUT: int = _get_positive_int(
+        "CONDITIONAL_ENRICHMENT_TIMEOUT",
+        20,
+    )
+
+    CONDITIONAL_ENRICHMENT_MAX_RETRIES: int = _get_non_negative_int(
+        "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+        1,
+    )
+
+    CONDITIONAL_ENRICHMENT_MAX_VARIANTS: int = _get_positive_int(
+        "CONDITIONAL_ENRICHMENT_MAX_VARIANTS",
+        5,
+    )
+
+    CONDITIONAL_ENRICHMENT_MAX_ARTICLES: int = _get_positive_int(
+        "CONDITIONAL_ENRICHMENT_MAX_ARTICLES",
+        10,
+    )
+
     HPO_ONTOLOGY_URL: str = os.getenv(
         "HPO_ONTOLOGY_URL",
         "https://purl.obolibrary.org/obo/hp.obo",
@@ -395,6 +430,9 @@ class Settings:
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
+            "GNOMAD_BASE_URL": cls.GNOMAD_BASE_URL,
+            "LITVAR_BASE_URL": cls.LITVAR_BASE_URL,
+            "PUBMED_BASE_URL": cls.PUBMED_BASE_URL,
             "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
             "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (
                 cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE

@@ -31,11 +31,12 @@ from config import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = "2.2"
+EVIDENCE_SCHEMA_VERSION = "2.3"
 SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {
     "1.0",
     "2.0",
     "2.1",
+    "2.2",
     EVIDENCE_SCHEMA_VERSION,
 }
 INTERPRETATION_PROMPT_VERSION = "1.1"
@@ -275,6 +276,17 @@ class EvidenceConflictAudit(TypedDict):
     post_review: ConflictAuditResult | None
 
 
+class EvidenceConditionalEnrichment(TypedDict):
+    """Triggered direct population and literature context."""
+
+    triggered: bool
+    triggers: list[str]
+    gnomad: dict[str, Any]
+    literature: dict[str, Any]
+    myvariant_fallback: dict[str, Any]
+    warnings: list[str]
+
+
 class EvidenceObject(TypedDict):
     """Versioned, JSON-safe evidence supplied to later stages."""
 
@@ -306,6 +318,7 @@ class EvidenceObject(TypedDict):
     provenance: EvidenceProvenance
     human_review: EvidenceHumanReview
     conflict_audit: EvidenceConflictAudit
+    conditional_enrichment: EvidenceConditionalEnrichment
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -405,6 +418,9 @@ EVIDENCE_HUMAN_REVIEW_FIELDS = frozenset(
 )
 EVIDENCE_CONFLICT_AUDIT_FIELDS = frozenset(
     EvidenceConflictAudit.__required_keys__
+)
+EVIDENCE_CONDITIONAL_ENRICHMENT_FIELDS = frozenset(
+    EvidenceConditionalEnrichment.__required_keys__
 )
 CLINICAL_REPORT_FIELDS = frozenset(ClinicalReport.__required_keys__)
 CLINICAL_REPORT_SECTION_FIELDS = frozenset(
@@ -1139,6 +1155,47 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
             "human confirmation."
         )
 
+    enrichment = value["conditional_enrichment"]
+    if not isinstance(enrichment, dict):
+        raise EvidenceObjectError(
+            "evidence.conditional_enrichment must be a dictionary."
+        )
+    _validate_exact_fields(
+        enrichment,
+        EVIDENCE_CONDITIONAL_ENRICHMENT_FIELDS,
+        "evidence.conditional_enrichment",
+    )
+    if not isinstance(enrichment["triggered"], bool):
+        raise EvidenceObjectError(
+            "evidence.conditional_enrichment.triggered must be a boolean."
+        )
+    triggers = _validate_unique_strings(
+        enrichment["triggers"],
+        "evidence.conditional_enrichment.triggers",
+    )
+    allowed_triggers = {
+        "meaningful_conflict",
+        "vus",
+        "insufficient_evidence",
+        "population_evidence_ambiguity",
+        "literature_evidence_need",
+    }
+    if not set(triggers).issubset(allowed_triggers):
+        raise EvidenceObjectError(
+            "evidence.conditional_enrichment.triggers contains an "
+            "unsupported trigger."
+        )
+    for field in ("gnomad", "literature", "myvariant_fallback"):
+        if not isinstance(enrichment[field], dict):
+            raise EvidenceObjectError(
+                f"evidence.conditional_enrichment.{field} must be a "
+                "dictionary."
+            )
+    _validate_unique_strings(
+        enrichment["warnings"],
+        "evidence.conditional_enrichment.warnings",
+    )
+
     for field in (
         "annotations",
         "pathogenicity",
@@ -1146,6 +1203,7 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         "provenance",
         "human_review",
         "conflict_audit",
+        "conditional_enrichment",
     ):
         _validate_context_tree(value[field], f"evidence.{field}")
 
@@ -1992,6 +2050,10 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
         "conflict_audit": _sanitize_context_tree(
             evidence["conflict_audit"],
             "evidence.conflict_audit",
+        ),
+        "conditional_enrichment": _sanitize_context_tree(
+            evidence["conditional_enrichment"],
+            "evidence.conditional_enrichment",
         ),
     }
     clean_evidence = validate_evidence_object(clean_evidence)
@@ -3033,6 +3095,179 @@ def _compact_cspec_context(value: object) -> list[dict[str, Any]]:
     ]
 
 
+def _compact_population_block(value: object) -> dict[str, Any] | None:
+    """Retain bounded direct population metrics."""
+
+    if value is None:
+        return None
+    source = _candidate_mapping(value)
+    block = _selected_context(
+        source,
+        (
+            "ac",
+            "an",
+            "af",
+            "homozygote_count",
+            "filtering_af",
+            "filtering_af_population",
+            "filters",
+        ),
+    )
+    populations = source.get("populations")
+    block["populations"] = (
+        [
+            _selected_context(
+                item,
+                ("id", "ac", "an", "af", "homozygote_count"),
+            )
+            for item in populations[:20]
+            if isinstance(item, dict)
+        ]
+        if isinstance(populations, list)
+        else []
+    )
+    return block
+
+
+def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
+    """Retain only bounded Stage 32 evidence and explicit missingness."""
+
+    source = _candidate_mapping(value)
+    if not source:
+        return {
+            "triggered": False,
+            "triggers": [],
+            "gnomad": {
+                "status": "not_triggered",
+                "exome": None,
+                "genome": None,
+                "joint": None,
+            },
+            "literature": {
+                "status": "not_triggered",
+                "providers": {
+                    "litvar": {"status": "not_triggered"},
+                    "pubmed": {"status": "not_triggered"},
+                },
+                "articles": [],
+            },
+            "myvariant_fallback": {
+                "used": False,
+                "status": "not_needed",
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+    gnomad_source = _candidate_mapping(source.get("gnomad"))
+    gnomad = _selected_context(
+        gnomad_source,
+        (
+            "status",
+            "provider",
+            "provider_version",
+            "retrieved_at",
+            "assembly",
+            "dataset",
+            "query_variant_id",
+            "http_status",
+            "warnings",
+            "failure_reason",
+        ),
+    )
+    for field in ("exome", "genome", "joint"):
+        gnomad[field] = _compact_population_block(
+            gnomad_source.get(field)
+        )
+
+    literature_source = _candidate_mapping(source.get("literature"))
+    providers = _candidate_mapping(literature_source.get("providers"))
+    literature = _selected_context(
+        literature_source,
+        (
+            "status",
+            "provider",
+            "provider_version",
+            "retrieved_at",
+            "query_basis",
+            "pmcids",
+            "warnings",
+            "failure_reason",
+        ),
+    )
+    literature["providers"] = {
+        name: _selected_context(
+            _candidate_mapping(providers.get(name)),
+            (
+                "status",
+                "http_status",
+                "result_count",
+                "failure_reason",
+            ),
+        )
+        for name in ("litvar", "pubmed")
+    }
+    articles = literature_source.get("articles")
+    literature["articles"] = (
+        [
+            _selected_context(
+                article,
+                (
+                    "pmid",
+                    "pmcid",
+                    "title",
+                    "journal",
+                    "publication_date",
+                    "authors",
+                    "doi",
+                    "source_providers",
+                    "url",
+                ),
+            )
+            for article in articles[:10]
+            if isinstance(article, dict)
+        ]
+        if isinstance(articles, list)
+        else []
+    )
+    fallback = _selected_context(
+        _candidate_mapping(source.get("myvariant_fallback")),
+        (
+            "used",
+            "status",
+            "reason",
+            "provider",
+            "upstream_sources",
+            "independent_evidence",
+        ),
+    )
+    triggers = source.get("triggers")
+    warnings = source.get("warnings")
+    return {
+        "triggered": source.get("triggered") is True,
+        "triggers": (
+            [
+                item
+                for item in triggers
+                if isinstance(item, str)
+            ]
+            if isinstance(triggers, list)
+            else []
+        ),
+        "gnomad": gnomad,
+        "literature": literature,
+        "myvariant_fallback": fallback,
+        "warnings": (
+            [
+                item
+                for item in warnings
+                if isinstance(item, str)
+            ]
+            if isinstance(warnings, list)
+            else []
+        ),
+    }
+
+
 def _phenotype_status(
     patient_hpo_terms: list[str],
     matched_hpo_terms: list[str],
@@ -3194,6 +3429,7 @@ def _build_evidence_lineage(
     cspec: dict[str, Any],
     phen2gene: dict[str, Any],
     mydisease: dict[str, Any],
+    conditional_enrichment: dict[str, Any],
 ) -> tuple[
     list[EvidenceLineageRecord],
     list[EvidenceSharedUpstreamGroup],
@@ -3390,6 +3626,68 @@ def _build_evidence_lineage(
                 )
             )
 
+    gnomad = _candidate_mapping(
+        conditional_enrichment.get("gnomad")
+    )
+    if gnomad and gnomad.get("status") != "not_triggered":
+        records.append(
+            _lineage_record(
+                "conditional_enrichment.gnomad",
+                gnomad,
+                default_provider="gnomAD",
+                default_upstream_sources=("gnomAD",),
+                derivation="direct",
+                evidence_present=(
+                    gnomad.get("status") in {"available", "partial"}
+                ),
+            )
+        )
+    literature = _candidate_mapping(
+        conditional_enrichment.get("literature")
+    )
+    literature_providers = _candidate_mapping(
+        literature.get("providers")
+    )
+    articles = literature.get("articles")
+    article_items = articles if isinstance(articles, list) else []
+    for source_name, provider_name, upstream_name in (
+        ("litvar", "LitVar2", "LitVar2"),
+        ("pubmed", "PubMed", "PubMed"),
+    ):
+        provider_status = _candidate_mapping(
+            literature_providers.get(source_name)
+        )
+        if (
+            not provider_status
+            or provider_status.get("status") == "not_triggered"
+        ):
+            continue
+        source_marker = (
+            "LitVar2" if source_name == "litvar" else "PubMed"
+        )
+        has_articles = any(
+            isinstance(article, dict)
+            and source_marker in article.get("source_providers", [])
+            for article in article_items
+        )
+        records.append(
+            _lineage_record(
+                f"conditional_enrichment.literature.{source_name}",
+                {
+                    **provider_status,
+                    "provider": provider_name,
+                    "provider_version": literature.get(
+                        "provider_version"
+                    ),
+                    "retrieved_at": literature.get("retrieved_at"),
+                },
+                default_provider=provider_name,
+                default_upstream_sources=(upstream_name,),
+                derivation="direct",
+                evidence_present=has_articles,
+            )
+        )
+
     records = records[:MAX_EVIDENCE_LINEAGE_RECORDS]
     by_upstream: dict[str, list[EvidenceLineageRecord]] = {}
     for record in records:
@@ -3444,6 +3742,9 @@ def _build_v2_sections(
     phen2gene = _candidate_mapping(candidate.get("phen2gene"))
     mydisease = _compact_mydisease_context(
         candidate.get("mydisease")
+    )
+    conditional_enrichment = _compact_conditional_enrichment(
+        candidate.get("conditional_enrichment")
     )
     allele = {
         "chrom": variant.get("chrom"),
@@ -3526,6 +3827,7 @@ def _build_v2_sections(
             if isinstance(candidate.get("mydisease"), dict)
             else {}
         ),
+        conditional_enrichment=conditional_enrichment,
     )
     upstream_sources = sorted(
         {
@@ -3684,6 +3986,7 @@ def _build_v2_sections(
             "reviewer_notes": [],
             "confirmed_at": None,
         },
+        "conditional_enrichment": conditional_enrichment,
     }
 
 
@@ -3778,6 +4081,9 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             "pre_review": cast(ConflictAuditResult, {}),
             "post_review": None,
         },
+        "conditional_enrichment": v2_sections[
+            "conditional_enrichment"
+        ],
     }
     evidence["conflict_audit"]["pre_review"] = audit_evidence_conflicts(
         evidence,

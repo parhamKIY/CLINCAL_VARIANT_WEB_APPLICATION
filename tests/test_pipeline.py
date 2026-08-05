@@ -51,6 +51,12 @@ from backend.conflict_auditor import (
     audit_evidence_conflicts,
     normalize_classification_label,
 )
+from backend.conditional_enrichment import (
+    determine_enrichment_triggers,
+    enrich_conditionally,
+    fetch_gnomad_evidence,
+    fetch_literature_evidence,
+)
 from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
@@ -884,10 +890,12 @@ class FakeResponse:
         payload: object,
         *,
         headers: dict[str, str] | None = None,
+        text: str | None = None,
     ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.headers = headers or {}
+        self.text = text
 
     def json(self) -> object:
         if isinstance(self._payload, ValueError):
@@ -1130,6 +1138,41 @@ class FakeMyDiseaseSession:
         self.closed = True
 
 
+class FakeConditionalSession:
+    """Return queued conditional-enrichment responses."""
+
+    def __init__(
+        self,
+        *,
+        get_responses: list[object] | None = None,
+        post_responses: list[object] | None = None,
+    ) -> None:
+        self.get_responses = list(get_responses or [])
+        self.post_responses = list(post_responses or [])
+        self.get_calls: list[dict[str, object]] = []
+        self.post_calls: list[dict[str, object]] = []
+        self.closed = False
+
+    @staticmethod
+    def _response(queue: list[object]) -> FakeResponse:
+        response = queue.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, FakeResponse)
+        return response
+
+    def get(self, url: str, **kwargs: object) -> FakeResponse:
+        self.get_calls.append({"url": url, **kwargs})
+        return self._response(self.get_responses)
+
+    def post(self, url: str, **kwargs: object) -> FakeResponse:
+        self.post_calls.append({"url": url, **kwargs})
+        return self._response(self.post_responses)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def _successful_phen2gene_session(
     gene: str = "SCN1A",
 ) -> FakePhen2GeneSession:
@@ -1222,6 +1265,38 @@ def _isolate_pipeline_mydisease(
 
     monkeypatch.setattr(
         "backend.pipeline.enrich_with_mydisease",
+        fake_enrich,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_conditional_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep general pipeline tests independent of conditional APIs."""
+
+    def fake_enrich(
+        variants: object,
+        _evidence: object,
+        **_: object,
+    ) -> dict[str, object]:
+        enriched = [
+            deepcopy(dict(variant))
+            for variant in variants  # type: ignore[union-attr]
+        ]
+        return {
+            "variants": enriched,
+            "status": "skipped",
+            "message": "No variant triggered conditional enrichment.",
+            "variant_count": len(enriched),
+            "triggered_count": 0,
+            "gnomad_status": "skipped",
+            "litvar_status": "skipped",
+            "pubmed_status": "skipped",
+        }
+
+    monkeypatch.setattr(
+        "backend.pipeline.enrich_conditionally",
         fake_enrich,
     )
 
@@ -5837,6 +5912,30 @@ class TestEvidenceObject:
                 },
                 "post_review": None,
             },
+            "conditional_enrichment": {
+                "triggered": False,
+                "triggers": [],
+                "gnomad": {
+                    "status": "not_triggered",
+                    "exome": None,
+                    "genome": None,
+                    "joint": None,
+                },
+                "literature": {
+                    "status": "not_triggered",
+                    "providers": {
+                        "litvar": {"status": "not_triggered"},
+                        "pubmed": {"status": "not_triggered"},
+                    },
+                    "articles": [],
+                },
+                "myvariant_fallback": {
+                    "used": False,
+                    "status": "not_needed",
+                    "independent_evidence": False,
+                },
+                "warnings": [],
+            },
         }
 
     @staticmethod
@@ -6413,6 +6512,666 @@ class TestEvidenceObject:
             for finding in post_review["findings"]
         )
         assert post_review["final_classification"] is None
+
+    def test_stage_32_no_trigger_does_not_request_enrichment(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        evidence = build_evidence_object(candidate)
+
+        assert determine_enrichment_triggers(evidence, candidate) == []
+
+    def test_stage_32_vus_and_population_ambiguity_trigger_sources(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        myvariant = sources["myvariant"]
+        assert isinstance(clinvar, dict)
+        assert isinstance(myvariant, dict)
+        clinvar["clinical_significance"] = "uncertain significance"
+        myvariant["population_frequencies"] = {
+            "gnomad_exome": 0.0001,
+            "gnomad_genome": 0.01,
+        }
+
+        evidence = build_evidence_object(candidate)
+        triggers = determine_enrichment_triggers(evidence, candidate)
+
+        assert triggers == [
+            "vus",
+            "population_evidence_ambiguity",
+            "literature_evidence_need",
+        ]
+
+    def test_stage_32_gnomad_success_is_exact_and_bounded(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        session = FakeConditionalSession(
+            post_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "data": {
+                            "variant": {
+                                "variant_id": "2-166848215-C-T",
+                                "reference_genome": "GRCh38",
+                                "chrom": "2",
+                                "pos": 166848215,
+                                "ref": "C",
+                                "alt": "T",
+                                "faf95_joint": {
+                                    "popmax": 0.0025,
+                                    "popmax_population": "nfe",
+                                },
+                                "exome": {
+                                    "ac": 2,
+                                    "an": 1000,
+                                    "homozygote_count": 0,
+                                    "filters": ["PASS"],
+                                    "faf95": {
+                                        "popmax": 0.003,
+                                        "popmax_population": "nfe",
+                                    },
+                                    "populations": [
+                                        {
+                                            "id": "nfe",
+                                            "ac": 2,
+                                            "an": 500,
+                                            "homozygote_count": 0,
+                                        }
+                                    ],
+                                },
+                                "genome": None,
+                                "joint": {
+                                    "ac": 3,
+                                    "an": 1500,
+                                    "homozygote_count": 0,
+                                    "filters": ["PASS"],
+                                    "populations": [],
+                                },
+                            }
+                        }
+                    },
+                )
+            ]
+        )
+
+        result = fetch_gnomad_evidence(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "available"
+        assert result["dataset"] == "gnomad_r4"
+        assert result["provider_version"] == "4.1.0"
+        assert result["exome"]["af"] == 0.002
+        assert result["exome"]["populations"][0]["af"] == 0.004
+        assert result["joint"]["af"] == 0.002
+        assert result["joint"]["filtering_af"] == 0.0025
+        call = session.post_calls[0]
+        assert call["url"] == settings.GNOMAD_BASE_URL
+        assert call["json"]["variables"] == {
+            "variantId": "2-166848215-C-T",
+            "dataset": "gnomad_r4",
+        }
+        assert "faf95_joint" in call["json"]["query"]
+        assert "homozygote_count" in call["json"]["query"]
+        assert "raw" not in json.dumps(result).casefold()
+
+    @pytest.mark.parametrize(
+        ("response", "expected_status", "expected_reason"),
+        [
+            (
+                FakeResponse(200, {"data": {"variant": None}}),
+                "no_association",
+                None,
+            ),
+            (
+                requests.Timeout("private timeout"),
+                "unavailable",
+                "timeout",
+            ),
+            (
+                FakeResponse(200, {"unexpected": []}),
+                "invalid_response",
+                "invalid_schema",
+            ),
+            (
+                FakeResponse(
+                    200,
+                    {
+                        "data": {
+                            "variant": {
+                                "variant_id": "2-1-C-T",
+                            }
+                        }
+                    },
+                ),
+                "invalid_response",
+                "variant_identity_mismatch",
+            ),
+        ],
+    )
+    def test_stage_32_gnomad_missingness_and_failures_are_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        response: object,
+        expected_status: str,
+        expected_reason: str | None,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+            0,
+        )
+        session = FakeConditionalSession(post_responses=[response])
+
+        result = fetch_gnomad_evidence(
+            self._complete_candidate(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == expected_status
+        assert result["failure_reason"] == expected_reason
+        assert "private timeout" not in json.dumps(result)
+
+    def test_stage_32_gnomad_retains_valid_partial_graphql_data(
+        self,
+    ) -> None:
+        session = FakeConditionalSession(
+            post_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "errors": [{"message": "genome unavailable"}],
+                        "data": {
+                            "variant": {
+                                "variant_id": "2-166848215-C-T",
+                                "exome": {
+                                    "ac": 1,
+                                    "an": 100,
+                                    "ac_hom": 0,
+                                    "populations": [],
+                                },
+                            }
+                        },
+                    },
+                )
+            ]
+        )
+
+        result = fetch_gnomad_evidence(
+            self._complete_candidate(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "partial"
+        assert result["exome"]["af"] == 0.01
+        assert "genome unavailable" not in json.dumps(result)
+
+    def test_stage_32_litvar_and_pubmed_are_merged_and_bounded(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant["rsid"] = "rs123"
+        session = FakeConditionalSession(
+            get_responses=[
+                FakeResponse(
+                    200,
+                    [
+                        {
+                            "variant_id": "litvar@rs123",
+                            "rsid": "rs123",
+                            "gene": "SCN1A",
+                        }
+                    ],
+                ),
+                FakeResponse(
+                    200,
+                    [{"pmid": "123", "pmcid": "PMC123"}],
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "esearchresult": {
+                            "idlist": ["123", "456"]
+                        }
+                    },
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "result": {
+                            "uids": ["123", "456"],
+                            "123": {
+                                "title": "SCN1A variant report",
+                                "source": "Journal A",
+                                "pubdate": "2025",
+                                "authors": [{"name": "Author A"}],
+                                "articleids": [
+                                    {
+                                        "idtype": "doi",
+                                        "value": "10.1/example",
+                                    }
+                                ],
+                            },
+                            "456": {
+                                "title": "Independent report",
+                                "source": "Journal B",
+                                "pubdate": "2024",
+                                "authors": [],
+                                "articleids": [],
+                            },
+                        }
+                    },
+                ),
+            ]
+        )
+
+        result = fetch_literature_evidence(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "available"
+        assert result["providers"]["litvar"]["status"] == "available"
+        assert result["providers"]["pubmed"]["status"] == "available"
+        assert {article["pmid"] for article in result["articles"]} == {
+            "123",
+            "456",
+        }
+        assert result["pmcids"] == ["PMC123"]
+        assert next(
+            article
+            for article in result["articles"]
+            if article["pmid"] == "123"
+        )["source_providers"] == ["LitVar2", "PubMed"]
+        assert len(session.get_calls) == 4
+        assert "raw" not in json.dumps(result).casefold()
+
+    def test_stage_32_litvar_current_ndjson_contract_is_supported(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant["rsid"] = "rs123"
+        session = FakeConditionalSession(
+            get_responses=[
+                FakeResponse(
+                    200,
+                    ValueError("not JSON"),
+                    text=(
+                        "{'_id': 'litvar@rs123##', "
+                        "'gene': ['SCN1A'], 'name': 'rs123', "
+                        "'rsid': 'rs123', 'flag_rsid_variant': True}"
+                    ),
+                ),
+                FakeResponse(
+                    200,
+                    {"pmids": [123, 456]},
+                ),
+                FakeResponse(
+                    200,
+                    {"esearchresult": {"idlist": []}},
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "result": {
+                            "uids": ["123", "456"],
+                            "123": {"title": "First"},
+                            "456": {"title": "Second"},
+                        }
+                    },
+                ),
+            ]
+        )
+
+        result = fetch_literature_evidence(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "partial"
+        assert result["providers"]["litvar"]["status"] == "available"
+        assert result["providers"]["litvar"]["result_count"] == 2
+        assert result["providers"]["pubmed"] == {
+            "status": "partial",
+            "http_status": 200,
+            "result_count": 2,
+            "failure_reason": "search_not_available",
+        }
+        assert [article["pmid"] for article in result["articles"]] == [
+            "456",
+            "123",
+        ]
+        assert all(
+            article["source_providers"] == ["LitVar2", "PubMed"]
+            for article in result["articles"]
+        )
+        publication_call = session.get_calls[1]
+        assert publication_call["url"].endswith(
+            "/variant/get/litvar%40rs123%23%23/publications"
+        )
+
+    def test_stage_32_literature_provider_failure_is_isolated(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+            0,
+        )
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant["rsid"] = "rs123"
+        session = FakeConditionalSession(
+            get_responses=[
+                requests.Timeout("private timeout"),
+                FakeResponse(
+                    200,
+                    {"esearchresult": {"idlist": ["123"]}},
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "result": {
+                            "uids": ["123"],
+                            "123": {"title": "Retained PubMed result"},
+                        }
+                    },
+                ),
+            ]
+        )
+
+        result = fetch_literature_evidence(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "partial"
+        assert result["providers"]["litvar"]["status"] == "unavailable"
+        assert result["providers"]["litvar"]["failure_reason"] == "timeout"
+        assert result["providers"]["pubmed"]["status"] == "available"
+        assert result["articles"][0]["pmid"] == "123"
+        assert "private timeout" not in json.dumps(result)
+
+    def test_stage_32_empty_litvar_body_is_valid_missingness(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant["rsid"] = "rs123"
+        session = FakeConditionalSession(
+            get_responses=[
+                FakeResponse(
+                    200,
+                    ValueError("empty body"),
+                    text="",
+                ),
+                FakeResponse(
+                    200,
+                    {"esearchresult": {"idlist": []}},
+                ),
+            ]
+        )
+
+        result = fetch_literature_evidence(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "no_association"
+        assert result["providers"]["litvar"]["status"] == "no_association"
+        assert result["providers"]["pubmed"]["status"] == "no_association"
+        assert result["articles"] == []
+
+    def test_stage_32_analysis_enrichment_limit_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_VARIANTS",
+            1,
+        )
+        candidates = []
+        for offset in range(3):
+            candidate = self._complete_candidate()
+            variant = candidate["variant"]
+            sources = candidate["sources"]
+            assert isinstance(variant, dict)
+            assert isinstance(sources, dict)
+            clinvar = sources["clinvar"]
+            assert isinstance(clinvar, dict)
+            variant["pos"] = 166848215 + offset
+            clinvar["clinical_significance"] = "uncertain significance"
+            candidates.append(candidate)
+        preliminary = build_evidence_objects(candidates)
+        gnomad_session = FakeConditionalSession(
+            post_responses=[
+                FakeResponse(200, {"data": {"variant": None}})
+            ]
+        )
+        literature_session = FakeConditionalSession(
+            get_responses=[
+                FakeResponse(200, []),
+                FakeResponse(
+                    200,
+                    {"esearchresult": {"idlist": []}},
+                ),
+            ]
+        )
+
+        result = enrich_conditionally(
+            candidates,
+            preliminary,
+            gnomad_session=gnomad_session,  # type: ignore[arg-type]
+            literature_session=literature_session,  # type: ignore[arg-type]
+        )
+
+        assert result["triggered_count"] == 1
+        assert len(gnomad_session.post_calls) == 1
+        assert len(literature_session.get_calls) == 2
+        for candidate in result["variants"][1:]:
+            enrichment = candidate["conditional_enrichment"]
+            assert enrichment["triggered"] is False
+            assert enrichment["gnomad"]["failure_reason"] == (
+                "analysis_enrichment_limit"
+            )
+            assert enrichment["literature"]["failure_reason"] == (
+                "analysis_enrichment_limit"
+            )
+
+    def test_stage_32_queries_only_triggered_variants_and_uses_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+            0,
+        )
+        first = self._complete_candidate()
+        first_sources = first["sources"]
+        assert isinstance(first_sources, dict)
+        first_clinvar = first_sources["clinvar"]
+        first_myvariant = first_sources["myvariant"]
+        assert isinstance(first_clinvar, dict)
+        assert isinstance(first_myvariant, dict)
+        first_clinvar[
+            "clinical_significance"
+        ] = "uncertain significance"
+        first_myvariant["population_frequencies"] = {
+            "gnomad_exome": 0.0001
+        }
+        first_myvariant["upstream_sources"] = ["gnomAD"]
+        second = self._complete_candidate()
+        second_variant = second["variant"]
+        assert isinstance(second_variant, dict)
+        second_variant["pos"] = 166848216
+        preliminary = build_evidence_objects([first, second])
+        gnomad_session = FakeConditionalSession(
+            post_responses=[requests.Timeout("private timeout")]
+        )
+        literature_session = FakeConditionalSession(
+            get_responses=[
+                FakeResponse(200, []),
+                FakeResponse(
+                    200,
+                    {"esearchresult": {"idlist": []}},
+                ),
+            ]
+        )
+
+        result = enrich_conditionally(
+            [first, second],
+            preliminary,
+            gnomad_session=gnomad_session,  # type: ignore[arg-type]
+            literature_session=literature_session,  # type: ignore[arg-type]
+        )
+
+        assert result["triggered_count"] == 1
+        assert len(gnomad_session.post_calls) == 1
+        assert len(literature_session.get_calls) == 2
+        first_enrichment = result["variants"][0][
+            "conditional_enrichment"
+        ]
+        second_enrichment = result["variants"][1][
+            "conditional_enrichment"
+        ]
+        assert first_enrichment["myvariant_fallback"]["used"] is True
+        assert first_enrichment["myvariant_fallback"][
+            "independent_evidence"
+        ] is False
+        assert second_enrichment["triggered"] is False
+        assert [
+            item["variant"]["pos"] for item in result["variants"]
+        ] == [166848215, 166848216]
+
+    def test_stage_32_enrichment_flows_into_bounded_evidence_lineage(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["vus", "literature_evidence_need"],
+            "gnomad": {
+                "status": "available",
+                "provider": "gnomAD",
+                "provider_version": "4.1.0",
+                "retrieved_at": "2026-08-06T00:00:00Z",
+                "assembly": "GRCh38",
+                "dataset": "gnomad_r4",
+                "query_variant_id": "2-166848215-C-T",
+                "http_status": 200,
+                "exome": {
+                    "ac": 1,
+                    "an": 1000,
+                    "af": 0.001,
+                    "homozygote_count": 0,
+                    "filtering_af": 0.002,
+                    "filtering_af_population": "nfe",
+                    "filters": ["PASS"],
+                    "populations": [],
+                },
+                "genome": None,
+                "joint": None,
+                "warnings": [],
+                "failure_reason": None,
+                "raw_response": "must not be copied",
+            },
+            "literature": {
+                "status": "available",
+                "provider": "LitVar2/PubMed",
+                "provider_version": "LitVar2; E-utilities",
+                "retrieved_at": "2026-08-06T00:00:00Z",
+                "query_basis": ["SCN1A", "rs123"],
+                "providers": {
+                    "litvar": {
+                        "status": "available",
+                        "http_status": 200,
+                        "result_count": 1,
+                        "failure_reason": None,
+                    },
+                    "pubmed": {
+                        "status": "available",
+                        "http_status": 200,
+                        "result_count": 1,
+                        "failure_reason": None,
+                    },
+                },
+                "articles": [
+                    {
+                        "pmid": "123",
+                        "pmcid": "PMC123",
+                        "title": "Variant evidence",
+                        "journal": "Journal",
+                        "publication_date": "2025",
+                        "authors": ["Author A"],
+                        "doi": "10.1/example",
+                        "source_providers": ["LitVar2", "PubMed"],
+                        "url": "https://pubmed.ncbi.nlm.nih.gov/123/",
+                        "abstract": "must not be copied",
+                    }
+                ],
+                "pmcids": ["PMC123"],
+                "warnings": [],
+                "failure_reason": None,
+            },
+            "myvariant_fallback": {
+                "used": False,
+                "status": "not_needed",
+                "reason": None,
+                "provider": "MyVariant.info",
+                "upstream_sources": ["gnomAD"],
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+
+        evidence = build_evidence_object(candidate)
+        enrichment = evidence["conditional_enrichment"]
+        lineage_paths = {
+            record["evidence_path"]
+            for record in evidence["provenance"]["lineage"]
+        }
+
+        assert enrichment["gnomad"]["exome"]["af"] == 0.001
+        assert enrichment["literature"]["articles"][0]["pmid"] == "123"
+        assert "raw_response" not in enrichment["gnomad"]
+        assert "abstract" not in enrichment["literature"]["articles"][0]
+        assert "conditional_enrichment.gnomad" in lineage_paths
+        assert (
+            "conditional_enrichment.literature.litvar"
+            in lineage_paths
+        )
+        assert (
+            "conditional_enrichment.literature.pubmed"
+            in lineage_paths
+        )
+        assert not any(
+            "myvariant_fallback" in path for path in lineage_paths
+        )
+        assert json.loads(json.dumps(evidence)) == evidence
 
     def test_v2_mydisease_lists_are_bounded(self) -> None:
         candidate = self._complete_candidate()
