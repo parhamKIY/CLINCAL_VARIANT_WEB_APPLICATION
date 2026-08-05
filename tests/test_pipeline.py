@@ -47,6 +47,10 @@ from backend.database import (
     save_report,
     save_variants,
 )
+from backend.conflict_auditor import (
+    audit_evidence_conflicts,
+    normalize_classification_label,
+)
 from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
@@ -5667,6 +5671,7 @@ class TestEvidenceObject:
                 "genebe": {},
                 "population": {
                     "population_frequency": 0.00001,
+                    "assembly": "GRCh38",
                     "status": "success",
                     "variant_id": "chr2:g.166848215C>T",
                     "genebe": {},
@@ -5684,6 +5689,7 @@ class TestEvidenceObject:
                 "clinvar_conditions": [
                     "Developmental and epileptic encephalopathy",
                 ],
+                "clinvar_conflicting_submissions": {},
                 "clingen_context": [
                     {
                         "disease": (
@@ -5806,6 +5812,30 @@ class TestEvidenceObject:
                 "additions": [],
                 "reviewer_notes": [],
                 "confirmed_at": None,
+            },
+            "conflict_audit": {
+                "pre_review": {
+                    "phase": "pre_review",
+                    "status": "no_conflict",
+                    "routing_severity": "none",
+                    "findings": [],
+                    "normalized_classifications": [
+                        {
+                            "evidence_path": (
+                                "pathogenicity."
+                                "clinvar_classification"
+                            ),
+                            "source": "NCBI ClinVar",
+                            "original_label": "Pathogenic",
+                            "normalized_label": "Pathogenic",
+                            "review_status": (
+                                "reviewed by expert panel"
+                            ),
+                        }
+                    ],
+                    "final_classification": None,
+                },
+                "post_review": None,
             },
         }
 
@@ -6226,6 +6256,163 @@ class TestEvidenceObject:
 
         with pytest.raises(EvidenceObjectError, match="include a timezone"):
             validate_evidence_object(evidence)
+
+    @pytest.mark.parametrize(
+        ("label", "expected"),
+        [
+            ("benign", "Benign"),
+            ("Likely_Benign", "Likely Benign"),
+            ("uncertain significance", "VUS"),
+            ("likely-pathogenic", "Likely Pathogenic"),
+            ("PATHOGENIC", "Pathogenic"),
+            ("Pathogenic/Likely pathogenic", None),
+        ],
+    )
+    def test_stage_31_normalizes_only_unambiguous_five_class_labels(
+        self,
+        label: str,
+        expected: str | None,
+    ) -> None:
+        assert normalize_classification_label(label) == expected
+
+    def test_stage_31_pre_review_no_conflict_is_explicit(self) -> None:
+        evidence = build_evidence_object(self._complete_candidate())
+
+        audit = evidence["conflict_audit"]["pre_review"]
+
+        assert audit["phase"] == "pre_review"
+        assert audit["status"] == "no_conflict"
+        assert audit["routing_severity"] == "none"
+        assert audit["findings"] == []
+        assert audit["final_classification"] is None
+        assert evidence["conflict_audit"]["post_review"] is None
+
+    def test_stage_31_detects_classification_condition_and_quality(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        sources["genebe"] = {
+            "status": "success",
+            "provider": "GeneBe",
+            "automated_acmg_classification": "Benign",
+            "clinvar_derived": {
+                "upstream_source": "ClinVar",
+                "classification": "Benign",
+                "review_status": (
+                    "criteria provided, single submitter"
+                ),
+                "disease": "Unrelated condition",
+            },
+        }
+
+        evidence = build_evidence_object(candidate)
+        audit = evidence["conflict_audit"]["pre_review"]
+        conflict_types = {
+            finding["conflict_type"]
+            for finding in audit["findings"]
+        }
+
+        assert audit["routing_severity"] == "major"
+        assert {
+            "classification_disagreement",
+            "review_status_mismatch",
+            "condition_mismatch",
+            "source_quality_mismatch",
+            "upstream_dependency",
+        }.issubset(conflict_types)
+        assert audit["final_classification"] is None
+
+    def test_stage_31_detects_transcript_assembly_and_staleness(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        vep = sources["vep"]
+        clinvar = sources["clinvar"]
+        assert isinstance(vep, dict)
+        assert isinstance(clinvar, dict)
+        vep.update(
+            {
+                "assembly": "GRCh38",
+                "retrieved_at": "2024-01-01T00:00:00Z",
+            }
+        )
+        clinvar["retrieved_at"] = "2026-01-02T00:00:00Z"
+        sources["genebe"] = {
+            "status": "success",
+            "transcript": "ENST00000999999",
+            "request_assembly": "GRCh37",
+        }
+
+        evidence = build_evidence_object(candidate)
+        audit = evidence["conflict_audit"]["pre_review"]
+        conflict_types = {
+            finding["conflict_type"]
+            for finding in audit["findings"]
+        }
+
+        assert {
+            "transcript_mismatch",
+            "assembly_mismatch",
+            "stale_evidence",
+        }.issubset(conflict_types)
+        assert audit["routing_severity"] == "critical"
+
+    def test_stage_31_detects_clinvar_and_gene_context_conflicts(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        assert isinstance(clinvar, dict)
+        clinvar["conflicting_submissions"] = {
+            "status": "conflicting",
+            "detected": True,
+            "basis": "aggregate_review_status",
+            "details": "Pathogenic, uncertain significance",
+        }
+        candidate["phen2gene"] = {
+            "availability": "available",
+            "gene": "OTHER",
+            "rank": 1,
+            "score": 0.9,
+            "status": "SeedGene",
+        }
+
+        evidence = build_evidence_object(candidate)
+        conflict_types = {
+            finding["conflict_type"]
+            for finding in evidence["conflict_audit"][
+                "pre_review"
+            ]["findings"]
+        }
+
+        assert "clinvar_conflicting_submissions" in conflict_types
+        assert "gene_disease_context_mismatch" in conflict_types
+
+    def test_stage_31_post_review_rerun_detects_user_override(
+        self,
+    ) -> None:
+        evidence = build_evidence_object(self._complete_candidate())
+
+        post_review = audit_evidence_conflicts(
+            evidence,
+            phase="post_review",
+            reviewed_values={"classification": "Benign"},
+        )
+
+        assert post_review["phase"] == "post_review"
+        assert post_review["status"] == "conflict"
+        assert post_review["routing_severity"] == "major"
+        assert any(
+            finding["conflict_type"] == "user_override_conflict"
+            for finding in post_review["findings"]
+        )
+        assert post_review["final_classification"] is None
 
     def test_v2_mydisease_lists_are_bounded(self) -> None:
         candidate = self._complete_candidate()

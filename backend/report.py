@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
+from backend.conflict_auditor import (
+    ConflictAuditResult,
+    audit_evidence_conflicts,
+)
 from backend.llm import LLMClient, LLMResponse, call_llm
 from backend.privacy import (
     ClinicalDataPrivacyError,
@@ -27,10 +31,11 @@ from config import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = "2.1"
+EVIDENCE_SCHEMA_VERSION = "2.2"
 SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {
     "1.0",
     "2.0",
+    "2.1",
     EVIDENCE_SCHEMA_VERSION,
 }
 INTERPRETATION_PROMPT_VERSION = "1.1"
@@ -201,6 +206,7 @@ class EvidencePathogenicity(TypedDict):
     clinvar_classification: str | None
     clinvar_review_status: str | None
     clinvar_conditions: list[str]
+    clinvar_conflicting_submissions: dict[str, Any]
     clingen_context: list[EvidenceClinGenCuration]
     cspec_context: list[dict[str, Any]]
     warnings: list[str]
@@ -262,6 +268,13 @@ class EvidenceHumanReview(TypedDict):
     confirmed_at: str | None
 
 
+class EvidenceConflictAudit(TypedDict):
+    """Pre-review result and reserved post-review rerun."""
+
+    pre_review: ConflictAuditResult
+    post_review: ConflictAuditResult | None
+
+
 class EvidenceObject(TypedDict):
     """Versioned, JSON-safe evidence supplied to later stages."""
 
@@ -292,6 +305,7 @@ class EvidenceObject(TypedDict):
     phenotype_relationship: EvidencePhenotypeRelationship
     provenance: EvidenceProvenance
     human_review: EvidenceHumanReview
+    conflict_audit: EvidenceConflictAudit
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -388,6 +402,9 @@ EVIDENCE_SHARED_UPSTREAM_FIELDS = frozenset(
 )
 EVIDENCE_HUMAN_REVIEW_FIELDS = frozenset(
     EvidenceHumanReview.__required_keys__
+)
+EVIDENCE_CONFLICT_AUDIT_FIELDS = frozenset(
+    EvidenceConflictAudit.__required_keys__
 )
 CLINICAL_REPORT_FIELDS = frozenset(ClinicalReport.__required_keys__)
 CLINICAL_REPORT_SECTION_FIELDS = frozenset(
@@ -968,6 +985,14 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         pathogenicity["clinvar_conditions"],
         "evidence.pathogenicity.clinvar_conditions",
     )
+    if not isinstance(
+        pathogenicity["clinvar_conflicting_submissions"],
+        dict,
+    ):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity.clinvar_conflicting_submissions "
+            "must be a dictionary."
+        )
     _validate_clingen_curations(pathogenicity["clingen_context"])
     if not isinstance(pathogenicity["cspec_context"], list):
         raise EvidenceObjectError(
@@ -1089,12 +1114,38 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
             "the human-review stage."
         )
 
+    conflict_audit = value["conflict_audit"]
+    if not isinstance(conflict_audit, dict):
+        raise EvidenceObjectError(
+            "evidence.conflict_audit must be a dictionary."
+        )
+    _validate_exact_fields(
+        conflict_audit,
+        EVIDENCE_CONFLICT_AUDIT_FIELDS,
+        "evidence.conflict_audit",
+    )
+    expected_pre_review = audit_evidence_conflicts(
+        value,
+        phase="pre_review",
+    )
+    if conflict_audit["pre_review"] != expected_pre_review:
+        raise EvidenceObjectError(
+            "evidence.conflict_audit.pre_review does not match the "
+            "deterministic source-evidence audit."
+        )
+    if conflict_audit["post_review"] is not None:
+        raise EvidenceObjectError(
+            "evidence.conflict_audit.post_review must be null before "
+            "human confirmation."
+        )
+
     for field in (
         "annotations",
         "pathogenicity",
         "phenotype_relationship",
         "provenance",
         "human_review",
+        "conflict_audit",
     ):
         _validate_context_tree(value[field], f"evidence.{field}")
 
@@ -1937,6 +1988,10 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
         "human_review": _sanitize_context_tree(
             evidence["human_review"],
             "evidence.human_review",
+        ),
+        "conflict_audit": _sanitize_context_tree(
+            evidence["conflict_audit"],
+            "evidence.conflict_audit",
         ),
     }
     clean_evidence = validate_evidence_object(clean_evidence)
@@ -3504,6 +3559,7 @@ def _build_v2_sections(
                         "provider",
                         "provider_version",
                         "retrieved_at",
+                        "assembly",
                         "most_severe_consequence",
                         "total_transcript_consequences",
                         "transcripts_truncated",
@@ -3524,6 +3580,7 @@ def _build_v2_sections(
                     "provider",
                     "provider_version",
                     "retrieved_at",
+                    "request_assembly",
                     "gene",
                     "gene_hgnc_id",
                     "transcript",
@@ -3541,6 +3598,7 @@ def _build_v2_sections(
                 "population_frequency": candidate.get(
                     "population_frequency"
                 ),
+                "assembly": candidate.get("assembly"),
                 **_selected_context(
                     myvariant,
                     (
@@ -3572,6 +3630,12 @@ def _build_v2_sections(
             ),
             "clinvar_review_status": clinvar.get("review_status"),
             "clinvar_conditions": deepcopy(clinvar_conditions),
+            "clinvar_conflicting_submissions": _selected_context(
+                _candidate_mapping(
+                    clinvar.get("conflicting_submissions")
+                ),
+                ("status", "detected", "basis", "details"),
+            ),
             "clingen_context": deepcopy(clingen_curations),
             "cspec_context": _compact_cspec_context(cspec),
             "warnings": deepcopy(warnings[:MAX_EVIDENCE_WARNINGS]),
@@ -3710,7 +3774,15 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
         ],
         "provenance": v2_sections["provenance"],
         "human_review": v2_sections["human_review"],
+        "conflict_audit": {
+            "pre_review": cast(ConflictAuditResult, {}),
+            "post_review": None,
+        },
     }
+    evidence["conflict_audit"]["pre_review"] = audit_evidence_conflicts(
+        evidence,
+        phase="pre_review",
+    )
     return sanitize_evidence_object(evidence)
 
 
