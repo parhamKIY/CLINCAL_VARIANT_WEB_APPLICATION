@@ -33,8 +33,11 @@ from frontend.execution import (
     UploadedVCF,
     execute_analysis,
 )
+from frontend.evidence_review import (
+    clear_evidence_review_state,
+    render_evidence_review,
+)
 from frontend.results import render_analysis_results
-from frontend.report_viewer import render_report_viewer
 
 
 PAGE_TITLE = "Clinical Variant Interpretation"
@@ -228,6 +231,7 @@ def _clear_analysis_result() -> None:
 
     st.session_state[PIPELINE_RESULT_KEY] = None
     st.session_state.pop("selected_evidence_object", None)
+    clear_evidence_review_state()
 
 
 def _manual_widget_key(field: str, row_index: int) -> str:
@@ -1201,4 +1205,4 @@ def render_app() -> None:
         st.divider()
         render_analysis_results(pipeline_result)
         st.divider()
-        render_report_viewer(pipeline_result)
+        render_evidence_review(pipeline_result)

@@ -61,6 +61,12 @@ from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
 )
+from backend.evidence_review import (
+    EvidenceReviewError,
+    build_evidence_review_reports,
+    save_evidence_review_draft,
+    validate_evidence_review_report,
+)
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -8726,6 +8732,169 @@ class TestClinicalReportContract:
             validate_clinical_report(report)
 
 
+class TestStage33EvidenceReview:
+    """Verify immutable originals and bounded editable Output A drafts."""
+
+    @staticmethod
+    def _evidence() -> dict[str, object]:
+        return TestEvidenceObject._complete_evidence_object()
+
+    def test_builds_one_ordered_report_per_evidence_object(
+        self,
+    ) -> None:
+        first = self._evidence()
+        second = deepcopy(first)
+
+        reports = build_evidence_review_reports(
+            [first, second],
+            timestamp="2026-08-05T08:00:00Z",
+        )
+
+        assert [report["variant_index"] for report in reports] == [0, 1]
+        assert len({report["report_id"] for report in reports}) == 2
+        assert reports[0]["original_machine_report"] == first
+        assert reports[0]["reviewed_user_report"] == first
+        assert (
+            reports[0]["reviewed_user_report"]
+            is not reports[0]["original_machine_report"]
+        )
+        assert reports[0]["status"] == "draft"
+        assert reports[0]["edit_history"] == []
+
+    def test_save_tracks_edits_additions_and_notes(
+        self,
+    ) -> None:
+        report = build_evidence_review_reports(
+            [self._evidence()],
+            timestamp="2026-08-05T08:00:00Z",
+        )[0]
+        reviewed = deepcopy(report["reviewed_user_report"])
+        original_gene = reviewed["gene"]
+        reviewed["gene"] = "reviewed-gene"
+        reviewed.pop("impact")
+        reviewed["supplemental_information"] = {
+            "laboratory": "orthogonal confirmation pending",
+            "family": "segregation data unavailable",
+        }
+
+        saved = save_evidence_review_draft(
+            report,
+            reviewed,
+            ["Manual evidence requires verification."],
+            timestamp="2026-08-05T08:05:00Z",
+        )
+
+        assert saved["original_machine_report"]["gene"] == original_gene
+        assert saved["reviewed_user_report"] == reviewed
+        assert saved["reviewer_notes"] == [
+            "Manual evidence requires verification."
+        ]
+        edits = {
+            (edit["path"], edit["change_type"], edit["user_added"])
+            for edit in saved["edit_history"]
+        }
+        assert edits == {
+            ("/gene", "modified", False),
+            ("/impact", "deleted", False),
+            ("/reviewer_notes/0", "added", True),
+            ("/supplemental_information", "added", True),
+        }
+        assert saved["updated_at"] == "2026-08-05T08:05:00Z"
+
+    def test_repeated_unchanged_save_does_not_duplicate_history(
+        self,
+    ) -> None:
+        report = build_evidence_review_reports(
+            [self._evidence()],
+            timestamp="2026-08-05T08:00:00Z",
+        )[0]
+        reviewed = deepcopy(report["reviewed_user_report"])
+        reviewed["manual_evidence"] = {"note": "reviewed"}
+        saved = save_evidence_review_draft(
+            report,
+            reviewed,
+            timestamp="2026-08-05T08:01:00Z",
+        )
+
+        unchanged = save_evidence_review_draft(
+            saved,
+            reviewed,
+            timestamp="2026-08-05T08:02:00Z",
+        )
+
+        assert unchanged["edit_history"] == saved["edit_history"]
+        assert unchanged["updated_at"] == "2026-08-05T08:02:00Z"
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            lambda reviewed: reviewed.update(
+                {"non_finite": float("nan")}
+            ),
+            lambda reviewed: reviewed.update(
+                {"too_deep": [[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]}
+            ),
+            lambda reviewed: reviewed.update(
+                {"too_large": "x" * (256 * 1024)}
+            ),
+        ],
+    )
+    def test_invalid_user_content_is_rejected(
+        self,
+        mutation: object,
+    ) -> None:
+        report = build_evidence_review_reports([self._evidence()])[0]
+        reviewed = deepcopy(report["reviewed_user_report"])
+        mutation(reviewed)  # type: ignore[operator]
+
+        with pytest.raises(EvidenceReviewError):
+            save_evidence_review_draft(report, reviewed)
+
+    def test_tampered_original_and_backdated_update_are_rejected(
+        self,
+    ) -> None:
+        report = build_evidence_review_reports(
+            [self._evidence()],
+            timestamp="2026-08-05T08:00:00Z",
+        )[0]
+        tampered = deepcopy(report)
+        tampered["original_machine_report"]["gene"] = "OTHER"
+        with pytest.raises(EvidenceReviewError, match="report_id"):
+            validate_evidence_review_report(tampered)
+
+        with pytest.raises(EvidenceReviewError, match="precede"):
+            save_evidence_review_draft(
+                report,
+                report["reviewed_user_report"],
+                timestamp="2026-08-05T07:59:59Z",
+            )
+        precise = save_evidence_review_draft(
+            report,
+            report["reviewed_user_report"],
+            timestamp="2026-08-05T08:00:00.100000Z",
+        )
+        assert precise["updated_at"].endswith(".100000Z")
+
+    def test_pipeline_contract_rejects_reordered_review_reports(
+        self,
+    ) -> None:
+        evidence = [self._evidence(), self._evidence()]
+        result = create_pipeline_result()
+        result["evidence_objects"] = evidence
+        result["evidence_review_reports"] = [
+            dict(report)
+            for report in reversed(
+                build_evidence_review_reports(evidence)
+            )
+        ]
+
+        with pytest.raises(
+            PipelineResultError,
+            match="preserve Evidence Object order",
+        ):
+            validate_pipeline_result(result)
+
+
 class TestClinicalInterpretationValidation:
     """Verify Stage 9 validation of untrusted LLM Markdown."""
 
@@ -10321,7 +10490,7 @@ class TestCompletePipelineHappyPath:
             f"{CLINICAL_DECISION_SUPPORT_NOTICE}"
         )
 
-    def test_analysis_builds_evidence_and_saves_leading_report(
+    def test_analysis_builds_editable_reports_without_calling_llm(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -10368,7 +10537,10 @@ class TestCompletePipelineHappyPath:
 
         result = run_analysis(
             vcf_path=None,
-            manual_variants=_manual_rows("2:166848215:C:T"),
+            manual_variants=_manual_rows(
+                "2:166848215:C:T",
+                "2:166848215:C:G",
+            ),
             phenotypes=["HP:0001250", "HP:0001263"],
             annotation_max_retries=0,
             phen2gene_max_retries=0,
@@ -10384,45 +10556,46 @@ class TestCompletePipelineHappyPath:
         assert result["status"] == "success"
         assert result["current_stage"] == "completed"
         assert result["progress_percent"] == 100
-        assert len(result["evidence_objects"]) == 1
+        assert len(result["evidence_objects"]) == 2
         assert result["evidence_objects"][0]["variant"] == {
             "chrom": "2",
             "pos": 166848215,
             "ref": "C",
             "alt": "T",
         }
-        assert len(adapter.requests) == 1
+        assert result["evidence_objects"][1]["variant"]["alt"] == "G"
+        assert len(result["evidence_review_reports"]) == 2
+        assert [
+            report["original_machine_report"]
+            for report in result["evidence_review_reports"]
+        ] == result["evidence_objects"]
+        assert [
+            report["variant_index"]
+            for report in result["evidence_review_reports"]
+        ] == [0, 1]
+        assert adapter.requests == []
         assert result["api_statuses"][-1] == {
             "source": "llm",
-            "status": "success",
-            "message": (
-                "Completed the interpretation with the configured model."
-            ),
+            "status": "skipped",
+            "message": "Not called before human review and confirmation.",
         }
-        assert "BEGIN_EVIDENCE_OBJECT_JSON" in (
-            adapter.requests[0].messages[1].content
-        )
-        assert result["report_path"] is not None
-        report_path = Path(result["report_path"])
-        assert report_path.is_file()
-        assert (
-            CLINICAL_DECISION_SUPPORT_NOTICE
-            in report_path.read_text(encoding="utf-8")
-        )
-        assert all(
-            record["status"] == "success"
+        assert result["report_path"] is None
+        stage_statuses = {
+            record["stage"]: record["status"]
             for record in result["stages"]
+        }
+        assert stage_statuses["llm"] == "skipped"
+        assert all(
+            status == "success"
+            for stage, status in stage_statuses.items()
+            if stage != "llm"
         )
         json.dumps(result, allow_nan=False)
 
-    def test_llm_failure_is_retried_automatically(
+    def test_preconfirmation_pipeline_never_retries_llm(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        interpretation_attempts = 0
-        delays: list[float] = []
-
         def fake_annotate(
             variants: object,
             **_: object,
@@ -10434,51 +10607,26 @@ class TestCompletePipelineHappyPath:
                 annotations.append(candidate)
             return annotations
 
-        def flaky_interpretation(
-            *_: object,
-            **__: object,
-        ) -> LLMResponse:
-            nonlocal interpretation_attempts
-            interpretation_attempts += 1
-            if interpretation_attempts == 1:
-                raise LLMTimeoutError("temporary timeout")
-            return LLMResponse(
-                content=(
-                    TestClinicalInterpretationValidation
-                    ._valid_markdown()
-                ),
-                model="retry-test-model",
-            )
-
         monkeypatch.setattr(
             "backend.pipeline.annotate_variants",
             fake_annotate,
         )
-        monkeypatch.setattr(
-            "backend.pipeline.generate_clinical_interpretation",
-            flaky_interpretation,
+        adapter = FakeLLMAdapter(
+            LLMTimeoutError("must not be called")
         )
-        monkeypatch.setattr(
-            "backend.pipeline.time.sleep",
-            delays.append,
-        )
-        monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 1)
 
         result = run_analysis(
             vcf_path=None,
             manual_variants=_manual_rows("2:166848215:C:T"),
             phenotypes=[],
-            report_dir=tmp_path / "reports",
+            llm_client=LLMClient(adapter),
             persist_analysis=False,
         )
 
         assert result["status"] == "success"
-        assert interpretation_attempts == 2
-        assert delays == [1.0]
-        assert result["api_statuses"][-1]["status"] == "success"
-        assert "after 1 automatic retry" in (
-            result["api_statuses"][-1]["message"]
-        )
+        assert adapter.requests == []
+        assert result["api_statuses"][-1]["status"] == "skipped"
+        assert len(result["evidence_review_reports"]) == 1
 
     def test_invalid_input_returns_frontend_safe_error(self) -> None:
         result = run_analysis(
@@ -10546,7 +10694,7 @@ class TestCompletePipelineHappyPath:
         ]
         assert "secret database path" not in json.dumps(result)
 
-    def test_llm_failure_retains_evidence_as_partial_result(
+    def test_configured_failing_llm_is_not_called_before_review(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -10588,25 +10736,19 @@ class TestCompletePipelineHappyPath:
             persist_analysis=False,
         )
 
-        assert result["status"] == "partial"
-        assert result["current_stage"] == "llm"
+        assert result["status"] == "success"
+        assert result["current_stage"] == "completed"
         assert len(result["evidence_objects"]) == 1
+        assert len(result["evidence_review_reports"]) == 1
         assert result["report_path"] is None
-        assert result["errors"] == [
-            {
-                "stage": "llm",
-                "code": "llm_interpretation_failed",
-                "message": "The LLM request timed out.",
-                "recoverable": True,
-            }
-        ]
+        assert result["errors"] == []
         stage_statuses = {
             record["stage"]: record["status"]
             for record in result["stages"]
         }
         assert stage_statuses["evidence"] == "success"
-        assert stage_statuses["llm"] == "error"
-        assert stage_statuses["report"] == "skipped"
+        assert stage_statuses["llm"] == "skipped"
+        assert stage_statuses["report"] == "success"
         json.dumps(result, allow_nan=False)
 
     def test_phenotype_failure_continues_without_scores(
@@ -10667,8 +10809,8 @@ class TestCompletePipelineHappyPath:
             "phenotype_score"
         ] is None
         assert result["evidence_objects"][0]["hpo_terms"] == []
-        assert result["report_path"] is not None
-        assert Path(result["report_path"]).is_file()
+        assert result["report_path"] is None
+        assert len(result["evidence_review_reports"]) == 1
         assert result["errors"][0]["stage"] == "phenotype"
         assert result["errors"][0]["recoverable"] is True
         assert "private ontology path" not in json.dumps(result)
@@ -10859,9 +11001,9 @@ class TestCompletePipelineHappyPath:
         assert result["evidence_objects"][0][
             "matched_hpo_terms"
         ] == ["HP:0001250"]
-        assert result["report_path"] is not None
+        assert result["report_path"] is None
+        assert len(result["evidence_review_reports"]) == 1
         assert result["analysis_id"] is not None
-        assert Path(result["report_path"]).is_file()
         assert len(annotation_session.post_calls) == 1
         assert len(annotation_session.myvariant_get_calls) == 1
         assert len(annotation_session.clinvar_get_calls) == 2
@@ -10870,7 +11012,13 @@ class TestCompletePipelineHappyPath:
         assert all(
             stage["status"] == "success"
             for stage in result["stages"]
+            if stage["stage"] != "llm"
         )
+        assert next(
+            stage["status"]
+            for stage in result["stages"]
+            if stage["stage"] == "llm"
+        ) == "skipped"
         assert [
             snapshot["progress_percent"]
             for snapshot in progress_snapshots
@@ -10895,7 +11043,7 @@ class TestCompletePipelineHappyPath:
             restored["evidence_objects"]
             == result["evidence_objects"]
         )
-        assert restored["report_path"] == result["report_path"]
+        assert restored["report_path"] is None
 
 
 class TestStage13IntegrationBoundaries:
@@ -11107,11 +11255,18 @@ class TestStage13IntegrationBoundaries:
 
         assert result["status"] == "success"
         assert result["analysis_id"] is not None
-        assert result["report_path"] is not None
+        assert result["report_path"] is None
+        assert len(result["evidence_review_reports"]) == 1
         assert all(
             stage["status"] == "success"
             for stage in result["stages"]
+            if stage["stage"] != "llm"
         )
+        assert next(
+            stage["status"]
+            for stage in result["stages"]
+            if stage["stage"] == "llm"
+        ) == "skipped"
         restored = get_analysis(
             result["analysis_id"],
             database_path=database_path,
@@ -11126,7 +11281,7 @@ class TestStage13IntegrationBoundaries:
         assert restored["evidence_objects"][0][
             "matched_hpo_terms"
         ] == ["HP:0001250"]
-        assert restored["report_path"] == result["report_path"]
+        assert restored["report_path"] is None
 
 
 @pytest.mark.stage14_security
@@ -11505,13 +11660,17 @@ class TestPipelineLifecycleLogging:
             "phenotype_count=1"
         ) in contents
         for stage in PIPELINE_STAGE_ORDER:
-            assert (
-                f"event=pipeline_stage_started stage={stage}"
-                in contents
+            if stage != "llm":
+                assert (
+                    f"event=pipeline_stage_started stage={stage}"
+                    in contents
+                )
+            expected_status = (
+                "skipped" if stage == "llm" else "success"
             )
             assert (
                 "event=pipeline_stage_finished "
-                f"stage={stage} status=success"
+                f"stage={stage} status={expected_status}"
                 in contents
             )
         assert (
@@ -11523,12 +11682,8 @@ class TestPipelineLifecycleLogging:
             "event=evidence_build_finished evidence_object_count=1"
         ) in contents
         assert (
-            "event=report_saved report_directory="
-            f"{(tmp_path / 'reports').resolve()}"
-        ) in contents
-        assert re.search(
-            r"event=report_saved .* report_id=[0-9a-f]{16}",
-            contents,
+            "event=evidence_review_reports_prepared report_count=1"
+            in contents
         )
         run_ids = re.findall(
             r"run_id=(run-[0-9a-f]{32})",
@@ -11539,8 +11694,7 @@ class TestPipelineLifecycleLogging:
         assert "1:100:A:G" not in contents
         assert "HP:0001250" not in contents
         assert "SCN1A" not in contents
-        assert result["report_path"] is not None
-        assert Path(result["report_path"]).name not in contents
+        assert result["report_path"] is None
 
     def test_invalid_input_logs_safe_terminal_lifecycle(
         self,
@@ -11695,8 +11849,8 @@ class TestStage13MockedServiceFailures:
         )
 
         assert result["status"] == "partial"
-        assert result["report_path"] is not None
-        assert Path(result["report_path"]).is_file()
+        assert result["report_path"] is None
+        assert len(result["evidence_review_reports"]) == 1
         evidence = result["evidence_objects"][0]
         assert evidence["source_statuses"] == {
             "vep": "success",
@@ -13798,23 +13952,9 @@ class TestFrontendFoundation:
     @pytest.mark.stage16_mvp
     def test_manual_table_executes_pipeline(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         received: dict[str, object] = {}
-        report_directory = tmp_path / "reports"
-        report_directory.mkdir()
-        report_path = report_directory / "clinical-report.txt"
-        report_path.write_text(
-            "Clinical report\n===============\n\n"
-            "Evidence-based summary.",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(
-            settings,
-            "REPORT_DIR",
-            report_directory,
-        )
         monkeypatch.setattr(
             settings,
             "LLM_MODEL",
@@ -13859,7 +13999,14 @@ class TestFrontendFoundation:
             result["evidence_objects"] = [
                 TestEvidenceObject._complete_evidence_object()
             ]
-            result["report_path"] = str(report_path)
+            result["evidence_review_reports"] = [
+                dict(report)
+                for report in build_evidence_review_reports(
+                    result["evidence_objects"],
+                    timestamp="2026-08-05T08:00:00Z",
+                )
+            ]
+            result["report_path"] = None
             progress_callback(result)
             return result
 
@@ -14012,15 +14159,34 @@ class TestFrontendFoundation:
             "ClinGen/GenCC": "Success",
         }
         assert len(app.dataframe) == 6
-        assert [button.label for button in app.get("download_button")] == [
-            "Download text",
-            "Download PDF",
-            "Download Word",
-        ]
         assert any(
-            "Evidence-based summary." in markdown.value
-            for markdown in app.markdown
+            subheader.value
+            == "Output A — Editable detailed evidence report"
+            for subheader in app.subheader
         )
+        assert not app.get("download_button")
+        reviewed = TestEvidenceObject._complete_evidence_object()
+        reviewed["manual_evidence"] = {
+            "laboratory": "confirmation pending"
+        }
+        next(
+            area
+            for area in app.text_area
+            if area.label == "Reviewed evidence report (JSON)"
+        ).set_value(json.dumps(reviewed))
+        next(
+            button
+            for button in app.button
+            if button.label == "Save draft"
+        ).click().run(timeout=10)
+        assert not app.exception
+        drafts = app.session_state["evidence_review_drafts"]
+        assert drafts[0]["reviewed_user_report"]["manual_evidence"] == {
+            "laboratory": "confirmation pending"
+        }
+        assert drafts[0]["original_machine_report"].get(
+            "manual_evidence"
+        ) is None
 
     @pytest.mark.stage16_mvp
     def test_local_hpo_search_adds_selected_phenotype(self) -> None:

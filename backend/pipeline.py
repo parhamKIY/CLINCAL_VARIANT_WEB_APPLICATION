@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -26,7 +25,12 @@ from backend.error_handling import (
     PipelineResultError,
     map_pipeline_exception,
 )
-from backend.llm import LLMClient, LLMError
+from backend.evidence_review import (
+    EvidenceReviewError,
+    build_evidence_review_reports,
+    validate_evidence_review_report,
+)
+from backend.llm import LLMClient
 from backend.logging_config import (
     bind_analysis_run_id,
     get_logger,
@@ -46,23 +50,15 @@ from backend.privacy import (
     validate_no_prohibited_fields,
 )
 from backend.report import (
-    ClinicalInterpretationError,
-    ClinicalReportError,
     EvidenceObjectError,
-    build_clinical_report,
     build_evidence_objects,
-    generate_clinical_interpretation,
-    save_clinical_report,
 )
 from backend.vcf_processing import (
     VCFProcessingError,
     parse_manual_variants,
     process_vcf,
 )
-from config import settings
-
-
-PIPELINE_SCHEMA_VERSION = "1.9"
+PIPELINE_SCHEMA_VERSION = "2.0"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -184,6 +180,7 @@ class PipelineResult(TypedDict):
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
+    evidence_review_reports: list[dict[str, object]]
     report_path: str | None
     analysis_id: str | None
     warnings: list[str]
@@ -353,6 +350,7 @@ def create_pipeline_result() -> PipelineResult:
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
+        "evidence_review_reports": [],
         "report_path": None,
         "analysis_id": None,
         "warnings": [],
@@ -571,6 +569,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "annotations",
         "phenotype_results",
         "evidence_objects",
+        "evidence_review_reports",
     ):
         collection = value[field]
         if (
@@ -601,6 +600,32 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "pipeline.variant_count must match the complete variant list."
         )
+    review_reports = value["evidence_review_reports"]
+    if review_reports:
+        if len(review_reports) != len(value["evidence_objects"]):
+            raise PipelineResultError(
+                "pipeline.evidence_review_reports must match the "
+                "Evidence Object count."
+            )
+        try:
+            validated_reports = [
+                validate_evidence_review_report(report)
+                for report in review_reports
+            ]
+        except EvidenceReviewError as exc:
+            raise PipelineResultError(
+                "pipeline.evidence_review_reports is invalid."
+            ) from exc
+        for index, report in enumerate(validated_reports):
+            if (
+                report["variant_index"] != index
+                or report["original_machine_report"]
+                != value["evidence_objects"][index]
+            ):
+                raise PipelineResultError(
+                    "pipeline.evidence_review_reports must preserve "
+                    "Evidence Object order and originals."
+                )
     if value["report_path"] is not None:
         _required_text(
             value["report_path"],
@@ -826,6 +851,7 @@ def _finish_failed_stage(
             "annotations",
             "phenotype_results",
             "evidence_objects",
+            "evidence_review_reports",
         )
     )
     result["status"] = (
@@ -1378,8 +1404,9 @@ def _build_evidence_and_report(
     literature_session: requests.Session | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
-    """Build Evidence Objects and report the first filtered variant."""
+    """Build Stage 33 Output A for every filtered variant."""
 
+    _ = (llm_client, llm_model, report_dir)
     result["current_stage"] = "evidence"
     result["progress_percent"] = 65
     _set_stage(
@@ -1411,6 +1438,11 @@ def _build_evidence_and_report(
         dict(evidence)
         for evidence in evidence_objects
     ]
+    review_reports = build_evidence_review_reports(evidence_objects)
+    result["evidence_review_reports"] = [
+        dict(report)
+        for report in review_reports
+    ]
     LOGGER.info(
         "event=evidence_build_finished evidence_object_count=%d",
         len(evidence_objects),
@@ -1427,92 +1459,20 @@ def _build_evidence_and_report(
         ),
     )
 
-    leading_evidence = evidence_objects[0]
     result["current_stage"] = "llm"
     result["progress_percent"] = 75
     _set_stage(
         result,
         "llm",
-        "running",
-        progress_percent=0,
-        message="Interpreting the first filtered variant.",
-    )
-    selected_model = llm_model or "the configured model"
-    _set_api_status(
-        result,
-        "llm",
-        "running",
-        f"Generating the interpretation with {selected_model}.",
-    )
-    _notify_progress(result, progress_callback)
-    for attempt in range(settings.LLM_MAX_RETRIES + 1):
-        try:
-            interpretation = generate_clinical_interpretation(
-                leading_evidence,
-                client=llm_client,
-                model=llm_model,
-            )
-            break
-        except Exception:
-            if attempt >= settings.LLM_MAX_RETRIES:
-                _set_api_status(
-                    result,
-                    "llm",
-                    "error",
-                    (
-                        "The LLM API failed after "
-                        f"{settings.LLM_MAX_RETRIES} automatic "
-                        f"{'retry' if settings.LLM_MAX_RETRIES == 1 else 'retries'}."
-                    ),
-                )
-                _notify_progress(result, progress_callback)
-                raise
-
-            delay = min(float(2**attempt), 5.0)
-            next_attempt = attempt + 2
-            total_attempts = settings.LLM_MAX_RETRIES + 1
-            _set_api_status(
-                result,
-                "llm",
-                "running",
-                (
-                    f"Attempt {attempt + 1} failed; retrying "
-                    f"automatically ({next_attempt} of "
-                    f"{total_attempts}) in {delay:g} seconds."
-                ),
-            )
-            LOGGER.warning(
-                "event=llm_retry_scheduled next_attempt=%d "
-                "reason=generation_failure delay_ms=%d",
-                next_attempt,
-                round(delay * 1000),
-            )
-            _notify_progress(result, progress_callback)
-            time.sleep(delay)
-    _set_api_status(
-        result,
-        "llm",
-        "success",
-        (
-            f"Completed the interpretation with {selected_model}"
-            + (
-                f" after {attempt} automatic "
-                f"{'retry' if attempt == 1 else 'retries'}"
-                if attempt
-                else ""
-            )
-            + "."
-        ),
-    )
-    _set_stage(
-        result,
-        "llm",
-        "success",
+        "skipped",
         progress_percent=100,
-        message=(
-            "Generated an evidence-bound interpretation for the "
-            "first filtered variant."
-        ),
+        message="Final interpretation requires human confirmation.",
+    )
+    _set_api_status(
+        result,
+        "llm",
+        "skipped",
+        "Not called before human review and confirmation.",
     )
     _notify_progress(result, progress_callback)
 
@@ -1523,30 +1483,22 @@ def _build_evidence_and_report(
         "report",
         "running",
         progress_percent=0,
-        message="Building and saving the clinical report.",
+        message="Preparing editable evidence review reports.",
     )
     _notify_progress(result, progress_callback)
-    report = build_clinical_report(
-        leading_evidence,
-        interpretation,
-    )
-    report_path = save_clinical_report(
-        report,
-        report_dir=report_dir,
-    )
-    result["report_path"] = str(report_path)
-    report_id = report_path.stem.rsplit("-", 1)[-1]
     LOGGER.info(
-        "event=report_saved report_directory=%s report_id=%s",
-        report_path.parent,
-        report_id,
+        "event=evidence_review_reports_prepared report_count=%d",
+        len(review_reports),
     )
     _set_stage(
         result,
         "report",
         "success",
         progress_percent=100,
-        message="Saved the clinical report.",
+        message=(
+            f"Prepared {len(review_reports)} editable evidence review "
+            "reports."
+        ),
     )
     result["status"] = (
         "partial"
@@ -1763,7 +1715,7 @@ def _run_analysis_unpersisted(
             literature_session=literature_session,
             progress_callback=progress_callback,
         )
-    except EvidenceObjectError as exc:
+    except (EvidenceObjectError, EvidenceReviewError) as exc:
         return _finish_exception(
             result,
             stage="evidence",
@@ -1771,28 +1723,6 @@ def _run_analysis_unpersisted(
             default_code="evidence_object_failed",
             default_message="Evidence construction could not be completed.",
             default_recoverable=False,
-            progress_callback=progress_callback,
-        )
-    except (LLMError, ClinicalInterpretationError) as exc:
-        return _finish_exception(
-            result,
-            stage="llm",
-            error=exc,
-            default_code="llm_interpretation_failed",
-            default_message=(
-                "Clinical interpretation could not be completed."
-            ),
-            default_recoverable=True,
-            progress_callback=progress_callback,
-        )
-    except ClinicalReportError as exc:
-        return _finish_exception(
-            result,
-            stage="report",
-            error=exc,
-            default_code="report_generation_failed",
-            default_message="The clinical report could not be generated.",
-            default_recoverable=True,
             progress_callback=progress_callback,
         )
     except PipelineError as exc:
