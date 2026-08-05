@@ -3772,8 +3772,14 @@ class TestAnnotation:
         )[0]
 
         myvariant = annotation["sources"]["myvariant"]
+        retrieved_at = myvariant.pop("retrieved_at")
+        assert isinstance(retrieved_at, str)
+        assert retrieved_at.endswith(("Z", "+00:00"))
         assert myvariant == {
             "status": "success",
+            "provider": "MyVariant.info",
+            "provider_version": "v1",
+            "upstream_sources": ["ExAC", "dbSNP", "gnomAD"],
             "variant_id": "chr1:g.100A>G",
             "rsid": "rs123",
             "gene": "GENE1",
@@ -5733,9 +5739,65 @@ class TestEvidenceObject:
                         "status": "success",
                     },
                 ],
-                "upstream_sources": [],
+                "upstream_sources": [
+                    "ClinGen",
+                    "ClinVar",
+                    "Ensembl",
+                    "MyVariant.info",
+                ],
                 "versions": {},
                 "retrieved_at": {},
+                "lineage": [
+                    {
+                        "evidence_path": "annotations.vep",
+                        "provider": "Ensembl VEP",
+                        "upstream_sources": ["Ensembl"],
+                        "derivation": "direct",
+                        "status": "success",
+                        "evidence_present": True,
+                        "provider_version": None,
+                        "source_release": None,
+                        "retrieved_at": None,
+                    },
+                    {
+                        "evidence_path": (
+                            "annotations.population.myvariant"
+                        ),
+                        "provider": "MyVariant.info",
+                        "upstream_sources": ["MyVariant.info"],
+                        "derivation": "aggregated",
+                        "status": "success",
+                        "evidence_present": True,
+                        "provider_version": None,
+                        "source_release": None,
+                        "retrieved_at": None,
+                    },
+                    {
+                        "evidence_path": "pathogenicity.clinvar",
+                        "provider": "NCBI ClinVar",
+                        "upstream_sources": ["ClinVar"],
+                        "derivation": "direct",
+                        "status": "success",
+                        "evidence_present": True,
+                        "provider_version": None,
+                        "source_release": None,
+                        "retrieved_at": None,
+                    },
+                    {
+                        "evidence_path": (
+                            "pathogenicity.clingen_context"
+                        ),
+                        "provider": "ClinGen/GenCC",
+                        "upstream_sources": ["ClinGen"],
+                        "derivation": "aggregated",
+                        "status": "success",
+                        "evidence_present": True,
+                        "provider_version": None,
+                        "source_release": None,
+                        "retrieved_at": None,
+                    },
+                ],
+                "shared_upstream_groups": [],
                 "warnings": [],
             },
             "human_review": {
@@ -5993,7 +6055,7 @@ class TestEvidenceObject:
 
         evidence = build_evidence_object(candidate)
 
-        assert evidence["schema_version"] == "2.0"
+        assert evidence["schema_version"] == EVIDENCE_SCHEMA_VERSION
         assert evidence["clinvar_significance"] == "Pathogenic"
         assert evidence["pathogenicity"][
             "automated_acmg_classification"
@@ -6023,6 +6085,147 @@ class TestEvidenceObject:
         ]
         assert candidate == original
         assert json.loads(json.dumps(evidence)) == evidence
+
+    def test_stage_30_tracks_lineage_and_collapses_shared_clinvar(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        genebe = {
+            "status": "success",
+            "provider": "GeneBe",
+            "provider_version": "1.2",
+            "retrieved_at": "2026-08-05T03:30:00+03:30",
+            "automated_acmg_classification": "Pathogenic",
+            "clinvar_derived": {
+                "upstream_source": "ClinVar",
+                "classification": "Pathogenic",
+            },
+        }
+        sources["genebe"] = genebe
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant.update(
+            {
+                "provider": "MyVariant.info",
+                "provider_version": "2026-07",
+                "retrieved_at": "2026-08-05T00:00:00Z",
+                "upstream_sources": ["NCBI ClinVar"],
+            }
+        )
+        clinvar = sources["clinvar"]
+        assert isinstance(clinvar, dict)
+        clinvar.update(
+            {
+                "provider": "NCBI ClinVar",
+                "provider_version": "2026-07",
+                "retrieved_at": "2026-08-05T00:00:00+00:00",
+            }
+        )
+
+        evidence = build_evidence_object(candidate)
+        provenance = evidence["provenance"]
+        lineage = {
+            record["evidence_path"]: record
+            for record in provenance["lineage"]
+        }
+
+        assert lineage["annotations.genebe.clinvar_derived"] == {
+            "evidence_path": "annotations.genebe.clinvar_derived",
+            "provider": "GeneBe",
+            "upstream_sources": ["ClinVar"],
+            "derivation": "derived",
+            "status": "success",
+            "evidence_present": True,
+            "provider_version": "1.2",
+            "source_release": "1.2",
+            "retrieved_at": "2026-08-05T00:00:00Z",
+        }
+        assert lineage["pathogenicity.clinvar"][
+            "source_release"
+        ] == "2026-07"
+        assert provenance["shared_upstream_groups"] == [
+            {
+                "upstream_source": "ClinVar",
+                "evidence_paths": [
+                    "annotations.genebe.clinvar_derived",
+                    "annotations.population.myvariant",
+                    "pathogenicity.clinvar",
+                ],
+                "providers": [
+                    "GeneBe",
+                    "MyVariant.info",
+                    "NCBI ClinVar",
+                ],
+                "independent_vote_count": 1,
+            }
+        ]
+        assert evidence["clinvar_significance"] == "Pathogenic"
+
+    def test_stage_30_missingness_does_not_create_consensus(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        candidate["mydisease"] = {
+            "status": "no_association",
+            "provider": "MyDisease.info",
+            "provider_version": "2026-07",
+            "retrieved_at": "2026-08-05T00:00:00Z",
+            "diseases": [],
+            "inferred_pathway_context": [],
+            "upstream_sources": ["ClinVar"],
+        }
+
+        evidence = build_evidence_object(candidate)
+        provenance = evidence["provenance"]
+        mydisease_lineage = next(
+            record
+            for record in provenance["lineage"]
+            if record["evidence_path"]
+            == "phenotype_relationship.mydisease"
+        )
+
+        assert mydisease_lineage["evidence_present"] is False
+        assert provenance["shared_upstream_groups"] == []
+
+    def test_stage_30_requires_shared_upstream_vote_group(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+        provenance = evidence["provenance"]
+        assert isinstance(provenance, dict)
+        lineage = provenance["lineage"]
+        assert isinstance(lineage, list)
+        vep = lineage[0]
+        assert isinstance(vep, dict)
+        vep["upstream_sources"] = ["ClinVar"]
+        provenance["upstream_sources"] = [
+            "ClinGen",
+            "ClinVar",
+            "MyVariant.info",
+        ]
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="every repeated upstream source",
+        ):
+            validate_evidence_object(evidence)
+
+    def test_stage_30_rejects_non_comparable_retrieval_time(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+        provenance = evidence["provenance"]
+        assert isinstance(provenance, dict)
+        lineage = provenance["lineage"]
+        assert isinstance(lineage, list)
+        record = lineage[0]
+        assert isinstance(record, dict)
+        record["retrieved_at"] = "2026-08-05T00:00:00"
+
+        with pytest.raises(EvidenceObjectError, match="include a timezone"):
+            validate_evidence_object(evidence)
 
     def test_v2_mydisease_lists_are_bounded(self) -> None:
         candidate = self._complete_candidate()
@@ -6264,7 +6467,7 @@ class TestEvidenceObject:
         )[0]
         evidence = build_evidence_object(scored_candidate)
 
-        assert evidence["schema_version"] == "2.0"
+        assert evidence["schema_version"] == EVIDENCE_SCHEMA_VERSION
         assert evidence["variant"] == {
             "chrom": "2",
             "pos": 166848215,

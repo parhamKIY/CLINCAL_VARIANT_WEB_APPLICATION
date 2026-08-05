@@ -9,6 +9,7 @@ import tempfile
 import unicodedata
 from collections.abc import Iterable
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
@@ -26,8 +27,12 @@ from config import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = "2.0"
-SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {"1.0", EVIDENCE_SCHEMA_VERSION}
+EVIDENCE_SCHEMA_VERSION = "2.1"
+SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {
+    "1.0",
+    "2.0",
+    EVIDENCE_SCHEMA_VERSION,
+}
 INTERPRETATION_PROMPT_VERSION = "1.1"
 CLINICAL_REPORT_SCHEMA_VERSION = "1.0"
 CLINICAL_INTERPRETATION_MAX_TOKENS = 1200
@@ -44,6 +49,19 @@ SOURCE_STATUS_VALUES = {
     "invalid_response",
     "error",
 }
+UPSTREAM_SOURCE_NAMES = {
+    "clinvar": "ClinVar",
+    "ncbi clinvar": "ClinVar",
+    "dbsnp": "dbSNP",
+    "gnomad": "gnomAD",
+    "exac": "ExAC",
+    "dbnsfp": "dbNSFP",
+    "cadd": "CADD",
+    "hpo": "HPO",
+    "mondo": "MONDO",
+    "umls": "UMLS",
+    "ctd": "CTD",
+}
 MAX_EVIDENCE_HPO_TERMS = 50
 MAX_EVIDENCE_CLINVAR_CONDITIONS = 10
 MAX_EVIDENCE_CLINGEN_CURATIONS = 10
@@ -53,6 +71,9 @@ MAX_EVIDENCE_WARNINGS = 20
 MAX_EVIDENCE_DISEASES = 10
 MAX_EVIDENCE_DISEASE_HPO_TERMS = 20
 MAX_EVIDENCE_CSPEC_CONTEXTS = 10
+MAX_EVIDENCE_LINEAGE_RECORDS = 32
+MAX_EVIDENCE_UPSTREAM_SOURCES = 12
+MAX_EVIDENCE_SHARED_UPSTREAM_GROUPS = 16
 MAX_EVIDENCE_SERIALIZED_BYTES = 64 * 1024
 MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
 MAX_EVIDENCE_ALLELE_LENGTH = 10_000
@@ -196,6 +217,29 @@ class EvidencePhenotypeRelationship(TypedDict):
     mydisease: dict[str, Any]
 
 
+class EvidenceLineageRecord(TypedDict):
+    """Trace one evidence section to its provider and upstream data."""
+
+    evidence_path: str
+    provider: str
+    upstream_sources: list[str]
+    derivation: str
+    status: str | None
+    evidence_present: bool
+    provider_version: str | None
+    source_release: str | None
+    retrieved_at: str | None
+
+
+class EvidenceSharedUpstreamGroup(TypedDict):
+    """Evidence paths that must not be counted as independent votes."""
+
+    upstream_source: str
+    evidence_paths: list[str]
+    providers: list[str]
+    independent_vote_count: int
+
+
 class EvidenceProvenance(TypedDict):
     """Bounded provider and upstream-source metadata."""
 
@@ -203,6 +247,8 @@ class EvidenceProvenance(TypedDict):
     upstream_sources: list[str]
     versions: dict[str, str]
     retrieved_at: dict[str, str]
+    lineage: list[EvidenceLineageRecord]
+    shared_upstream_groups: list[EvidenceSharedUpstreamGroup]
     warnings: list[str]
 
 
@@ -334,6 +380,12 @@ EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS = frozenset(
 EVIDENCE_PROVENANCE_FIELDS = frozenset(
     EvidenceProvenance.__required_keys__
 )
+EVIDENCE_LINEAGE_FIELDS = frozenset(
+    EvidenceLineageRecord.__required_keys__
+)
+EVIDENCE_SHARED_UPSTREAM_FIELDS = frozenset(
+    EvidenceSharedUpstreamGroup.__required_keys__
+)
 EVIDENCE_HUMAN_REVIEW_FIELDS = frozenset(
     EvidenceHumanReview.__required_keys__
 )
@@ -425,6 +477,24 @@ def _validate_optional_string(value: object, path: str) -> None:
     """Allow an explicit null or a non-empty string."""
     if value is not None:
         _validate_required_string(value, path)
+
+
+def _validate_optional_timestamp(value: object, path: str) -> None:
+    """Allow null or one timezone-aware ISO 8601 retrieval timestamp."""
+
+    if value is None:
+        return
+    timestamp = _validate_required_string(value, path)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EvidenceObjectError(
+            f"{path} must be a valid ISO 8601 timestamp."
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceObjectError(
+            f"{path} must include a timezone."
+        )
 
 
 def _validate_unique_strings(
@@ -656,6 +726,170 @@ def _validate_context_tree(
     )
 
 
+def _validate_evidence_lineage(provenance: dict[str, Any]) -> None:
+    """Validate source traceability and shared-upstream vote grouping."""
+
+    lineage = provenance["lineage"]
+    if not isinstance(lineage, list):
+        raise EvidenceObjectError(
+            "evidence.provenance.lineage must be a list."
+        )
+    if len(lineage) > MAX_EVIDENCE_LINEAGE_RECORDS:
+        raise EvidenceObjectError(
+            "evidence.provenance.lineage exceeds the maximum of "
+            f"{MAX_EVIDENCE_LINEAGE_RECORDS}."
+        )
+
+    paths: set[str] = set()
+    records_by_source: dict[str, list[dict[str, Any]]] = {}
+    allowed_derivations = {
+        "direct",
+        "aggregated",
+        "computed",
+        "derived",
+        "inferred",
+    }
+    for index, record in enumerate(lineage):
+        path = f"evidence.provenance.lineage[{index}]"
+        if not isinstance(record, dict):
+            raise EvidenceObjectError(f"{path} must be a dictionary.")
+        _validate_exact_fields(record, EVIDENCE_LINEAGE_FIELDS, path)
+        evidence_path = _validate_required_string(
+            record["evidence_path"],
+            f"{path}.evidence_path",
+        )
+        if evidence_path in paths:
+            raise EvidenceObjectError(
+                "evidence.provenance.lineage evidence paths must be "
+                "unique."
+            )
+        paths.add(evidence_path)
+        _validate_required_string(record["provider"], f"{path}.provider")
+        upstream_sources = _validate_unique_strings(
+            record["upstream_sources"],
+            f"{path}.upstream_sources",
+        )
+        if not upstream_sources:
+            raise EvidenceObjectError(
+                f"{path}.upstream_sources must not be empty."
+            )
+        if len(upstream_sources) > MAX_EVIDENCE_UPSTREAM_SOURCES:
+            raise EvidenceObjectError(
+                f"{path}.upstream_sources exceeds the maximum of "
+                f"{MAX_EVIDENCE_UPSTREAM_SOURCES}."
+            )
+        if record["derivation"] not in allowed_derivations:
+            raise EvidenceObjectError(
+                f"{path}.derivation is unsupported."
+            )
+        _validate_optional_string(record["status"], f"{path}.status")
+        if not isinstance(record["evidence_present"], bool):
+            raise EvidenceObjectError(
+                f"{path}.evidence_present must be a boolean."
+            )
+        _validate_optional_string(
+            record["provider_version"],
+            f"{path}.provider_version",
+        )
+        _validate_optional_string(
+            record["source_release"],
+            f"{path}.source_release",
+        )
+        _validate_optional_timestamp(
+            record["retrieved_at"],
+            f"{path}.retrieved_at",
+        )
+        if record["evidence_present"]:
+            for upstream_source in upstream_sources:
+                records_by_source.setdefault(
+                    upstream_source,
+                    [],
+                ).append(record)
+
+    aggregate_sources = _validate_unique_strings(
+        provenance["upstream_sources"],
+        "evidence.provenance.upstream_sources",
+    )
+    lineage_sources = sorted(
+        {
+            source
+            for record in lineage
+            for source in record["upstream_sources"]
+        }
+    )
+    if aggregate_sources != lineage_sources:
+        raise EvidenceObjectError(
+            "evidence.provenance.upstream_sources must equal the "
+            "sorted lineage upstream-source set."
+        )
+
+    shared_groups = provenance["shared_upstream_groups"]
+    if not isinstance(shared_groups, list):
+        raise EvidenceObjectError(
+            "evidence.provenance.shared_upstream_groups must be a list."
+        )
+    if len(shared_groups) > MAX_EVIDENCE_SHARED_UPSTREAM_GROUPS:
+        raise EvidenceObjectError(
+            "evidence.provenance.shared_upstream_groups exceeds the "
+            f"maximum of {MAX_EVIDENCE_SHARED_UPSTREAM_GROUPS}."
+        )
+    expected_sources = {
+        source
+        for source, records in records_by_source.items()
+        if len(records) > 1
+    }
+    actual_sources: set[str] = set()
+    for index, group in enumerate(shared_groups):
+        path = f"evidence.provenance.shared_upstream_groups[{index}]"
+        if not isinstance(group, dict):
+            raise EvidenceObjectError(f"{path} must be a dictionary.")
+        _validate_exact_fields(
+            group,
+            EVIDENCE_SHARED_UPSTREAM_FIELDS,
+            path,
+        )
+        upstream_source = _validate_required_string(
+            group["upstream_source"],
+            f"{path}.upstream_source",
+        )
+        if upstream_source in actual_sources:
+            raise EvidenceObjectError(
+                "evidence.provenance.shared_upstream_groups must not "
+                "repeat upstream sources."
+            )
+        actual_sources.add(upstream_source)
+        evidence_paths = _validate_unique_strings(
+            group["evidence_paths"],
+            f"{path}.evidence_paths",
+        )
+        providers = _validate_unique_strings(
+            group["providers"],
+            f"{path}.providers",
+        )
+        expected_records = records_by_source.get(upstream_source, [])
+        if evidence_paths != sorted(
+            record["evidence_path"] for record in expected_records
+        ):
+            raise EvidenceObjectError(
+                f"{path}.evidence_paths does not match its lineage."
+            )
+        if providers != sorted(
+            {record["provider"] for record in expected_records}
+        ):
+            raise EvidenceObjectError(
+                f"{path}.providers does not match its lineage."
+            )
+        if group["independent_vote_count"] != 1:
+            raise EvidenceObjectError(
+                f"{path}.independent_vote_count must be 1."
+            )
+    if actual_sources != expected_sources:
+        raise EvidenceObjectError(
+            "evidence.provenance.shared_upstream_groups must include "
+            "every repeated upstream source with retained evidence."
+        )
+
+
 def _validate_v2_sections(value: dict[str, Any]) -> None:
     """Validate the additive Evidence Object V2 sections."""
 
@@ -803,10 +1037,6 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         raise EvidenceObjectError(
             "evidence.provenance.providers must be a list."
         )
-    _validate_unique_strings(
-        provenance["upstream_sources"],
-        "evidence.provenance.upstream_sources",
-    )
     for field in ("versions", "retrieved_at"):
         if not isinstance(provenance[field], dict):
             raise EvidenceObjectError(
@@ -821,6 +1051,12 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
                 metadata,
                 f"evidence.provenance.{field}.{source}",
             )
+            if field == "retrieved_at":
+                _validate_optional_timestamp(
+                    metadata,
+                    f"evidence.provenance.{field}.{source}",
+                )
+    _validate_evidence_lineage(provenance)
     _validate_unique_strings(
         provenance["warnings"],
         "evidence.provenance.warnings",
@@ -2757,6 +2993,379 @@ def _phenotype_status(
     return "no_exact_match"
 
 
+def _lineage_timestamp(value: object) -> str | None:
+    """Normalize one provider retrieval timestamp for comparison."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(
+            value.strip().replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return (
+        parsed.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _lineage_text(value: object) -> str | None:
+    """Return one optional non-empty lineage metadata value."""
+
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _lineage_sources(
+    payload: dict[str, Any],
+    defaults: Iterable[str],
+) -> list[str]:
+    """Return canonical bounded upstream sources for one evidence record."""
+
+    candidates: list[object] = []
+    explicit = payload.get("upstream_sources")
+    if isinstance(explicit, list):
+        candidates.extend(explicit)
+    singular = payload.get("upstream_source")
+    if singular is not None:
+        candidates.append(singular)
+    if not candidates:
+        candidates.extend(defaults)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        source = _lineage_text(candidate)
+        if source is None:
+            continue
+        source = UPSTREAM_SOURCE_NAMES.get(source.casefold(), source)
+        key = source.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(source)
+        if len(result) == MAX_EVIDENCE_UPSTREAM_SOURCES:
+            break
+    return sorted(result)
+
+
+def _lineage_release(
+    payload: dict[str, Any],
+    *,
+    fallback: object = None,
+) -> str | None:
+    """Select explicit release metadata without retaining raw payloads."""
+
+    for value in (
+        payload.get("source_release"),
+        payload.get("release"),
+        payload.get("provider_version"),
+        fallback,
+    ):
+        normalized = _lineage_text(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _lineage_status(payload: dict[str, Any]) -> str | None:
+    """Return the normalized provider status or availability."""
+
+    return _lineage_text(
+        payload.get("status", payload.get("availability"))
+    )
+
+
+def _status_retained_evidence(status: str | None) -> bool:
+    """Separate retained evidence from valid missingness and failures."""
+
+    return status in {"success", "available", "partial"}
+
+
+def _lineage_record(
+    evidence_path: str,
+    payload: dict[str, Any],
+    *,
+    default_provider: str,
+    default_upstream_sources: Iterable[str],
+    derivation: str,
+    evidence_present: bool | None = None,
+    source_release: object = None,
+) -> EvidenceLineageRecord:
+    """Build one bounded provider-to-upstream lineage record."""
+
+    status = _lineage_status(payload)
+    provider = _lineage_text(payload.get("provider")) or default_provider
+    provider_version = _lineage_text(
+        payload.get("provider_version")
+    )
+    if provider_version is None:
+        provider_version = _lineage_text(payload.get("api_version"))
+    return {
+        "evidence_path": evidence_path,
+        "provider": provider,
+        "upstream_sources": _lineage_sources(
+            payload,
+            default_upstream_sources,
+        ),
+        "derivation": derivation,
+        "status": status,
+        "evidence_present": (
+            _status_retained_evidence(status)
+            if evidence_present is None
+            else evidence_present
+        ),
+        "provider_version": provider_version,
+        "source_release": _lineage_release(
+            payload,
+            fallback=source_release,
+        ),
+        "retrieved_at": _lineage_timestamp(
+            payload.get("retrieved_at")
+        ),
+    }
+
+
+def _build_evidence_lineage(
+    *,
+    vep: dict[str, Any],
+    genebe: dict[str, Any],
+    myvariant: dict[str, Any],
+    clinvar: dict[str, Any],
+    clingen: dict[str, Any],
+    cspec: dict[str, Any],
+    phen2gene: dict[str, Any],
+    mydisease: dict[str, Any],
+) -> tuple[
+    list[EvidenceLineageRecord],
+    list[EvidenceSharedUpstreamGroup],
+]:
+    """Build traceable evidence records and collapse shared source votes."""
+
+    records: list[EvidenceLineageRecord] = []
+    if vep:
+        records.append(
+            _lineage_record(
+                "annotations.vep",
+                vep,
+                default_provider="Ensembl VEP",
+                default_upstream_sources=("Ensembl",),
+                derivation="direct",
+            )
+        )
+    if genebe:
+        records.append(
+            _lineage_record(
+                "annotations.genebe",
+                genebe,
+                default_provider="GeneBe",
+                default_upstream_sources=("GeneBe",),
+                derivation="computed",
+            )
+        )
+        clinvar_derived = _candidate_mapping(
+            genebe.get("clinvar_derived")
+        )
+        if any(
+            value is not None
+            for key, value in clinvar_derived.items()
+            if key != "upstream_source"
+        ):
+            records.append(
+                _lineage_record(
+                    "annotations.genebe.clinvar_derived",
+                    {
+                        **clinvar_derived,
+                        "provider": (
+                            _lineage_text(genebe.get("provider"))
+                            or "GeneBe"
+                        ),
+                        "provider_version": genebe.get(
+                            "provider_version"
+                        ),
+                        "retrieved_at": genebe.get("retrieved_at"),
+                        "status": _lineage_status(genebe),
+                    },
+                    default_provider="GeneBe",
+                    default_upstream_sources=("ClinVar",),
+                    derivation="derived",
+                    evidence_present=True,
+                )
+            )
+    if myvariant:
+        records.append(
+            _lineage_record(
+                "annotations.population.myvariant",
+                myvariant,
+                default_provider="MyVariant.info",
+                default_upstream_sources=("MyVariant.info",),
+                derivation="aggregated",
+            )
+        )
+    if clinvar:
+        records.append(
+            _lineage_record(
+                "pathogenicity.clinvar",
+                clinvar,
+                default_provider="NCBI ClinVar",
+                default_upstream_sources=("ClinVar",),
+                derivation="direct",
+            )
+        )
+    if clingen:
+        submitters = [
+            item.get("submitter")
+            for item in clingen.get("curations", [])
+            if isinstance(item, dict)
+        ] if isinstance(clingen.get("curations"), list) else []
+        records.append(
+            _lineage_record(
+                "pathogenicity.clingen_context",
+                clingen,
+                default_provider="ClinGen/GenCC",
+                default_upstream_sources=(
+                    tuple(
+                        source
+                        for source in submitters
+                        if isinstance(source, str)
+                    )
+                    or (
+                        _lineage_text(clingen.get("data_provider"))
+                        or "ClinGen",
+                    )
+                ),
+                derivation="aggregated",
+            )
+        )
+    if cspec:
+        specification_versions = sorted(
+            {
+                version
+                for item in cspec.get("specifications", [])
+                if isinstance(item, dict)
+                for version in [_lineage_text(item.get("version"))]
+                if version is not None
+            }
+        ) if isinstance(cspec.get("specifications"), list) else []
+        records.append(
+            _lineage_record(
+                "pathogenicity.cspec_context",
+                cspec,
+                default_provider="ClinGen CSpec Registry",
+                default_upstream_sources=(
+                    "ClinGen CSpec Registry",
+                ),
+                derivation="direct",
+                source_release=(
+                    ",".join(specification_versions)
+                    if specification_versions
+                    else None
+                ),
+            )
+        )
+    if phen2gene:
+        records.append(
+            _lineage_record(
+                "phenotype_relationship.phen2gene",
+                phen2gene,
+                default_provider="Phen2Gene",
+                default_upstream_sources=("Phen2Gene",),
+                derivation="computed",
+            )
+        )
+    if mydisease:
+        disease_sources = [
+            source
+            for disease in mydisease.get("diseases", [])
+            if isinstance(disease, dict)
+            for source in disease.get("upstream_sources", [])
+            if isinstance(source, str)
+        ] if isinstance(mydisease.get("diseases"), list) else []
+        records.append(
+            _lineage_record(
+                "phenotype_relationship.mydisease",
+                {
+                    **mydisease,
+                    "upstream_sources": (
+                        disease_sources
+                        or mydisease.get("upstream_sources", [])
+                    ),
+                },
+                default_provider="MyDisease.info",
+                default_upstream_sources=(
+                    disease_sources or ("MyDisease.info",)
+                ),
+                derivation="aggregated",
+                evidence_present=(
+                    _status_retained_evidence(
+                        _lineage_status(mydisease)
+                    )
+                    and bool(mydisease.get("diseases"))
+                ),
+            )
+        )
+        inferred = mydisease.get("inferred_pathway_context")
+        if isinstance(inferred, list) and inferred:
+            inferred_sources = [
+                item.get("upstream_source")
+                for item in inferred
+                if isinstance(item, dict)
+            ]
+            records.append(
+                _lineage_record(
+                    (
+                        "phenotype_relationship.mydisease."
+                        "inferred_pathway_context"
+                    ),
+                    {
+                        **mydisease,
+                        "upstream_sources": [
+                            source
+                            for source in inferred_sources
+                            if isinstance(source, str)
+                        ],
+                    },
+                    default_provider="MyDisease.info",
+                    default_upstream_sources=("CTD",),
+                    derivation="inferred",
+                    evidence_present=True,
+                )
+            )
+
+    records = records[:MAX_EVIDENCE_LINEAGE_RECORDS]
+    by_upstream: dict[str, list[EvidenceLineageRecord]] = {}
+    for record in records:
+        if not record["evidence_present"]:
+            continue
+        for source in record["upstream_sources"]:
+            by_upstream.setdefault(source, []).append(record)
+    shared_groups: list[EvidenceSharedUpstreamGroup] = []
+    for upstream_source in sorted(by_upstream):
+        source_records = by_upstream[upstream_source]
+        if len(source_records) < 2:
+            continue
+        shared_groups.append(
+            {
+                "upstream_source": upstream_source,
+                "evidence_paths": sorted(
+                    record["evidence_path"]
+                    for record in source_records
+                ),
+                "providers": sorted(
+                    {record["provider"] for record in source_records}
+                ),
+                "independent_vote_count": 1,
+            }
+        )
+    return (
+        records,
+        shared_groups[:MAX_EVIDENCE_SHARED_UPSTREAM_GROUPS],
+    )
+
+
 def _build_v2_sections(
     candidate: dict[str, Any],
     *,
@@ -2769,7 +3378,7 @@ def _build_v2_sections(
     matched_hpo_terms: list[str],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Build additive bounded Stage 29 sections."""
+    """Build additive bounded Stage 29/30 sections."""
 
     vep = _candidate_mapping(sources.get("vep"))
     genebe = _candidate_mapping(sources.get("genebe"))
@@ -2845,20 +3454,31 @@ def _build_v2_sections(
         version = payload.get("provider_version")
         if isinstance(version, str) and version:
             versions[source_name] = version
-        timestamp = payload.get("retrieved_at")
-        if isinstance(timestamp, str) and timestamp:
+        timestamp = _lineage_timestamp(payload.get("retrieved_at"))
+        if timestamp is not None:
             retrieved[source_name] = timestamp
 
-    upstream_sources = [
-        source
-        for source in mydisease.get("upstream_sources", [])
-        if isinstance(source, str)
-    ]
-    clinvar_derived = genebe.get("clinvar_derived")
-    if isinstance(clinvar_derived, dict) and any(
-        value is not None for value in clinvar_derived.values()
-    ):
-        upstream_sources.append("ClinVar")
+    lineage, shared_upstream_groups = _build_evidence_lineage(
+        vep=vep,
+        genebe=genebe,
+        myvariant=myvariant,
+        clinvar=clinvar,
+        clingen=clingen,
+        cspec=cspec,
+        phen2gene=phen2gene,
+        mydisease=(
+            mydisease
+            if isinstance(candidate.get("mydisease"), dict)
+            else {}
+        ),
+    )
+    upstream_sources = sorted(
+        {
+            source
+            for record in lineage
+            for source in record["upstream_sources"]
+        }
+    )
 
     return {
         "variant_context": {
@@ -2989,6 +3609,8 @@ def _build_v2_sections(
             "upstream_sources": sorted(set(upstream_sources)),
             "versions": versions,
             "retrieved_at": retrieved,
+            "lineage": lineage,
+            "shared_upstream_groups": shared_upstream_groups,
             "warnings": deepcopy(warnings[:MAX_EVIDENCE_WARNINGS]),
         },
         "human_review": {

@@ -37,6 +37,8 @@ TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
 VEP_PROVIDER_NAME = "Ensembl VEP"
 GENEBE_PROVIDER_NAME = "GeneBe"
+MYVARIANT_PROVIDER_NAME = "MyVariant.info"
+MYVARIANT_API_VERSION = "v1"
 GENEBE_GENOMES = {
     "GRCh37": "hg19",
     "GRCh38": "hg38",
@@ -1770,6 +1772,10 @@ def _base_annotation(
             },
             "myvariant": {
                 "status": "pending",
+                "provider": MYVARIANT_PROVIDER_NAME,
+                "provider_version": MYVARIANT_API_VERSION,
+                "retrieved_at": None,
+                "upstream_sources": [],
                 "variant_id": None,
                 "rsid": None,
                 "gene": None,
@@ -2421,11 +2427,23 @@ def _standardize_myvariant_response(
             "genename",
         )
     )
+    upstream_sources: list[str] = []
+    for payload_field, source_name in (
+        ("dbsnp", "dbSNP"),
+        ("dbnsfp", "dbNSFP"),
+        ("cadd", "CADD"),
+        ("gnomad_exome", "gnomAD"),
+        ("gnomad_genome", "gnomAD"),
+        ("exac", "ExAC"),
+    ):
+        if payload.get(payload_field) is not None:
+            upstream_sources.append(source_name)
 
     annotation["population_frequency"] = max_frequency
     annotation["sources"]["myvariant"].update(
         {
             "status": "success",
+            "upstream_sources": sorted(set(upstream_sources)),
             "variant_id": variant_id,
             "rsid": _first_nested_string(dbsnp, "rsid"),
             "gene": gene,
@@ -2451,6 +2469,9 @@ def _annotate_with_myvariant(
     max_retries: int,
 ) -> None:
     """Add isolated MyVariant evidence to one existing VEP annotation."""
+    annotation["sources"]["myvariant"][
+        "retrieved_at"
+    ] = _retrieval_timestamp()
     try:
         payload, variant_id, unsupported_warning = _get_myvariant(
             session,

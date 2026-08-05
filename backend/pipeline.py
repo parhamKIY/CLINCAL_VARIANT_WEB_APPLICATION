@@ -61,7 +61,7 @@ from backend.vcf_processing import (
 from config import settings
 
 
-PIPELINE_SCHEMA_VERSION = "1.6"
+PIPELINE_SCHEMA_VERSION = "1.7"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
