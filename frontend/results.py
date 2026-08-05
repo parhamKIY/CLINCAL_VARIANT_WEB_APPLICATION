@@ -164,6 +164,27 @@ def build_phenotype_rows(
     rows: list[dict[str, object]] = []
     for result in phenotype_results:
         phen2gene = _dictionary(result.get("phen2gene"))
+        mydisease = _dictionary(result.get("mydisease"))
+        mydisease_diseases = mydisease.get("diseases")
+        inferred_context = mydisease.get(
+            "inferred_pathway_context"
+        )
+        disease_items = (
+            mydisease_diseases
+            if isinstance(mydisease_diseases, list)
+            else []
+        )
+        matched_hpo_count = sum(
+            len(
+                disease.get("matched_patient_hpo_terms", [])
+            )
+            for disease in disease_items
+            if isinstance(disease, dict)
+            and isinstance(
+                disease.get("matched_patient_hpo_terms"),
+                list,
+            )
+        )
         rows.append(
             {
                 "Variant": _variant_label(result),
@@ -187,8 +208,123 @@ def build_phenotype_rows(
                     phen2gene.get("rank")
                 ),
                 "Phen2Gene gene status": phen2gene.get("status"),
+                "MyDisease result": mydisease.get("status"),
+                "MyDisease HTTP status": mydisease.get("http_status"),
+                "MyDisease provider total": mydisease.get(
+                    "provider_total"
+                ),
+                "MyDisease provider returned": mydisease.get(
+                    "provider_returned_count",
+                    0,
+                ),
+                "MyDisease diseases": mydisease.get(
+                    "disease_count",
+                    0,
+                ),
+                "MyDisease matched HPO": matched_hpo_count,
+                "MyDisease inferred context": (
+                    len(inferred_context)
+                    if isinstance(inferred_context, list)
+                    else 0
+                ),
             }
         )
+    return rows
+
+
+def build_mydisease_rows(
+    phenotype_results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return displayable normalized MyDisease disease context."""
+
+    rows: list[dict[str, object]] = []
+    for result in phenotype_results:
+        mydisease = _dictionary(result.get("mydisease"))
+        diseases = mydisease.get("diseases")
+        if not isinstance(diseases, list):
+            continue
+        for item in diseases:
+            disease = _dictionary(item)
+            relation = _dictionary(
+                disease.get("gene_disease_relation")
+            )
+            rows.append(
+                {
+                    "Variant": _variant_label(result),
+                    "Gene": result.get("gene"),
+                    "Gene ID": relation.get("requested_gene_id"),
+                    "Disease ID": disease.get("disease_id"),
+                    "Disease": disease.get("disease_name"),
+                    "Association type": relation.get(
+                        "association_type"
+                    ),
+                    "Matched patient HPO": _joined_text(
+                        disease.get("matched_patient_hpo_terms")
+                    ),
+                    "Phenotype match": disease.get(
+                        "phenotype_match_status"
+                    ),
+                    "Disease HPO terms": len(
+                        disease.get("supporting_hpo_terms", [])
+                    )
+                    if isinstance(
+                        disease.get("supporting_hpo_terms"),
+                        list,
+                    )
+                    else 0,
+                    "Upstream sources": _joined_text(
+                        disease.get("upstream_sources")
+                    ),
+                    "MyDisease build": mydisease.get(
+                        "provider_version"
+                    ),
+                }
+            )
+    return rows
+
+
+def build_monarch_rows(
+    phenotype_results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return legacy read-only Monarch association evidence."""
+
+    rows: list[dict[str, object]] = []
+    for result in phenotype_results:
+        monarch = _dictionary(result.get("monarch"))
+        associations = monarch.get("associations")
+        if not isinstance(associations, list):
+            continue
+        for item in associations:
+            association = _dictionary(item)
+            sources = association.get("sources")
+            publications = association.get("publications")
+            rows.append(
+                {
+                    "Variant": _variant_label(result),
+                    "Gene": result.get("gene"),
+                    "Gene ID": association.get("gene_id"),
+                    "Disease ID": association.get("disease_id"),
+                    "Disease": association.get("disease_name"),
+                    "HPO ID": association.get("hpo_id"),
+                    "Phenotype": association.get("hpo_name"),
+                    "Association type": association.get(
+                        "association_type"
+                    ),
+                    "Predicate": association.get("predicate"),
+                    "Direction": association.get("direction"),
+                    "Sources": _joined_text(
+                        sources if isinstance(sources, list) else []
+                    ),
+                    "Publications": _joined_text(
+                        publications
+                        if isinstance(publications, list)
+                        else []
+                    ),
+                    "Monarch release": monarch.get(
+                        "provider_version"
+                    ),
+                }
+            )
     return rows
 
 
@@ -318,6 +454,13 @@ def _render_phenotype_table(result: PipelineResult) -> None:
             "Phen2Gene score",
             "Phen2Gene rank (service metadata)",
             "Phen2Gene gene status",
+            "MyDisease result",
+            "MyDisease HTTP status",
+            "MyDisease provider total",
+            "MyDisease provider returned",
+            "MyDisease diseases",
+            "MyDisease matched HPO",
+            "MyDisease inferred context",
         ),
         column_config={
             "Phenotype score": st.column_config.NumberColumn(
@@ -330,12 +473,67 @@ def _render_phenotype_table(result: PipelineResult) -> None:
             "Phen2Gene rank (service metadata)": (
                 st.column_config.NumberColumn(format="%d")
             ),
+            "MyDisease diseases": st.column_config.NumberColumn(
+                format="%d"
+            ),
+            "MyDisease HTTP status": st.column_config.NumberColumn(
+                format="%d"
+            ),
+            "MyDisease provider total": st.column_config.NumberColumn(
+                format="%d"
+            ),
+            "MyDisease provider returned": (
+                st.column_config.NumberColumn(format="%d")
+            ),
+            "MyDisease matched HPO": st.column_config.NumberColumn(
+                format="%d"
+            ),
+            "MyDisease inferred context": st.column_config.NumberColumn(
+                format="%d"
+            ),
         },
     )
     st.caption(
         "Phen2Gene rank is provider metadata for the annotated gene; "
         "it does not reorder variants or change pathogenicity."
     )
+    mydisease_rows = build_mydisease_rows(
+        result["phenotype_results"]
+    )
+    if mydisease_rows:
+        st.markdown("**MyDisease.info gene-disease-phenotype context**")
+        st.dataframe(
+            mydisease_rows,
+            hide_index=True,
+            key="mydisease_context_results",
+            column_order=(
+                "Variant",
+                "Gene",
+                "Gene ID",
+                "Disease ID",
+                "Disease",
+                "Association type",
+                "Matched patient HPO",
+                "Phenotype match",
+                "Disease HPO terms",
+                "Upstream sources",
+                "MyDisease build",
+            ),
+        )
+    st.caption(
+        "Only direct structured gene-disease associations populate the "
+        "primary MyDisease.info table. A no_association or no exact HPO "
+        "match means missing context, not negative biological evidence; "
+        "this context does not change pathogenicity."
+    )
+    monarch_rows = build_monarch_rows(result["phenotype_results"])
+    if monarch_rows:
+        st.markdown("**Legacy Monarch evidence (read-only)**")
+        st.dataframe(
+            monarch_rows,
+            hide_index=True,
+            key="legacy_monarch_association_results",
+        )
 
 
 def _render_source_statuses(evidence: dict[str, object]) -> None:

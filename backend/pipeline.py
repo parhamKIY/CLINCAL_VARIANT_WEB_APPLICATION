@@ -31,6 +31,7 @@ from backend.logging_config import (
     get_logger,
     reset_analysis_run_id,
 )
+from backend.mydisease import MyDiseaseError, enrich_with_mydisease
 from backend.phenotype import (
     HPODataError,
     Phen2GeneError,
@@ -60,7 +61,7 @@ from backend.vcf_processing import (
 from config import settings
 
 
-PIPELINE_SCHEMA_VERSION = "1.4"
+PIPELINE_SCHEMA_VERSION = "1.5"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -86,6 +87,7 @@ PipelineAPIStatus = Literal[
     "pending",
     "running",
     "success",
+    "no_association",
     "warning",
     "error",
     "skipped",
@@ -107,7 +109,9 @@ PIPELINE_STAGE_STATUS_VALUES = {
     "error",
     "skipped",
 }
-PIPELINE_API_STATUS_VALUES = PIPELINE_STAGE_STATUS_VALUES
+PIPELINE_API_STATUS_VALUES = PIPELINE_STAGE_STATUS_VALUES | {
+    "no_association"
+}
 PIPELINE_STAGE_ORDER = (
     "input",
     "vcf_processing",
@@ -125,6 +129,7 @@ PIPELINE_API_ORDER = (
     "clingen",
     "cspec",
     "phen2gene",
+    "mydisease",
     "llm",
 )
 
@@ -994,6 +999,7 @@ def _annotate_and_match(
     phen2gene_max_retries: int | None,
     phen2gene_session: requests.Session | None,
     phen2gene_use_cache: bool,
+    mydisease_session: requests.Session | None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Enrich filtered variants and attach optional HPO scores."""
@@ -1238,6 +1244,124 @@ def _annotate_and_match(
                 message=phenotype_message,
             )
 
+    _set_api_status(
+        result,
+        "mydisease",
+        "running",
+        "Retrieving bounded gene-disease-phenotype context.",
+    )
+    _notify_progress(result, progress_callback)
+    try:
+        mydisease_result = enrich_with_mydisease(
+            result["phenotype_results"],
+            request["phenotypes"],
+            session=mydisease_session,
+        )
+    except MyDiseaseError:
+        mydisease_message = (
+            "MyDisease.info context could not be produced; annotation, local "
+            "HPO, and Phen2Gene evidence were retained."
+        )
+        _set_api_status(
+            result,
+            "mydisease",
+            "error",
+            mydisease_message,
+        )
+        _record_issue(
+            result,
+            stage="phenotype",
+            code="mydisease_unavailable",
+            message=mydisease_message,
+            recoverable=True,
+        )
+        _set_stage(
+            result,
+            "phenotype",
+            "warning",
+            progress_percent=100,
+            message=mydisease_message,
+        )
+    else:
+        public_mydisease_results = [
+            dict(variant)
+            for variant in mydisease_result["variants"]
+        ]
+        try:
+            validate_no_prohibited_fields(
+                public_mydisease_results,
+                context="MyDisease phenotype output",
+            )
+        except ClinicalDataPrivacyError as exc:
+            raise AnnotationError(
+                "MyDisease output violated the clinical-data privacy "
+                "contract."
+            ) from exc
+        result["phenotype_results"] = public_mydisease_results
+        mydisease_status = mydisease_result["status"]
+        if mydisease_status == "available":
+            mydisease_api_status: PipelineAPIStatus = "success"
+        elif mydisease_status == "no_association":
+            mydisease_api_status = "no_association"
+        elif mydisease_status == "unsupported":
+            mydisease_api_status = "skipped"
+        elif mydisease_status == "unavailable":
+            mydisease_api_status = "error"
+            _record_issue(
+                result,
+                stage="phenotype",
+                code="mydisease_unavailable",
+                message=(
+                    "MyDisease.info was unavailable; annotation, local "
+                    "HPO, and Phen2Gene evidence were retained."
+                ),
+                recoverable=True,
+            )
+        elif mydisease_status == "invalid_response":
+            mydisease_api_status = "error"
+            _record_issue(
+                result,
+                stage="phenotype",
+                code="mydisease_invalid_response",
+                message=(
+                    "MyDisease.info returned an invalid response; "
+                    "annotation, local HPO, and Phen2Gene evidence "
+                    "were retained."
+                ),
+                recoverable=True,
+            )
+        else:
+            mydisease_api_status = "warning"
+        _set_api_status(
+            result,
+            "mydisease",
+            mydisease_api_status,
+            mydisease_result["message"],
+        )
+
+        phenotype_record = next(
+            record
+            for record in result["stages"]
+            if record["stage"] == "phenotype"
+        )
+        prior_status = phenotype_record["status"]
+        if mydisease_api_status in {"error", "warning"}:
+            combined_status: PipelineStageStatus = "warning"
+        elif prior_status == "skipped":
+            combined_status = "success"
+        else:
+            combined_status = prior_status
+        _set_stage(
+            result,
+            "phenotype",
+            combined_status,
+            progress_percent=100,
+            message=(
+                "Phenotype and Phen2Gene evidence were retained. "
+                f"{mydisease_result['message']}"
+            ),
+        )
+
     result["current_stage"] = "evidence"
     result["progress_percent"] = 60
     _notify_progress(result, progress_callback)
@@ -1450,8 +1574,9 @@ def run_annotation_and_phenotype(
     phen2gene_max_retries: int | None = None,
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
+    mydisease_session: requests.Session | None = None,
 ) -> PipelineResult:
-    """Run Stage 10 through annotation and optional HPO matching."""
+    """Run annotation, optional HPO matching, and MyDisease enrichment."""
 
     request = validate_analysis_input(
         vcf_path=vcf_path,
@@ -1474,6 +1599,7 @@ def run_annotation_and_phenotype(
         phen2gene_max_retries=phen2gene_max_retries,
         phen2gene_session=phen2gene_session,
         phen2gene_use_cache=phen2gene_use_cache,
+        mydisease_session=mydisease_session,
     )
     return validate_pipeline_result(result)
 
@@ -1491,6 +1617,7 @@ def _run_analysis_unpersisted(
     phen2gene_max_retries: int | None = None,
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
+    mydisease_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     report_dir: str | Path | None = None,
@@ -1580,6 +1707,7 @@ def _run_analysis_unpersisted(
             phen2gene_max_retries=phen2gene_max_retries,
             phen2gene_session=phen2gene_session,
             phen2gene_use_cache=phen2gene_use_cache,
+            mydisease_session=mydisease_session,
             progress_callback=progress_callback,
         )
     except AnnotationError as exc:
@@ -1685,6 +1813,7 @@ def run_analysis(
     phen2gene_max_retries: int | None = None,
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
+    mydisease_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     report_dir: str | Path | None = None,
@@ -1725,6 +1854,7 @@ def run_analysis(
             phen2gene_max_retries=phen2gene_max_retries,
             phen2gene_session=phen2gene_session,
             phen2gene_use_cache=phen2gene_use_cache,
+            mydisease_session=mydisease_session,
             llm_client=llm_client,
             llm_model=llm_model,
             report_dir=report_dir,

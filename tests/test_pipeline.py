@@ -73,6 +73,11 @@ from backend.logging_config import (
     get_logger,
     shutdown_logging,
 )
+from backend.mydisease import (
+    MYDISEASE_PROVIDER_NAME,
+    clear_mydisease_cache,
+    enrich_with_mydisease,
+)
 from backend.phenotype import (
     HPODataError,
     PHEN2GENE_PROVIDER_NAME,
@@ -171,6 +176,7 @@ from frontend.execution import (
 )
 from frontend.results import (
     build_annotation_rows,
+    build_mydisease_rows,
     build_variant_rows,
     build_phenotype_rows,
 )
@@ -425,6 +431,31 @@ class TestConfiguration:
                 500_000_001,
                 "MAX_UNCOMPRESSED_VCF_BYTES cannot exceed",
             ),
+            (
+                "MYDISEASE_TIMEOUT",
+                121,
+                "MYDISEASE_TIMEOUT cannot exceed",
+            ),
+            (
+                "MYDISEASE_MAX_RETRIES",
+                11,
+                "MYDISEASE_MAX_RETRIES cannot exceed",
+            ),
+            (
+                "MYDISEASE_CACHE_SIZE",
+                1001,
+                "MYDISEASE_CACHE_SIZE cannot exceed",
+            ),
+            (
+                "MYDISEASE_MAX_DISEASES_PER_GENE",
+                101,
+                "MYDISEASE_MAX_DISEASES_PER_GENE cannot exceed",
+            ),
+            (
+                "MYDISEASE_MAX_HPO_TERMS_PER_DISEASE",
+                201,
+                "MYDISEASE_MAX_HPO_TERMS_PER_DISEASE cannot exceed",
+            ),
         ],
     )
     def test_invalid_central_configuration_is_rejected(
@@ -467,6 +498,10 @@ class TestConfiguration:
             (
                 "PHEN2GENE_BASE_URL",
                 "http://phen2gene.example/api",
+            ),
+            (
+                "MYDISEASE_BASE_URL",
+                "http://mydisease.example/v1",
             ),
         ],
     )
@@ -1071,6 +1106,26 @@ class FakePhen2GeneSession:
         self.closed = True
 
 
+class FakeMyDiseaseSession:
+    """Return queued MyDisease responses without a network call."""
+
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+        self.closed = False
+
+    def get(self, url: str, **kwargs: object) -> FakeResponse:
+        self.calls.append({"url": url, **kwargs})
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, FakeResponse)
+        return response
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def _successful_phen2gene_session(
     gene: str = "SCN1A",
 ) -> FakePhen2GeneSession:
@@ -1094,6 +1149,76 @@ def _successful_phen2gene_session(
                 },
             )
         ]
+    )
+
+
+def _mydisease_evidence_stub(
+    gene: object,
+) -> dict[str, object]:
+    """Build deterministic no-network pipeline evidence."""
+
+    normalized_gene = gene if isinstance(gene, str) else None
+    return {
+        "status": "no_association",
+        "provider": MYDISEASE_PROVIDER_NAME,
+        "provider_version": "test-build",
+        "retrieved_at": "2026-08-05T00:00:00+00:00",
+        "query_gene": normalized_gene,
+        "query_gene_id": (
+            "HGNC:10585" if normalized_gene is not None else None
+        ),
+        "query": "mondo.synonym.exact:SCN1A*",
+        "http_status": 200,
+        "provider_total": 0,
+        "provider_returned_count": 0,
+        "disease_count": 0,
+        "diseases": [],
+        "inferred_pathway_context": [],
+        "upstream_sources": [],
+        "warnings": [],
+        "failure_reason": None,
+        "cache_state": "miss",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_mydisease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep general pipeline tests independent of live MyDisease."""
+
+    def fake_enrich(
+        variants: object,
+        _patient_hpo_terms: object,
+        **_: object,
+    ) -> dict[str, object]:
+        enriched = []
+        for variant in variants:  # type: ignore[union-attr]
+            item = deepcopy(dict(variant))
+            item["mydisease"] = _mydisease_evidence_stub(
+                item.get("gene")
+            )
+            enriched.append(item)
+        return {
+            "variants": enriched,
+            "status": "no_association",
+            "message": (
+                "MyDisease.info completed successfully; no validated "
+                "direct gene-disease association was retained for "
+                f"{len(enriched)} of {len(enriched)} variants."
+            ),
+            "request_attempts": len(enriched),
+            "variant_count": len(enriched),
+            "variants_with_evidence": 0,
+            "no_association_count": len(enriched),
+            "unsupported_count": 0,
+            "unavailable_count": 0,
+            "invalid_response_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "backend.pipeline.enrich_with_mydisease",
+        fake_enrich,
     )
 
 
@@ -8380,7 +8505,6 @@ class TestPipelineAnnotationAndPhenotype:
                 )
             ]
         )
-
         result = run_annotation_and_phenotype(
             vcf_path=None,
             manual_variants=_manual_rows("2:166848215:C:T"),
@@ -8402,6 +8526,9 @@ class TestPipelineAnnotationAndPhenotype:
             "phenotype_score"
         ] == 1.0
         assert result["phenotype_results"][0]["phen2gene"]["score"] == 0.98  # type: ignore[index]
+        assert result["phenotype_results"][0]["mydisease"][  # type: ignore[index]
+            "status"
+        ] == "no_association"
         assert len(phen2gene_session.calls) == 1
         phen2gene_status = next(
             record
@@ -8409,6 +8536,11 @@ class TestPipelineAnnotationAndPhenotype:
             if record["source"] == "phen2gene"
         )
         assert phen2gene_status["status"] == "success"
+        assert next(
+            record["status"]
+            for record in result["api_statuses"]
+            if record["source"] == "mydisease"
+        ) == "no_association"
         assert result["status"] == "running"
         assert result["current_stage"] == "evidence"
         assert result["progress_percent"] == 60
@@ -8483,6 +8615,168 @@ class TestPipelineAnnotationAndPhenotype:
         ]
         assert "private provider detail" not in json.dumps(result)
 
+    def test_mydisease_pipeline_failure_keeps_phen2gene_evidence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations = [
+                self._annotation(dict(variant))
+                for variant in variants  # type: ignore[union-attr]
+            ]
+            for annotation in annotations:
+                annotation["sources"] = {
+                    "genebe": {
+                        "status": "success",
+                        "gene": "SCN1A",
+                        "gene_hgnc_id": 10585,
+                    }
+                }
+            return annotations
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.enrich_with_mydisease",
+            enrich_with_mydisease,
+        )
+        clear_mydisease_cache()
+        monkeypatch.setattr(settings, "MYDISEASE_MAX_RETRIES", 0)
+        mydisease_session = FakeMyDiseaseSession(
+            [
+                FakeResponse(200, {"build_version": "test-build"}),
+                requests.ConnectionError("private mydisease failure"),
+            ]
+        )
+
+        result = run_annotation_and_phenotype(
+            vcf_path=None,
+            manual_variants=_manual_rows("2:166848215:C:T"),
+            phenotypes=["HP:0001250"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=_successful_phen2gene_session(),
+            phen2gene_use_cache=False,
+            mydisease_session=mydisease_session,  # type: ignore[arg-type]
+        )
+
+        variant = result["phenotype_results"][0]
+        assert variant["phen2gene"]["score"] == 0.95  # type: ignore[index]
+        assert variant["mydisease"]["status"] == "unavailable"  # type: ignore[index]
+        assert next(
+            record["status"]
+            for record in result["api_statuses"]
+            if record["source"] == "mydisease"
+        ) == "error"
+        assert any(
+            issue["code"] == "mydisease_unavailable"
+            for issue in result["errors"]
+        )
+        assert "private mydisease failure" not in json.dumps(result)
+
+    def test_mydisease_zero_match_is_pipeline_success(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations = [
+                self._annotation(dict(variant))
+                for variant in variants  # type: ignore[union-attr]
+            ]
+            for annotation in annotations:
+                annotation["sources"] = {
+                    "genebe": {
+                        "status": "success",
+                        "gene": "SCN1A",
+                        "gene_hgnc_id": 10585,
+                    }
+                }
+            return annotations
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            "backend.pipeline.enrich_with_mydisease",
+            enrich_with_mydisease,
+        )
+        clear_mydisease_cache()
+        monkeypatch.setattr(settings, "MYDISEASE_MAX_RETRIES", 0)
+        mydisease_session = FakeMyDiseaseSession(
+            [
+                FakeResponse(200, {"build_version": "test-build"}),
+                FakeResponse(
+                    200,
+                    {
+                        "total": 0,
+                        "hits": [],
+                    },
+                ),
+            ]
+        )
+
+        result = run_annotation_and_phenotype(
+            vcf_path=None,
+            manual_variants=_manual_rows("2:166848215:C:T"),
+            phenotypes=["HP:0001250"],
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=_successful_phen2gene_session(),
+            phen2gene_use_cache=False,
+            mydisease_session=mydisease_session,  # type: ignore[arg-type]
+        )
+
+        mydisease = result["phenotype_results"][0]["mydisease"]
+        assert mydisease["status"] == "no_association"  # type: ignore[index]
+        assert result["phenotype_results"][0]["phen2gene"][  # type: ignore[index]
+            "score"
+        ] == 0.95
+        mydisease_api = next(
+            record
+            for record in result["api_statuses"]
+            if record["source"] == "mydisease"
+        )
+        assert mydisease_api["status"] == "no_association"
+        assert "no validated direct gene-disease association" in (
+            mydisease_api["message"]
+        )
+        phenotype_stage = next(
+            record
+            for record in result["stages"]
+            if record["stage"] == "phenotype"
+        )
+        assert phenotype_stage["status"] == "success"
+        assert "Failed" not in (
+            phenotype_stage["message"]
+        )
+        assert not any(
+            issue["code"] == "mydisease_unavailable"
+            for issue in result["errors"]
+        )
+
     def test_empty_phenotypes_skip_matching_without_losing_variants(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -8510,7 +8804,10 @@ class TestPipelineAnnotationAndPhenotype:
             phenotypes=[],
         )
 
-        assert result["phenotype_results"] == result["annotations"]
+        assert result["phenotype_results"][0]["gene"] == "SCN1A"
+        assert result["phenotype_results"][0]["mydisease"][  # type: ignore[index]
+            "status"
+        ] == "no_association"
         assert result["warnings"] == [
             "ClinVar evidence was unavailable."
         ]
@@ -8519,7 +8816,17 @@ class TestPipelineAnnotationAndPhenotype:
             for record in result["stages"]
         }
         assert stage_statuses["annotation"] == "warning"
-        assert stage_statuses["phenotype"] == "skipped"
+        assert stage_statuses["phenotype"] == "success"
+        assert next(
+            record["status"]
+            for record in result["api_statuses"]
+            if record["source"] == "phen2gene"
+        ) == "skipped"
+        assert next(
+            record["status"]
+            for record in result["api_statuses"]
+            if record["source"] == "mydisease"
+        ) == "no_association"
 
 
 class TestCompletePipelineHappyPath:
@@ -9238,6 +9545,7 @@ class TestStage13IntegrationBoundaries:
             "clingen": "success",
             "cspec": "success",
             "phen2gene": "skipped",
+            "mydisease": "no_association",
             "llm": "pending",
         }
         assert result["annotations"][0]["sources"]["vep"][
@@ -9252,12 +9560,17 @@ class TestStage13IntegrationBoundaries:
         assert result["annotations"][0]["sources"]["clingen"][
             "status"
         ] == "success"
-        assert result["phenotype_results"] == result["annotations"]
+        assert result["phenotype_results"][0]["gene"] == (
+            result["annotations"][0]["gene"]
+        )
+        assert result["phenotype_results"][0]["mydisease"][  # type: ignore[index]
+            "status"
+        ] == "no_association"
         assert next(
             stage
             for stage in result["stages"]
             if stage["stage"] == "phenotype"
-        )["status"] == "skipped"
+        )["status"] == "success"
 
     def test_annotation_to_report_boundary(
         self,
@@ -10407,6 +10720,35 @@ class TestFrontendResults:
             "score": 0.81,
             "status": "SeedGene",
         }
+        annotation["mydisease"] = {
+            "status": "available",
+            "http_status": 200,
+            "provider_total": 2,
+            "provider_returned_count": 2,
+            "disease_count": 1,
+            "diseases": [
+                {
+                    "disease_id": "MONDO:0005027",
+                    "disease_name": "Dravet syndrome",
+                    "gene_disease_relation": {
+                        "association_type": "direct_gene_disease",
+                        "requested_gene_id": "HGNC:10585",
+                    },
+                    "matched_patient_hpo_terms": ["HP:0001250"],
+                    "supporting_hpo_terms": [
+                        {"hpo_id": "HP:0001250"}
+                    ],
+                    "phenotype_match_status": "exact_match",
+                    "upstream_sources": ["HPO", "MONDO"],
+                }
+            ],
+            "inferred_pathway_context": [
+                {
+                    "association_type": "inferred_pathway_context",
+                }
+            ],
+            "provider_version": "20260720",
+        }
         variant = annotation["variant"]
         assert isinstance(variant, dict)
 
@@ -10442,6 +10784,16 @@ class TestFrontendResults:
         assert phenotype_rows[0][
             "Phen2Gene rank (service metadata)"
         ] == 12
+        assert phenotype_rows[0]["MyDisease result"] == "available"
+        assert phenotype_rows[0]["MyDisease HTTP status"] == 200
+        assert phenotype_rows[0]["MyDisease provider total"] == 2
+        assert phenotype_rows[0]["MyDisease provider returned"] == 2
+        assert phenotype_rows[0]["MyDisease diseases"] == 1
+        assert phenotype_rows[0]["MyDisease matched HPO"] == 1
+        mydisease_rows = build_mydisease_rows([annotation])
+        assert mydisease_rows[0]["Gene ID"] == "HGNC:10585"
+        assert mydisease_rows[0]["Disease ID"] == "MONDO:0005027"
+        assert mydisease_rows[0]["MyDisease build"] == "20260720"
 
 
 class TestFrontendReportViewer:
@@ -11830,6 +12182,7 @@ class TestFrontendFoundation:
             "clingen": ("skipped", "Not called."),
             "cspec": ("success", "Found one released specification."),
             "phen2gene": ("success", "Matched all 5 variants."),
+            "mydisease": ("success", "Returned disease context."),
             "llm": ("pending", "Waiting for annotation."),
         }
         for record in result["api_statuses"]:
@@ -11856,6 +12209,7 @@ class TestFrontendFoundation:
             "ClinGen/GenCC (UCSC)",
             "ClinGen CSpec Registry",
             "Phen2Gene",
+            "MyDisease.info",
             "LLM API",
         ):
             assert source in rendered

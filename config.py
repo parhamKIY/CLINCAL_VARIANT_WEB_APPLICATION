@@ -207,6 +207,36 @@ class Settings:
         "https://phen2gene.wglab.org/api",
     ).strip().rstrip("/")
 
+    MYDISEASE_BASE_URL: str = os.getenv(
+        "MYDISEASE_BASE_URL",
+        "https://mydisease.info/v1",
+    ).strip().rstrip("/")
+
+    MYDISEASE_TIMEOUT: int = _get_positive_int(
+        "MYDISEASE_TIMEOUT",
+        30,
+    )
+
+    MYDISEASE_MAX_RETRIES: int = _get_non_negative_int(
+        "MYDISEASE_MAX_RETRIES",
+        2,
+    )
+
+    MYDISEASE_CACHE_SIZE: int = _get_positive_int(
+        "MYDISEASE_CACHE_SIZE",
+        128,
+    )
+
+    MYDISEASE_MAX_DISEASES_PER_GENE: int = _get_positive_int(
+        "MYDISEASE_MAX_DISEASES_PER_GENE",
+        20,
+    )
+
+    MYDISEASE_MAX_HPO_TERMS_PER_DISEASE: int = _get_positive_int(
+        "MYDISEASE_MAX_HPO_TERMS_PER_DISEASE",
+        50,
+    )
+
     HPO_ONTOLOGY_URL: str = os.getenv(
         "HPO_ONTOLOGY_URL",
         "https://purl.obolibrary.org/obo/hp.obo",
@@ -364,6 +394,7 @@ class Settings:
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
+            "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
             "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
             "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (
                 cls.HPO_GENE_ASSOCIATIONS_URL_TEMPLATE
@@ -420,6 +451,31 @@ class Settings:
         if cls.VEP_BATCH_SIZE > 200:
             raise RuntimeError(
                 "VEP_BATCH_SIZE cannot exceed Ensembl's limit of 200."
+            )
+
+        if cls.MYDISEASE_TIMEOUT > 120:
+            raise RuntimeError(
+                "MYDISEASE_TIMEOUT cannot exceed 120."
+            )
+
+        if cls.MYDISEASE_MAX_RETRIES > 10:
+            raise RuntimeError(
+                "MYDISEASE_MAX_RETRIES cannot exceed 10."
+            )
+
+        if cls.MYDISEASE_CACHE_SIZE > 1000:
+            raise RuntimeError(
+                "MYDISEASE_CACHE_SIZE cannot exceed 1000."
+            )
+
+        if cls.MYDISEASE_MAX_DISEASES_PER_GENE > 100:
+            raise RuntimeError(
+                "MYDISEASE_MAX_DISEASES_PER_GENE cannot exceed 100."
+            )
+
+        if cls.MYDISEASE_MAX_HPO_TERMS_PER_DISEASE > 200:
+            raise RuntimeError(
+                "MYDISEASE_MAX_HPO_TERMS_PER_DISEASE cannot exceed 200."
             )
 
         if cls.LOG_LEVEL not in {
