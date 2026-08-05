@@ -5626,6 +5626,125 @@ class TestEvidenceObject:
                 }
             ],
             "warnings": [],
+            "variant_context": {
+                "input": {
+                    "chrom": "2",
+                    "pos": 166848215,
+                    "ref": "C",
+                    "alt": "T",
+                },
+                "normalized": {
+                    "chrom": "2",
+                    "pos": 166848215,
+                    "ref": "C",
+                    "alt": "T",
+                },
+                "assembly": "GRCh38",
+                "gene": "SCN1A",
+                "gene_id": "ENSG00000144285",
+                "transcript": "ENST00000303395",
+                "hgvs_c": None,
+                "hgvs_p": "ENSP00000303540:p.Arg1645Cys",
+                "consequence": "missense_variant",
+            },
+            "annotations": {
+                "vep": {
+                    "status": "success",
+                    "gene": "SCN1A",
+                    "gene_id": "ENSG00000144285",
+                    "transcript": "ENST00000303395",
+                    "consequence": "missense_variant",
+                    "impact": "MODERATE",
+                    "hgvs_c": None,
+                    "hgvs_p": None,
+                },
+                "genebe": {},
+                "population": {
+                    "population_frequency": 0.00001,
+                    "status": "success",
+                    "variant_id": "chr2:g.166848215C>T",
+                    "genebe": {},
+                },
+                "predictors": {
+                    "vep": {},
+                    "genebe": {},
+                },
+            },
+            "pathogenicity": {
+                "automated_acmg_classification": None,
+                "acmg_criteria": [],
+                "clinvar_classification": "Pathogenic",
+                "clinvar_review_status": "reviewed by expert panel",
+                "clinvar_conditions": [
+                    "Developmental and epileptic encephalopathy",
+                ],
+                "clingen_context": [
+                    {
+                        "disease": (
+                            "Developmental and epileptic encephalopathy"
+                        ),
+                        "disease_id": "MONDO:0100062",
+                        "classification": "Definitive",
+                        "mode_of_inheritance": "Autosomal dominant",
+                        "pmids": ["12345678"],
+                        "report_url": (
+                            "https://search.clinicalgenome.org/"
+                            "kb/gene-validity/example"
+                        ),
+                    }
+                ],
+                "cspec_context": [],
+                "warnings": [],
+            },
+            "phenotype_relationship": {
+                "patient_hpo_terms": [
+                    "HP:0001250",
+                    "HP:0001263",
+                ],
+                "local_phenotype_score": 0.5,
+                "matched_patient_hpo_terms": ["HP:0001250"],
+                "phenotype_status": "partial_match",
+                "phen2gene": {},
+                "mydisease": {
+                    "diseases": [],
+                    "inferred_pathway_context": [],
+                },
+            },
+            "provenance": {
+                "providers": [
+                    {
+                        "source": "vep",
+                        "provider": "Ensembl VEP",
+                        "status": "success",
+                    },
+                    {
+                        "source": "myvariant",
+                        "provider": "MyVariant.info",
+                        "status": "success",
+                    },
+                    {
+                        "source": "clinvar",
+                        "provider": "NCBI ClinVar",
+                        "status": "success",
+                    },
+                    {
+                        "source": "clingen",
+                        "provider": "ClinGen/GenCC",
+                        "status": "success",
+                    },
+                ],
+                "upstream_sources": [],
+                "versions": {},
+                "retrieved_at": {},
+                "warnings": [],
+            },
+            "human_review": {
+                "status": "not_reviewed",
+                "edits": [],
+                "additions": [],
+                "reviewer_notes": [],
+                "confirmed_at": None,
+            },
         }
 
     @staticmethod
@@ -5765,6 +5884,208 @@ class TestEvidenceObject:
         assert "genotype" not in evidence["variant"]
         assert "raw_api_payload" not in evidence
         assert "raw_internal_detail" not in evidence["references"][0]
+
+    def test_v2_adds_bounded_provider_context_without_changing_flat_fields(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        sources["genebe"] = {
+            "status": "success",
+            "provider": "GeneBe",
+            "provider_version": "1.2",
+            "retrieved_at": "2026-08-05T00:00:00Z",
+            "gene": "SCN1A",
+            "gene_hgnc_id": 10585,
+            "transcript": "ENST00000303395",
+            "automated_acmg_classification": "Pathogenic",
+            "automated_acmg_criteria": ["PS1", "PM2"],
+            "automated_acmg_score": 10.0,
+            "population_annotations": {"gnomad_exomes_af": 0.00001},
+            "predictor_annotations": {
+                "revel": {"score": 0.92}
+            },
+            "clinvar_derived": {
+                "upstream_source": "ClinVar",
+                "classification": "Pathogenic",
+            },
+        }
+        sources["cspec"] = {
+            "status": "success",
+            "provider": "ClinGen CSpec Registry",
+            "provider_version": "2.4",
+            "retrieved_at": "2026-08-05T00:00:00Z",
+            "specifications": [
+                {
+                    "specification_id": "GN009",
+                    "title": "SCN1A specification",
+                    "version": "2.4",
+                    "status": "Released",
+                    "matched_disease_ids": ["MONDO:0012320"],
+                    "scope_match": "gene_and_disease",
+                }
+            ],
+        }
+        candidate["phen2gene"] = {
+            "availability": "available",
+            "gene": "SCN1A",
+            "gene_id": "6323",
+            "rank": 1,
+            "score": 0.95,
+            "status": "SeedGene",
+            "hpo_terms": ["HP:0001250"],
+            "weight_model": "skewness",
+            "provider": "Phen2Gene",
+            "provider_version": None,
+            "retrieved_at": "2026-08-05T00:00:00Z",
+            "cache_hit": False,
+            "warnings": [],
+        }
+        candidate["mydisease"] = {
+            "status": "available",
+            "provider": "MyDisease.info",
+            "provider_version": "20260720",
+            "retrieved_at": "2026-08-05T00:00:00Z",
+            "query_gene": "SCN1A",
+            "query_gene_id": "HGNC:10585",
+            "query": "raw query must not be copied",
+            "http_status": 200,
+            "provider_total": 1,
+            "provider_returned_count": 1,
+            "disease_count": 1,
+            "diseases": [
+                {
+                    "disease_id": "MONDO:0012320",
+                    "disease_name": "familial hemiplegic migraine 3",
+                    "primary_source": "MONDO",
+                    "cross_references": {"omim": ["609634"]},
+                    "gene_disease_relation": {
+                        "association_type": "direct_gene_disease",
+                        "requested_gene_id": "HGNC:10585",
+                        "matched_gene_id": "HGNC:10585",
+                        "upstream_source": "MONDO",
+                        "is_direct": True,
+                    },
+                    "supporting_hpo_terms": [
+                        {
+                            "hpo_id": "HP:0001250",
+                            "hpo_name": "Seizure",
+                            "evidence_code": "IEA",
+                            "upstream_source": "HPO",
+                        }
+                    ],
+                    "matched_patient_hpo_terms": ["HP:0001250"],
+                    "unmatched_patient_hpo_terms": ["HP:0001263"],
+                    "phenotype_match_count": 1,
+                    "phenotype_match_status": "partial_match",
+                    "upstream_sources": ["HPO", "MONDO"],
+                    "warnings": [],
+                }
+            ],
+            "inferred_pathway_context": [],
+            "upstream_sources": ["HPO", "MONDO"],
+            "warnings": [],
+            "failure_reason": None,
+            "cache_state": "miss",
+        }
+        original = deepcopy(candidate)
+
+        evidence = build_evidence_object(candidate)
+
+        assert evidence["schema_version"] == "2.0"
+        assert evidence["clinvar_significance"] == "Pathogenic"
+        assert evidence["pathogenicity"][
+            "automated_acmg_classification"
+        ] == "Pathogenic"
+        assert evidence["pathogenicity"]["acmg_criteria"] == [
+            "PS1",
+            "PM2",
+        ]
+        assert evidence["pathogenicity"]["cspec_context"][0][
+            "classification_effect"
+        ] == "context_only"
+        phenotype = evidence["phenotype_relationship"]
+        assert phenotype["phen2gene"]["rank"] == 1
+        assert phenotype["mydisease"]["diseases"][0][
+            "disease_id"
+        ] == "MONDO:0012320"
+        assert "query" not in phenotype["mydisease"]
+        assert evidence["human_review"] == {
+            "status": "not_reviewed",
+            "edits": [],
+            "additions": [],
+            "reviewer_notes": [],
+            "confirmed_at": None,
+        }
+        assert "ClinVar" in evidence["provenance"][
+            "upstream_sources"
+        ]
+        assert candidate == original
+        assert json.loads(json.dumps(evidence)) == evidence
+
+    def test_v2_mydisease_lists_are_bounded(self) -> None:
+        candidate = self._complete_candidate()
+        candidate["mydisease"] = {
+            "status": "available",
+            "diseases": [
+                {
+                    "disease_id": f"MONDO:{index:07d}",
+                    "supporting_hpo_terms": [
+                        {"hpo_id": f"HP:{term:07d}"}
+                        for term in range(30)
+                    ],
+                }
+                for index in range(15)
+            ],
+            "inferred_pathway_context": [],
+        }
+
+        evidence = build_evidence_object(candidate)
+        diseases = evidence["phenotype_relationship"]["mydisease"][
+            "diseases"
+        ]
+
+        assert len(diseases) == 10
+        assert all(
+            len(disease["supporting_hpo_terms"]) == 20
+            for disease in diseases
+        )
+
+    def test_v2_machine_review_state_cannot_claim_confirmation(
+        self,
+    ) -> None:
+        evidence = self._complete_evidence_object()
+        review = evidence["human_review"]
+        assert isinstance(review, dict)
+        review["status"] = "confirmed"
+        review["confirmed_at"] = "2026-08-05T00:00:00Z"
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="must be not_reviewed",
+        ):
+            validate_evidence_object(evidence)
+
+    def test_v2_rejects_raw_or_phi_fields_in_nested_context(self) -> None:
+        evidence = self._complete_evidence_object()
+        annotations = evidence["annotations"]
+        assert isinstance(annotations, dict)
+        vep = annotations["vep"]
+        assert isinstance(vep, dict)
+        vep["raw_api_payload"] = {"sample_id": "private"}
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="prohibited clinical data",
+        ):
+            validate_evidence_object(evidence)
+
+    def test_v2_preserves_legacy_report_schema_compatibility(self) -> None:
+        report = TestClinicalReportContract._complete_report()
+        report["source_evidence_schema_version"] = "1.0"
+
+        assert validate_clinical_report(report) == report
 
     def test_evidence_text_is_sanitized_without_mutating_input(
         self,
@@ -5943,7 +6264,7 @@ class TestEvidenceObject:
         )[0]
         evidence = build_evidence_object(scored_candidate)
 
-        assert evidence["schema_version"] == "1.0"
+        assert evidence["schema_version"] == "2.0"
         assert evidence["variant"] == {
             "chrom": "2",
             "pos": 166848215,
@@ -7152,7 +7473,7 @@ class TestClinicalReportContract:
             ),
             (
                 "source_evidence_schema_version",
-                "2.0",
+                "9.0",
                 "source_evidence_schema_version",
             ),
             (

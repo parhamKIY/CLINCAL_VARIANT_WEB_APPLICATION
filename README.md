@@ -12,8 +12,8 @@ professor-facing workflow.
 [![MVP status](https://img.shields.io/badge/MVP-Stage_16_complete-24708a?style=for-the-badge)](#stage-16-mvp-preparation-complete)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=for-the-badge&logo=python&logoColor=white)](#environment)
 [![Streamlit](https://img.shields.io/badge/Streamlit-frontend-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#stage-11-streamlit-frontend-complete)
-[![Tests](https://img.shields.io/badge/tests-524_pass%2C_3_skipped-2e7d32?style=for-the-badge)](#tests)
-[![Coverage](https://img.shields.io/badge/coverage-88.05%25-2e7d32?style=for-the-badge)](#tests)
+[![Tests](https://img.shields.io/badge/tests-529_pass%2C_3_skipped-2e7d32?style=for-the-badge)](#tests)
+[![Coverage](https://img.shields.io/badge/coverage-88.16%25-2e7d32?style=for-the-badge)](#tests)
 [![Security](https://img.shields.io/badge/security-Stage_15_complete-5c6bc0?style=for-the-badge)](#stage-15-security-complete)
 
 </div>

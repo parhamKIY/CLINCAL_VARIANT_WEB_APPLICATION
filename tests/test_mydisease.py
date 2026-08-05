@@ -521,7 +521,12 @@ def test_raw_response_is_not_stored_or_forwarded_to_evidence_object() -> None:
     }
     evidence = build_evidence_objects([candidate])[0]
     assert "mydisease" not in evidence
-    assert "MONDO:0012320" not in json.dumps(evidence)
+    mydisease = evidence["phenotype_relationship"]["mydisease"]
+    assert mydisease["diseases"][0]["disease_id"] == (
+        "MONDO:0012320"
+    )
+    assert "query" not in mydisease
+    assert '"_score"' not in json.dumps(evidence)
 
 
 def test_active_and_legacy_display_namespaces_are_not_relabelled() -> None:

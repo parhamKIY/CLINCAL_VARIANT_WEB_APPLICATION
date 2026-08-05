@@ -8,6 +8,7 @@ import re
 import tempfile
 import unicodedata
 from collections.abc import Iterable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
@@ -16,6 +17,7 @@ from backend.llm import LLMClient, LLMResponse, call_llm
 from backend.privacy import (
     ClinicalDataPrivacyError,
     validate_llm_payload,
+    validate_no_prohibited_fields,
 )
 from config import (
     PRIVATE_DIRECTORY_MODE,
@@ -24,7 +26,8 @@ from config import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = "1.0"
+EVIDENCE_SCHEMA_VERSION = "2.0"
+SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {"1.0", EVIDENCE_SCHEMA_VERSION}
 INTERPRETATION_PROMPT_VERSION = "1.1"
 CLINICAL_REPORT_SCHEMA_VERSION = "1.0"
 CLINICAL_INTERPRETATION_MAX_TOKENS = 1200
@@ -47,6 +50,9 @@ MAX_EVIDENCE_CLINGEN_CURATIONS = 10
 MAX_EVIDENCE_PMIDS_PER_CURATION = 20
 MAX_EVIDENCE_REFERENCES = 25
 MAX_EVIDENCE_WARNINGS = 20
+MAX_EVIDENCE_DISEASES = 10
+MAX_EVIDENCE_DISEASE_HPO_TERMS = 20
+MAX_EVIDENCE_CSPEC_CONTEXTS = 10
 MAX_EVIDENCE_SERIALIZED_BYTES = 64 * 1024
 MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
 MAX_EVIDENCE_ALLELE_LENGTH = 10_000
@@ -143,6 +149,73 @@ class EvidenceSourceStatuses(TypedDict):
     clingen: str
 
 
+class EvidenceVariantContext(TypedDict):
+    """Additive normalized variant identity for Evidence Object V2."""
+
+    input: EvidenceVariant
+    normalized: EvidenceVariant
+    assembly: str
+    gene: str | None
+    gene_id: str | None
+    transcript: str | None
+    hgvs_c: str | None
+    hgvs_p: str | None
+    consequence: str | None
+
+
+class EvidenceAnnotations(TypedDict):
+    """Bounded annotation-provider evidence."""
+
+    vep: dict[str, Any]
+    genebe: dict[str, Any]
+    population: dict[str, Any]
+    predictors: dict[str, Any]
+
+
+class EvidencePathogenicity(TypedDict):
+    """Source-attributed classification and validity context."""
+
+    automated_acmg_classification: str | None
+    acmg_criteria: list[str]
+    clinvar_classification: str | None
+    clinvar_review_status: str | None
+    clinvar_conditions: list[str]
+    clingen_context: list[EvidenceClinGenCuration]
+    cspec_context: list[dict[str, Any]]
+    warnings: list[str]
+
+
+class EvidencePhenotypeRelationship(TypedDict):
+    """Patient HPO, Phen2Gene, and MyDisease context."""
+
+    patient_hpo_terms: list[str]
+    local_phenotype_score: float | None
+    matched_patient_hpo_terms: list[str]
+    phenotype_status: str
+    phen2gene: dict[str, Any]
+    mydisease: dict[str, Any]
+
+
+class EvidenceProvenance(TypedDict):
+    """Bounded provider and upstream-source metadata."""
+
+    providers: list[dict[str, str | None]]
+    upstream_sources: list[str]
+    versions: dict[str, str]
+    retrieved_at: dict[str, str]
+    warnings: list[str]
+
+
+class EvidenceHumanReview(TypedDict):
+    """Reserved machine-generated review state for later stages."""
+
+    status: str
+    edits: list[dict[str, Any]]
+    additions: list[dict[str, Any]]
+    reviewer_notes: list[str]
+    confirmed_at: str | None
+
+
 class EvidenceObject(TypedDict):
     """Versioned, JSON-safe evidence supplied to later stages."""
 
@@ -167,6 +240,12 @@ class EvidenceObject(TypedDict):
     source_statuses: EvidenceSourceStatuses
     references: list[EvidenceReference]
     warnings: list[str]
+    variant_context: EvidenceVariantContext
+    annotations: EvidenceAnnotations
+    pathogenicity: EvidencePathogenicity
+    phenotype_relationship: EvidencePhenotypeRelationship
+    provenance: EvidenceProvenance
+    human_review: EvidenceHumanReview
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -240,6 +319,24 @@ EVIDENCE_SOURCE_STATUS_FIELDS = frozenset(
     EvidenceSourceStatuses.__required_keys__
 )
 EVIDENCE_SOURCE_NAMES = ("vep", "myvariant", "clinvar", "clingen")
+EVIDENCE_VARIANT_CONTEXT_FIELDS = frozenset(
+    EvidenceVariantContext.__required_keys__
+)
+EVIDENCE_ANNOTATION_FIELDS = frozenset(
+    EvidenceAnnotations.__required_keys__
+)
+EVIDENCE_PATHOGENICITY_FIELDS = frozenset(
+    EvidencePathogenicity.__required_keys__
+)
+EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS = frozenset(
+    EvidencePhenotypeRelationship.__required_keys__
+)
+EVIDENCE_PROVENANCE_FIELDS = frozenset(
+    EvidenceProvenance.__required_keys__
+)
+EVIDENCE_HUMAN_REVIEW_FIELDS = frozenset(
+    EvidenceHumanReview.__required_keys__
+)
 CLINICAL_REPORT_FIELDS = frozenset(ClinicalReport.__required_keys__)
 CLINICAL_REPORT_SECTION_FIELDS = frozenset(
     ClinicalReportSections.__required_keys__
@@ -510,6 +607,262 @@ def _validate_clingen_curations(value: object) -> None:
             )
 
 
+def _validate_context_tree(
+    value: object,
+    path: str,
+    *,
+    depth: int = 0,
+) -> None:
+    """Validate one bounded JSON-safe normalized context tree."""
+
+    if depth > 8:
+        raise EvidenceObjectError(
+            f"{path} exceeds the maximum nesting depth."
+        )
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise EvidenceObjectError(
+                f"{path} must contain only finite numbers."
+            )
+        return
+    if isinstance(value, list):
+        if len(value) > 100:
+            raise EvidenceObjectError(
+                f"{path} exceeds the maximum list length of 100."
+            )
+        for index, item in enumerate(value):
+            _validate_context_tree(
+                item,
+                f"{path}[{index}]",
+                depth=depth + 1,
+            )
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip():
+                raise EvidenceObjectError(
+                    f"{path} keys must be non-empty strings."
+                )
+            _validate_context_tree(
+                item,
+                f"{path}.{key}",
+                depth=depth + 1,
+            )
+        return
+    raise EvidenceObjectError(
+        f"{path} must contain only JSON-compatible values."
+    )
+
+
+def _validate_v2_sections(value: dict[str, Any]) -> None:
+    """Validate the additive Evidence Object V2 sections."""
+
+    variant_context = value["variant_context"]
+    if not isinstance(variant_context, dict):
+        raise EvidenceObjectError(
+            "evidence.variant_context must be a dictionary."
+        )
+    _validate_exact_fields(
+        variant_context,
+        EVIDENCE_VARIANT_CONTEXT_FIELDS,
+        "evidence.variant_context",
+    )
+    _validate_variant(variant_context["input"])
+    _validate_variant(variant_context["normalized"])
+    if variant_context["assembly"] not in GENOME_ASSEMBLIES:
+        raise EvidenceObjectError(
+            "evidence.variant_context.assembly must be GRCh37 or GRCh38."
+        )
+    for field in (
+        "gene",
+        "gene_id",
+        "transcript",
+        "hgvs_c",
+        "hgvs_p",
+        "consequence",
+    ):
+        _validate_optional_string(
+            variant_context[field],
+            f"evidence.variant_context.{field}",
+        )
+
+    annotations = value["annotations"]
+    if not isinstance(annotations, dict):
+        raise EvidenceObjectError(
+            "evidence.annotations must be a dictionary."
+        )
+    _validate_exact_fields(
+        annotations,
+        EVIDENCE_ANNOTATION_FIELDS,
+        "evidence.annotations",
+    )
+    for field in EVIDENCE_ANNOTATION_FIELDS:
+        if not isinstance(annotations[field], dict):
+            raise EvidenceObjectError(
+                f"evidence.annotations.{field} must be a dictionary."
+            )
+
+    pathogenicity = value["pathogenicity"]
+    if not isinstance(pathogenicity, dict):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity must be a dictionary."
+        )
+    _validate_exact_fields(
+        pathogenicity,
+        EVIDENCE_PATHOGENICITY_FIELDS,
+        "evidence.pathogenicity",
+    )
+    _validate_optional_string(
+        pathogenicity["automated_acmg_classification"],
+        "evidence.pathogenicity.automated_acmg_classification",
+    )
+    _validate_optional_string(
+        pathogenicity["clinvar_classification"],
+        "evidence.pathogenicity.clinvar_classification",
+    )
+    _validate_optional_string(
+        pathogenicity["clinvar_review_status"],
+        "evidence.pathogenicity.clinvar_review_status",
+    )
+    _validate_unique_strings(
+        pathogenicity["acmg_criteria"],
+        "evidence.pathogenicity.acmg_criteria",
+    )
+    _validate_unique_strings(
+        pathogenicity["clinvar_conditions"],
+        "evidence.pathogenicity.clinvar_conditions",
+    )
+    _validate_clingen_curations(pathogenicity["clingen_context"])
+    if not isinstance(pathogenicity["cspec_context"], list):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity.cspec_context must be a list."
+        )
+    _validate_unique_strings(
+        pathogenicity["warnings"],
+        "evidence.pathogenicity.warnings",
+    )
+
+    phenotype = value["phenotype_relationship"]
+    if not isinstance(phenotype, dict):
+        raise EvidenceObjectError(
+            "evidence.phenotype_relationship must be a dictionary."
+        )
+    _validate_exact_fields(
+        phenotype,
+        EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS,
+        "evidence.phenotype_relationship",
+    )
+    patient_hpo = _validate_unique_strings(
+        phenotype["patient_hpo_terms"],
+        "evidence.phenotype_relationship.patient_hpo_terms",
+    )
+    matched_hpo = _validate_unique_strings(
+        phenotype["matched_patient_hpo_terms"],
+        "evidence.phenotype_relationship.matched_patient_hpo_terms",
+    )
+    if any(
+        HPO_ID_PATTERN.fullmatch(term) is None
+        for term in (*patient_hpo, *matched_hpo)
+    ):
+        raise EvidenceObjectError(
+            "evidence.phenotype_relationship HPO terms must be canonical."
+        )
+    if not set(matched_hpo).issubset(patient_hpo):
+        raise EvidenceObjectError(
+            "evidence.phenotype_relationship matched terms must be a "
+            "subset of patient terms."
+        )
+    _validate_probability(
+        phenotype["local_phenotype_score"],
+        "evidence.phenotype_relationship.local_phenotype_score",
+    )
+    _validate_required_string(
+        phenotype["phenotype_status"],
+        "evidence.phenotype_relationship.phenotype_status",
+    )
+    for field in ("phen2gene", "mydisease"):
+        if not isinstance(phenotype[field], dict):
+            raise EvidenceObjectError(
+                "evidence.phenotype_relationship."
+                f"{field} must be a dictionary."
+            )
+
+    provenance = value["provenance"]
+    if not isinstance(provenance, dict):
+        raise EvidenceObjectError(
+            "evidence.provenance must be a dictionary."
+        )
+    _validate_exact_fields(
+        provenance,
+        EVIDENCE_PROVENANCE_FIELDS,
+        "evidence.provenance",
+    )
+    if not isinstance(provenance["providers"], list):
+        raise EvidenceObjectError(
+            "evidence.provenance.providers must be a list."
+        )
+    _validate_unique_strings(
+        provenance["upstream_sources"],
+        "evidence.provenance.upstream_sources",
+    )
+    for field in ("versions", "retrieved_at"):
+        if not isinstance(provenance[field], dict):
+            raise EvidenceObjectError(
+                f"evidence.provenance.{field} must be a dictionary."
+            )
+        for source, metadata in provenance[field].items():
+            _validate_required_string(
+                source,
+                f"evidence.provenance.{field}.source",
+            )
+            _validate_required_string(
+                metadata,
+                f"evidence.provenance.{field}.{source}",
+            )
+    _validate_unique_strings(
+        provenance["warnings"],
+        "evidence.provenance.warnings",
+    )
+
+    review = value["human_review"]
+    if not isinstance(review, dict):
+        raise EvidenceObjectError(
+            "evidence.human_review must be a dictionary."
+        )
+    _validate_exact_fields(
+        review,
+        EVIDENCE_HUMAN_REVIEW_FIELDS,
+        "evidence.human_review",
+    )
+    if review["status"] != "not_reviewed":
+        raise EvidenceObjectError(
+            "evidence.human_review.status must be not_reviewed in "
+            "machine-generated Evidence Object V2."
+        )
+    for field in ("edits", "additions", "reviewer_notes"):
+        if review[field] != []:
+            raise EvidenceObjectError(
+                f"evidence.human_review.{field} must be empty before "
+                "the human-review stage."
+            )
+    if review["confirmed_at"] is not None:
+        raise EvidenceObjectError(
+            "evidence.human_review.confirmed_at must be null before "
+            "the human-review stage."
+        )
+
+    for field in (
+        "annotations",
+        "pathogenicity",
+        "phenotype_relationship",
+        "provenance",
+        "human_review",
+    ):
+        _validate_context_tree(value[field], f"evidence.{field}")
+
+
 def validate_evidence_object(value: object) -> EvidenceObject:
     """Validate and return one complete Stage 7 evidence object.
 
@@ -523,7 +876,6 @@ def validate_evidence_object(value: object) -> EvidenceObject:
             "Evidence object must be a dictionary."
         )
     _validate_exact_fields(value, EVIDENCE_OBJECT_FIELDS, "evidence")
-
     if value["schema_version"] != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceObjectError(
             "evidence.schema_version must be "
@@ -592,6 +944,16 @@ def validate_evidence_object(value: object) -> EvidenceObject:
     _validate_source_statuses(value["source_statuses"])
     _validate_references(value["references"])
     _validate_unique_strings(value["warnings"], "evidence.warnings")
+    _validate_v2_sections(value)
+    try:
+        validate_no_prohibited_fields(
+            value,
+            context="Evidence Object",
+        )
+    except ClinicalDataPrivacyError as exc:
+        raise EvidenceObjectError(
+            "Evidence Object contains prohibited clinical data."
+        ) from exc
 
     try:
         json.dumps(value, allow_nan=False)
@@ -732,10 +1094,12 @@ def validate_clinical_report(value: object) -> ClinicalReport:
             "report.schema_version must be "
             f"{CLINICAL_REPORT_SCHEMA_VERSION}."
         )
-    if value["source_evidence_schema_version"] != EVIDENCE_SCHEMA_VERSION:
+    if (
+        value["source_evidence_schema_version"]
+        not in SUPPORTED_EVIDENCE_SCHEMA_VERSIONS
+    ):
         raise ClinicalReportError(
-            "report.source_evidence_schema_version must be "
-            f"{EVIDENCE_SCHEMA_VERSION}."
+            "report.source_evidence_schema_version is unsupported."
         )
     prompt_version = _report_required_text(
         value["interpretation_prompt_version"],
@@ -1060,6 +1424,33 @@ def _unique_in_order(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _sanitize_context_tree(value: Any, path: str) -> Any:
+    """Sanitize strings inside an already validated context tree."""
+
+    if isinstance(value, str):
+        return _sanitize_text(
+            value,
+            max_length=(
+                MAX_EVIDENCE_URL_LENGTH
+                if value.startswith(("http://", "https://"))
+                else MAX_EVIDENCE_TEXT_LENGTH
+            ),
+            path=path,
+            truncate=True,
+        )
+    if isinstance(value, list):
+        return [
+            _sanitize_context_tree(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_context_tree(item, f"{path}.{key}")
+            for key, item in value.items()
+        }
+    return value
+
+
 def sanitize_evidence_object(value: object) -> EvidenceObject:
     """Return a bounded, control-character-free evidence copy."""
     evidence = validate_evidence_object(value)
@@ -1287,6 +1678,30 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
         "source_statuses": dict(evidence["source_statuses"]),
         "references": clean_references,
         "warnings": clean_warnings,
+        "variant_context": _sanitize_context_tree(
+            evidence["variant_context"],
+            "evidence.variant_context",
+        ),
+        "annotations": _sanitize_context_tree(
+            evidence["annotations"],
+            "evidence.annotations",
+        ),
+        "pathogenicity": _sanitize_context_tree(
+            evidence["pathogenicity"],
+            "evidence.pathogenicity",
+        ),
+        "phenotype_relationship": _sanitize_context_tree(
+            evidence["phenotype_relationship"],
+            "evidence.phenotype_relationship",
+        ),
+        "provenance": _sanitize_context_tree(
+            evidence["provenance"],
+            "evidence.provenance",
+        ),
+        "human_review": _sanitize_context_tree(
+            evidence["human_review"],
+            "evidence.human_review",
+        ),
     }
     clean_evidence = validate_evidence_object(clean_evidence)
     serialized_size = len(
@@ -2163,6 +2578,429 @@ def _map_phenotype(
     )
 
 
+def _candidate_mapping(value: object) -> dict[str, Any]:
+    """Return an optional normalized candidate mapping."""
+
+    return value if isinstance(value, dict) else {}
+
+
+def _selected_context(
+    source: dict[str, Any],
+    fields: Iterable[str],
+) -> dict[str, Any]:
+    """Copy only approved normalized fields from one provider namespace."""
+
+    return {
+        field: deepcopy(source[field])
+        for field in fields
+        if field in source
+    }
+
+
+def _compact_hpo_context(value: object) -> list[dict[str, Any]]:
+    """Retain bounded disease-HPO fields without raw provider data."""
+
+    if not isinstance(value, list):
+        return []
+    fields = (
+        "hpo_id",
+        "hpo_name",
+        "evidence_code",
+        "numeric_frequency",
+        "frequency_numerator",
+        "frequency_denominator",
+        "original_disease_id",
+        "omim_refs",
+        "pmid_refs",
+        "biocuration",
+        "upstream_source",
+    )
+    return [
+        _selected_context(item, fields)
+        for item in value[:MAX_EVIDENCE_DISEASE_HPO_TERMS]
+        if isinstance(item, dict)
+    ]
+
+
+def _compact_mydisease_context(value: object) -> dict[str, Any]:
+    """Map bounded Stage 28 context into Evidence Object V2."""
+
+    source = _candidate_mapping(value)
+    diseases: list[dict[str, Any]] = []
+    raw_diseases = source.get("diseases")
+    if isinstance(raw_diseases, list):
+        for item in raw_diseases[:MAX_EVIDENCE_DISEASES]:
+            if not isinstance(item, dict):
+                continue
+            disease = _selected_context(
+                item,
+                (
+                    "disease_id",
+                    "disease_name",
+                    "synonyms",
+                    "primary_source",
+                    "cross_references",
+                    "gene_disease_relation",
+                    "matched_patient_hpo_terms",
+                    "unmatched_patient_hpo_terms",
+                    "phenotype_match_count",
+                    "phenotype_match_status",
+                    "upstream_sources",
+                    "warnings",
+                ),
+            )
+            disease["supporting_hpo_terms"] = _compact_hpo_context(
+                item.get("supporting_hpo_terms")
+            )
+            disease["inheritance"] = _compact_hpo_context(
+                item.get("inheritance")
+            )
+            disease["clinical_course"] = _compact_hpo_context(
+                item.get("clinical_course")
+            )
+            disease["clinical_modifier"] = _compact_hpo_context(
+                item.get("clinical_modifier")
+            )
+            diseases.append(disease)
+    context = _selected_context(
+        source,
+        (
+            "status",
+            "provider",
+            "provider_version",
+            "retrieved_at",
+            "query_gene",
+            "query_gene_id",
+            "http_status",
+            "provider_total",
+            "provider_returned_count",
+            "disease_count",
+            "upstream_sources",
+            "warnings",
+            "failure_reason",
+            "cache_state",
+        ),
+    )
+    context["diseases"] = diseases
+    raw_inferred = source.get("inferred_pathway_context")
+    context["inferred_pathway_context"] = (
+        [
+            _selected_context(
+                item,
+                (
+                    "disease_id",
+                    "association_type",
+                    "classification_effect",
+                    "inference_gene",
+                    "pathway_id",
+                    "pathway_name",
+                    "provider",
+                    "upstream_source",
+                ),
+            )
+            for item in raw_inferred[:10]
+            if isinstance(item, dict)
+        ]
+        if isinstance(raw_inferred, list)
+        else []
+    )
+    return context
+
+
+def _compact_cspec_context(value: object) -> list[dict[str, Any]]:
+    """Retain released CSpec metadata as context only."""
+
+    source = _candidate_mapping(value)
+    specifications = source.get("specifications")
+    if not isinstance(specifications, list):
+        return []
+    fields = (
+        "specification_id",
+        "title",
+        "short_title",
+        "version",
+        "status",
+        "vcep",
+        "approved_at",
+        "modified_at",
+        "source_document_url",
+        "specification_url",
+        "concept_doi",
+        "document_doi",
+        "matched_disease_ids",
+        "scope_match",
+        "applicable_to_disease_context",
+    )
+    return [
+        {
+            **_selected_context(item, fields),
+            "classification_effect": "context_only",
+            "rule_logic_applied": False,
+        }
+        for item in specifications[:MAX_EVIDENCE_CSPEC_CONTEXTS]
+        if isinstance(item, dict)
+    ]
+
+
+def _phenotype_status(
+    patient_hpo_terms: list[str],
+    matched_hpo_terms: list[str],
+) -> str:
+    """Return deterministic local exact-match missingness."""
+
+    if not patient_hpo_terms:
+        return "not_applicable"
+    if len(matched_hpo_terms) == len(patient_hpo_terms):
+        return "exact_match"
+    if matched_hpo_terms:
+        return "partial_match"
+    return "no_exact_match"
+
+
+def _build_v2_sections(
+    candidate: dict[str, Any],
+    *,
+    variant: dict[str, Any],
+    sources: dict[str, Any],
+    clinvar_conditions: list[str],
+    clingen_curations: list[EvidenceClinGenCuration],
+    phenotype_score: float | None,
+    hpo_terms: list[str],
+    matched_hpo_terms: list[str],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Build additive bounded Stage 29 sections."""
+
+    vep = _candidate_mapping(sources.get("vep"))
+    genebe = _candidate_mapping(sources.get("genebe"))
+    myvariant = _candidate_mapping(sources.get("myvariant"))
+    clinvar = _candidate_mapping(sources.get("clinvar"))
+    clingen = _candidate_mapping(sources.get("clingen"))
+    cspec = _candidate_mapping(sources.get("cspec"))
+    phen2gene = _candidate_mapping(candidate.get("phen2gene"))
+    mydisease = _compact_mydisease_context(
+        candidate.get("mydisease")
+    )
+    allele = {
+        "chrom": variant.get("chrom"),
+        "pos": variant.get("pos"),
+        "ref": variant.get("ref"),
+        "alt": variant.get("alt"),
+    }
+    criteria = genebe.get("automated_acmg_criteria")
+    acmg_criteria = (
+        list(criteria[:20])
+        if isinstance(criteria, list)
+        else []
+    )
+    predictors = candidate.get("predictors")
+    vep_predictors = (
+        deepcopy(predictors)
+        if isinstance(predictors, dict)
+        else {}
+    )
+
+    providers: list[dict[str, str | None]] = []
+    versions: dict[str, str] = {}
+    retrieved: dict[str, str] = {}
+    provider_defaults = {
+        "vep": "Ensembl VEP",
+        "genebe": "GeneBe",
+        "myvariant": "MyVariant.info",
+        "clinvar": "NCBI ClinVar",
+        "clingen": "ClinGen/GenCC",
+        "cspec": "ClinGen CSpec Registry",
+    }
+    for source_name, payload in (
+        ("vep", vep),
+        ("genebe", genebe),
+        ("myvariant", myvariant),
+        ("clinvar", clinvar),
+        ("clingen", clingen),
+        ("cspec", cspec),
+        ("phen2gene", phen2gene),
+        (
+            "mydisease",
+            mydisease
+            if isinstance(candidate.get("mydisease"), dict)
+            else {},
+        ),
+    ):
+        if not payload:
+            continue
+        provider = payload.get("provider")
+        provider_name = (
+            provider
+            if isinstance(provider, str)
+            else provider_defaults.get(source_name, source_name)
+        )
+        status = payload.get("status", payload.get("availability"))
+        providers.append(
+            {
+                "source": source_name,
+                "provider": provider_name,
+                "status": status if isinstance(status, str) else None,
+            }
+        )
+        version = payload.get("provider_version")
+        if isinstance(version, str) and version:
+            versions[source_name] = version
+        timestamp = payload.get("retrieved_at")
+        if isinstance(timestamp, str) and timestamp:
+            retrieved[source_name] = timestamp
+
+    upstream_sources = [
+        source
+        for source in mydisease.get("upstream_sources", [])
+        if isinstance(source, str)
+    ]
+    clinvar_derived = genebe.get("clinvar_derived")
+    if isinstance(clinvar_derived, dict) and any(
+        value is not None for value in clinvar_derived.values()
+    ):
+        upstream_sources.append("ClinVar")
+
+    return {
+        "variant_context": {
+            "input": deepcopy(allele),
+            "normalized": deepcopy(allele),
+            "assembly": candidate.get("assembly"),
+            "gene": candidate.get("gene"),
+            "gene_id": candidate.get("gene_id"),
+            "transcript": candidate.get("transcript"),
+            "hgvs_c": candidate.get("hgvsc"),
+            "hgvs_p": (
+                candidate.get("hgvsp")
+                or candidate.get("protein_change")
+            ),
+            "consequence": candidate.get("consequence"),
+        },
+        "annotations": {
+            "vep": {
+                **_selected_context(
+                    vep,
+                    (
+                        "status",
+                        "provider",
+                        "provider_version",
+                        "retrieved_at",
+                        "most_severe_consequence",
+                        "total_transcript_consequences",
+                        "transcripts_truncated",
+                    ),
+                ),
+                "gene": candidate.get("gene"),
+                "gene_id": candidate.get("gene_id"),
+                "transcript": candidate.get("transcript"),
+                "consequence": candidate.get("consequence"),
+                "impact": candidate.get("impact"),
+                "hgvs_c": candidate.get("hgvsc"),
+                "hgvs_p": candidate.get("hgvsp"),
+            },
+            "genebe": _selected_context(
+                genebe,
+                (
+                    "status",
+                    "provider",
+                    "provider_version",
+                    "retrieved_at",
+                    "gene",
+                    "gene_hgnc_id",
+                    "transcript",
+                    "effect",
+                    "consequences",
+                    "automated_acmg_classification",
+                    "automated_acmg_criteria",
+                    "automated_acmg_score",
+                    "population_annotations",
+                    "predictor_annotations",
+                    "clinvar_derived",
+                ),
+            ),
+            "population": {
+                "population_frequency": candidate.get(
+                    "population_frequency"
+                ),
+                **_selected_context(
+                    myvariant,
+                    (
+                        "status",
+                        "provider",
+                        "provider_version",
+                        "retrieved_at",
+                        "variant_id",
+                    ),
+                ),
+                "genebe": deepcopy(
+                    genebe.get("population_annotations", {})
+                ),
+            },
+            "predictors": {
+                "vep": vep_predictors,
+                "genebe": deepcopy(
+                    genebe.get("predictor_annotations", {})
+                ),
+            },
+        },
+        "pathogenicity": {
+            "automated_acmg_classification": genebe.get(
+                "automated_acmg_classification"
+            ),
+            "acmg_criteria": acmg_criteria,
+            "clinvar_classification": clinvar.get(
+                "clinical_significance"
+            ),
+            "clinvar_review_status": clinvar.get("review_status"),
+            "clinvar_conditions": deepcopy(clinvar_conditions),
+            "clingen_context": deepcopy(clingen_curations),
+            "cspec_context": _compact_cspec_context(cspec),
+            "warnings": deepcopy(warnings[:MAX_EVIDENCE_WARNINGS]),
+        },
+        "phenotype_relationship": {
+            "patient_hpo_terms": deepcopy(hpo_terms),
+            "local_phenotype_score": phenotype_score,
+            "matched_patient_hpo_terms": deepcopy(matched_hpo_terms),
+            "phenotype_status": _phenotype_status(
+                hpo_terms,
+                matched_hpo_terms,
+            ),
+            "phen2gene": _selected_context(
+                phen2gene,
+                (
+                    "availability",
+                    "gene",
+                    "gene_id",
+                    "rank",
+                    "score",
+                    "status",
+                    "hpo_terms",
+                    "weight_model",
+                    "provider",
+                    "provider_version",
+                    "retrieved_at",
+                    "cache_hit",
+                    "warnings",
+                ),
+            ),
+            "mydisease": mydisease,
+        },
+        "provenance": {
+            "providers": providers,
+            "upstream_sources": sorted(set(upstream_sources)),
+            "versions": versions,
+            "retrieved_at": retrieved,
+            "warnings": deepcopy(warnings[:MAX_EVIDENCE_WARNINGS]),
+        },
+        "human_review": {
+            "status": "not_reviewed",
+            "edits": [],
+            "additions": [],
+            "reviewer_notes": [],
+            "confirmed_at": None,
+        },
+    }
+
+
 def build_evidence_object(candidate: object) -> EvidenceObject:
     """Convert one Stage 5/6 candidate to the Stage 7 schema."""
     candidate_data = _require_candidate_mapping(candidate, "candidate")
@@ -2191,6 +3029,23 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
         clinvar.get("accession_version")
         or clinvar.get("accession")
     )
+    clinvar_conditions = _map_clinvar_conditions(clinvar)
+    clingen_curations = _map_clingen_curations(clingen)
+    warnings = _deduplicate_strings(
+        candidate_data.get("warnings", []),
+        "candidate.warnings",
+    )
+    v2_sections = _build_v2_sections(
+        candidate_data,
+        variant=variant,
+        sources=sources,
+        clinvar_conditions=clinvar_conditions,
+        clingen_curations=clingen_curations,
+        phenotype_score=phenotype_score,
+        hpo_terms=hpo_terms,
+        matched_hpo_terms=matched_hpo_terms,
+        warnings=warnings,
+    )
     evidence: EvidenceObject = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "variant": {
@@ -2214,8 +3069,8 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             "clinical_significance"
         ),
         "clinvar_review_status": clinvar.get("review_status"),
-        "clinvar_conditions": _map_clinvar_conditions(clinvar),
-        "clingen_curations": _map_clingen_curations(clingen),
+        "clinvar_conditions": clinvar_conditions,
+        "clingen_curations": clingen_curations,
         "phenotype_score": phenotype_score,
         "hpo_terms": hpo_terms,
         "matched_hpo_terms": matched_hpo_terms,
@@ -2224,10 +3079,15 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             for source, payload in source_payloads.items()
         },
         "references": _map_references(candidate_data),
-        "warnings": _deduplicate_strings(
-            candidate_data.get("warnings", []),
-            "candidate.warnings",
-        ),
+        "warnings": warnings,
+        "variant_context": v2_sections["variant_context"],
+        "annotations": v2_sections["annotations"],
+        "pathogenicity": v2_sections["pathogenicity"],
+        "phenotype_relationship": v2_sections[
+            "phenotype_relationship"
+        ],
+        "provenance": v2_sections["provenance"],
+        "human_review": v2_sections["human_review"],
     }
     return sanitize_evidence_object(evidence)
 
