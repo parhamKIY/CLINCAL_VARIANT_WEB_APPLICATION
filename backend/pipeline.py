@@ -25,6 +25,11 @@ from backend.error_handling import (
     PipelineResultError,
     map_pipeline_exception,
 )
+from backend.evidence_confirmation import (
+    EvidenceConfirmationError,
+    confirm_evidence_review,
+    validate_reviewed_evidence_package,
+)
 from backend.evidence_review import (
     EvidenceReviewError,
     build_evidence_review_reports,
@@ -181,6 +186,7 @@ class PipelineResult(TypedDict):
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
+    reviewed_evidence_packages: list[dict[str, object]]
     report_path: str | None
     analysis_id: str | None
     warnings: list[str]
@@ -351,6 +357,7 @@ def create_pipeline_result() -> PipelineResult:
         "phenotype_results": [],
         "evidence_objects": [],
         "evidence_review_reports": [],
+        "reviewed_evidence_packages": [],
         "report_path": None,
         "analysis_id": None,
         "warnings": [],
@@ -626,6 +633,43 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "pipeline.evidence_review_reports must preserve "
                     "Evidence Object order and originals."
                 )
+    packages = value["reviewed_evidence_packages"]
+    if (
+        not isinstance(packages, list)
+        or any(not isinstance(item, dict) for item in packages)
+    ):
+        raise PipelineResultError(
+            "pipeline.reviewed_evidence_packages must be a list of "
+            "dictionaries."
+        )
+    if packages:
+        try:
+            validated_packages = [
+                validate_reviewed_evidence_package(package)
+                for package in packages
+            ]
+        except EvidenceConfirmationError as exc:
+            raise PipelineResultError(
+                "pipeline.reviewed_evidence_packages is invalid."
+            ) from exc
+        previous_index = -1
+        for package in validated_packages:
+            index = package["variant_index"]
+            if index <= previous_index:
+                raise PipelineResultError(
+                    "pipeline.reviewed_evidence_packages must preserve "
+                    "ascending variant order without duplicates."
+                )
+            if (
+                index >= len(value["evidence_objects"])
+                or package["original_machine_report"]
+                != value["evidence_objects"][index]
+            ):
+                raise PipelineResultError(
+                    "pipeline.reviewed_evidence_packages must reference "
+                    "an unmodified Evidence Object."
+                )
+            previous_index = index
     if value["report_path"] is not None:
         _required_text(
             value["report_path"],
@@ -852,6 +896,7 @@ def _finish_failed_stage(
             "phenotype_results",
             "evidence_objects",
             "evidence_review_reports",
+            "reviewed_evidence_packages",
         )
     )
     result["status"] = (
@@ -1862,6 +1907,65 @@ def run_analysis(
         reset_analysis_run_id(context_token)
 
 
+def confirm_reviewed_evidence(
+    result: PipelineResult,
+    reports: Sequence[Mapping[str, object]],
+    *,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Build Stage 34 Reviewed Evidence Packages without calling the LLM.
+
+    Accepts one or more user-confirmed Stage 33 drafts (a full or partial
+    subset of ``result["evidence_review_reports"]``), re-runs the
+    deterministic post-review conflict audit for each, and stores the
+    resulting immutable packages. Confirming a variant again replaces its
+    prior package. No stage transition and no LLM call happen here.
+    """
+
+    working = validate_pipeline_result(deepcopy(result))
+    if not working["evidence_review_reports"]:
+        raise PipelineError(
+            "No editable evidence review reports are available to "
+            "confirm."
+        )
+    if isinstance(reports, (str, bytes, Mapping)):
+        raise PipelineError(
+            "reports must be a sequence of evidence review drafts."
+        )
+
+    packages_by_index: dict[int, dict[str, object]] = {
+        cast(int, package["variant_index"]): dict(package)
+        for package in working["reviewed_evidence_packages"]
+    }
+    for report in reports:
+        try:
+            package = confirm_evidence_review(report, timestamp=timestamp)
+        except EvidenceConfirmationError as exc:
+            raise PipelineError(str(exc)) from exc
+        index = package["variant_index"]
+        if (
+            index >= len(working["evidence_objects"])
+            or package["original_machine_report"]
+            != working["evidence_objects"][index]
+        ):
+            raise PipelineError(
+                "Confirmed evidence does not match this analysis."
+            )
+        packages_by_index[index] = dict(package)
+        LOGGER.info(
+            "event=reviewed_evidence_package_confirmed variant_index=%d "
+            "post_review_status=%s",
+            index,
+            package["post_review_conflict"]["status"],
+        )
+
+    working["reviewed_evidence_packages"] = [
+        packages_by_index[index]
+        for index in sorted(packages_by_index.keys())
+    ]
+    return validate_pipeline_result(working)
+
+
 __all__ = [
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
@@ -1881,6 +1985,7 @@ __all__ = [
     "PipelineStageRecord",
     "PipelineStageStatus",
     "PipelineStatus",
+    "confirm_reviewed_evidence",
     "create_pipeline_result",
     "run_analysis",
     "run_annotation_and_phenotype",

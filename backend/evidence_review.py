@@ -533,13 +533,22 @@ def save_evidence_review_draft(
     return validate_evidence_review_report(updated)
 
 
+def validate_bounded_json_tree(value: object, *, path: str = "value") -> None:
+    """Validate one bounded, JSON-safe tree using Stage 33 limits."""
+
+    _validate_review_tree(value, path=path)
+
+
 __all__ = [
+    "EDIT_RECORD_FIELDS",
     "EVIDENCE_REVIEW_SCHEMA_VERSION",
+    "MAX_EDIT_HISTORY",
     "EvidenceEditRecord",
     "EvidenceReviewError",
     "EvidenceReviewReport",
     "MAX_REVIEW_REPORT_BYTES",
     "build_evidence_review_reports",
     "save_evidence_review_draft",
+    "validate_bounded_json_tree",
     "validate_evidence_review_report",
 ]

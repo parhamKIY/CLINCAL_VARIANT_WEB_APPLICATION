@@ -63,6 +63,11 @@ from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
 )
+from backend.evidence_confirmation import (
+    EvidenceConfirmationError,
+    confirm_evidence_review,
+    validate_reviewed_evidence_package,
+)
 from backend.evidence_review import (
     EvidenceReviewError,
     build_evidence_review_reports,
@@ -123,6 +128,7 @@ from backend.pipeline import (
     PipelineProgressCallback,
     PipelineResult,
     PipelineResultError,
+    confirm_reviewed_evidence,
     create_pipeline_result,
     run_analysis,
     run_annotation_and_phenotype,
@@ -9309,6 +9315,207 @@ class TestStage33EvidenceReview:
             match="preserve Evidence Object order",
         ):
             validate_pipeline_result(result)
+
+
+class TestStage34EvidenceConfirmation:
+    """Verify the Stage 34 human confirmation gate and its package."""
+
+    @staticmethod
+    def _report() -> dict[str, object]:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        return build_evidence_review_reports(
+            [evidence],
+            timestamp="2026-08-06T08:00:00Z",
+        )[0]
+
+    def test_confirm_builds_a_complete_reviewed_evidence_package(
+        self,
+    ) -> None:
+        report = self._report()
+
+        package = confirm_evidence_review(
+            report,
+            timestamp="2026-08-06T09:00:00Z",
+        )
+
+        assert package["status"] == "confirmed"
+        assert package["variant_index"] == 0
+        assert (
+            package["original_machine_report"]
+            == report["original_machine_report"]
+        )
+        assert (
+            package["reviewed_user_report"]
+            == report["reviewed_user_report"]
+        )
+        assert package["reviewer_notes"] == []
+        assert package["user_added_evidence"] == []
+        assert (
+            package["provenance"]
+            == report["original_machine_report"]["provenance"]
+        )
+        assert package["pre_review_conflict"] == report[
+            "original_machine_report"
+        ]["conflict_audit"]["pre_review"]
+        assert package["post_review_conflict"]["phase"] == "post_review"
+        assert (
+            package["post_review_conflict"]["final_classification"]
+            is None
+        )
+        assert package["confirmed_at"] == "2026-08-06T09:00:00Z"
+        json.dumps(package, allow_nan=False)
+        validate_reviewed_evidence_package(package)
+
+    def test_user_added_evidence_is_isolated_from_full_history(
+        self,
+    ) -> None:
+        report = self._report()
+        reviewed = deepcopy(report["reviewed_user_report"])
+        reviewed["gene"] = "reviewed-gene"
+        reviewed["laboratory_note"] = "Orthogonal confirmation pending."
+        saved = save_evidence_review_draft(
+            report,
+            reviewed,
+            ["Manual laboratory evidence added."],
+            timestamp="2026-08-06T08:30:00Z",
+        )
+
+        package = confirm_evidence_review(
+            saved,
+            timestamp="2026-08-06T09:00:00Z",
+        )
+
+        assert len(package["edit_history"]) == 3
+        assert len(package["user_added_evidence"]) == 2
+        assert package["user_added_evidence"][0]["path"] == (
+            "/laboratory_note"
+        )
+        assert all(
+            edit["user_added"] is True
+            for edit in package["user_added_evidence"]
+        )
+
+    def test_user_override_conflict_is_surfaced_and_original_preserved(
+        self,
+    ) -> None:
+        report = self._report()
+        reviewed = deepcopy(report["reviewed_user_report"])
+        reviewed["clinvar_significance"] = "Benign"
+        saved = save_evidence_review_draft(
+            report,
+            reviewed,
+            timestamp="2026-08-06T08:30:00Z",
+        )
+
+        package = confirm_evidence_review(
+            saved,
+            timestamp="2026-08-06T09:00:00Z",
+        )
+
+        assert package["post_review_conflict"]["status"] == "conflict"
+        assert any(
+            finding["conflict_type"] == "user_override_conflict"
+            for finding in package["post_review_conflict"]["findings"]
+        )
+        assert (
+            package["original_machine_report"]["clinvar_significance"]
+            == "Pathogenic"
+        )
+        assert package["pre_review_conflict"]["status"] == "no_conflict"
+
+    def test_confirm_before_latest_draft_edit_is_rejected(self) -> None:
+        report = self._report()
+
+        with pytest.raises(
+            EvidenceConfirmationError,
+            match="precede",
+        ):
+            confirm_evidence_review(
+                report,
+                timestamp="2026-08-06T07:59:59Z",
+            )
+
+    def test_tampered_original_is_rejected_on_reload(self) -> None:
+        report = self._report()
+        package = confirm_evidence_review(
+            report,
+            timestamp="2026-08-06T09:00:00Z",
+        )
+        tampered = deepcopy(package)
+        tampered["original_machine_report"]["gene"] = "OTHER"
+
+        with pytest.raises(
+            EvidenceConfirmationError,
+            match="package_id",
+        ):
+            validate_reviewed_evidence_package(tampered)
+
+    def test_pipeline_confirm_preserves_order_without_calling_llm(
+        self,
+    ) -> None:
+        first_evidence = TestEvidenceObject._complete_evidence_object()
+        second_evidence = deepcopy(first_evidence)
+        second_evidence["variant"]["pos"] = 166848216
+        result = create_pipeline_result()
+        result["evidence_objects"] = [first_evidence, second_evidence]
+        reports = build_evidence_review_reports(
+            [first_evidence, second_evidence],
+            timestamp="2026-08-06T08:00:00Z",
+        )
+        result["evidence_review_reports"] = [
+            dict(report) for report in reports
+        ]
+
+        confirmed = confirm_reviewed_evidence(
+            result,
+            [reports[1]],
+            timestamp="2026-08-06T09:00:00Z",
+        )
+
+        assert [
+            package["variant_index"]
+            for package in confirmed["reviewed_evidence_packages"]
+        ] == [1]
+
+        fully_confirmed = confirm_reviewed_evidence(
+            confirmed,
+            [reports[0]],
+            timestamp="2026-08-06T09:05:00Z",
+        )
+
+        assert [
+            package["variant_index"]
+            for package in fully_confirmed["reviewed_evidence_packages"]
+        ] == [0, 1]
+        assert fully_confirmed["api_statuses"] == result["api_statuses"]
+        json.dumps(fully_confirmed, allow_nan=False)
+
+    def test_pipeline_confirm_rejects_mismatched_evidence(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        result = create_pipeline_result()
+        result["evidence_objects"] = [evidence]
+        matching_report = build_evidence_review_reports(
+            [evidence],
+            timestamp="2026-08-06T08:00:00Z",
+        )[0]
+        result["evidence_review_reports"] = [dict(matching_report)]
+
+        stale_evidence = deepcopy(evidence)
+        stale_evidence["gene"] = "DIFFERENT"
+        stale_report = build_evidence_review_reports(
+            [stale_evidence],
+            timestamp="2026-08-06T08:00:00Z",
+        )[0]
+
+        with pytest.raises(
+            PipelineError,
+            match="does not match this analysis",
+        ):
+            confirm_reviewed_evidence(
+                result,
+                [stale_report],
+                timestamp="2026-08-06T09:00:00Z",
+            )
 
 
 class TestClinicalInterpretationValidation:

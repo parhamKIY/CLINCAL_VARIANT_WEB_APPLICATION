@@ -8,6 +8,11 @@ from typing import cast
 
 import streamlit as st
 
+from backend.evidence_confirmation import (
+    EvidenceConfirmationError,
+    ReviewedEvidencePackage,
+    confirm_evidence_review,
+)
 from backend.evidence_review import (
     EvidenceReviewError,
     EvidenceReviewReport,
@@ -20,6 +25,7 @@ from backend.pipeline import PipelineResult
 REVIEW_DRAFTS_KEY = "evidence_review_drafts"
 REVIEW_SIGNATURE_KEY = "evidence_review_signature"
 REVIEW_VARIANT_KEY = "selected_evidence_review_variant"
+REVIEW_PACKAGES_KEY = "evidence_review_packages"
 _REVIEW_WIDGET_PREFIX = "evidence_review_"
 
 
@@ -32,6 +38,7 @@ def clear_evidence_review_state() -> None:
                 REVIEW_DRAFTS_KEY,
                 REVIEW_SIGNATURE_KEY,
                 REVIEW_VARIANT_KEY,
+                REVIEW_PACKAGES_KEY,
             }
             or str(key).startswith(_REVIEW_WIDGET_PREFIX)
         ):
@@ -48,6 +55,7 @@ def _initialize_drafts(
     if st.session_state.get(REVIEW_SIGNATURE_KEY) != signature:
         st.session_state[REVIEW_SIGNATURE_KEY] = signature
         st.session_state[REVIEW_DRAFTS_KEY] = deepcopy(reports)
+        st.session_state[REVIEW_PACKAGES_KEY] = {}
         st.session_state.pop(REVIEW_VARIANT_KEY, None)
     return cast(
         list[EvidenceReviewReport],
@@ -170,6 +178,64 @@ def _render_history(report: EvidenceReviewReport) -> None:
     st.dataframe(rows, hide_index=True)
 
 
+def _render_package_summary(package: ReviewedEvidencePackage) -> None:
+    post_review = package["post_review_conflict"]
+    status = post_review.get("status")
+    st.success(f"Confirmed at {package['confirmed_at']}.")
+    if status == "conflict":
+        st.warning(
+            "Post-review conflict status: conflict "
+            f"(severity: {post_review.get('routing_severity')})."
+        )
+    else:
+        st.caption("Post-review conflict status: no_conflict")
+    if package["user_added_evidence"]:
+        st.caption(
+            f"{len(package['user_added_evidence'])} user-added "
+            "evidence field(s) will be visible to the LLM."
+        )
+
+
+def _render_confirmation(
+    report: EvidenceReviewReport,
+    result: PipelineResult,
+) -> None:
+    packages = cast(
+        dict[str, ReviewedEvidencePackage],
+        st.session_state.setdefault(REVIEW_PACKAGES_KEY, {}),
+    )
+    report_id = report["report_id"]
+
+    st.caption(
+        "Confirming builds an immutable Reviewed Evidence Package for "
+        "this variant. Final interpretation still requires Stage 35 "
+        "LLM routing, which is not implemented yet."
+    )
+    if st.button(
+        "Confirm evidence",
+        key=f"{_REVIEW_WIDGET_PREFIX}confirm_{report_id}",
+    ):
+        evidence_objects = result.get("evidence_objects", [])
+        variant_index = report["variant_index"]
+        if (
+            variant_index >= len(evidence_objects)
+            or report["original_machine_report"]
+            != evidence_objects[variant_index]
+        ):
+            st.error(
+                "This draft no longer matches the current analysis."
+            )
+        else:
+            try:
+                packages[report_id] = confirm_evidence_review(report)
+            except EvidenceConfirmationError as exc:
+                st.error(f"Evidence was not confirmed: {exc}")
+
+    package = packages.get(report_id)
+    if package is not None:
+        _render_package_summary(package)
+
+
 def render_evidence_review(result: PipelineResult) -> None:
     """Render editable reports without invoking final interpretation."""
 
@@ -191,8 +257,13 @@ def render_evidence_review(result: PipelineResult) -> None:
         "Drafts remain local to this browser session. Final LLM "
         "interpretation is not run before confirmation."
     )
-    editor_tab, original_tab, history_tab = st.tabs(
-        ["Edit draft", "Original machine report", "Edit history"]
+    editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
+        [
+            "Edit draft",
+            "Original machine report",
+            "Edit history",
+            "Confirm evidence",
+        ]
     )
     with editor_tab:
         _render_editor(report, selected, drafts)
@@ -200,10 +271,13 @@ def render_evidence_review(result: PipelineResult) -> None:
         st.json(report["original_machine_report"], expanded=2)
     with history_tab:
         _render_history(report)
+    with confirm_tab:
+        _render_confirmation(drafts[selected], result)
 
 
 __all__ = [
     "REVIEW_DRAFTS_KEY",
+    "REVIEW_PACKAGES_KEY",
     "clear_evidence_review_state",
     "render_evidence_review",
 ]
