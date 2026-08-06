@@ -1,17 +1,18 @@
-"""Triggered, bounded gnomAD and literature evidence enrichment."""
+"""Triggered, bounded population and literature evidence enrichment."""
 
 from __future__ import annotations
 
 import ast
 import json
 import math
+import re
 import time
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, TypedDict
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -22,10 +23,7 @@ from config import settings
 LOGGER = get_logger("conditional_enrichment")
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 MEANINGFUL_SEVERITIES = {"moderate", "major", "critical"}
-GNOMAD_DATASETS = {
-    "GRCh37": ("gnomad_r2_1", "2.1.1"),
-    "GRCh38": ("gnomad_r4", "4.1.0"),
-}
+RSID_PATTERN = re.compile(r"rs[1-9][0-9]*", re.IGNORECASE)
 MAX_POPULATIONS = 20
 MAX_QUERY_TERMS = 8
 MAX_LITVAR_RESPONSE_LINES = 1000
@@ -34,46 +32,22 @@ NCBI_REQUEST_INTERVAL = 0.5
 _NCBI_RATE_LOCK = Lock()
 _LAST_NCBI_REQUEST_AT = 0.0
 
-GNOMAD_QUERY = """
-query ConditionalVariant($variantId: String!, $dataset: DatasetId!) {
-  variant(variantId: $variantId, dataset: $dataset) {
-    variant_id
-    reference_genome
-    chrom
-    pos
-    ref
-    alt
-    faf95_joint { popmax popmax_population }
-    exome {
-      ac
-      an
-      homozygote_count
-      filters
-      faf95 { popmax popmax_population }
-      populations { id ac an homozygote_count }
-    }
-    genome {
-      ac
-      an
-      homozygote_count
-      filters
-      faf95 { popmax popmax_population }
-      populations { id ac an homozygote_count }
-    }
-    joint {
-      ac
-      an
-      homozygote_count
-      filters
-      populations { id ac an homozygote_count }
-    }
-  }
-}
-""".strip()
-
-
 class ConditionalEnrichmentError(ValueError):
     """Raised when conditional enrichment input is invalid."""
+
+
+class ProviderResponseError(ConditionalEnrichmentError):
+    """Raised for a classified invalid provider response."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.http_status = http_status
 
 
 class ConditionalEnrichmentResult(TypedDict):
@@ -84,8 +58,9 @@ class ConditionalEnrichmentResult(TypedDict):
     message: str
     variant_count: int
     triggered_count: int
-    gnomad_status: str
+    population_status: str
     litvar_status: str
+    europe_pmc_status: str
     pubmed_status: str
 
 
@@ -131,11 +106,9 @@ def _wait_for_ncbi_slot(session: object) -> None:
 
 def _request_json(
     session: requests.Session,
-    method: str,
     url: str,
     *,
-    params: dict[str, object] | None = None,
-    json_body: dict[str, object] | None = None,
+    params: dict[str, str | int | float | bool] | None = None,
     ncbi: bool = False,
     litvar: bool = False,
 ) -> tuple[object, int, int]:
@@ -146,29 +119,16 @@ def _request_json(
         if ncbi:
             _wait_for_ncbi_slot(session)
         try:
-            if method == "POST":
-                response = session.post(
-                    url,
-                    json=json_body,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "User-Agent": "ClinicalVariantInterpretation/0.1",
-                    },
-                    timeout=settings.CONDITIONAL_ENRICHMENT_TIMEOUT,
-                    verify=True,
-                )
-            else:
-                response = session.get(
-                    url,
-                    params=params,
-                    headers={
-                        "Accept": "application/json",
-                        "User-Agent": "ClinicalVariantInterpretation/0.1",
-                    },
-                    timeout=settings.CONDITIONAL_ENRICHMENT_TIMEOUT,
-                    verify=True,
-                )
+            response = session.get(
+                url,
+                params=params,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "ClinicalVariantInterpretation/0.1",
+                },
+                timeout=settings.CONDITIONAL_ENRICHMENT_TIMEOUT,
+                verify=True,
+            )
         except requests.RequestException:
             if attempt >= max_retries:
                 raise
@@ -185,17 +145,55 @@ def _request_json(
                 f"HTTP {response.status_code}",
                 response=response,
             )
+        headers = getattr(response, "headers", {})
+        content_type = ""
+        if isinstance(headers, Mapping):
+            content_type = str(
+                headers.get(
+                    "Content-Type",
+                    headers.get("content-type", ""),
+                )
+            ).partition(";")[0].strip().casefold()
+        valid_content_type = (
+            not content_type
+            or content_type == "application/json"
+            or content_type.endswith("+json")
+            or (
+                litvar
+                and content_type
+                in {
+                    "application/x-ndjson",
+                    "application/ndjson",
+                    "text/plain",
+                }
+            )
+        )
+        if not valid_content_type:
+            raise ProviderResponseError(
+                "invalid_content_type",
+                http_status=response.status_code,
+            )
         try:
             return response.json(), response.status_code, attempt + 1
         except ValueError as exc:
             if litvar:
+                try:
+                    parsed_body = _parse_litvar_body(
+                        getattr(response, "text", None)
+                    )
+                except ConditionalEnrichmentError as parse_exc:
+                    raise ProviderResponseError(
+                        "invalid_json",
+                        http_status=response.status_code,
+                    ) from parse_exc
                 return (
-                    _parse_litvar_body(getattr(response, "text", None)),
+                    parsed_body,
                     response.status_code,
                     attempt + 1,
                 )
-            raise ConditionalEnrichmentError(
-                "Provider returned invalid JSON."
+            raise ProviderResponseError(
+                "invalid_json",
+                http_status=response.status_code,
             ) from exc
     raise RuntimeError("Conditional request retry loop ended unexpectedly.")
 
@@ -239,6 +237,11 @@ def _parse_litvar_body(value: object) -> list[dict[str, Any]]:
 
 
 def _finite_frequency(value: object) -> float | None:
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
@@ -249,166 +252,125 @@ def _finite_frequency(value: object) -> float | None:
     return float(value)
 
 
-def _non_negative_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    return value
+def _request_failure_reason(exc: requests.RequestException) -> str:
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status == 429:
+        return "rate_limited"
+    if status == 403:
+        return "forbidden"
+    if isinstance(status, int) and status >= 500:
+        return "upstream_error"
+    if isinstance(status, int):
+        return "http_error"
+    return "network_error"
 
 
-def _population_block(
-    value: object,
-    *,
-    filtering_af: object = None,
-) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise ConditionalEnrichmentError(
-            "gnomAD population block is invalid."
-        )
-    ac = _non_negative_int(value.get("ac"))
-    an = _non_negative_int(value.get("an"))
-    hom = _non_negative_int(
-        value.get("homozygote_count", value.get("ac_hom"))
-    )
-    if ac is None or an is None or hom is None or ac > an:
-        raise ConditionalEnrichmentError(
-            "gnomAD population counts are invalid."
-        )
-    populations: list[dict[str, Any]] = []
-    raw_populations = value.get("populations")
-    if raw_populations is not None and not isinstance(
-        raw_populations,
-        list,
+def _candidate_rsid(candidate: Mapping[str, object]) -> str | None:
+    sources = _mapping(candidate.get("sources"))
+    myvariant = _mapping(sources.get("myvariant"))
+    for value in (
+        myvariant.get("rsid"),
+        candidate.get("rsid"),
     ):
-        raise ConditionalEnrichmentError(
-            "gnomAD ancestry populations are invalid."
-        )
-    for item in (raw_populations or [])[:MAX_POPULATIONS]:
-        if not isinstance(item, dict):
-            continue
-        population_id = _text(item.get("id"), 50)
-        pop_ac = _non_negative_int(item.get("ac"))
-        pop_an = _non_negative_int(item.get("an"))
-        pop_hom = _non_negative_int(
-            item.get("homozygote_count", item.get("ac_hom"))
-        )
-        if (
-            population_id is None
-            or pop_ac is None
-            or pop_an is None
-            or pop_hom is None
-            or pop_ac > pop_an
-        ):
-            continue
-        populations.append(
-            {
-                "id": population_id,
-                "ac": pop_ac,
-                "an": pop_an,
-                "af": pop_ac / pop_an if pop_an else None,
-                "homozygote_count": pop_hom,
-            }
-        )
-    faf = _mapping(
-        filtering_af
-        if filtering_af is not None
-        else value.get("faf95")
-    )
-    filters = value.get("filters")
-    return {
-        "ac": ac,
-        "an": an,
-        "af": ac / an if an else None,
-        "homozygote_count": hom,
-        "filtering_af": _finite_frequency(faf.get("popmax")),
-        "filtering_af_population": _text(
-            faf.get("popmax_population"),
-            50,
-        ),
-        "filters": (
-            [
-                item
-                for item in filters[:20]
-                if isinstance(item, str) and item.strip()
-            ]
-            if isinstance(filters, list)
-            else []
-        ),
-        "populations": populations,
-    }
+        rsid = _text(value, 32)
+        if rsid is not None and RSID_PATTERN.fullmatch(rsid):
+            return rsid.casefold()
+    return None
 
 
-def _variant_id(candidate: Mapping[str, object]) -> str | None:
-    variant = _mapping(candidate.get("variant"))
-    chrom = _text(variant.get("chrom"), 10)
-    pos = variant.get("pos")
-    ref = _text(variant.get("ref"), 10_000)
-    alt = _text(variant.get("alt"), 10_000)
-    if (
-        chrom is None
-        or chrom.removeprefix("chr") not in {
-            *(str(value) for value in range(1, 23)),
-            "X",
-            "Y",
-        }
-        or isinstance(pos, bool)
-        or not isinstance(pos, int)
-        or pos <= 0
-        or ref is None
-        or alt is None
-    ):
+def _population_source_url(rsid: str | None) -> str | None:
+    if rsid is None:
         return None
+    path = quote(rsid, safe="")
     return (
-        f"{chrom.removeprefix('chr')}-{pos}-"
-        f"{ref.upper()}-{alt.upper()}"
+        f"{settings.ENSEMBL_VARIATION_BASE_URL}/variation/human/"
+        f"{path}?{urlencode({'pops': 1})}"
     )
 
 
-def _empty_gnomad(
+def _empty_population_evidence(
     *,
     status: str,
     candidate: Mapping[str, object],
     failure_reason: str | None = None,
     http_status: int | None = None,
 ) -> dict[str, Any]:
-    assembly = _text(candidate.get("assembly"), 20)
-    dataset, release = GNOMAD_DATASETS.get(
-        assembly or "",
-        (None, None),
-    )
+    rsid = _candidate_rsid(candidate)
     return {
         "status": status,
-        "provider": "gnomAD",
-        "provider_version": release,
-        "retrieved_at": None if status == "not_triggered" else _timestamp(),
-        "assembly": assembly,
-        "dataset": dataset,
-        "query_variant_id": _variant_id(candidate),
+        "response_status": status,
+        "provider": "Ensembl REST Variation",
+        "provider_version": None,
+        "upstream_sources": [],
+        "retrieved_at": (
+            None if status == "not_triggered" else _timestamp()
+        ),
+        "assembly": _text(candidate.get("assembly"), 20),
+        "dataset": None,
+        "release": None,
+        "query_identifier": rsid,
         "http_status": http_status,
-        "exome": None,
-        "genome": None,
-        "joint": None,
+        "source_url": _population_source_url(rsid),
+        "derivation": "direct",
+        "most_severe_consequence": None,
+        "minor_allele": None,
+        "global_maf": None,
+        "populations": [],
         "warnings": [],
         "failure_reason": failure_reason,
     }
 
 
-def fetch_gnomad_evidence(
+def _ensembl_population_rows(
+    value: object,
+) -> tuple[list[dict[str, Any]], int]:
+    if value is None:
+        return [], 0
+    if not isinstance(value, list):
+        raise ProviderResponseError("invalid_schema")
+    rows: list[dict[str, Any]] = []
+    invalid = 0
+    for item in value[:MAX_POPULATIONS]:
+        if not isinstance(item, dict):
+            invalid += 1
+            continue
+        population = _text(item.get("population"), 150)
+        allele = _text(item.get("allele"), 10_000)
+        frequency = _finite_frequency(item.get("frequency"))
+        if population is None or allele is None or frequency is None:
+            invalid += 1
+            continue
+        rows.append(
+            {
+                "population": population,
+                "allele": allele,
+                "frequency": frequency,
+            }
+        )
+    return rows, invalid
+
+
+def fetch_ensembl_population_evidence(
     candidate: Mapping[str, object],
     *,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    """Fetch exact direct gnomAD population evidence for one variant."""
+    """Fetch direct Ensembl population frequencies for one rsID."""
 
     if not isinstance(candidate, Mapping):
         raise ConditionalEnrichmentError("Candidate must be a mapping.")
-    evidence = _empty_gnomad(status="unavailable", candidate=candidate)
-    variant_id = evidence["query_variant_id"]
-    dataset = evidence["dataset"]
-    if variant_id is None or dataset is None:
-        evidence["status"] = "not_applicable"
-        evidence["failure_reason"] = "unsupported_variant_or_assembly"
+    evidence = _empty_population_evidence(
+        status="unavailable",
+        candidate=candidate,
+    )
+    rsid = evidence["query_identifier"]
+    if rsid is None:
+        evidence["status"] = "missing_identifier"
+        evidence["response_status"] = "missing_identifier"
+        evidence["failure_reason"] = "missing_rsid"
         return evidence
 
     owns_session = session is None
@@ -417,16 +379,22 @@ def fetch_gnomad_evidence(
         try:
             payload, http_status, _ = _request_json(
                 client,
-                "POST",
-                settings.GNOMAD_BASE_URL,
-                json_body={
-                    "query": GNOMAD_QUERY,
-                    "variables": {
-                        "variantId": variant_id,
-                        "dataset": dataset,
-                    },
-                },
+                (
+                    f"{settings.ENSEMBL_VARIATION_BASE_URL}/"
+                    f"variation/human/{quote(rsid, safe='')}"
+                ),
+                params={"pops": 1},
             )
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            evidence["http_status"] = status
+            if status == 404:
+                evidence["status"] = "no_match"
+                evidence["response_status"] = "no_match"
+                return evidence
+            evidence["failure_reason"] = _request_failure_reason(exc)
+            return evidence
         except requests.RequestException as exc:
             response = getattr(exc, "response", None)
             evidence["http_status"] = getattr(
@@ -434,15 +402,13 @@ def fetch_gnomad_evidence(
                 "status_code",
                 None,
             )
-            evidence["failure_reason"] = (
-                "timeout"
-                if isinstance(exc, requests.Timeout)
-                else "http_or_network_error"
-            )
+            evidence["failure_reason"] = _request_failure_reason(exc)
             return evidence
-        except ConditionalEnrichmentError:
+        except ProviderResponseError as exc:
             evidence["status"] = "invalid_response"
-            evidence["failure_reason"] = "invalid_json"
+            evidence["response_status"] = "invalid_response"
+            evidence["http_status"] = exc.http_status
+            evidence["failure_reason"] = exc.reason
             return evidence
     finally:
         if owns_session:
@@ -451,107 +417,105 @@ def fetch_gnomad_evidence(
     evidence["http_status"] = http_status
     if not isinstance(payload, dict):
         evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
         evidence["failure_reason"] = "invalid_schema"
         return evidence
-    graph_errors = payload.get("errors")
-    if graph_errors is not None and not isinstance(graph_errors, list):
-        evidence["status"] = "invalid_response"
-        evidence["failure_reason"] = "invalid_schema"
-        return evidence
-    data = payload.get("data")
-    if not isinstance(data, dict) or "variant" not in data:
-        evidence["status"] = "invalid_response"
-        evidence["failure_reason"] = "invalid_schema"
-        return evidence
-    variant = data.get("variant")
-    if variant is None and not graph_errors:
-        evidence["status"] = "no_association"
-        return evidence
-    if not isinstance(variant, dict):
-        evidence["status"] = "invalid_response"
-        evidence["failure_reason"] = "graphql_error"
-        return evidence
-    returned_id = _text(
-        variant.get("variant_id", variant.get("variantId")),
-        10_050,
+    name = _text(payload.get("name"), 32)
+    synonyms = payload.get("synonyms")
+    synonym_values = (
+        {
+            item.casefold()
+            for item in synonyms
+            if isinstance(item, str)
+        }
+        if isinstance(synonyms, list)
+        else set()
     )
-    if returned_id is not None and returned_id != variant_id:
+    if name is None:
         evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "invalid_schema"
+        return evidence
+    if name.casefold() != rsid and rsid not in synonym_values:
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
         evidence["failure_reason"] = "variant_identity_mismatch"
         return evidence
-    returned_assembly = _text(variant.get("reference_genome"), 20)
-    if (
-        returned_assembly is not None
-        and returned_assembly != evidence["assembly"]
-    ):
-        evidence["status"] = "invalid_response"
-        evidence["failure_reason"] = "assembly_mismatch"
-        return evidence
-    expected_parts = variant_id.split("-", 3)
-    returned_chrom = _text(variant.get("chrom"), 10)
-    returned_ref = _text(variant.get("ref"), 10_000)
-    returned_alt = _text(variant.get("alt"), 10_000)
-    returned_parts = (
-        (
-            returned_chrom.removeprefix("chr")
-            if returned_chrom is not None
-            else None
-        ),
-        variant.get("pos"),
-        returned_ref.upper() if returned_ref is not None else None,
-        returned_alt.upper() if returned_alt is not None else None,
-    )
-    if any(value is not None for value in returned_parts) and (
-        returned_parts
-        != (
-            expected_parts[0],
-            int(expected_parts[1]),
-            expected_parts[2],
-            expected_parts[3],
+    try:
+        populations, invalid = _ensembl_population_rows(
+            payload.get("populations")
         )
-    ):
+    except ProviderResponseError as exc:
         evidence["status"] = "invalid_response"
-        evidence["failure_reason"] = "variant_identity_mismatch"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = exc.reason
         return evidence
 
-    valid_blocks = 0
-    invalid_blocks = 0
-    for field in ("exome", "genome", "joint"):
-        try:
-            block = _population_block(
-                variant.get(field),
-                filtering_af=(
-                    variant.get("faf95_joint")
-                    if field == "joint"
-                    else None
-                ),
-            )
-        except ConditionalEnrichmentError:
-            block = None
-            invalid_blocks += 1
-        evidence[field] = block
-        if block is not None:
-            valid_blocks += 1
-    if valid_blocks == 0:
+    source = _text(payload.get("source"), 100)
+    release_value = payload.get("release")
+    release = (
+        _text(release_value, 100)
+        if isinstance(release_value, str)
+        else (
+            str(release_value)
+            if isinstance(release_value, int)
+            and not isinstance(release_value, bool)
+            else None
+        )
+    )
+    evidence.update(
+        {
+            "provider_version": release,
+            "upstream_sources": [source] if source else [],
+            "dataset": source,
+            "release": release,
+            "most_severe_consequence": _text(
+                payload.get("most_severe_consequence"),
+                200,
+            ),
+            "minor_allele": _text(payload.get("minor_allele"), 100),
+            "global_maf": _finite_frequency(payload.get("MAF")),
+            "populations": populations,
+        }
+    )
+    if not populations:
         evidence["status"] = (
-            "invalid_response"
-            if invalid_blocks or graph_errors
-            else "no_association"
+            "invalid_response" if invalid else "no_match"
         )
+        evidence["response_status"] = evidence["status"]
         evidence["failure_reason"] = (
-            "invalid_population_schema"
-            if invalid_blocks
-            else ("graphql_error" if graph_errors else None)
+            "invalid_schema" if invalid else None
         )
-        return evidence
-    if invalid_blocks or graph_errors:
+    elif invalid:
         evidence["status"] = "partial"
+        evidence["response_status"] = "partial"
         evidence["warnings"] = [
-            "gnomAD returned partial population evidence."
+            "Ensembl returned partial population-frequency evidence."
         ]
     else:
         evidence["status"] = "available"
+        evidence["response_status"] = "available"
     return evidence
+
+
+def fetch_gnomad_evidence(
+    candidate: Mapping[str, object],
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """Return an explicit disabled result for the deprecated adapter."""
+
+    _ = session
+    if not isinstance(candidate, Mapping):
+        raise ConditionalEnrichmentError("Candidate must be a mapping.")
+    return {
+        "status": "deprecated",
+        "response_status": "deprecated",
+        "provider": "gnomAD",
+        "active": False,
+        "retrieved_at": None,
+        "failure_reason": "adapter_disabled",
+    }
 
 
 def _candidate_identifiers(
@@ -811,34 +775,367 @@ def _summary_articles(
 def _provider_status(
     status: str,
     *,
+    provider: str,
+    upstream_sources: list[str],
+    query_identifier: str | None = None,
+    source_url: str | None = None,
+    dataset: str | None = None,
+    release: str | None = None,
+    derivation: str = "direct",
+    retrieved_at: str | None = None,
     http_status: int | None = None,
     failure_reason: str | None = None,
     result_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "status": status,
+        "response_status": status,
+        "provider": provider,
+        "upstream_sources": upstream_sources,
+        "query_identifier": query_identifier,
+        "retrieved_at": retrieved_at,
+        "source_url": source_url,
+        "dataset": dataset,
+        "release": release,
+        "derivation": derivation,
         "http_status": http_status,
         "result_count": result_count,
         "failure_reason": failure_reason,
     }
 
 
+def _literature_provider_status(
+    name: str,
+    status: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    metadata = {
+        "litvar": (
+            "LitVar2",
+            ["LitVar2", "PubMed"],
+            "LitVar2",
+            settings.LITVAR_BASE_URL,
+        ),
+        "europe_pmc": (
+            "Europe PMC",
+            ["Europe PMC", "PubMed"],
+            "Europe PMC",
+            f"{settings.EUROPE_PMC_BASE_URL}/search",
+        ),
+        "pubmed": (
+            "PubMed E-utilities",
+            ["PubMed"],
+            "PubMed",
+            f"{settings.PUBMED_BASE_URL}/esearch.fcgi",
+        ),
+    }
+    provider, upstream, dataset, source_url = metadata[name]
+    details: dict[str, Any] = {
+        "dataset": dataset,
+        "source_url": source_url,
+    }
+    details.update(kwargs)
+    return _provider_status(
+        status,
+        provider=provider,
+        upstream_sources=upstream,
+        **details,
+    )
+
+
 def _empty_literature(status: str) -> dict[str, Any]:
+    retrieved_at = None if status == "not_triggered" else _timestamp()
     return {
         "status": status,
-        "provider": "LitVar2/PubMed",
-        "provider_version": "LitVar2; E-utilities",
-        "retrieved_at": None if status == "not_triggered" else _timestamp(),
+        "response_status": status,
+        "provider": "LitVar2 with Europe PMC and PubMed fallbacks",
+        "provider_version": None,
+        "upstream_sources": ["LitVar2", "Europe PMC", "PubMed"],
+        "retrieved_at": retrieved_at,
         "query_basis": [],
         "providers": {
-            "litvar": _provider_status(status),
-            "pubmed": _provider_status(status),
+            name: _literature_provider_status(
+                name,
+                (
+                    status
+                    if name == "litvar" or status == "not_triggered"
+                    else "not_triggered"
+                ),
+                retrieved_at=(
+                    retrieved_at
+                    if name == "litvar"
+                    else None
+                ),
+            )
+            for name in ("litvar", "europe_pmc", "pubmed")
         },
         "articles": [],
-        "pmcids": [],
         "warnings": [],
         "failure_reason": None,
     }
+
+
+def _empty_article(
+    *,
+    pmid: str | None = None,
+    pmcid: str | None = None,
+    doi: str | None = None,
+    provider: str,
+) -> dict[str, Any]:
+    return {
+        "pmid": pmid,
+        "pmcid": pmcid,
+        "title": None,
+        "journal": None,
+        "publication_date": None,
+        "authors": [],
+        "doi": doi,
+        "source_providers": [provider],
+        "url": (
+            f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            if pmid is not None
+            else (
+                f"https://europepmc.org/article/MED/{pmcid}"
+                if pmcid is not None
+                else None
+            )
+        ),
+    }
+
+
+def _normalized_pmid(value: object) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return str(value)
+    text = _text(value, 20)
+    return text if text is not None and text.isdigit() else None
+
+
+def _normalized_pmcid(value: object) -> str | None:
+    text = _text(value, 30)
+    if text is None or not text.upper().startswith("PMC"):
+        return None
+    return text.upper()
+
+
+def _normalized_doi(value: object) -> str | None:
+    text = _text(value, 200)
+    return text.casefold() if text is not None else None
+
+
+def _litvar_articles(
+    payload: object,
+) -> tuple[list[dict[str, Any]], int]:
+    if isinstance(payload, dict):
+        for field in ("publications", "results", "result", "data"):
+            if isinstance(payload.get(field), list):
+                payload = payload[field]
+                break
+    if isinstance(payload, list):
+        articles: list[dict[str, Any]] = []
+        invalid = 0
+        for item in payload[:1000]:
+            if isinstance(item, (int, str)):
+                pmid = _normalized_pmid(item)
+                pmcid = _normalized_pmcid(item)
+                if pmid is not None or pmcid is not None:
+                    articles.append(
+                        _empty_article(
+                            pmid=pmid,
+                            pmcid=pmcid,
+                            provider="LitVar2",
+                        )
+                    )
+                else:
+                    invalid += 1
+                continue
+            if not isinstance(item, dict):
+                invalid += 1
+                continue
+            pmid = _normalized_pmid(
+                item.get("pmid", item.get("PMID"))
+            )
+            pmcid = _normalized_pmcid(
+                item.get("pmcid", item.get("PMCID"))
+            )
+            doi = _normalized_doi(item.get("doi"))
+            if pmid is None and pmcid is None and doi is None:
+                invalid += 1
+                continue
+            article = _empty_article(
+                pmid=pmid,
+                pmcid=pmcid,
+                doi=doi,
+                provider="LitVar2",
+            )
+            article.update(
+                {
+                    "title": _text(item.get("title"), 500),
+                    "journal": _text(item.get("journal"), 300),
+                    "publication_date": _text(
+                        item.get("publication_date"),
+                        100,
+                    ),
+                }
+            )
+            articles.append(article)
+        return articles, invalid
+    identifiers = _publication_ids(payload)
+    articles = [
+        _empty_article(pmid=pmid, provider="LitVar2")
+        for pmid in sorted(
+            identifiers["pmids"],
+            key=int,
+            reverse=True,
+        )
+    ]
+    articles.extend(
+        _empty_article(pmcid=pmcid, provider="LitVar2")
+        for pmcid in sorted(identifiers["pmcids"])
+    )
+    return articles, 0
+
+
+def _europe_pmc_articles(
+    payload: object,
+) -> tuple[list[dict[str, Any]], int]:
+    if not isinstance(payload, dict):
+        raise ProviderResponseError("invalid_schema")
+    result_list = payload.get("resultList")
+    if not isinstance(result_list, dict) or not isinstance(
+        result_list.get("result"),
+        list,
+    ):
+        raise ProviderResponseError("invalid_schema")
+    articles: list[dict[str, Any]] = []
+    invalid = 0
+    for item in result_list["result"][
+        : settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES
+    ]:
+        if not isinstance(item, dict):
+            invalid += 1
+            continue
+        pmid = _normalized_pmid(item.get("pmid"))
+        pmcid = _normalized_pmcid(item.get("pmcid"))
+        doi = _normalized_doi(item.get("doi"))
+        if pmid is None and pmcid is None and doi is None:
+            invalid += 1
+            continue
+        author_text = _text(item.get("authorString"), 1000)
+        article = _empty_article(
+            pmid=pmid,
+            pmcid=pmcid,
+            doi=doi,
+            provider="Europe PMC",
+        )
+        article.update(
+            {
+                "title": _text(item.get("title"), 500),
+                "journal": _text(item.get("journalTitle"), 300),
+                "publication_date": _text(
+                    item.get(
+                        "firstPublicationDate",
+                        item.get("pubYear"),
+                    ),
+                    100,
+                ),
+                "authors": [author_text] if author_text else [],
+                "url": (
+                    f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    if pmid
+                    else (
+                        f"https://europepmc.org/article/PMC/{pmcid}"
+                        if pmcid
+                        else f"https://doi.org/{doi}"
+                    )
+                ),
+            }
+        )
+        articles.append(article)
+    return articles, invalid
+
+
+def _article_matches(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> bool:
+    """Match by the strongest identifier shared by both records."""
+
+    for field in ("pmid", "pmcid", "doi"):
+        left_value = left.get(field)
+        right_value = right.get(field)
+        if isinstance(left_value, str) and isinstance(right_value, str):
+            return left_value.casefold() == right_value.casefold()
+    return False
+
+
+def _deduplicate_articles(
+    articles: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduplicated: list[dict[str, Any]] = []
+
+    def merge(
+        existing: dict[str, Any],
+        article: Mapping[str, Any],
+    ) -> None:
+        for field in (
+            "pmid",
+            "pmcid",
+            "title",
+            "journal",
+            "publication_date",
+            "doi",
+            "url",
+        ):
+            if (
+                existing.get(field) is None
+                and article.get(field) is not None
+            ):
+                existing[field] = deepcopy(article[field])
+        existing["authors"] = list(
+            dict.fromkeys(
+                [
+                    *existing.get("authors", []),
+                    *article.get("authors", []),
+                ]
+            )
+        )[:20]
+        existing["source_providers"] = list(
+            dict.fromkeys(
+                [
+                    *existing.get("source_providers", []),
+                    *article.get("source_providers", []),
+                ]
+            )
+        )
+
+    for article in articles:
+        matching_indexes = [
+            index
+            for index, item in enumerate(deduplicated)
+            if _article_matches(item, article)
+        ]
+        if not matching_indexes:
+            deduplicated.append(deepcopy(article))
+            continue
+        primary = deduplicated[matching_indexes[0]]
+        merge(primary, article)
+        for index in reversed(matching_indexes[1:]):
+            merge(primary, deduplicated[index])
+            deduplicated.pop(index)
+    return deduplicated[
+        : settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES
+    ]
+
+
+def _provider_failure_status(
+    exc: requests.RequestException,
+) -> tuple[str, int | None, str]:
+    response = getattr(exc, "response", None)
+    return (
+        "unavailable",
+        getattr(response, "status_code", None),
+        _request_failure_reason(exc),
+    )
 
 
 def fetch_literature_evidence(
@@ -846,7 +1143,7 @@ def fetch_literature_evidence(
     *,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    """Fetch bounded variant-focused LitVar2 and PubMed citations."""
+    """Fetch LitVar2 citations with failure-only bounded fallbacks."""
 
     if not isinstance(candidate, Mapping):
         raise ConditionalEnrichmentError("Candidate must be a mapping.")
@@ -857,227 +1154,346 @@ def fetch_literature_evidence(
         item for item in ([gene] + identifiers) if item is not None
     ][:MAX_QUERY_TERMS]
     if not identifiers and query is None:
-        result["status"] = "not_applicable"
-        result["providers"]["litvar"] = _provider_status(
-            "not_applicable"
-        )
-        result["providers"]["pubmed"] = _provider_status(
-            "not_applicable"
-        )
+        result["status"] = "missing_identifier"
+        result["response_status"] = "missing_identifier"
+        for name in result["providers"]:
+            result["providers"][name] = _literature_provider_status(
+                name,
+                "missing_identifier",
+                retrieved_at=result["retrieved_at"],
+                failure_reason="insufficient_query_identifiers",
+            )
         result["failure_reason"] = "insufficient_query_identifiers"
         return result
 
     owns_session = session is None
     client = session or requests.Session()
-    litvar_pmids: set[str] = set()
-    litvar_pmcids: set[str] = set()
+    articles: list[dict[str, Any]] = []
+    litvar_failed = False
+    litvar_http_status: int | None = None
     if identifiers:
         autocomplete_query = (
             f"{gene} {identifiers[0]}" if gene else identifiers[0]
         )
+        autocomplete_url = (
+            f"{settings.LITVAR_BASE_URL}/variant/autocomplete/"
+        )
         try:
             payload, status, _ = _request_json(
                 client,
-                "GET",
-                (
-                    f"{settings.LITVAR_BASE_URL}/variant/"
-                    "autocomplete/"
-                ),
+                autocomplete_url,
                 params={"query": autocomplete_query, "limit": 10},
                 ncbi=True,
                 litvar=True,
             )
+            litvar_http_status = status
             litvar_id = _litvar_variant_id(
                 payload,
                 identifiers=identifiers,
                 gene=gene,
             )
             if litvar_id is None:
-                result["providers"]["litvar"] = _provider_status(
-                    "no_association",
+                result["providers"]["litvar"] = (
+                    _literature_provider_status(
+                    "litvar",
+                    "no_match",
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=identifiers[0],
+                    source_url=autocomplete_url,
                     http_status=status,
                 )
+                )
             else:
+                encoded_id = quote(litvar_id, safe="")
+                publication_url = (
+                    f"{settings.LITVAR_BASE_URL}/variant/get/"
+                    f"{encoded_id}/publications"
+                )
                 publication_payload, publication_status, _ = _request_json(
                     client,
-                    "GET",
-                    (
-                        f"{settings.LITVAR_BASE_URL}/variant/get/"
-                        f"{quote(litvar_id, safe='')}/publications"
-                    ),
+                    publication_url,
                     ncbi=True,
                     litvar=True,
                 )
-                publication_ids = _publication_ids(publication_payload)
-                litvar_pmids = publication_ids["pmids"]
-                litvar_pmcids = publication_ids["pmcids"]
-                result["providers"]["litvar"] = _provider_status(
-                    (
-                        "available"
-                        if litvar_pmids or litvar_pmcids
-                        else "no_association"
-                    ),
-                    http_status=publication_status,
-                    result_count=len(litvar_pmids) + len(litvar_pmcids),
+                litvar_http_status = publication_status
+                litvar_articles, invalid_articles = _litvar_articles(
+                    publication_payload
+                )
+                articles.extend(litvar_articles)
+                litvar_state = (
+                    "partial"
+                    if invalid_articles and litvar_articles
+                    else (
+                        "invalid_response"
+                        if invalid_articles
+                        else (
+                            "available"
+                            if litvar_articles
+                            else "no_match"
+                        )
+                    )
+                )
+                litvar_failed = invalid_articles > 0
+                result["providers"]["litvar"] = (
+                    _literature_provider_status(
+                        "litvar",
+                        litvar_state,
+                        retrieved_at=result["retrieved_at"],
+                        query_identifier=litvar_id,
+                        source_url=publication_url,
+                        http_status=publication_status,
+                        result_count=len(litvar_articles),
+                        failure_reason=(
+                            "invalid_schema"
+                            if invalid_articles
+                            else None
+                        ),
+                    )
                 )
         except requests.RequestException as exc:
-            response = getattr(exc, "response", None)
-            result["providers"]["litvar"] = _provider_status(
-                "unavailable",
-                http_status=getattr(response, "status_code", None),
-                failure_reason=(
-                    "timeout"
-                    if isinstance(exc, requests.Timeout)
-                    else "http_or_network_error"
-                ),
+            litvar_failed = True
+            status, http_status, reason = _provider_failure_status(exc)
+            result["providers"]["litvar"] = _literature_provider_status(
+                "litvar",
+                status,
+                retrieved_at=result["retrieved_at"],
+                query_identifier=identifiers[0],
+                source_url=autocomplete_url,
+                http_status=http_status,
+                failure_reason=reason,
+            )
+        except ProviderResponseError as exc:
+            litvar_failed = True
+            result["providers"]["litvar"] = _literature_provider_status(
+                "litvar",
+                "invalid_response",
+                retrieved_at=result["retrieved_at"],
+                query_identifier=identifiers[0],
+                source_url=autocomplete_url,
+                http_status=exc.http_status,
+                failure_reason=exc.reason,
             )
         except ConditionalEnrichmentError:
-            result["providers"]["litvar"] = _provider_status(
+            litvar_failed = True
+            result["providers"]["litvar"] = _literature_provider_status(
+                "litvar",
                 "invalid_response",
+                retrieved_at=result["retrieved_at"],
+                query_identifier=identifiers[0],
+                source_url=autocomplete_url,
+                http_status=litvar_http_status,
                 failure_reason="invalid_schema",
             )
     else:
-        result["providers"]["litvar"] = _provider_status(
-            "not_applicable"
+        result["providers"]["litvar"] = _literature_provider_status(
+            "litvar",
+            "missing_identifier",
+            retrieved_at=result["retrieved_at"],
+            failure_reason="missing_variant_identifier",
         )
 
-    pubmed_pmids: list[str] = []
-    if query is not None:
+    europe_failed = False
+    europe_http_status: int | None = None
+    if litvar_failed and query is not None:
+        europe_url = f"{settings.EUROPE_PMC_BASE_URL}/search"
+        try:
+            europe_payload, europe_status, _ = _request_json(
+                client,
+                europe_url,
+                params={
+                    "query": query,
+                    "format": "json",
+                    "pageSize": (
+                        settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES
+                    ),
+                },
+            )
+            europe_http_status = europe_status
+            europe_articles, invalid = _europe_pmc_articles(
+                europe_payload
+            )
+            articles.extend(europe_articles)
+            europe_state = (
+                "partial"
+                if invalid and europe_articles
+                else (
+                    "invalid_response"
+                    if invalid
+                    else (
+                        "available"
+                        if europe_articles
+                        else "no_match"
+                    )
+                )
+            )
+            europe_failed = europe_state in {
+                "partial",
+                "invalid_response",
+            }
+            result["providers"]["europe_pmc"] = (
+                _literature_provider_status(
+                    "europe_pmc",
+                    europe_state,
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=europe_url,
+                    http_status=europe_status,
+                    result_count=len(europe_articles),
+                    failure_reason=(
+                        "invalid_schema" if invalid else None
+                    ),
+                )
+            )
+        except requests.RequestException as exc:
+            europe_failed = True
+            status, http_status, reason = _provider_failure_status(exc)
+            result["providers"]["europe_pmc"] = (
+                _literature_provider_status(
+                    "europe_pmc",
+                    status,
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=europe_url,
+                    http_status=http_status,
+                    failure_reason=reason,
+                )
+            )
+        except ProviderResponseError as exc:
+            europe_failed = True
+            result["providers"]["europe_pmc"] = (
+                _literature_provider_status(
+                    "europe_pmc",
+                    "invalid_response",
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=europe_url,
+                    http_status=(
+                        exc.http_status or europe_http_status
+                    ),
+                    failure_reason=exc.reason,
+                )
+            )
+    elif litvar_failed:
+        result["providers"]["europe_pmc"] = (
+            _literature_provider_status(
+                "europe_pmc",
+                "missing_identifier",
+                retrieved_at=result["retrieved_at"],
+                failure_reason="insufficient_query_identifiers",
+            )
+        )
+
+    if europe_failed and query is not None:
+        search_url = f"{settings.PUBMED_BASE_URL}/esearch.fcgi"
+        pubmed_pmids: list[str] = []
+        pubmed_http_status: int | None = None
         try:
             search_payload, search_status, _ = _request_json(
                 client,
-                "GET",
-                f"{settings.PUBMED_BASE_URL}/esearch.fcgi",
+                search_url,
                 params={
                     "db": "pubmed",
                     "retmode": "json",
-                    "retmax": settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES,
+                    "retmax": (
+                        settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES
+                    ),
                     "sort": "relevance",
                     "tool": "clinical_variant_app",
                     "term": query,
                 },
                 ncbi=True,
             )
+            pubmed_http_status = search_status
             pubmed_pmids = _pubmed_search_ids(search_payload)
-            result["providers"]["pubmed"] = _provider_status(
-                "available" if pubmed_pmids else "no_association",
-                http_status=search_status,
-                result_count=len(pubmed_pmids),
-            )
-        except requests.RequestException as exc:
-            response = getattr(exc, "response", None)
-            result["providers"]["pubmed"] = _provider_status(
-                "unavailable",
-                http_status=getattr(response, "status_code", None),
-                failure_reason=(
-                    "timeout"
-                    if isinstance(exc, requests.Timeout)
-                    else "http_or_network_error"
-                ),
-            )
-        except ConditionalEnrichmentError:
-            result["providers"]["pubmed"] = _provider_status(
-                "invalid_response",
-                failure_reason="invalid_schema",
-            )
-    else:
-        result["providers"]["pubmed"] = _provider_status(
-            "not_applicable"
-        )
-
-    all_pmids = list(
-        dict.fromkeys(
-            [
-                *sorted(litvar_pmids, key=int, reverse=True),
-                *pubmed_pmids,
+            pubmed_articles = [
+                _empty_article(pmid=pmid, provider="PubMed")
+                for pmid in pubmed_pmids
             ]
-        )
-    )[: settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES]
-    articles = {
-        pmid: {
-            "pmid": pmid,
-            "pmcid": None,
-            "title": None,
-            "journal": None,
-            "publication_date": None,
-            "authors": [],
-            "doi": None,
-            "source_providers": (
-                ["LitVar2", "PubMed"]
-                if pmid in litvar_pmids and pmid in pubmed_pmids
-                else (["LitVar2"] if pmid in litvar_pmids else ["PubMed"])
-            ),
-            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-        }
-        for pmid in all_pmids
-    }
-    if all_pmids:
-        try:
-            summary_payload, summary_status, _ = _request_json(
-                client,
-                "GET",
-                f"{settings.PUBMED_BASE_URL}/esummary.fcgi",
-                params={
-                    "db": "pubmed",
-                    "retmode": "json",
-                    "id": ",".join(all_pmids),
-                    "tool": "clinical_variant_app",
-                },
-                ncbi=True,
+            articles.extend(pubmed_articles)
+            result["providers"]["pubmed"] = (
+                _literature_provider_status(
+                    "pubmed",
+                    "available" if pubmed_pmids else "no_match",
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=search_url,
+                    http_status=search_status,
+                    result_count=len(pubmed_pmids),
+                )
             )
-            summaries = _summary_articles(summary_payload, all_pmids)
-            for pmid, summary in summaries.items():
-                summary["source_providers"] = list(
-                    dict.fromkeys(
-                        [
-                            *articles[pmid]["source_providers"],
-                            "PubMed",
-                        ]
-                    )
-                )
-                articles[pmid] = summary
-            if (
-                summaries
-                and result["providers"]["pubmed"]["status"]
-                != "available"
-            ):
-                result["providers"]["pubmed"] = _provider_status(
-                    "partial",
-                    http_status=summary_status,
-                    result_count=len(summaries),
-                    failure_reason="search_not_available",
-                )
         except requests.RequestException as exc:
-            result["warnings"].append(
-                "PubMed metadata was unavailable; identifiers were retained."
+            status, http_status, reason = _provider_failure_status(exc)
+            result["providers"]["pubmed"] = (
+                _literature_provider_status(
+                    "pubmed",
+                    status,
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=search_url,
+                    http_status=http_status,
+                    failure_reason=reason,
+                )
             )
-            response = getattr(exc, "response", None)
-            result["providers"]["pubmed"] = _provider_status(
-                "partial" if pubmed_pmids else "unavailable",
-                http_status=getattr(response, "status_code", None),
-                result_count=len(pubmed_pmids),
-                failure_reason=(
-                    "metadata_timeout"
-                    if isinstance(exc, requests.Timeout)
-                    else "metadata_http_or_network_error"
-                ),
+        except ProviderResponseError as exc:
+            result["providers"]["pubmed"] = (
+                _literature_provider_status(
+                    "pubmed",
+                    "invalid_response",
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=search_url,
+                    http_status=exc.http_status,
+                    failure_reason=exc.reason,
+                )
             )
         except ConditionalEnrichmentError:
-            result["warnings"].append(
-                "PubMed metadata was invalid; identifiers were retained."
+            result["providers"]["pubmed"] = (
+                _literature_provider_status(
+                    "pubmed",
+                    "invalid_response",
+                    retrieved_at=result["retrieved_at"],
+                    query_identifier=query,
+                    source_url=search_url,
+                    http_status=pubmed_http_status,
+                    failure_reason="invalid_schema",
+                )
             )
-            result["providers"]["pubmed"] = _provider_status(
-                "partial" if pubmed_pmids else "invalid_response",
-                result_count=len(pubmed_pmids),
-                failure_reason="metadata_invalid_schema",
-            )
+
+        if pubmed_pmids:
+            try:
+                summary_payload, _, _ = _request_json(
+                    client,
+                    f"{settings.PUBMED_BASE_URL}/esummary.fcgi",
+                    params={
+                        "db": "pubmed",
+                        "retmode": "json",
+                        "id": ",".join(pubmed_pmids),
+                        "tool": "clinical_variant_app",
+                    },
+                    ncbi=True,
+                )
+                articles.extend(
+                    _summary_articles(
+                        summary_payload,
+                        pubmed_pmids,
+                    ).values()
+                )
+            except (
+                requests.RequestException,
+                ConditionalEnrichmentError,
+            ):
+                result["warnings"].append(
+                    "PubMed metadata was unavailable; identifiers "
+                    "were retained."
+                )
+                provider = result["providers"]["pubmed"]
+                provider["status"] = "partial"
+                provider["response_status"] = "partial"
+                provider["failure_reason"] = "metadata_unavailable"
     if owns_session:
         client.close()
 
-    result["pmcids"] = sorted(litvar_pmcids)[
-        : settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES
-    ]
-    result["articles"] = list(articles.values())
+    result["articles"] = _deduplicate_articles(articles)
     provider_statuses = {
         item["status"] for item in result["providers"].values()
     }
@@ -1088,12 +1504,15 @@ def fetch_literature_evidence(
     }
     if result["articles"]:
         result["status"] = "partial" if failures else "available"
-    elif provider_statuses <= {"no_association", "not_applicable"}:
-        result["status"] = "no_association"
+    elif "no_match" in provider_statuses and not failures:
+        result["status"] = "no_match"
     elif "invalid_response" in failures and "unavailable" not in failures:
         result["status"] = "invalid_response"
-    else:
+    elif failures:
         result["status"] = "unavailable"
+    else:
+        result["status"] = "missing_identifier"
+    result["response_status"] = result["status"]
     result["failure_reason"] = (
         "provider_failure" if failures and not result["articles"] else None
     )
@@ -1179,8 +1598,8 @@ def determine_enrichment_triggers(
 def _myvariant_fallback(
     candidate: Mapping[str, object],
     *,
-    gnomad_needed: bool,
-    gnomad_status: str,
+    population_needed: bool,
+    population_status: str,
 ) -> dict[str, Any]:
     myvariant = _mapping(
         _mapping(candidate.get("sources")).get("myvariant")
@@ -1188,13 +1607,13 @@ def _myvariant_fallback(
     frequencies = _mapping(myvariant.get("population_frequencies"))
     usable = myvariant.get("status") == "success" and bool(frequencies)
     used = (
-        gnomad_needed
-        and gnomad_status
+        population_needed
+        and population_status
         in {
-            "no_association",
+            "no_match",
             "unavailable",
             "invalid_response",
-            "not_applicable",
+            "missing_identifier",
         }
         and usable
     )
@@ -1203,10 +1622,14 @@ def _myvariant_fallback(
         "status": (
             "used"
             if used
-            else ("unavailable" if gnomad_needed and not usable else "not_needed")
+            else (
+                "unavailable"
+                if population_needed and not usable
+                else "not_needed"
+            )
         ),
         "reason": (
-            f"direct_gnomad_{gnomad_status}"
+            f"direct_population_{population_status}"
             if used
             else None
         ),
@@ -1227,10 +1650,10 @@ def _status_summary(statuses: Iterable[str]) -> str:
     if any(value in {"available", "partial"} for value in values):
         return "success"
     if all(
-        value in {"no_association", "not_applicable", "not_triggered"}
+        value in {"no_match", "missing_identifier", "not_triggered"}
         for value in values
     ):
-        return "no_association"
+        return "no_match"
     if any(
         value in {"unavailable", "invalid_response"} for value in values
     ):
@@ -1242,7 +1665,7 @@ def enrich_conditionally(
     candidates: Iterable[dict[str, Any]],
     preliminary_evidence: Iterable[Mapping[str, object]],
     *,
-    gnomad_session: requests.Session | None = None,
+    population_session: requests.Session | None = None,
     literature_session: requests.Session | None = None,
 ) -> ConditionalEnrichmentResult:
     """Enrich only triggered variants without changing their order."""
@@ -1261,8 +1684,9 @@ def enrich_conditionally(
 
     enriched: list[dict[str, Any]] = []
     triggered_count = 0
-    gnomad_statuses: list[str] = []
+    population_statuses: list[str] = []
     litvar_statuses: list[str] = []
+    europe_pmc_statuses: list[str] = []
     pubmed_statuses: list[str] = []
     for index, (candidate, evidence) in enumerate(
         zip(candidate_items, evidence_items, strict=True)
@@ -1280,7 +1704,7 @@ def enrich_conditionally(
             triggered_count
             < settings.CONDITIONAL_ENRICHMENT_MAX_VARIANTS
         )
-        gnomad_needed = bool(
+        population_needed = bool(
             set(triggers)
             & {
                 "vus",
@@ -1289,10 +1713,12 @@ def enrich_conditionally(
             }
         )
         literature_needed = "literature_evidence_need" in triggers
-        if (gnomad_needed or literature_needed) and within_limit:
+        if (population_needed or literature_needed) and within_limit:
             triggered_count += 1
-        elif not within_limit and (gnomad_needed or literature_needed):
-            gnomad = _empty_gnomad(
+        elif not within_limit and (
+            population_needed or literature_needed
+        ):
+            population = _empty_population_evidence(
                 status="not_triggered",
                 candidate=item,
                 failure_reason="analysis_enrichment_limit",
@@ -1302,27 +1728,34 @@ def enrich_conditionally(
             item["conditional_enrichment"] = {
                 "triggered": False,
                 "triggers": triggers,
-                "gnomad": gnomad,
+                "population_frequency": population,
                 "literature": literature,
                 "myvariant_fallback": _myvariant_fallback(
                     item,
-                    gnomad_needed=False,
-                    gnomad_status="not_triggered",
+                    population_needed=False,
+                    population_status="not_triggered",
                 ),
                 "warnings": [
                     "Conditional enrichment was skipped by the analysis limit."
                 ],
             }
             enriched.append(item)
-            gnomad_statuses.append("not_triggered")
+            population_statuses.append("not_triggered")
             litvar_statuses.append("not_triggered")
+            europe_pmc_statuses.append("not_triggered")
             pubmed_statuses.append("not_triggered")
             continue
 
-        gnomad = (
-            fetch_gnomad_evidence(item, session=gnomad_session)
-            if gnomad_needed
-            else _empty_gnomad(status="not_triggered", candidate=item)
+        population = (
+            fetch_ensembl_population_evidence(
+                item,
+                session=population_session,
+            )
+            if population_needed
+            else _empty_population_evidence(
+                status="not_triggered",
+                candidate=item,
+            )
         )
         literature = (
             fetch_literature_evidence(
@@ -1333,35 +1766,40 @@ def enrich_conditionally(
             else _empty_literature("not_triggered")
         )
         litvar_status = literature["providers"]["litvar"]["status"]
+        europe_pmc_status = literature["providers"][
+            "europe_pmc"
+        ]["status"]
         pubmed_status = literature["providers"]["pubmed"]["status"]
         item["conditional_enrichment"] = {
-            "triggered": bool(gnomad_needed or literature_needed),
+            "triggered": bool(population_needed or literature_needed),
             "triggers": triggers,
-            "gnomad": gnomad,
+            "population_frequency": population,
             "literature": literature,
             "myvariant_fallback": _myvariant_fallback(
                 item,
-                gnomad_needed=gnomad_needed,
-                gnomad_status=gnomad["status"],
+                population_needed=population_needed,
+                population_status=population["status"],
             ),
             "warnings": [
                 warning
                 for warning in (
-                    *gnomad["warnings"],
+                    *population["warnings"],
                     *literature["warnings"],
                 )
                 if isinstance(warning, str)
             ],
         }
         enriched.append(item)
-        gnomad_statuses.append(gnomad["status"])
+        population_statuses.append(population["status"])
         litvar_statuses.append(litvar_status)
+        europe_pmc_statuses.append(europe_pmc_status)
         pubmed_statuses.append(pubmed_status)
 
     overall = _status_summary(
         [
-            *gnomad_statuses,
+            *population_statuses,
             *litvar_statuses,
+            *europe_pmc_statuses,
             *pubmed_statuses,
         ]
     )
@@ -1374,8 +1812,11 @@ def enrich_conditionally(
         ),
         "variant_count": len(enriched),
         "triggered_count": triggered_count,
-        "gnomad_status": _status_summary(gnomad_statuses),
+        "population_status": _status_summary(population_statuses),
         "litvar_status": _status_summary(litvar_statuses),
+        "europe_pmc_status": _status_summary(
+            europe_pmc_statuses
+        ),
         "pubmed_status": _status_summary(pubmed_statuses),
     }
 
@@ -1385,6 +1826,7 @@ __all__ = [
     "ConditionalEnrichmentResult",
     "determine_enrichment_triggers",
     "enrich_conditionally",
+    "fetch_ensembl_population_evidence",
     "fetch_gnomad_evidence",
     "fetch_literature_evidence",
 ]

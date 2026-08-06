@@ -1400,7 +1400,7 @@ def _build_evidence_and_report(
     llm_client: LLMClient | None,
     llm_model: str | None,
     report_dir: str | Path | None,
-    gnomad_session: requests.Session | None = None,
+    population_session: requests.Session | None = None,
     literature_session: requests.Session | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
@@ -1423,7 +1423,7 @@ def _build_evidence_and_report(
     conditional_result = enrich_conditionally(
         result["phenotype_results"],
         preliminary_evidence,
-        gnomad_session=gnomad_session,
+        population_session=population_session,
         literature_session=literature_session,
     )
     result["phenotype_results"] = conditional_result["variants"]
@@ -1587,7 +1587,7 @@ def _run_analysis_unpersisted(
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
     mydisease_session: requests.Session | None = None,
-    gnomad_session: requests.Session | None = None,
+    population_session: requests.Session | None = None,
     literature_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
@@ -1711,7 +1711,7 @@ def _run_analysis_unpersisted(
             llm_client=llm_client,
             llm_model=llm_model,
             report_dir=report_dir,
-            gnomad_session=gnomad_session,
+            population_session=population_session,
             literature_session=literature_session,
             progress_callback=progress_callback,
         )
@@ -1765,7 +1765,7 @@ def run_analysis(
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
     mydisease_session: requests.Session | None = None,
-    gnomad_session: requests.Session | None = None,
+    population_session: requests.Session | None = None,
     literature_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
@@ -1808,7 +1808,7 @@ def run_analysis(
             phen2gene_session=phen2gene_session,
             phen2gene_use_cache=phen2gene_use_cache,
             mydisease_session=mydisease_session,
-            gnomad_session=gnomad_session,
+            population_session=population_session,
             literature_session=literature_session,
             llm_client=llm_client,
             llm_model=llm_model,

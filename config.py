@@ -242,9 +242,19 @@ class Settings:
         "https://gnomad.broadinstitute.org/api",
     ).strip().rstrip("/")
 
+    ENSEMBL_VARIATION_BASE_URL: str = os.getenv(
+        "ENSEMBL_VARIATION_BASE_URL",
+        "https://rest.ensembl.org",
+    ).strip().rstrip("/")
+
     LITVAR_BASE_URL: str = os.getenv(
         "LITVAR_BASE_URL",
         "https://www.ncbi.nlm.nih.gov/research/litvar2-api",
+    ).strip().rstrip("/")
+
+    EUROPE_PMC_BASE_URL: str = os.getenv(
+        "EUROPE_PMC_BASE_URL",
+        "https://www.ebi.ac.uk/europepmc/webservices/rest",
     ).strip().rstrip("/")
 
     PUBMED_BASE_URL: str = os.getenv(
@@ -430,8 +440,11 @@ class Settings:
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
-            "GNOMAD_BASE_URL": cls.GNOMAD_BASE_URL,
+            "ENSEMBL_VARIATION_BASE_URL": (
+                cls.ENSEMBL_VARIATION_BASE_URL
+            ),
             "LITVAR_BASE_URL": cls.LITVAR_BASE_URL,
+            "EUROPE_PMC_BASE_URL": cls.EUROPE_PMC_BASE_URL,
             "PUBMED_BASE_URL": cls.PUBMED_BASE_URL,
             "HPO_ONTOLOGY_URL": cls.HPO_ONTOLOGY_URL,
             "HPO_GENE_ASSOCIATIONS_URL_TEMPLATE": (

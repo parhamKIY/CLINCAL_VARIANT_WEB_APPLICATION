@@ -31,12 +31,13 @@ from config import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = "2.3"
+EVIDENCE_SCHEMA_VERSION = "2.4"
 SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {
     "1.0",
     "2.0",
     "2.1",
     "2.2",
+    "2.3",
     EVIDENCE_SCHEMA_VERSION,
 }
 INTERPRETATION_PROMPT_VERSION = "1.1"
@@ -60,6 +61,10 @@ UPSTREAM_SOURCE_NAMES = {
     "ncbi clinvar": "ClinVar",
     "dbsnp": "dbSNP",
     "gnomad": "gnomAD",
+    "ensembl": "Ensembl",
+    "europe pmc": "Europe PMC",
+    "pubmed": "PubMed",
+    "litvar2": "LitVar2",
     "exac": "ExAC",
     "dbnsfp": "dbNSFP",
     "cadd": "CADD",
@@ -281,7 +286,7 @@ class EvidenceConditionalEnrichment(TypedDict):
 
     triggered: bool
     triggers: list[str]
-    gnomad: dict[str, Any]
+    population_frequency: dict[str, Any]
     literature: dict[str, Any]
     myvariant_fallback: dict[str, Any]
     warnings: list[str]
@@ -1185,7 +1190,11 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
             "evidence.conditional_enrichment.triggers contains an "
             "unsupported trigger."
         )
-    for field in ("gnomad", "literature", "myvariant_fallback"):
+    for field in (
+        "population_frequency",
+        "literature",
+        "myvariant_fallback",
+    ):
         if not isinstance(enrichment[field], dict):
             raise EvidenceObjectError(
                 f"evidence.conditional_enrichment.{field} must be a "
@@ -3095,40 +3104,6 @@ def _compact_cspec_context(value: object) -> list[dict[str, Any]]:
     ]
 
 
-def _compact_population_block(value: object) -> dict[str, Any] | None:
-    """Retain bounded direct population metrics."""
-
-    if value is None:
-        return None
-    source = _candidate_mapping(value)
-    block = _selected_context(
-        source,
-        (
-            "ac",
-            "an",
-            "af",
-            "homozygote_count",
-            "filtering_af",
-            "filtering_af_population",
-            "filters",
-        ),
-    )
-    populations = source.get("populations")
-    block["populations"] = (
-        [
-            _selected_context(
-                item,
-                ("id", "ac", "an", "af", "homozygote_count"),
-            )
-            for item in populations[:20]
-            if isinstance(item, dict)
-        ]
-        if isinstance(populations, list)
-        else []
-    )
-    return block
-
-
 def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
     """Retain only bounded Stage 32 evidence and explicit missingness."""
 
@@ -3137,16 +3112,16 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
         return {
             "triggered": False,
             "triggers": [],
-            "gnomad": {
+            "population_frequency": {
                 "status": "not_triggered",
-                "exome": None,
-                "genome": None,
-                "joint": None,
+                "provider": "Ensembl REST Variation",
+                "populations": [],
             },
             "literature": {
                 "status": "not_triggered",
                 "providers": {
                     "litvar": {"status": "not_triggered"},
+                    "europe_pmc": {"status": "not_triggered"},
                     "pubmed": {"status": "not_triggered"},
                 },
                 "articles": [],
@@ -3158,26 +3133,45 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             },
             "warnings": [],
         }
-    gnomad_source = _candidate_mapping(source.get("gnomad"))
-    gnomad = _selected_context(
-        gnomad_source,
+    population_source = _candidate_mapping(
+        source.get("population_frequency")
+    )
+    population = _selected_context(
+        population_source,
         (
             "status",
+            "response_status",
             "provider",
             "provider_version",
+            "upstream_sources",
             "retrieved_at",
             "assembly",
             "dataset",
-            "query_variant_id",
+            "release",
+            "query_identifier",
             "http_status",
+            "source_url",
+            "derivation",
+            "most_severe_consequence",
+            "minor_allele",
+            "global_maf",
             "warnings",
             "failure_reason",
         ),
     )
-    for field in ("exome", "genome", "joint"):
-        gnomad[field] = _compact_population_block(
-            gnomad_source.get(field)
-        )
+    populations = population_source.get("populations")
+    population["populations"] = (
+        [
+            _selected_context(
+                item,
+                ("population", "allele", "frequency"),
+            )
+            for item in populations[:20]
+            if isinstance(item, dict)
+        ]
+        if isinstance(populations, list)
+        else []
+    )
 
     literature_source = _candidate_mapping(source.get("literature"))
     providers = _candidate_mapping(literature_source.get("providers"))
@@ -3185,11 +3179,12 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
         literature_source,
         (
             "status",
+            "response_status",
             "provider",
             "provider_version",
+            "upstream_sources",
             "retrieved_at",
             "query_basis",
-            "pmcids",
             "warnings",
             "failure_reason",
         ),
@@ -3199,12 +3194,21 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             _candidate_mapping(providers.get(name)),
             (
                 "status",
+                "response_status",
+                "provider",
+                "upstream_sources",
+                "query_identifier",
+                "retrieved_at",
+                "source_url",
+                "dataset",
+                "release",
+                "derivation",
                 "http_status",
                 "result_count",
                 "failure_reason",
             ),
         )
-        for name in ("litvar", "pubmed")
+        for name in ("litvar", "europe_pmc", "pubmed")
     }
     articles = literature_source.get("articles")
     literature["articles"] = (
@@ -3253,7 +3257,7 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             if isinstance(triggers, list)
             else []
         ),
-        "gnomad": gnomad,
+        "population_frequency": population,
         "literature": literature,
         "myvariant_fallback": fallback,
         "warnings": (
@@ -3626,19 +3630,23 @@ def _build_evidence_lineage(
                 )
             )
 
-    gnomad = _candidate_mapping(
-        conditional_enrichment.get("gnomad")
+    population = _candidate_mapping(
+        conditional_enrichment.get("population_frequency")
     )
-    if gnomad and gnomad.get("status") != "not_triggered":
+    if (
+        population
+        and population.get("status") != "not_triggered"
+    ):
         records.append(
             _lineage_record(
-                "conditional_enrichment.gnomad",
-                gnomad,
-                default_provider="gnomAD",
-                default_upstream_sources=("gnomAD",),
+                "conditional_enrichment.population_frequency",
+                population,
+                default_provider="Ensembl REST Variation",
+                default_upstream_sources=("Ensembl",),
                 derivation="direct",
                 evidence_present=(
-                    gnomad.get("status") in {"available", "partial"}
+                    population.get("status")
+                    in {"available", "partial"}
                 ),
             )
         )
@@ -3652,6 +3660,7 @@ def _build_evidence_lineage(
     article_items = articles if isinstance(articles, list) else []
     for source_name, provider_name, upstream_name in (
         ("litvar", "LitVar2", "LitVar2"),
+        ("europe_pmc", "Europe PMC", "Europe PMC"),
         ("pubmed", "PubMed", "PubMed"),
     ):
         provider_status = _candidate_mapping(
@@ -3662,9 +3671,11 @@ def _build_evidence_lineage(
             or provider_status.get("status") == "not_triggered"
         ):
             continue
-        source_marker = (
-            "LitVar2" if source_name == "litvar" else "PubMed"
-        )
+        source_marker = {
+            "litvar": "LitVar2",
+            "europe_pmc": "Europe PMC",
+            "pubmed": "PubMed",
+        }[source_name]
         has_articles = any(
             isinstance(article, dict)
             and source_marker in article.get("source_providers", [])
