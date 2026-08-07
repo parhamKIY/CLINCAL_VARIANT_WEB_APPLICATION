@@ -70,15 +70,15 @@ flowchart LR
 | **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, UCSC GenCC, and ClinGen CSpec integrations |
 | **Phenotype correlation** | Local HPO matching, Phen2Gene prioritization metadata, and bounded MyDisease.info gene-disease-phenotype context |
 | **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
-| **Reporting** | Validated plain text plus local PDF and Word exports |
+| **Reporting** | Editable evidence Output A, confirmed reviewed-evidence packages, and local text/PDF/Word exports |
 | **Safety** | Data minimization, bounded storage, secret scanning, safe errors, and security acceptance gates |
 
 ---
 
 ## API-first continuation
 
-Stage 28 MyDisease.info context integration is implemented. Stages 29 and later remain
-planned until the code and tests for each stage are completed. The repository
+Stages 27–34 are implemented and tested. Stage 35 and later remain planned
+until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
 [`docs/STAGE_19_REPOSITORY_REALITY_CHECK.md`](docs/STAGE_19_REPOSITORY_REALITY_CHECK.md).
@@ -138,6 +138,17 @@ LLM interpretation and one report for the first allele.
   primary disease through an exact MONDO material-basis HGNC relation, and
   attaches bounded disease/HPO context with explicit upstream provenance and
   missingness without changing pathogenicity.
+- Stages 29–31 provide bounded Evidence Object V2, evidence lineage, shared
+  upstream-source collapsing, and deterministic pre/post-review conflict
+  auditing without assigning a final classification.
+- Stage 32 conditionally queries exact normalized alleles through the direct
+  gnomAD GraphQL API and performs bounded LitVar2, Europe PMC, and PubMed
+  literature enrichment before Output A.
+- Stage 33 creates one full-access editable evidence report per variant while
+  preserving the original machine evidence and append-only edit history.
+- Stage 34 requires explicit human confirmation, stores the validated package
+  in pipeline state, reruns the deterministic conflict audit, and invalidates
+  confirmation whenever the reviewed draft changes. The LLM remains skipped.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.

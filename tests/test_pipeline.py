@@ -198,6 +198,7 @@ from frontend.execution import (
     FrontendExecutionError,
     execute_analysis as execute_frontend_analysis,
 )
+from frontend.evidence_review import _invalidate_confirmation
 from frontend.results import (
     build_annotation_rows,
     build_mydisease_rows,
@@ -5935,7 +5936,7 @@ class TestEvidenceObject:
                 "triggers": [],
                 "population_frequency": {
                     "status": "not_triggered",
-                    "provider": "Ensembl REST Variation",
+                    "provider": "gnomAD",
                     "populations": [],
                 },
                 "literature": {
@@ -6576,6 +6577,46 @@ class TestEvidenceObject:
         myvariant["rsid"] = rsid
         return candidate
 
+    @staticmethod
+    def _gnomad_payload(
+        *,
+        variant_id: str = "2-166848215-C-T",
+        ref: str = "C",
+        alt: str = "T",
+    ) -> dict[str, object]:
+        return {
+            "data": {
+                "variant": {
+                    "variant_id": variant_id,
+                    "ref": ref,
+                    "alt": alt,
+                    "rsid": "rs121913529",
+                    "joint": {
+                        "ac": 2,
+                        "an": 200_000,
+                        "populations": [
+                            {"id": "nfe", "ac": 2, "an": 100_000},
+                            {"id": "nfe_XX", "ac": 1, "an": 50_000},
+                        ],
+                    },
+                    "exome": {
+                        "ac": 1,
+                        "an": 150_000,
+                        "ac_hom": 0,
+                        "ac_hemi": 0,
+                        "populations": [],
+                    },
+                    "genome": {
+                        "ac": 1,
+                        "an": 50_000,
+                        "ac_hom": 0,
+                        "ac_hemi": 0,
+                        "populations": [],
+                    },
+                }
+            }
+        }
+
     def test_stage_32_ensembl_population_success_is_provenanced(
         self,
     ) -> None:
@@ -6590,6 +6631,14 @@ class TestEvidenceObject:
                         "most_severe_consequence": "missense_variant",
                         "minor_allele": "T",
                         "MAF": "0.001",
+                        "mappings": [
+                            {
+                                "assembly_name": "GRCh38",
+                                "seq_region_name": "2",
+                                "start": 166848215,
+                                "allele_string": "C/T",
+                            }
+                        ],
                         "populations": [
                             {
                                 "population": "1000GENOMES:phase_3:EUR",
@@ -6710,6 +6759,14 @@ class TestEvidenceObject:
                     {
                         "name": "rs121913529",
                         "source": "dbSNP",
+                        "mappings": [
+                            {
+                                "assembly_name": "GRCh38",
+                                "seq_region_name": "2",
+                                "start": 166848215,
+                                "allele_string": "C/T",
+                            }
+                        ],
                         "populations": [],
                     },
                 )
@@ -6738,20 +6795,54 @@ class TestEvidenceObject:
         assert missing["failure_reason"] == "missing_rsid"
         assert missing_session.get_calls == []
 
-    def test_stage_32_old_gnomad_adapter_is_disabled(
+    def test_stage_32_direct_gnomad_is_exact_and_provenanced(
         self,
     ) -> None:
-        session = FakeConditionalSession()
+        session = FakeConditionalSession(
+            post_responses=[FakeResponse(200, self._gnomad_payload())]
+        )
 
         result = fetch_gnomad_evidence(
             self._candidate_with_rsid(),
             session=session,  # type: ignore[arg-type]
         )
 
-        assert result["status"] == "deprecated"
-        assert result["active"] is False
-        assert session.get_calls == []
-        assert session.post_calls == []
+        assert result["status"] == "available"
+        assert result["provider"] == "gnomAD"
+        assert result["query_identifier"] == "2-166848215-C-T"
+        assert result["global_maf"] == pytest.approx(0.00001)
+        assert result["populations"] == [
+            {
+                "population": "nfe",
+                "allele": "T",
+                "frequency": 0.00002,
+                "allele_count": 2,
+                "allele_number": 100_000,
+            }
+        ]
+        assert len(session.post_calls) == 1
+
+    def test_stage_32_gnomad_rejects_a_different_allele(self) -> None:
+        session = FakeConditionalSession(
+            post_responses=[
+                FakeResponse(
+                    200,
+                    self._gnomad_payload(
+                        variant_id="2-166848215-C-G",
+                        alt="G",
+                    ),
+                )
+            ]
+        )
+
+        result = fetch_gnomad_evidence(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "invalid_response"
+        assert result["failure_reason"] == "variant_identity_mismatch"
+        assert result["populations"] == []
 
     def test_stage_32_litvar_publication_success_avoids_fallback(
         self,
@@ -7190,14 +7281,10 @@ class TestEvidenceObject:
             candidates.append(candidate)
         preliminary = build_evidence_objects(candidates)
         population_session = FakeConditionalSession(
-            get_responses=[
+            post_responses=[
                 FakeResponse(
                     200,
-                    {
-                        "name": "rs121913529",
-                        "source": "dbSNP",
-                        "populations": [],
-                    },
+                    self._gnomad_payload(),
                 )
             ]
         )
@@ -7217,7 +7304,7 @@ class TestEvidenceObject:
         )
 
         assert result["triggered_count"] == 1
-        assert len(population_session.get_calls) == 1
+        assert len(population_session.post_calls) == 1
         assert len(literature_session.get_calls) == 1
         for candidate in result["variants"][1:]:
             enrichment = candidate["conditional_enrichment"]
@@ -7261,7 +7348,7 @@ class TestEvidenceObject:
         second_variant["pos"] = 166848216
         preliminary = build_evidence_objects([first, second])
         population_session = FakeConditionalSession(
-            get_responses=[requests.Timeout("private timeout")]
+            post_responses=[requests.Timeout("private timeout")]
         )
         literature_session = FakeConditionalSession(
             get_responses=[
@@ -7279,7 +7366,7 @@ class TestEvidenceObject:
         )
 
         assert result["triggered_count"] == 1
-        assert len(population_session.get_calls) == 1
+        assert len(population_session.post_calls) == 1
         assert len(literature_session.get_calls) == 1
         first_enrichment = result["variants"][0][
             "conditional_enrichment"
@@ -7347,7 +7434,7 @@ class TestEvidenceObject:
             phenotypes=[],
             population_session=(  # type: ignore[arg-type]
                 FakeConditionalSession(
-                    get_responses=[
+                    post_responses=[
                         requests.Timeout("first"),
                         requests.Timeout("second"),
                     ]
@@ -7394,28 +7481,40 @@ class TestEvidenceObject:
             "population_frequency": {
                 "status": "available",
                 "response_status": "available",
-                "provider": "Ensembl REST Variation",
-                "provider_version": "156",
-                "upstream_sources": ["dbSNP"],
+                "provider": "gnomAD",
+                "provider_version": "gnomad_r4",
+                "upstream_sources": ["gnomAD"],
                 "retrieved_at": "2026-08-06T00:00:00Z",
                 "assembly": "GRCh38",
-                "dataset": "dbSNP",
-                "release": "156",
-                "query_identifier": "rs121913529",
+                "dataset": "gnomad_r4",
+                "release": "gnomad_r4",
+                "query_identifier": "2-166848215-C-T",
                 "http_status": 200,
                 "source_url": (
-                    "https://rest.ensembl.org/variation/human/"
-                    "rs121913529?pops=1"
+                    "https://gnomad.broadinstitute.org/variant/"
+                    "2-166848215-C-T?dataset=gnomad_r4"
                 ),
                 "derivation": "direct",
-                "most_severe_consequence": "missense_variant",
+                "variant_id": "2-166848215-C-T",
+                "rsid": "rs121913529",
                 "minor_allele": "T",
                 "global_maf": 0.001,
+                "joint": {
+                    "allele_count": 2,
+                    "allele_number": 2000,
+                    "allele_frequency": 0.001,
+                    "homozygote_count": None,
+                    "hemizygote_count": None,
+                },
+                "exome": None,
+                "genome": None,
                 "populations": [
                     {
-                        "population": "1000GENOMES:phase_3:EUR",
+                        "population": "nfe",
                         "allele": "T",
                         "frequency": 0.002,
+                        "allele_count": 2,
+                        "allele_number": 1000,
                     }
                 ],
                 "warnings": [],
@@ -7527,7 +7626,7 @@ class TestEvidenceObject:
         }
 
         assert enrichment["population_frequency"]["provider"] == (
-            "Ensembl REST Variation"
+            "gnomAD"
         )
         assert enrichment["population_frequency"]["populations"][0][
             "frequency"
@@ -7543,9 +7642,9 @@ class TestEvidenceObject:
             "conditional_enrichment.population_frequency"
         ]
         assert population_lineage["provider"] == (
-            "Ensembl REST Variation"
+            "gnomAD"
         )
-        assert population_lineage["upstream_sources"] == ["dbSNP"]
+        assert population_lineage["upstream_sources"] == ["gnomAD"]
         assert population_lineage["derivation"] == "direct"
         assert (
             "conditional_enrichment.literature.litvar"
@@ -7583,19 +7682,25 @@ class TestEvidenceObject:
         reason="Live provider checks are opt-in.",
     )
     def test_stage_32_live_provider_diagnostic(self) -> None:
-        population = fetch_ensembl_population_evidence(
-            self._candidate_with_rsid()
+        candidate = self._candidate_with_rsid()
+        variant = candidate["variant"]
+        assert isinstance(variant, dict)
+        variant.update(
+            {"chrom": "12", "pos": 25245350, "ref": "C", "alt": "T"}
         )
-        literature = fetch_literature_evidence(
-            self._candidate_with_rsid()
-        )
+        population = fetch_gnomad_evidence(candidate)
+        literature = fetch_literature_evidence(candidate)
 
-        assert population["provider"] == "Ensembl REST Variation"
+        assert population["provider"] == "gnomAD"
         assert population["status"] in {
             "available",
             "no_match",
             "partial",
         }
+        assert population["query_identifier"] == "12-25245350-C-T"
+        assert all(
+            row["allele"] == "T" for row in population["populations"]
+        )
         assert literature["providers"]["litvar"]["status"] in {
             "available",
             "no_match",
@@ -9423,6 +9528,29 @@ class TestStage34EvidenceConfirmation:
         )
         assert package["pre_review_conflict"]["status"] == "no_conflict"
 
+    def test_nested_classification_edit_routes_as_conflict(self) -> None:
+        report = self._report()
+        reviewed = deepcopy(report["reviewed_user_report"])
+        reviewed["pathogenicity"]["clinvar_classification"] = "Benign"
+        saved = save_evidence_review_draft(
+            report,
+            reviewed,
+            timestamp="2026-08-06T08:30:00Z",
+        )
+
+        package = confirm_evidence_review(
+            saved,
+            timestamp="2026-08-06T09:00:00Z",
+        )
+
+        assert package["post_review_conflict"]["status"] == "conflict"
+        assert any(
+            finding["conflict_type"] == "user_override_conflict"
+            and "/pathogenicity/clinvar_classification"
+            in finding["evidence_paths"]
+            for finding in package["post_review_conflict"]["findings"]
+        )
+
     def test_confirm_before_latest_draft_edit_is_rejected(self) -> None:
         report = self._report()
 
@@ -9448,6 +9576,38 @@ class TestStage34EvidenceConfirmation:
             EvidenceConfirmationError,
             match="package_id",
         ):
+            validate_reviewed_evidence_package(tampered)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["reviewed_user_report", "post_review_conflict", "edit_history"],
+    )
+    def test_tampered_confirmed_content_is_rejected(
+        self,
+        field: str,
+    ) -> None:
+        package = confirm_evidence_review(
+            self._report(),
+            timestamp="2026-08-06T09:00:00Z",
+        )
+        tampered = deepcopy(package)
+        if field == "reviewed_user_report":
+            tampered[field]["gene"] = "TAMPERED"
+        elif field == "post_review_conflict":
+            tampered[field]["status"] = "conflict"
+        else:
+            tampered[field].append(
+                {
+                    "path": "/manual",
+                    "change_type": "added",
+                    "old_value": None,
+                    "new_value": "untracked",
+                    "user_added": True,
+                    "timestamp": "2026-08-06T08:30:00Z",
+                }
+            )
+
+        with pytest.raises(EvidenceConfirmationError, match="package_id"):
             validate_reviewed_evidence_package(tampered)
 
     def test_pipeline_confirm_preserves_order_without_calling_llm(
@@ -9516,6 +9676,35 @@ class TestStage34EvidenceConfirmation:
                 [stale_report],
                 timestamp="2026-08-06T09:00:00Z",
             )
+
+    def test_saving_after_confirmation_invalidates_pipeline_and_ui_state(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        result = create_pipeline_result()
+        result["evidence_objects"] = [evidence]
+        report = build_evidence_review_reports(
+            [evidence],
+            timestamp="2026-08-06T08:00:00Z",
+        )[0]
+        result["evidence_review_reports"] = [dict(report)]
+        confirmed = confirm_reviewed_evidence(
+            result,
+            [report],
+            timestamp="2026-08-06T09:00:00Z",
+        )
+        package = confirmed["reviewed_evidence_packages"][0]
+        packages = {report["report_id"]: package}
+
+        _invalidate_confirmation(
+            confirmed,
+            report["report_id"],
+            report["variant_index"],
+            packages,  # type: ignore[arg-type]
+        )
+
+        assert confirmed["reviewed_evidence_packages"] == []
+        assert packages == {}
 
 
 class TestClinicalInterpretationValidation:

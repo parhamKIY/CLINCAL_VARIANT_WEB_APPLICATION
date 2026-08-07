@@ -8,18 +8,18 @@ from typing import cast
 
 import streamlit as st
 
-from backend.evidence_confirmation import (
-    EvidenceConfirmationError,
-    ReviewedEvidencePackage,
-    confirm_evidence_review,
-)
+from backend.evidence_confirmation import ReviewedEvidencePackage
 from backend.evidence_review import (
     EvidenceReviewError,
     EvidenceReviewReport,
     MAX_REVIEW_REPORT_BYTES,
     save_evidence_review_draft,
 )
-from backend.pipeline import PipelineResult
+from backend.pipeline import (
+    PipelineError,
+    PipelineResult,
+    confirm_reviewed_evidence,
+)
 
 
 REVIEW_DRAFTS_KEY = "evidence_review_drafts"
@@ -77,6 +77,22 @@ def _variant_label(report: EvidenceReviewReport) -> str:
     )
 
 
+def _invalidate_confirmation(
+    result: PipelineResult,
+    report_id: str,
+    variant_index: int,
+    packages: dict[str, ReviewedEvidencePackage],
+) -> None:
+    """Remove a confirmation whenever its reviewed draft changes."""
+
+    packages.pop(report_id, None)
+    result["reviewed_evidence_packages"] = [
+        package
+        for package in result.get("reviewed_evidence_packages", [])
+        if package.get("variant_index") != variant_index
+    ]
+
+
 def _render_conflict_status(report: EvidenceReviewReport) -> None:
     audit = report["original_machine_report"].get("conflict_audit")
     pre_review = (
@@ -99,6 +115,7 @@ def _render_editor(
     report: EvidenceReviewReport,
     report_index: int,
     drafts: list[EvidenceReviewReport],
+    result: PipelineResult,
 ) -> None:
     report_id = report["report_id"]
     editor_key = f"{_REVIEW_WIDGET_PREFIX}json_{report_id}"
@@ -144,6 +161,16 @@ def _render_editor(
             report,
             reviewed,
             notes,
+        )
+        packages = cast(
+            dict[str, ReviewedEvidencePackage],
+            st.session_state.setdefault(REVIEW_PACKAGES_KEY, {}),
+        )
+        _invalidate_confirmation(
+            result,
+            report_id,
+            report["variant_index"],
+            packages,
         )
     except (json.JSONDecodeError, EvidenceReviewError) as exc:
         st.error(f"Draft was not saved: {exc}")
@@ -227,8 +254,20 @@ def _render_confirmation(
             )
         else:
             try:
-                packages[report_id] = confirm_evidence_review(report)
-            except EvidenceConfirmationError as exc:
+                confirmed = confirm_reviewed_evidence(result, [report])
+                result["reviewed_evidence_packages"] = confirmed[
+                    "reviewed_evidence_packages"
+                ]
+                package = next(
+                    item
+                    for item in result["reviewed_evidence_packages"]
+                    if item["variant_index"] == variant_index
+                )
+                packages[report_id] = cast(
+                    ReviewedEvidencePackage,
+                    package,
+                )
+            except (PipelineError, StopIteration) as exc:
                 st.error(f"Evidence was not confirmed: {exc}")
 
     package = packages.get(report_id)
@@ -266,7 +305,7 @@ def render_evidence_review(result: PipelineResult) -> None:
         ]
     )
     with editor_tab:
-        _render_editor(report, selected, drafts)
+        _render_editor(report, selected, drafts, result)
     with original_tab:
         st.json(report["original_machine_report"], expanded=2)
     with history_tab:

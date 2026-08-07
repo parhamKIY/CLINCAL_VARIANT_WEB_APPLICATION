@@ -29,8 +29,25 @@ MAX_QUERY_TERMS = 8
 MAX_LITVAR_RESPONSE_LINES = 1000
 MAX_LITVAR_RESPONSE_CHARS = 5_000_000
 NCBI_REQUEST_INTERVAL = 0.5
+GNOMAD_REQUEST_INTERVAL = 6.0
 _NCBI_RATE_LOCK = Lock()
 _LAST_NCBI_REQUEST_AT = 0.0
+_GNOMAD_RATE_LOCK = Lock()
+_LAST_GNOMAD_REQUEST_AT = 0.0
+
+GNOMAD_VARIANT_QUERY = """
+query Variant($variantId: String!, $dataset: DatasetId!) {
+  variant(variantId: $variantId, dataset: $dataset) {
+    variant_id
+    ref
+    alt
+    rsid
+    joint { ac an populations { id ac an } }
+    exome { ac an ac_hom ac_hemi populations { id ac an ac_hom ac_hemi } }
+    genome { ac an ac_hom ac_hemi populations { id ac an ac_hom ac_hemi } }
+  }
+}
+""".strip()
 
 class ConditionalEnrichmentError(ValueError):
     """Raised when conditional enrichment input is invalid."""
@@ -102,6 +119,18 @@ def _wait_for_ncbi_slot(session: object) -> None:
         if remaining > 0:
             time.sleep(remaining)
         _LAST_NCBI_REQUEST_AT = time.monotonic()
+
+
+def _wait_for_gnomad_slot(session: object) -> None:
+    if not isinstance(session, requests.Session):
+        return
+    global _LAST_GNOMAD_REQUEST_AT
+    with _GNOMAD_RATE_LOCK:
+        elapsed = time.monotonic() - _LAST_GNOMAD_REQUEST_AT
+        remaining = GNOMAD_REQUEST_INTERVAL - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+        _LAST_GNOMAD_REQUEST_AT = time.monotonic()
 
 
 def _request_json(
@@ -198,6 +227,67 @@ def _request_json(
     raise RuntimeError("Conditional request retry loop ended unexpectedly.")
 
 
+def _request_graphql(
+    session: requests.Session,
+    url: str,
+    *,
+    query: str,
+    variables: dict[str, str],
+) -> tuple[object, int, int]:
+    """Return one bounded gnomAD GraphQL response with retry metadata."""
+
+    max_retries = settings.CONDITIONAL_ENRICHMENT_MAX_RETRIES
+    for attempt in range(max_retries + 1):
+        _wait_for_gnomad_slot(session)
+        try:
+            response = session.post(
+                url,
+                json={"query": query, "variables": variables},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "ClinicalVariantInterpretation/0.1",
+                },
+                timeout=settings.CONDITIONAL_ENRICHMENT_TIMEOUT,
+                verify=True,
+            )
+        except requests.RequestException:
+            if attempt >= max_retries:
+                raise
+            time.sleep(_retry_delay(attempt))
+            continue
+        if (
+            response.status_code in TRANSIENT_HTTP_STATUSES
+            and attempt < max_retries
+        ):
+            time.sleep(_retry_delay(attempt, response))
+            continue
+        if not 200 <= response.status_code < 300:
+            raise requests.HTTPError(
+                f"HTTP {response.status_code}",
+                response=response,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderResponseError(
+                "invalid_json",
+                http_status=response.status_code,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProviderResponseError(
+                "invalid_schema",
+                http_status=response.status_code,
+            )
+        if payload.get("errors"):
+            raise ProviderResponseError(
+                "graphql_error",
+                http_status=response.status_code,
+            )
+        return payload, response.status_code, attempt + 1
+    raise RuntimeError("gnomAD request retry loop ended unexpectedly.")
+
+
 def _parse_litvar_body(value: object) -> list[dict[str, Any]]:
     """Parse LitVar2's bounded NDJSON/Python-literal response format."""
 
@@ -281,6 +371,37 @@ def _candidate_rsid(candidate: Mapping[str, object]) -> str | None:
     return None
 
 
+def _candidate_identity(
+    candidate: Mapping[str, object],
+) -> tuple[str, int, str, str, str] | None:
+    variant = _mapping(candidate.get("variant"))
+    chrom = _text(variant.get("chrom"), 32)
+    pos = variant.get("pos")
+    ref = _text(variant.get("ref"), 10_000)
+    alt = _text(variant.get("alt"), 10_000)
+    assembly = _text(candidate.get("assembly"), 20)
+    if (
+        chrom is None
+        or isinstance(pos, bool)
+        or not isinstance(pos, int)
+        or pos < 1
+        or ref is None
+        or alt is None
+        or assembly is None
+    ):
+        return None
+    normalized_chrom = chrom.removeprefix("chr").removeprefix("CHR")
+    if normalized_chrom.casefold() in {"m", "mt"}:
+        normalized_chrom = "M"
+    return (
+        normalized_chrom,
+        pos,
+        ref.upper(),
+        alt.upper(),
+        assembly,
+    )
+
+
 def _population_source_url(rsid: str | None) -> str | None:
     if rsid is None:
         return None
@@ -297,23 +418,43 @@ def _empty_population_evidence(
     candidate: Mapping[str, object],
     failure_reason: str | None = None,
     http_status: int | None = None,
+    provider: str = "gnomAD",
 ) -> dict[str, Any]:
     rsid = _candidate_rsid(candidate)
+    identity = _candidate_identity(candidate)
+    assembly = identity[4] if identity is not None else None
+    dataset = {
+        "GRCh37": settings.GNOMAD_DATASET_GRCH37,
+        "GRCh38": settings.GNOMAD_DATASET_GRCH38,
+    }.get(assembly)
+    variant_id = (
+        f"{identity[0]}-{identity[1]}-{identity[2]}-{identity[3]}"
+        if identity is not None
+        else None
+    )
+    is_gnomad = provider == "gnomAD"
     return {
         "status": status,
         "response_status": status,
-        "provider": "Ensembl REST Variation",
-        "provider_version": None,
-        "upstream_sources": [],
+        "provider": provider,
+        "provider_version": dataset if is_gnomad else None,
+        "upstream_sources": ["gnomAD"] if is_gnomad else [],
         "retrieved_at": (
             None if status == "not_triggered" else _timestamp()
         ),
-        "assembly": _text(candidate.get("assembly"), 20),
-        "dataset": None,
-        "release": None,
-        "query_identifier": rsid,
+        "assembly": assembly,
+        "dataset": dataset if is_gnomad else None,
+        "release": dataset if is_gnomad else None,
+        "query_identifier": variant_id if is_gnomad else rsid,
         "http_status": http_status,
-        "source_url": _population_source_url(rsid),
+        "source_url": (
+            (
+                f"https://gnomad.broadinstitute.org/variant/{variant_id}"
+                f"?dataset={dataset}"
+            )
+            if is_gnomad and variant_id is not None and dataset is not None
+            else _population_source_url(rsid)
+        ),
         "derivation": "direct",
         "most_severe_consequence": None,
         "minor_allele": None,
@@ -326,6 +467,8 @@ def _empty_population_evidence(
 
 def _ensembl_population_rows(
     value: object,
+    *,
+    alternate: str,
 ) -> tuple[list[dict[str, Any]], int]:
     if value is None:
         return [], 0
@@ -333,7 +476,7 @@ def _ensembl_population_rows(
         raise ProviderResponseError("invalid_schema")
     rows: list[dict[str, Any]] = []
     invalid = 0
-    for item in value[:MAX_POPULATIONS]:
+    for item in value:
         if not isinstance(item, dict):
             invalid += 1
             continue
@@ -343,6 +486,8 @@ def _ensembl_population_rows(
         if population is None or allele is None or frequency is None:
             invalid += 1
             continue
+        if allele.upper() != alternate.upper():
+            continue
         rows.append(
             {
                 "population": population,
@@ -350,7 +495,39 @@ def _ensembl_population_rows(
                 "frequency": frequency,
             }
         )
+        if len(rows) >= MAX_POPULATIONS:
+            break
     return rows, invalid
+
+
+def _has_exact_ensembl_mapping(
+    payload: Mapping[str, object],
+    candidate: Mapping[str, object],
+) -> bool:
+    identity = _candidate_identity(candidate)
+    mappings = payload.get("mappings")
+    if identity is None or not isinstance(mappings, list):
+        return False
+    chrom, pos, ref, alt, assembly = identity
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        alleles = _text(mapping.get("allele_string"), 20_000)
+        allele_values = (
+            [item.upper() for item in alleles.split("/")]
+            if alleles is not None
+            else []
+        )
+        if (
+            _text(mapping.get("assembly_name"), 20) == assembly
+            and _text(mapping.get("seq_region_name"), 32) == chrom
+            and mapping.get("start") == pos
+            and allele_values
+            and allele_values[0] == ref
+            and alt in allele_values[1:]
+        ):
+            return True
+    return False
 
 
 def fetch_ensembl_population_evidence(
@@ -365,6 +542,7 @@ def fetch_ensembl_population_evidence(
     evidence = _empty_population_evidence(
         status="unavailable",
         candidate=candidate,
+        provider="Ensembl REST Variation",
     )
     rsid = evidence["query_identifier"]
     if rsid is None:
@@ -441,9 +619,19 @@ def fetch_ensembl_population_evidence(
         evidence["response_status"] = "invalid_response"
         evidence["failure_reason"] = "variant_identity_mismatch"
         return evidence
+    identity = _candidate_identity(candidate)
+    if identity is None or not _has_exact_ensembl_mapping(
+        payload,
+        candidate,
+    ):
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "variant_identity_mismatch"
+        return evidence
     try:
         populations, invalid = _ensembl_population_rows(
-            payload.get("populations")
+            payload.get("populations"),
+            alternate=identity[3],
         )
     except ProviderResponseError as exc:
         evidence["status"] = "invalid_response"
@@ -503,19 +691,210 @@ def fetch_gnomad_evidence(
     *,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    """Return an explicit disabled result for the deprecated adapter."""
+    """Fetch exact-allele population evidence from gnomAD GraphQL."""
 
-    _ = session
     if not isinstance(candidate, Mapping):
         raise ConditionalEnrichmentError("Candidate must be a mapping.")
-    return {
-        "status": "deprecated",
-        "response_status": "deprecated",
+    identity = _candidate_identity(candidate)
+    assembly = identity[4] if identity is not None else None
+    dataset = {
+        "GRCh37": settings.GNOMAD_DATASET_GRCH37,
+        "GRCh38": settings.GNOMAD_DATASET_GRCH38,
+    }.get(assembly)
+    variant_id = (
+        f"{identity[0]}-{identity[1]}-{identity[2]}-{identity[3]}"
+        if identity is not None
+        else None
+    )
+    evidence: dict[str, Any] = {
+        "status": "unavailable",
+        "response_status": "unavailable",
         "provider": "gnomAD",
-        "active": False,
-        "retrieved_at": None,
-        "failure_reason": "adapter_disabled",
+        "provider_version": dataset,
+        "upstream_sources": ["gnomAD"],
+        "retrieved_at": _timestamp(),
+        "assembly": assembly,
+        "dataset": dataset,
+        "release": dataset,
+        "query_identifier": variant_id,
+        "http_status": None,
+        "source_url": (
+            f"https://gnomad.broadinstitute.org/variant/{variant_id}"
+            f"?dataset={dataset}"
+            if variant_id is not None and dataset is not None
+            else None
+        ),
+        "derivation": "direct",
+        "variant_id": variant_id,
+        "rsid": None,
+        "minor_allele": None,
+        "global_maf": None,
+        "joint": None,
+        "exome": None,
+        "genome": None,
+        "populations": [],
+        "warnings": [],
+        "failure_reason": None,
     }
+    if identity is None:
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "invalid_variant_identity"
+        return evidence
+    if dataset is None:
+        evidence["status"] = "unsupported"
+        evidence["response_status"] = "unsupported"
+        evidence["failure_reason"] = "unsupported_assembly"
+        return evidence
+
+    owns_session = session is None
+    client = session or requests.Session()
+    try:
+        try:
+            payload, http_status, _ = _request_graphql(
+                client,
+                settings.GNOMAD_BASE_URL,
+                query=GNOMAD_VARIANT_QUERY,
+                variables={
+                    "variantId": variant_id,
+                    "dataset": dataset,
+                },
+            )
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            evidence["http_status"] = getattr(
+                response,
+                "status_code",
+                None,
+            )
+            evidence["failure_reason"] = _request_failure_reason(exc)
+            return evidence
+        except ProviderResponseError as exc:
+            evidence["status"] = "invalid_response"
+            evidence["response_status"] = "invalid_response"
+            evidence["http_status"] = exc.http_status
+            evidence["failure_reason"] = exc.reason
+            return evidence
+    finally:
+        if owns_session:
+            client.close()
+
+    evidence["http_status"] = http_status
+    data = _mapping(_mapping(payload).get("data"))
+    variant = data.get("variant")
+    if variant is None:
+        evidence["status"] = "no_match"
+        evidence["response_status"] = "no_match"
+        return evidence
+    if not isinstance(variant, dict):
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "invalid_schema"
+        return evidence
+    if (
+        _text(variant.get("variant_id"), 20_000) != variant_id
+        or _text(variant.get("ref"), 10_000) != identity[2]
+        or _text(variant.get("alt"), 10_000) != identity[3]
+    ):
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "variant_identity_mismatch"
+        return evidence
+
+    def count(value: object) -> int | None:
+        return (
+            value
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+            else None
+        )
+
+    def block(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        ac = count(value.get("ac"))
+        an = count(value.get("an"))
+        if ac is None or an is None or an == 0 or ac > an:
+            return None
+        return {
+            "allele_count": ac,
+            "allele_number": an,
+            "allele_frequency": ac / an,
+            "homozygote_count": count(value.get("ac_hom")),
+            "hemizygote_count": count(value.get("ac_hemi")),
+        }
+
+    for name in ("joint", "exome", "genome"):
+        evidence[name] = block(variant.get(name))
+    joint = evidence["joint"]
+    if isinstance(joint, dict):
+        evidence["global_maf"] = joint["allele_frequency"]
+        if joint["allele_count"] > 0:
+            evidence["minor_allele"] = identity[3]
+
+    joint_source = _mapping(variant.get("joint"))
+    populations = joint_source.get("populations")
+    invalid_population_count = 0
+    if populations is not None and not isinstance(populations, list):
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "invalid_schema"
+        return evidence
+    for item in populations or []:
+        if not isinstance(item, dict):
+            invalid_population_count += 1
+            continue
+        population = _text(item.get("id"), 100)
+        ac = count(item.get("ac"))
+        an = count(item.get("an"))
+        if population is not None and (
+            population.endswith("_XX")
+            or population.endswith("_XY")
+            or population in {"XX", "XY"}
+        ):
+            continue
+        if (
+            population is None
+            or ac is None
+            or an is None
+            or an == 0
+            or ac > an
+        ):
+            if population not in {None, ""}:
+                invalid_population_count += 1
+            continue
+        evidence["populations"].append(
+            {
+                "population": population,
+                "allele": identity[3],
+                "frequency": ac / an,
+                "allele_count": ac,
+                "allele_number": an,
+            }
+        )
+        if len(evidence["populations"]) >= MAX_POPULATIONS:
+            break
+
+    evidence["rsid"] = _text(variant.get("rsid"), 100)
+    usable = any(
+        isinstance(evidence[name], dict)
+        for name in ("joint", "exome", "genome")
+    )
+    if not usable:
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "invalid_schema"
+    elif invalid_population_count:
+        evidence["status"] = "partial"
+        evidence["response_status"] = "partial"
+        evidence["warnings"] = [
+            "gnomAD returned partial population-frequency evidence."
+        ]
+    else:
+        evidence["status"] = "available"
+        evidence["response_status"] = "available"
+    return evidence
 
 
 def _candidate_identifiers(
@@ -1747,7 +2126,7 @@ def enrich_conditionally(
             continue
 
         population = (
-            fetch_ensembl_population_evidence(
+            fetch_gnomad_evidence(
                 item,
                 session=population_session,
             )

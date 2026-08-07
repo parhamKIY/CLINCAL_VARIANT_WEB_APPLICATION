@@ -168,32 +168,106 @@ def _validate_edit_records(
 
 
 def _extract_reviewed_values(
+    original_report: Mapping[str, object],
     reviewed_report: Mapping[str, object],
 ) -> dict[str, object]:
-    """Read the flat fields a user could edit for override detection."""
+    """Read clinically material edits across flat and V2 sections."""
 
-    conditions = reviewed_report.get("clinvar_conditions")
+    reviewed_pathogenicity = _mapping(
+        reviewed_report.get("pathogenicity")
+    )
+    reviewed_context = _mapping(reviewed_report.get("variant_context"))
+    original_pathogenicity = _mapping(
+        original_report.get("pathogenicity")
+    )
+    original_context = _mapping(original_report.get("variant_context"))
+    material_paths = {
+        "/clinvar_significance": (
+            original_report.get("clinvar_significance"),
+            reviewed_report.get("clinvar_significance"),
+        ),
+        "/pathogenicity/clinvar_classification": (
+            original_pathogenicity.get("clinvar_classification"),
+            reviewed_pathogenicity.get("clinvar_classification"),
+        ),
+        "/pathogenicity/automated_acmg_classification": (
+            original_pathogenicity.get("automated_acmg_classification"),
+            reviewed_pathogenicity.get("automated_acmg_classification"),
+        ),
+        "/assembly": (
+            original_report.get("assembly"),
+            reviewed_report.get("assembly"),
+        ),
+        "/variant_context/assembly": (
+            original_context.get("assembly"),
+            reviewed_context.get("assembly"),
+        ),
+        "/transcript": (
+            original_report.get("transcript"),
+            reviewed_report.get("transcript"),
+        ),
+        "/variant_context/transcript": (
+            original_context.get("transcript"),
+            reviewed_context.get("transcript"),
+        ),
+        "/gene": (
+            original_report.get("gene"),
+            reviewed_report.get("gene"),
+        ),
+        "/variant_context/gene": (
+            original_context.get("gene"),
+            reviewed_context.get("gene"),
+        ),
+        "/clinvar_conditions": (
+            original_report.get("clinvar_conditions"),
+            reviewed_report.get("clinvar_conditions"),
+        ),
+        "/pathogenicity/clinvar_conditions": (
+            original_pathogenicity.get("clinvar_conditions"),
+            reviewed_pathogenicity.get("clinvar_conditions"),
+        ),
+    }
+    classification = reviewed_pathogenicity.get(
+        "clinvar_classification",
+        reviewed_report.get("clinvar_significance"),
+    )
+    conditions = reviewed_pathogenicity.get(
+        "clinvar_conditions",
+        reviewed_report.get("clinvar_conditions"),
+    )
     return {
-        "classification": reviewed_report.get("clinvar_significance"),
-        "assembly": reviewed_report.get("assembly"),
-        "transcript": reviewed_report.get("transcript"),
-        "gene": reviewed_report.get("gene"),
+        "classification": classification,
+        "assembly": reviewed_context.get(
+            "assembly",
+            reviewed_report.get("assembly"),
+        ),
+        "transcript": reviewed_context.get(
+            "transcript",
+            reviewed_report.get("transcript"),
+        ),
+        "gene": reviewed_context.get(
+            "gene",
+            reviewed_report.get("gene"),
+        ),
         "conditions": (
             conditions if isinstance(conditions, list) else []
         ),
+        "edited_evidence_paths": [
+            path
+            for path, (original, reviewed) in material_paths.items()
+            if original != reviewed
+        ],
     }
 
 
 def _package_id(
-    original: Mapping[str, object],
-    variant_index: int,
-    confirmed_at: str,
+    package: Mapping[str, object],
 ) -> str:
     canonical = json.dumps(
         {
-            "original_machine_report": original,
-            "variant_index": variant_index,
-            "confirmed_at": confirmed_at,
+            key: value
+            for key, value in package.items()
+            if key != "package_id"
         },
         ensure_ascii=False,
         allow_nan=False,
@@ -239,6 +313,7 @@ def confirm_evidence_review(
         )
 
     reviewed_values = _extract_reviewed_values(
+        original,
         validated["reviewed_user_report"]
     )
     post_review = audit_evidence_conflicts(
@@ -252,13 +327,8 @@ def confirm_evidence_review(
         if edit["user_added"]
     ]
 
-    package: ReviewedEvidencePackage = {
+    package_data: dict[str, object] = {
         "schema_version": REVIEWED_PACKAGE_SCHEMA_VERSION,
-        "package_id": _package_id(
-            original,
-            validated["variant_index"],
-            confirmed_at,
-        ),
         "variant_index": validated["variant_index"],
         "status": "confirmed",
         "original_machine_report": original,
@@ -274,6 +344,13 @@ def confirm_evidence_review(
         "post_review_conflict": post_review,
         "confirmed_at": confirmed_at,
     }
+    package = cast(
+        ReviewedEvidencePackage,
+        {
+            **package_data,
+            "package_id": _package_id(package_data),
+        },
+    )
     size = len(
         json.dumps(
             package,
@@ -305,6 +382,15 @@ def validate_reviewed_evidence_package(
     if value["status"] != "confirmed":
         raise EvidenceConfirmationError(
             "Reviewed evidence package status must be confirmed."
+        )
+    raw_package_id = value["package_id"]
+    if (
+        not isinstance(raw_package_id, str)
+        or _PACKAGE_ID_PATTERN.fullmatch(raw_package_id) is None
+        or raw_package_id != _package_id(value)
+    ):
+        raise EvidenceConfirmationError(
+            "package_id does not match the confirmed evidence package."
         )
     variant_index = value["variant_index"]
     if (
@@ -352,10 +438,16 @@ def validate_reviewed_evidence_package(
         )
 
     post_review = value["post_review_conflict"]
+    expected_post_review = audit_evidence_conflicts(
+        original,
+        phase="post_review",
+        reviewed_values=_extract_reviewed_values(original, reviewed),
+    )
     if (
         not isinstance(post_review, dict)
         or post_review.get("phase") != "post_review"
         or post_review.get("final_classification") is not None
+        or post_review != expected_post_review
     ):
         raise EvidenceConfirmationError(
             "post_review_conflict is invalid."
@@ -373,21 +465,25 @@ def validate_reviewed_evidence_package(
         require_added=True,
     )
     reviewer_notes = _validate_notes(value["reviewer_notes"])
-
-    package_id = value["package_id"]
-    if (
-        not isinstance(package_id, str)
-        or _PACKAGE_ID_PATTERN.fullmatch(package_id) is None
-        or package_id
-        != _package_id(original, variant_index, confirmed_at)
+    expected_user_added = [
+        deepcopy(item) for item in edit_history if item["user_added"]
+    ]
+    if user_added_evidence != expected_user_added:
+        raise EvidenceConfirmationError(
+            "user_added_evidence must match the confirmed edit history."
+        )
+    if any(
+        _timestamp_value(item["timestamp"])
+        > _timestamp_value(confirmed_at)
+        for item in edit_history
     ):
         raise EvidenceConfirmationError(
-            "package_id does not match the immutable original evidence."
+            "confirmed_at cannot precede confirmed edit history."
         )
 
-    validated: ReviewedEvidencePackage = {
+    package_id = raw_package_id
+    validated_data: dict[str, object] = {
         "schema_version": REVIEWED_PACKAGE_SCHEMA_VERSION,
-        "package_id": package_id,
         "variant_index": variant_index,
         "status": "confirmed",
         "original_machine_report": original,
@@ -406,6 +502,18 @@ def validate_reviewed_evidence_package(
         ),
         "confirmed_at": confirmed_at,
     }
+    if (
+        not isinstance(package_id, str)
+        or _PACKAGE_ID_PATTERN.fullmatch(package_id) is None
+        or package_id != _package_id(validated_data)
+    ):
+        raise EvidenceConfirmationError(
+            "package_id does not match the confirmed evidence package."
+        )
+    validated = cast(
+        ReviewedEvidencePackage,
+        {**validated_data, "package_id": package_id},
+    )
     if len(
         json.dumps(
             validated,

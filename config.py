@@ -242,6 +242,16 @@ class Settings:
         "https://gnomad.broadinstitute.org/api",
     ).strip().rstrip("/")
 
+    GNOMAD_DATASET_GRCH37: str = os.getenv(
+        "GNOMAD_DATASET_GRCH37",
+        "gnomad_r2_1",
+    ).strip()
+
+    GNOMAD_DATASET_GRCH38: str = os.getenv(
+        "GNOMAD_DATASET_GRCH38",
+        "gnomad_r4",
+    ).strip()
+
     ENSEMBL_VARIATION_BASE_URL: str = os.getenv(
         "ENSEMBL_VARIATION_BASE_URL",
         "https://rest.ensembl.org",
@@ -440,6 +450,7 @@ class Settings:
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
+            "GNOMAD_BASE_URL": cls.GNOMAD_BASE_URL,
             "ENSEMBL_VARIATION_BASE_URL": (
                 cls.ENSEMBL_VARIATION_BASE_URL
             ),

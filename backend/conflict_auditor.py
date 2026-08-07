@@ -469,6 +469,13 @@ def _add_user_override_finding(
     findings: list[ConflictFinding],
 ) -> None:
     override_paths: list[str] = []
+    edited_paths = reviewed_values.get("edited_evidence_paths")
+    if isinstance(edited_paths, list):
+        override_paths.extend(
+            path
+            for path in edited_paths
+            if isinstance(path, str) and path
+        )
     classification = normalize_classification_label(
         reviewed_values.get("classification")
     )
@@ -508,7 +515,7 @@ def _add_user_override_finding(
             findings,
             conflict_type="user_override_conflict",
             severity="major",
-            evidence_paths=override_paths,
+            evidence_paths=list(dict.fromkeys(override_paths)),
             sources=["Human review", "Original source evidence"],
             message="Reviewed values conflict with preserved source evidence.",
         )
