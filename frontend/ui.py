@@ -70,6 +70,7 @@ ANALYSIS_JOB_KEY = "analysis_job"
 ANALYSIS_NOTICE_KEY = "analysis_notice"
 ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
 LLM_MODEL_KEY = "selected_llm_model"
+LLM_LIGHT_MODEL_KEY = "selected_llm_light_model"
 LLM_PINNED_MODELS = (
     "gpt-5.4-mini",
     "gpt-5.4",
@@ -85,6 +86,13 @@ LLM_RECOMMENDED_MODELS = (
     "gemini-3.5-flash",
     "claude-haiku-4-5",
     "gpt-4.1-mini",
+    "gpt-5-nano",
+    "gemini-2.5-flash-lite",
+    "deepseek-v4-flash",
+)
+LLM_LOW_COST_MODELS = (
+    "gpt-5.4-nano",
+    "gemini-3.1-flash-lite",
     "gpt-5-nano",
     "gemini-2.5-flash-lite",
     "deepseek-v4-flash",
@@ -193,7 +201,21 @@ def _llm_model_options() -> tuple[str, ...]:
     """Return pinned, recommended, and configured model options."""
 
     return tuple(
-        dict.fromkeys((*LLM_MODEL_CATALOG, settings.LLM_MODEL))
+        dict.fromkeys(
+            (
+                *LLM_MODEL_CATALOG,
+                settings.LLM_MODEL_STRONG,
+                settings.LLM_MODEL,
+            )
+        )
+    )
+
+
+def _light_llm_model_options() -> tuple[str, ...]:
+    """Return low-cost role choices plus its configured fallback."""
+
+    return tuple(
+        dict.fromkeys((*LLM_LOW_COST_MODELS, settings.LLM_MODEL_LIGHT))
     )
 
 
@@ -208,11 +230,20 @@ def _format_llm_model_option(model: str) -> str:
     return f"{model} — {pin_label}{advantage}"
 
 
+def _format_light_llm_model_option(model: str) -> str:
+    """Describe a model only in its low-cost routing role."""
+
+    advantage = LLM_MODEL_ADVANTAGES.get(
+        model,
+        "Custom low-cost model configured in .env",
+    )
+    return f"{model} — {advantage}"
+
+
 def _select_pinned_llm_model(model: str) -> None:
-    """Select one pinned model and discard an older analysis result."""
+    """Select one pinned model for meaningful conflict interpretation."""
 
     st.session_state[LLM_MODEL_KEY] = model
-    _clear_analysis_result()
 
 
 def _initialize_session_state() -> None:
@@ -226,7 +257,10 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     model_options = _llm_model_options()
     if st.session_state.get(LLM_MODEL_KEY) not in model_options:
-        st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL
+        st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL_STRONG
+    light_model_options = _light_llm_model_options()
+    if st.session_state.get(LLM_LIGHT_MODEL_KEY) not in light_model_options:
+        st.session_state[LLM_LIGHT_MODEL_KEY] = settings.LLM_MODEL_LIGHT
 
 
 def _clear_analysis_result() -> None:
@@ -458,22 +492,33 @@ def _render_hpo_picker() -> None:
                     st.rerun()
 
 
-def _render_llm_model_selector() -> str:
-    """Render the per-analysis LLM model selection."""
+def _render_llm_model_selector() -> tuple[str, str]:
+    """Render separate low-cost and strong interpretation role choices."""
 
     with st.container(border=True):
-        st.subheader("Interpretation model")
+        st.subheader("Interpretation models")
         st.caption(
-            "The six primary choices are pinned first. Open the menu "
-            "and type any part of a model name to search the curated "
-            "AvalAI chat-model catalog."
+            "Choose the strong conflict model first. The low-cost model is "
+            "used only when confirmed evidence has no meaningful conflict."
+        )
+        selected_strong_model = st.selectbox(
+            "Strong conflict model",
+            _llm_model_options(),
+            key=LLM_MODEL_KEY,
+            format_func=_format_llm_model_option,
+            placeholder="Search or select a strong AvalAI model",
+            filter_mode="contains",
+            help=(
+                "Used only for moderate, major, or critical conflicts. "
+                "Every result still requires qualified human review."
+            ),
         )
         with st.container(
             key="pinned_llm_models",
             gap="xsmall",
         ):
             st.markdown(
-                "**:material/push_pin: Pinned model quick picks**"
+                "**:material/push_pin: Pinned conflict-model quick picks**"
             )
             st.caption(
                 "Frequently used models are grouped here for fast "
@@ -496,26 +541,24 @@ def _render_llm_model_selector() -> str:
                         on_click=_select_pinned_llm_model,
                         args=(model,),
                     )
-        selected_model = st.selectbox(
-            "LLM model",
-            _llm_model_options(),
-            key=LLM_MODEL_KEY,
-            format_func=_format_llm_model_option,
-            placeholder="Search or select an AvalAI chat model",
+        selected_light_model = st.selectbox(
+            "Low-cost no-conflict model",
+            _light_llm_model_options(),
+            key=LLM_LIGHT_MODEL_KEY,
+            format_func=_format_light_llm_model_option,
+            placeholder="Select a low-cost AvalAI model",
             filter_mode="contains",
             help=(
-                "More capable models may produce stronger summaries but "
-                "usually cost more. Premium reasoning may also increase "
-                "billed token usage. Every result still requires review "
-                "by a qualified healthcare professional."
+                "Used only to rearrange confirmed evidence when the "
+                "deterministic audit finds no meaningful conflict."
             ),
-            on_change=_clear_analysis_result,
         )
         st.caption(
-            "Selected advantage: "
-            f"{LLM_MODEL_ADVANTAGES.get(selected_model, 'Configured default')}."
+            "Selected routes: "
+            f"no conflict → {selected_light_model}; "
+            f"meaningful conflict → {selected_strong_model}."
         )
-    return selected_model
+    return selected_light_model, selected_strong_model
 
 
 def _is_supported_vcf_filename(filename: str) -> bool:
@@ -1184,8 +1227,8 @@ def render_app() -> None:
     st.subheader("Analysis workflow")
     _render_workflow_overview()
     st.divider()
-    llm_model = _render_llm_model_selector()
-    submission = _render_variant_input(llm_model)
+    light_model, strong_model = _render_llm_model_selector()
+    submission = _render_variant_input(strong_model)
     _render_hpo_picker()
     st.divider()
 
@@ -1208,7 +1251,11 @@ def render_app() -> None:
         st.divider()
         render_analysis_results(pipeline_result)
         st.divider()
-        render_evidence_review(pipeline_result)
+        render_evidence_review(
+            pipeline_result,
+            light_model=light_model,
+            strong_model=strong_model,
+        )
         if pipeline_result.get("final_interpretation_report") is not None:
             st.divider()
             render_final_interpretation_output(pipeline_result)

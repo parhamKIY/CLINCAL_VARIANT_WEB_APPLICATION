@@ -10500,6 +10500,149 @@ class TestStage39ReviewStatePersistence:
             )
 
 
+class TestStage40FrontendReviewWorkflow:
+    """Verify full-access review through confirmed Output B generation."""
+
+    @staticmethod
+    def _draft_result() -> PipelineResult:
+        result = TestStage35TwoLayerLLMRouting._confirmed_result()
+        result["workflow_state"] = "awaiting_confirmation"
+        result["reviewed_evidence_packages"] = []
+        result["analysis_id"] = f"analysis-{'4' * 32}"
+        return validate_pipeline_result(result)
+
+    def test_full_access_draft_reset_and_persistence(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        saved: list[PipelineResult] = []
+        monkeypatch.setattr(
+            "frontend.evidence_review.save_pipeline_state",
+            lambda result: saved.append(deepcopy(result)) or result,
+        )
+        result = self._draft_result()
+        original = deepcopy(result["evidence_objects"][0])
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = result
+        app.run(timeout=10)
+
+        reviewed = deepcopy(original)
+        reviewed["manual_evidence"] = {
+            "laboratory": "Orthogonal confirmation pending."
+        }
+        next(
+            area
+            for area in app.text_area
+            if area.label == "Reviewed evidence report (JSON)"
+        ).set_value(json.dumps(reviewed))
+        next(
+            button
+            for button in app.button
+            if button.label == "Save draft"
+        ).click().run(timeout=10)
+
+        draft = app.session_state["evidence_review_drafts"][0]
+        assert draft["reviewed_user_report"]["manual_evidence"]
+        assert draft["original_machine_report"] == original
+        assert saved[-1]["evidence_review_reports"][0][
+            "reviewed_user_report"
+        ]["manual_evidence"]
+
+        next(
+            button
+            for button in app.button
+            if button.label == "Reset to original"
+        ).click().run(timeout=10)
+
+        reset = app.session_state["evidence_review_drafts"][0]
+        assert reset["reviewed_user_report"] == original
+        assert reset["original_machine_report"] == original
+        assert len(reset["edit_history"]) >= 2
+        assert saved[-1]["evidence_review_reports"][0][
+            "reviewed_user_report"
+        ] == original
+
+    def test_confirmation_unlocks_selected_models_and_output_b(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        saved: list[PipelineResult] = []
+        observed: dict[str, str | None] = {}
+        monkeypatch.setattr(
+            "frontend.evidence_review.save_pipeline_state",
+            lambda result: saved.append(deepcopy(result)) or result,
+        )
+
+        def fake_resume(
+            result: PipelineResult,
+            *,
+            light_model: str | None,
+            strong_model: str | None,
+        ) -> PipelineResult:
+            observed.update(
+                {
+                    "light_model": light_model,
+                    "strong_model": strong_model,
+                }
+            )
+            response = TestStage35TwoLayerLLMRouting._response(
+                model="light-response",
+                resolution="not_applicable",
+            )
+            return resume_confirmed_analysis(
+                result,
+                light_client=LLMClient(FakeLLMAdapter(response)),
+                strong_client=LLMClient(FakeLLMAdapter(response)),
+            )
+
+        monkeypatch.setattr(
+            "frontend.evidence_review.resume_confirmed_analysis",
+            fake_resume,
+        )
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = self._draft_result()
+        app.run(timeout=10)
+
+        generate = next(
+            button
+            for button in app.button
+            if button.label == "Generate interpretation"
+        )
+        assert generate.disabled
+        assert not any(
+            subheader.value == "Output B — Final interpretation only"
+            for subheader in app.subheader
+        )
+
+        next(
+            button
+            for button in app.button
+            if button.label == "Confirm evidence"
+        ).click().run(timeout=10)
+
+        assert saved[-1]["reviewed_evidence_packages"]
+        generate = next(
+            button
+            for button in app.button
+            if button.label == "Generate interpretation"
+        )
+        assert not generate.disabled
+        generate.click().run(timeout=10)
+
+        assert observed == {
+            "light_model": settings.LLM_MODEL_LIGHT,
+            "strong_model": settings.LLM_MODEL_STRONG,
+        }
+        assert app.session_state["pipeline_result"]["workflow_state"] == (
+            "completed"
+        )
+        assert saved[-1]["final_interpretation_report"] is not None
+        assert any(
+            subheader.value == "Output B — Final interpretation only"
+            for subheader in app.subheader
+        )
+
+
 class TestClinicalInterpretationValidation:
     """Verify Stage 9 validation of untrusted LLM Markdown."""
 
@@ -15628,7 +15771,7 @@ class TestFrontendFoundation:
         model_selector = next(
             field
             for field in app.selectbox
-            if field.label == "LLM model"
+            if field.label == "Strong conflict model"
         )
         assert model_selector.options[:6] == [
             (
@@ -15693,6 +15836,30 @@ class TestFrontendFoundation:
             (
                 "deepseek-v4-flash — Lowest-cost analytical "
                 "alternative; validate report consistency"
+            ),
+        ]
+        light_selector = next(
+            field
+            for field in app.selectbox
+            if field.label == "Low-cost no-conflict model"
+        )
+        assert light_selector.options[:5] == [
+            (
+                "gpt-5.4-nano — Lowest-cost option for basic testing; "
+                "less detailed conclusions"
+            ),
+            "gemini-3.1-flash-lite — Cheap and fast for draft reports",
+            (
+                "gpt-5-nano — Very cheap and fast for screening; "
+                "reduced conclusion depth"
+            ),
+            (
+                "gemini-2.5-flash-lite — Ultra-low-cost fast drafts; "
+                "reduced conclusion depth"
+            ),
+            (
+                "deepseek-v4-flash — Lowest-cost analytical alternative; "
+                "validate report consistency"
             ),
         ]
         next(

@@ -8,6 +8,7 @@ from typing import cast
 
 import streamlit as st
 
+from backend.database import DatabaseError, save_pipeline_state
 from backend.evidence_confirmation import ReviewedEvidencePackage
 from backend.evidence_review import (
     EvidenceReviewError,
@@ -19,6 +20,7 @@ from backend.pipeline import (
     PipelineError,
     PipelineResult,
     confirm_reviewed_evidence,
+    resume_confirmed_analysis,
 )
 
 
@@ -26,6 +28,7 @@ REVIEW_DRAFTS_KEY = "evidence_review_drafts"
 REVIEW_SIGNATURE_KEY = "evidence_review_signature"
 REVIEW_VARIANT_KEY = "selected_evidence_review_variant"
 REVIEW_PACKAGES_KEY = "evidence_review_packages"
+REVIEW_NOTICE_KEY = "evidence_review_notice"
 _REVIEW_WIDGET_PREFIX = "evidence_review_"
 
 
@@ -39,6 +42,7 @@ def clear_evidence_review_state() -> None:
                 REVIEW_SIGNATURE_KEY,
                 REVIEW_VARIANT_KEY,
                 REVIEW_PACKAGES_KEY,
+                REVIEW_NOTICE_KEY,
             }
             or str(key).startswith(_REVIEW_WIDGET_PREFIX)
         ):
@@ -47,15 +51,24 @@ def clear_evidence_review_state() -> None:
 
 def _initialize_drafts(
     reports: list[dict[str, object]],
+    result: PipelineResult,
 ) -> list[EvidenceReviewReport]:
-    signature = tuple(
-        str(report.get("report_id", ""))
-        for report in reports
+    signature = (
+        str(result.get("analysis_id") or "unpersisted"),
+        *(str(report.get("report_id", "")) for report in reports),
     )
     if st.session_state.get(REVIEW_SIGNATURE_KEY) != signature:
         st.session_state[REVIEW_SIGNATURE_KEY] = signature
         st.session_state[REVIEW_DRAFTS_KEY] = deepcopy(reports)
-        st.session_state[REVIEW_PACKAGES_KEY] = {}
+        packages_by_index = {
+            package["variant_index"]: package
+            for package in result.get("reviewed_evidence_packages", [])
+        }
+        st.session_state[REVIEW_PACKAGES_KEY] = {
+            report["report_id"]: packages_by_index[report["variant_index"]]
+            for report in reports
+            if report["variant_index"] in packages_by_index
+        }
         st.session_state.pop(REVIEW_VARIANT_KEY, None)
     return cast(
         list[EvidenceReviewReport],
@@ -100,6 +113,35 @@ def _invalidate_confirmation(
     result["workflow_state"] = "awaiting_confirmation"
 
 
+def _persist_review_state(result: PipelineResult) -> bool:
+    """Persist review progress when this analysis has a database identity."""
+
+    if result.get("analysis_id") is None:
+        return True
+    try:
+        save_pipeline_state(result)
+    except DatabaseError:
+        return False
+    return True
+
+
+def _set_notice(level: str, message: str) -> None:
+    st.session_state[REVIEW_NOTICE_KEY] = (level, message)
+
+
+def _render_notice() -> None:
+    notice = st.session_state.pop(REVIEW_NOTICE_KEY, None)
+    if not isinstance(notice, tuple) or len(notice) != 2:
+        return
+    level, message = notice
+    if level == "success":
+        st.success(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.error(message)
+
+
 def _render_conflict_status(report: EvidenceReviewReport) -> None:
     audit = report["original_machine_report"].get("conflict_audit")
     pre_review = (
@@ -112,10 +154,19 @@ def _render_conflict_status(report: EvidenceReviewReport) -> None:
         if isinstance(pre_review, dict)
         else None
     )
-    if status in {"conflict", "meaningful_conflict"}:
-        st.warning(f"Pre-review conflict status: {status}")
-    elif isinstance(status, str) and status:
-        st.caption(f"Pre-review conflict status: {status}")
+    severity = (
+        pre_review.get("routing_severity")
+        if isinstance(pre_review, dict)
+        else None
+    )
+    if status == "conflict" and severity in {
+        "moderate",
+        "major",
+        "critical",
+    }:
+        st.warning(f"Conflict detected before review — severity: {severity}.")
+    else:
+        st.success("No meaningful conflict detected before review.")
 
 
 def _render_editor(
@@ -150,25 +201,40 @@ def _render_editor(
             height=120,
             key=notes_key,
         )
-        save = st.form_submit_button("Save draft", type="primary")
-    if not save:
+        with st.container(horizontal=True):
+            save = st.form_submit_button(
+                "Save draft",
+                type="primary",
+                icon=":material/save:",
+            )
+            reset = st.form_submit_button(
+                "Reset to original",
+                icon=":material/restart_alt:",
+            )
+    if not save and not reset:
         return
     try:
-        reviewed = json.loads(reviewed_text)
-        if not isinstance(reviewed, dict):
-            raise EvidenceReviewError(
-                "The reviewed report must be a JSON object."
-            )
-        notes = [
-            line.strip()
-            for line in notes_text.splitlines()
-            if line.strip()
-        ]
-        drafts[report_index] = save_evidence_review_draft(
+        if reset:
+            reviewed = deepcopy(report["original_machine_report"])
+            notes: list[str] = []
+        else:
+            reviewed = json.loads(reviewed_text)
+            if not isinstance(reviewed, dict):
+                raise EvidenceReviewError(
+                    "The reviewed report must be a JSON object."
+                )
+            notes = [
+                line.strip()
+                for line in notes_text.splitlines()
+                if line.strip()
+            ]
+        updated = save_evidence_review_draft(
             report,
             reviewed,
             notes,
         )
+        drafts[report_index] = updated
+        result["evidence_review_reports"][report_index] = dict(updated)
         packages = cast(
             dict[str, ReviewedEvidencePackage],
             st.session_state.setdefault(REVIEW_PACKAGES_KEY, {}),
@@ -179,10 +245,19 @@ def _render_editor(
             report["variant_index"],
             packages,
         )
+        persisted = _persist_review_state(result)
     except (json.JSONDecodeError, EvidenceReviewError) as exc:
         st.error(f"Draft was not saved: {exc}")
         return
-    st.success("Draft saved in this session.")
+    action = "reset to the original evidence" if reset else "saved"
+    if persisted:
+        _set_notice("success", f"Draft {action}.")
+    else:
+        _set_notice(
+            "warning",
+            f"Draft {action} in this session, but database persistence failed.",
+        )
+    st.rerun()
 
 
 def _render_history(report: EvidenceReviewReport) -> None:
@@ -212,17 +287,34 @@ def _render_history(report: EvidenceReviewReport) -> None:
     st.dataframe(rows, hide_index=True)
 
 
-def _render_package_summary(package: ReviewedEvidencePackage) -> None:
+def _render_package_summary(
+    package: ReviewedEvidencePackage,
+    routing_result: dict[str, object] | None = None,
+) -> None:
     post_review = package["post_review_conflict"]
     status = post_review.get("status")
     st.success(f"Confirmed at {package['confirmed_at']}.")
     if status == "conflict":
+        user_override = any(
+            finding.get("conflict_type") == "user_override"
+            for finding in post_review.get("findings", [])
+            if isinstance(finding, dict)
+        )
+        label = (
+            "Conflict after user edits"
+            if user_override
+            else "Conflict detected after review"
+        )
         st.warning(
-            "Post-review conflict status: conflict "
-            f"(severity: {post_review.get('routing_severity')})."
+            f"{label} — severity: {post_review.get('routing_severity')}."
         )
     else:
-        st.caption("Post-review conflict status: no_conflict")
+        st.success("No meaningful conflict after review.")
+    if (
+        routing_result is not None
+        and routing_result.get("resolution_status") == "unresolved"
+    ):
+        st.error("Unresolved conflict in the final interpretation.")
     if package["user_added_evidence"]:
         st.caption(
             f"{len(package['user_added_evidence'])} user-added "
@@ -274,23 +366,104 @@ def _render_confirmation(
                     ReviewedEvidencePackage,
                     package,
                 )
+                if not _persist_review_state(result):
+                    st.warning(
+                        "Evidence was confirmed in this session, but "
+                        "database persistence failed."
+                    )
             except (PipelineError, StopIteration) as exc:
                 st.error(f"Evidence was not confirmed: {exc}")
 
     package = packages.get(report_id)
     if package is not None:
-        _render_package_summary(package)
+        routing_result = next(
+            (
+                item
+                for item in result.get("llm_routing_results", [])
+                if item.get("variant_index") == report["variant_index"]
+            ),
+            None,
+        )
+        _render_package_summary(package, routing_result)
 
 
-def render_evidence_review(result: PipelineResult) -> None:
+def _render_interpretation_action(
+    result: PipelineResult,
+    *,
+    light_model: str | None,
+    strong_model: str | None,
+) -> None:
+    variant_count = result["variant_count"]
+    confirmed_indexes = {
+        package["variant_index"]
+        for package in result.get("reviewed_evidence_packages", [])
+    }
+    fully_confirmed = (
+        variant_count > 0
+        and confirmed_indexes == set(range(variant_count))
+    )
+    completed = result.get("workflow_state") == "completed"
+
+    with st.container(border=True):
+        st.markdown("**Generate final interpretation**")
+        st.caption(
+            f"Confirmed variants: {len(confirmed_indexes)} of {variant_count}. "
+            "No-conflict variants use the low-cost model; meaningful "
+            "conflicts use the strong model."
+        )
+        if not fully_confirmed:
+            st.info(
+                "Confirm the reviewed evidence for every variant before "
+                "generating Output B."
+            )
+        if st.button(
+            "Generate interpretation",
+            type="primary",
+            icon=":material/auto_awesome:",
+            disabled=not fully_confirmed or completed,
+            key=f"{_REVIEW_WIDGET_PREFIX}generate_interpretation",
+        ):
+            try:
+                with st.spinner("Generating confirmed interpretations..."):
+                    generated = resume_confirmed_analysis(
+                        result,
+                        light_model=light_model,
+                        strong_model=strong_model,
+                    )
+            except PipelineError as exc:
+                st.error(f"Interpretation could not be generated: {exc}")
+                return
+            result.clear()
+            result.update(generated)
+            st.session_state["pipeline_result"] = result
+            persisted = _persist_review_state(result)
+            if persisted:
+                _set_notice("success", "Output B generated.")
+            else:
+                _set_notice(
+                    "warning",
+                    "Output B generated, but database persistence failed.",
+                )
+            st.rerun()
+        if completed:
+            st.success("Output B has been generated from confirmed evidence.")
+
+
+def render_evidence_review(
+    result: PipelineResult,
+    *,
+    light_model: str | None = None,
+    strong_model: str | None = None,
+) -> None:
     """Render editable reports without invoking final interpretation."""
 
     st.subheader("Output A — Editable detailed evidence report")
+    _render_notice()
     reports = result.get("evidence_review_reports", [])
     if not reports:
         st.info("No editable evidence review reports are available.")
         return
-    drafts = _initialize_drafts(reports)
+    drafts = _initialize_drafts(reports, result)
     selected = st.selectbox(
         "Variant evidence report",
         options=list(range(len(drafts))),
@@ -300,8 +473,9 @@ def render_evidence_review(result: PipelineResult) -> None:
     report = drafts[selected]
     _render_conflict_status(report)
     st.caption(
-        "Drafts remain local to this browser session. Final LLM "
-        "interpretation is not run before confirmation."
+        "Every reviewed JSON field can be edited, added, or deleted. "
+        "The immutable original remains available for comparison. Final "
+        "interpretation is blocked until every variant is confirmed."
     )
     editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
         [
@@ -319,6 +493,11 @@ def render_evidence_review(result: PipelineResult) -> None:
         _render_history(report)
     with confirm_tab:
         _render_confirmation(drafts[selected], result)
+    _render_interpretation_action(
+        result,
+        light_model=light_model,
+        strong_model=strong_model,
+    )
 
 
 __all__ = [

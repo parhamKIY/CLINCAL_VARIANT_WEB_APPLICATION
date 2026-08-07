@@ -77,7 +77,7 @@ flowchart LR
 
 ## API-first continuation
 
-Stages 27–39 are implemented and tested. Stage 40 and later remain planned
+Stages 27–40 are implemented and tested. Stage 41 and later remain planned
 until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
@@ -166,6 +166,11 @@ in input order and provides separate evidence and interpretation report views.
 - Stage 39 migrates SQLite to schema version `2` with bounded, validated
   Pipeline V2 snapshots. Phase A Drafts preserve review history and provenance,
   can be loaded later, and are replaced by Confirmed state after Phase B.
+- Stage 40 exposes the complete human-review workflow in Streamlit. Reviewers
+  can edit, add, or delete nested evidence, add notes, save or reset Drafts,
+  compare immutable originals, confirm each variant, and generate Output B only
+  after every variant is confirmed. Separate selectors configure the low-cost
+  no-conflict model and the strong conflict model.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
