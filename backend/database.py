@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
 from backend.report import (
@@ -26,14 +26,18 @@ from config import (
     settings,
 )
 
+if TYPE_CHECKING:
+    from backend.pipeline import PipelineResult
 
-DATABASE_SCHEMA_VERSION = 1
+
+DATABASE_SCHEMA_VERSION = 2
 DATABASE_BUSY_TIMEOUT_MS = 5_000
 MAX_ANALYSIS_WARNINGS = 100
 MAX_ANALYSIS_WARNING_LENGTH = 1_000
 MAX_ANALYSIS_WARNINGS_JSON_BYTES = 64 * 1024
 MAX_STORED_CANDIDATES = 100
 MAX_STORED_EVIDENCE_OBJECTS = 100
+MAX_PIPELINE_STATE_JSON_BYTES = 8 * 1024 * 1024
 ANALYSIS_STATUSES = frozenset(
     {"pending", "running", "success", "partial", "error"}
 )
@@ -83,6 +87,14 @@ DATABASE_TABLES = {
     "reports": (
         "analysis_id",
         "report_path",
+    ),
+    "pipeline_states": (
+        "analysis_id",
+        "review_state",
+        "workflow_state",
+        "pipeline_schema_version",
+        "pipeline_json",
+        "updated_at",
     ),
 }
 
@@ -135,6 +147,43 @@ CREATE TABLE reports (
         ON DELETE CASCADE
 ) WITHOUT ROWID;
 
+CREATE TABLE pipeline_states (
+    analysis_id TEXT PRIMARY KEY,
+    review_state TEXT NOT NULL
+        CHECK (review_state IN ('draft', 'confirmed')),
+    workflow_state TEXT NOT NULL
+        CHECK (length(workflow_state) BETWEEN 1 AND 32),
+    pipeline_schema_version TEXT NOT NULL
+        CHECK (length(pipeline_schema_version) BETWEEN 1 AND 32),
+    pipeline_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+        CHECK (length(updated_at) BETWEEN 1 AND 64),
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
+PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
+COMMIT;
+"""
+
+_MIGRATE_SCHEMA_V1_TO_V2_SQL = f"""
+BEGIN IMMEDIATE;
+CREATE TABLE pipeline_states (
+    analysis_id TEXT PRIMARY KEY,
+    review_state TEXT NOT NULL
+        CHECK (review_state IN ('draft', 'confirmed')),
+    workflow_state TEXT NOT NULL
+        CHECK (length(workflow_state) BETWEEN 1 AND 32),
+    pipeline_schema_version TEXT NOT NULL
+        CHECK (length(pipeline_schema_version) BETWEEN 1 AND 32),
+    pipeline_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+        CHECK (length(updated_at) BETWEEN 1 AND 64),
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
 PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
 COMMIT;
 """
@@ -283,6 +332,32 @@ def _existing_application_tables(
     }
 
 
+def _validate_schema_v1(connection: sqlite3.Connection) -> None:
+    """Verify the exact legacy schema before applying its sole migration."""
+
+    legacy_tables = {
+        name: columns
+        for name, columns in DATABASE_TABLES.items()
+        if name != "pipeline_states"
+    }
+    if _existing_application_tables(connection) != set(legacy_tables):
+        raise DatabaseInitializationError(
+            "The legacy analysis database schema is incomplete or unexpected."
+        )
+    for table_name, expected_columns in legacy_tables.items():
+        actual_columns = tuple(
+            str(row["name"])
+            for row in connection.execute(
+                f'PRAGMA table_info("{table_name}")'
+            )
+        )
+        if actual_columns != expected_columns:
+            raise DatabaseInitializationError(
+                "The legacy analysis database schema is incomplete or "
+                "unexpected."
+            )
+
+
 def _validate_schema(connection: sqlite3.Connection) -> None:
     """Verify that the installed version has the expected table columns."""
 
@@ -341,6 +416,9 @@ def initialize_database(
                     "version."
                 )
             connection.executescript(_DATABASE_SCHEMA_SQL)
+        elif schema_version == 1:
+            _validate_schema_v1(connection)
+            connection.executescript(_MIGRATE_SCHEMA_V1_TO_V2_SQL)
         elif schema_version < DATABASE_SCHEMA_VERSION:
             raise DatabaseInitializationError(
                 "The analysis database requires an unsupported schema "
@@ -1122,6 +1200,200 @@ def save_complete_analysis(
     return record
 
 
+def _derive_review_state(value: "PipelineResult") -> str:
+    """Derive review completion from confirmed packages, never UI input."""
+
+    confirmed_indexes = [
+        package["variant_index"]
+        for package in value["reviewed_evidence_packages"]
+    ]
+    return (
+        "confirmed"
+        if value["variant_count"] > 0
+        and confirmed_indexes == list(range(value["variant_count"]))
+        else "draft"
+    )
+
+
+def _prepare_pipeline_state(
+    value: object,
+) -> tuple["PipelineResult", str, str]:
+    """Validate and serialize one complete resumable pipeline snapshot."""
+
+    from backend.error_handling import PipelineResultError
+    from backend.pipeline import validate_pipeline_result
+
+    try:
+        validated = validate_pipeline_result(value)
+        serialized = json.dumps(
+            validated,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (PipelineResultError, TypeError, ValueError) as exc:
+        raise DatabaseValidationError(
+            "Pipeline state must be a valid JSON-safe pipeline result."
+        ) from exc
+    if len(serialized.encode("utf-8")) > MAX_PIPELINE_STATE_JSON_BYTES:
+        raise DatabaseValidationError(
+            "Pipeline state exceeds the storage size limit."
+        )
+    analysis_id = validated["analysis_id"]
+    if analysis_id is None:
+        raise DatabaseValidationError(
+            "Pipeline state requires a persisted analysis ID."
+        )
+    _validate_analysis_id(analysis_id)
+    return validated, serialized, _derive_review_state(validated)
+
+
+def save_pipeline_state(
+    value: object,
+    *,
+    database_path: str | Path | None = None,
+) -> "PipelineResult":
+    """Upsert a validated Draft or Confirmed pipeline state for later use."""
+
+    validated, serialized, review_state = _prepare_pipeline_state(value)
+    analysis_id = validated["analysis_id"]
+    assert analysis_id is not None
+    normalized_status = _validate_status(validated["status"])
+    normalized_warnings = _normalize_warnings(validated["warnings"])
+    warnings_json = json.dumps(
+        normalized_warnings,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    updated_at = (
+        datetime.now(UTC)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+    resolved_database_path = initialize_database(database_path)
+    connection = connect_database(resolved_database_path)
+    try:
+        with connection:
+            exists = connection.execute(
+                "SELECT 1 FROM analyses WHERE analysis_id = ?",
+                (analysis_id,),
+            ).fetchone()
+            if exists is None:
+                raise AnalysisNotFoundError(
+                    "The pipeline state requires an existing analysis."
+                )
+            connection.execute(
+                """
+                INSERT INTO pipeline_states (
+                    analysis_id,
+                    review_state,
+                    workflow_state,
+                    pipeline_schema_version,
+                    pipeline_json,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (analysis_id) DO UPDATE SET
+                    review_state = excluded.review_state,
+                    workflow_state = excluded.workflow_state,
+                    pipeline_schema_version = excluded.pipeline_schema_version,
+                    pipeline_json = excluded.pipeline_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    analysis_id,
+                    review_state,
+                    validated["workflow_state"],
+                    validated["schema_version"],
+                    serialized,
+                    updated_at,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE analyses
+                SET status = ?, warnings_json = ?
+                WHERE analysis_id = ?
+                """,
+                (normalized_status, warnings_json, analysis_id),
+            )
+    except DatabaseError:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseWriteError(
+            "The pipeline state could not be saved."
+        ) from exc
+    finally:
+        connection.close()
+    return validated
+
+
+def load_pipeline_state(
+    analysis_id: str,
+    *,
+    database_path: str | Path | None = None,
+) -> "PipelineResult":
+    """Load and revalidate one resumable pipeline snapshot."""
+
+    from backend.error_handling import PipelineResultError
+    from backend.pipeline import validate_pipeline_result
+
+    normalized_id = _validate_analysis_id(analysis_id)
+    resolved_database_path = initialize_database(database_path)
+    connection = connect_database(resolved_database_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                review_state,
+                workflow_state,
+                pipeline_schema_version,
+                pipeline_json
+            FROM pipeline_states
+            WHERE analysis_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise DatabaseReadError(
+            "The stored pipeline state could not be read."
+        ) from exc
+    finally:
+        connection.close()
+    if row is None:
+        raise AnalysisNotFoundError(
+            "The requested analysis has no saved pipeline state."
+        )
+    raw_json = row["pipeline_json"]
+    if (
+        not isinstance(raw_json, str)
+        or len(raw_json.encode("utf-8")) > MAX_PIPELINE_STATE_JSON_BYTES
+    ):
+        raise DatabaseReadError("The stored pipeline state is invalid.")
+    try:
+        raw = json.loads(raw_json)
+        validated = validate_pipeline_result(raw)
+    except (
+        json.JSONDecodeError,
+        PipelineResultError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DatabaseReadError(
+            "The stored pipeline state is invalid."
+        ) from exc
+    if (
+        validated["analysis_id"] != normalized_id
+        or validated["workflow_state"] != row["workflow_state"]
+        or validated["schema_version"] != row["pipeline_schema_version"]
+        or _derive_review_state(validated) != row["review_state"]
+    ):
+        raise DatabaseReadError("The stored pipeline state is invalid.")
+    return validated
+
+
 def _restore_analysis_metadata(
     row: sqlite3.Row,
 ) -> AnalysisRecord:
@@ -1384,6 +1656,7 @@ __all__ = [
     "DATABASE_TABLES",
     "MAX_STORED_CANDIDATES",
     "MAX_STORED_EVIDENCE_OBJECTS",
+    "MAX_PIPELINE_STATE_JSON_BYTES",
     "ANALYSIS_STATUSES",
     "AnalysisRecord",
     "AnalysisNotFoundError",
@@ -1399,9 +1672,11 @@ __all__ = [
     "connect_database",
     "get_analysis",
     "initialize_database",
+    "load_pipeline_state",
     "save_analysis",
     "save_complete_analysis",
     "save_evidence_objects",
     "save_report",
+    "save_pipeline_state",
     "save_variants",
 ]

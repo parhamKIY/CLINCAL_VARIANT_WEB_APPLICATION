@@ -41,9 +41,11 @@ from backend.database import (
     connect_database,
     get_analysis,
     initialize_database,
+    load_pipeline_state,
     save_analysis,
     save_complete_analysis,
     save_evidence_objects,
+    save_pipeline_state,
     save_report,
     save_variants,
 )
@@ -147,6 +149,7 @@ from backend.pipeline import (
     generate_confirmed_interpretations,
     generate_final_interpretation_report,
     resume_confirmed_analysis,
+    resume_saved_analysis,
     run_analysis,
     run_annotation_and_phenotype,
     run_variant_processing,
@@ -10344,6 +10347,157 @@ class TestStage37PipelineV2Integration:
 
         with pytest.raises(PipelineResultError, match="requires Output B"):
             validate_pipeline_result(paused)
+
+
+class TestStage39ReviewStatePersistence:
+    """Verify migration and resumable Draft/Confirmed persistence."""
+
+    @staticmethod
+    def _stored_draft(
+        database_path: Path,
+    ) -> tuple[PipelineResult, list[dict[str, object]]]:
+        draft, reports = TestStage37PipelineV2Integration._paused_result()
+        record = save_analysis(
+            status=draft["status"],
+            warnings=draft["warnings"],
+            database_path=database_path,
+        )
+        draft["analysis_id"] = record["analysis_id"]
+        save_pipeline_state(draft, database_path=database_path)
+        return draft, reports
+
+    def test_v1_schema_migrates_without_losing_analysis_rows(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        record = save_analysis(status="success", database_path=database_path)
+        connection = connect_database(database_path)
+        try:
+            connection.execute("DROP TABLE pipeline_states")
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+        finally:
+            connection.close()
+
+        initialize_database(database_path)
+
+        assert get_analysis(
+            record["analysis_id"], database_path=database_path
+        )["analysis_id"] == record["analysis_id"]
+        connection = connect_database(database_path)
+        try:
+            assert connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0] == DATABASE_SCHEMA_VERSION
+            assert connection.execute(
+                "SELECT COUNT(*) FROM pipeline_states"
+            ).fetchone()[0] == 0
+        finally:
+            connection.close()
+
+    def test_draft_round_trip_preserves_review_history_and_provenance(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft, _ = self._stored_draft(database_path)
+
+        restored = load_pipeline_state(
+            draft["analysis_id"], database_path=database_path
+        )
+
+        assert restored == draft
+        assert restored["evidence_review_reports"][0]["edit_history"]
+        assert restored["evidence_objects"][0]["provenance"]["lineage"]
+        connection = connect_database(database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT review_state, workflow_state
+                FROM pipeline_states
+                WHERE analysis_id = ?
+                """,
+                (draft["analysis_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert dict(row) == {
+            "review_state": "draft",
+            "workflow_state": "awaiting_confirmation",
+        }
+
+    def test_saved_draft_resumes_and_is_replaced_by_confirmed_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft, reports = self._stored_draft(database_path)
+        response = LLMResponse(
+            content=json.dumps(
+                {
+                    "final_interpretation": "Evidence-bound interpretation.",
+                    "resolution_status": "not_applicable",
+                    "warnings": [],
+                }
+            ),
+            model="light-response",
+        )
+
+        completed = resume_saved_analysis(
+            draft["analysis_id"],
+            reports,
+            database_path=database_path,
+            light_client=LLMClient(FakeLLMAdapter(response)),
+            strong_client=LLMClient(FakeLLMAdapter(response)),
+            timestamp="2026-08-08T09:00:00Z",
+        )
+
+        assert completed["workflow_state"] == "completed"
+        assert load_pipeline_state(
+            draft["analysis_id"], database_path=database_path
+        ) == completed
+        connection = connect_database(database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT review_state, workflow_state
+                FROM pipeline_states
+                WHERE analysis_id = ?
+                """,
+                (draft["analysis_id"],),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert dict(row) == {
+            "review_state": "confirmed",
+            "workflow_state": "completed",
+        }
+
+    def test_inconsistent_state_metadata_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft, _ = self._stored_draft(database_path)
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                UPDATE pipeline_states
+                SET review_state = 'confirmed'
+                WHERE analysis_id = ?
+                """,
+                (draft["analysis_id"],),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(DatabaseReadError, match="invalid"):
+            load_pipeline_state(
+                draft["analysis_id"], database_path=database_path
+            )
 
 
 class TestClinicalInterpretationValidation:

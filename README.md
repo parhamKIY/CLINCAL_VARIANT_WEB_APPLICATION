@@ -77,7 +77,7 @@ flowchart LR
 
 ## API-first continuation
 
-Stages 27–38 are implemented and tested. Stage 39 and later remain planned
+Stages 27–39 are implemented and tested. Stage 40 and later remain planned
 until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
@@ -163,6 +163,9 @@ in input order and provides separate evidence and interpretation report views.
   LLM settings in `config.py`. Strict feature flags can disable deep gnomAD or
   literature requests without code edits, and configured provider keys are
   redacted from application logs.
+- Stage 39 migrates SQLite to schema version `2` with bounded, validated
+  Pipeline V2 snapshots. Phase A Drafts preserve review history and provenance,
+  can be loaded later, and are replaced by Confirmed state after Phase B.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
@@ -644,6 +647,14 @@ fails, the completed clinical output remains available, internal database
 details are not exposed, and a successful result is safely downgraded to
 partial with a bounded warning. The live `--pipeline` smoke mode also retrieves
 the saved analysis and verifies its report and Evidence Objects.
+
+Stage 39 extends this foundation with a transactionally migrated
+`pipeline_states` table. `run_analysis()` saves the editable Phase A Draft,
+while `load_pipeline_state()`, `save_pipeline_state()`, and
+`resume_saved_analysis()` provide validated pause-and-resume persistence through
+human confirmation and final interpretation. The complete snapshot is bounded
+and revalidated on read; queryable review/workflow metadata is cross-checked
+against it instead of trusted independently.
 
 <a id="stage-13-comprehensive-testing-complete"></a>
 

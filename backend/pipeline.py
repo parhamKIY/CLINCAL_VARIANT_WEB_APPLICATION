@@ -18,7 +18,12 @@ from backend.annotation import (
     annotate_variants,
 )
 from backend.conditional_enrichment import enrich_conditionally
-from backend.database import DatabaseError, save_complete_analysis
+from backend.database import (
+    DatabaseError,
+    load_pipeline_state,
+    save_complete_analysis,
+    save_pipeline_state,
+)
 from backend.error_handling import (
     PipelineError,
     PipelineInputError,
@@ -1096,6 +1101,16 @@ def _persist_terminal_result(
         result["analysis_id"] = None
         return
     result["analysis_id"] = record["analysis_id"]
+    try:
+        save_pipeline_state(result, database_path=database_path)
+    except DatabaseError:
+        _append_warning(
+            result,
+            "The analysis was saved, but its resumable review state could "
+            "not be saved.",
+        )
+        if result["status"] == "success":
+            result["status"] = "partial"
 
 
 def _process_filtered_variants(
@@ -2309,6 +2324,35 @@ def resume_confirmed_analysis(
     return working
 
 
+def resume_saved_analysis(
+    analysis_id: str,
+    reports: Sequence[Mapping[str, object]] | None = None,
+    *,
+    database_path: str | Path | None = None,
+    light_client: LLMClient | None = None,
+    strong_client: LLMClient | None = None,
+    light_model: str | None = None,
+    strong_model: str | None = None,
+    timestamp: str | None = None,
+    progress_callback: PipelineProgressCallback | None = None,
+) -> PipelineResult:
+    """Load one Draft, run Phase B, and persist the Confirmed result."""
+
+    saved = load_pipeline_state(analysis_id, database_path=database_path)
+    completed = resume_confirmed_analysis(
+        saved,
+        reports,
+        light_client=light_client,
+        strong_client=strong_client,
+        light_model=light_model,
+        strong_model=strong_model,
+        timestamp=timestamp,
+        progress_callback=progress_callback,
+    )
+    save_pipeline_state(completed, database_path=database_path)
+    return completed
+
+
 __all__ = [
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
@@ -2334,6 +2378,7 @@ __all__ = [
     "generate_confirmed_interpretations",
     "generate_final_interpretation_report",
     "resume_confirmed_analysis",
+    "resume_saved_analysis",
     "create_pipeline_result",
     "run_analysis",
     "run_annotation_and_phenotype",
