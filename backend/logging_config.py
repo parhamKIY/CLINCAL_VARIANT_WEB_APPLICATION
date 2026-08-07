@@ -213,6 +213,7 @@ def configure_logging(
     redactor = SecretRedactor(
         (
             settings.LLM_API_KEY,
+            settings.GENEBE_API_KEY or "",
             *additional_secrets,
         )
     )

@@ -362,6 +362,38 @@ class TestConfiguration:
             == 0
         )
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("true", True),
+            ("1", True),
+            ("YES", True),
+            ("off", False),
+            ("0", False),
+        ],
+    )
+    def test_boolean_setting_is_strict_and_normalized(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+        expected: bool,
+    ) -> None:
+        monkeypatch.setenv("TEST_BOOLEAN_SETTING", value)
+
+        assert config_module._get_bool(
+            "TEST_BOOLEAN_SETTING",
+            not expected,
+        ) is expected
+
+    def test_boolean_setting_rejects_ambiguous_value(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TEST_BOOLEAN_SETTING", "enabled")
+
+        with pytest.raises(RuntimeError, match="must be a boolean"):
+            config_module._get_bool("TEST_BOOLEAN_SETTING", True)
+
     def test_relative_and_absolute_paths_are_resolved(
         self,
         tmp_path: Path,
@@ -501,6 +533,11 @@ class TestConfiguration:
                 201,
                 "MYDISEASE_MAX_HPO_TERMS_PER_DISEASE cannot exceed",
             ),
+            (
+                "ENABLE_GNOMAD_DEEP_LOOKUP",
+                "true",
+                "feature flags must be booleans",
+            ),
         ],
     )
     def test_invalid_central_configuration_is_rejected(
@@ -547,6 +584,10 @@ class TestConfiguration:
             (
                 "MYDISEASE_BASE_URL",
                 "http://mydisease.example/v1",
+            ),
+            (
+                "MONARCH_BASE_URL",
+                "http://api.monarchinitiative.org/v3/api",
             ),
         ],
     )
@@ -608,6 +649,19 @@ class TestConfiguration:
         config_module.Settings.initialize()
 
         assert calls == ["validate", "create"]
+
+    def test_providers_do_not_read_environment_directly(self) -> None:
+        provider_sources = [
+            path
+            for path in (PROJECT_ROOT / "backend").rglob("*.py")
+            if "__pycache__" not in path.parts
+        ]
+
+        for path in provider_sources:
+            source = path.read_text(encoding="utf-8")
+            assert "os.getenv(" not in source, path
+            assert "os.environ" not in source, path
+            assert "load_dotenv" not in source, path
 
 
 @pytest.mark.stage14_security
@@ -713,6 +767,29 @@ class TestLoggingConfiguration:
         assert REDACTED in contents
         assert "retained" in contents
         assert "RuntimeError" in contents
+
+    def test_configured_provider_keys_are_redacted(
+        self,
+        log_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provider_key = "configured-genebe-secret"
+        monkeypatch.setattr(settings, "GENEBE_API_KEY", provider_key)
+        configure_logging(
+            level="INFO",
+            log_path=log_path,
+            force=True,
+        )
+        get_logger("provider-secret-test").info(
+            "credential=%s",
+            provider_key,
+        )
+        for handler in logging.getLogger(APP_LOGGER_NAME).handlers:
+            handler.flush()
+
+        contents = log_path.read_text(encoding="utf-8")
+        assert provider_key not in contents
+        assert REDACTED in contents
 
     def test_nested_credentials_and_exception_text_are_omitted(
         self,
@@ -7271,6 +7348,60 @@ class TestEvidenceObject:
         assert result["providers"]["pubmed"]["status"] == "not_triggered"
         assert result["articles"] == []
         assert len(session.get_calls) == 1
+
+    def test_stage_38_feature_flags_skip_configured_enrichment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "ENABLE_GNOMAD_DEEP_LOOKUP",
+            False,
+        )
+        monkeypatch.setattr(
+            settings,
+            "ENABLE_LITERATURE_ENRICHMENT",
+            False,
+        )
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        myvariant = sources["myvariant"]
+        assert isinstance(clinvar, dict)
+        assert isinstance(myvariant, dict)
+        clinvar["clinical_significance"] = "uncertain significance"
+        myvariant["rsid"] = "rs121913529"
+        preliminary = build_evidence_objects([candidate])
+        population_session = FakeConditionalSession()
+        literature_session = FakeConditionalSession()
+
+        result = enrich_conditionally(
+            [candidate],
+            preliminary,
+            population_session=(  # type: ignore[arg-type]
+                population_session
+            ),
+            literature_session=(  # type: ignore[arg-type]
+                literature_session
+            ),
+        )
+
+        enrichment = result["variants"][0]["conditional_enrichment"]
+        assert result["triggered_count"] == 0
+        assert enrichment["triggered"] is False
+        assert population_session.post_calls == []
+        assert literature_session.get_calls == []
+        assert enrichment["population_frequency"]["failure_reason"] == (
+            "disabled_by_configuration"
+        )
+        assert enrichment["literature"]["failure_reason"] == (
+            "disabled_by_configuration"
+        )
+        assert enrichment["warnings"] == [
+            "gnomAD deep lookup is disabled by configuration.",
+            "Literature enrichment is disabled by configuration.",
+        ]
 
     def test_stage_32_analysis_enrichment_limit_is_explicit(
         self,

@@ -2083,7 +2083,7 @@ def enrich_conditionally(
             triggered_count
             < settings.CONDITIONAL_ENRICHMENT_MAX_VARIANTS
         )
-        population_needed = bool(
+        population_triggered = bool(
             set(triggers)
             & {
                 "vus",
@@ -2091,7 +2091,15 @@ def enrich_conditionally(
                 "population_evidence_ambiguity",
             }
         )
-        literature_needed = "literature_evidence_need" in triggers
+        literature_triggered = "literature_evidence_need" in triggers
+        population_needed = (
+            population_triggered
+            and settings.ENABLE_GNOMAD_DEEP_LOOKUP
+        )
+        literature_needed = (
+            literature_triggered
+            and settings.ENABLE_LITERATURE_ENRICHMENT
+        )
         if (population_needed or literature_needed) and within_limit:
             triggered_count += 1
         elif not within_limit and (
@@ -2125,25 +2133,37 @@ def enrich_conditionally(
             pubmed_statuses.append("not_triggered")
             continue
 
-        population = (
-            fetch_gnomad_evidence(
+        if population_needed:
+            population = fetch_gnomad_evidence(
                 item,
                 session=population_session,
             )
-            if population_needed
-            else _empty_population_evidence(
+        else:
+            population = _empty_population_evidence(
                 status="not_triggered",
                 candidate=item,
             )
-        )
-        literature = (
-            fetch_literature_evidence(
+            if population_triggered:
+                population["failure_reason"] = (
+                    "disabled_by_configuration"
+                )
+                population["warnings"] = [
+                    "gnomAD deep lookup is disabled by configuration."
+                ]
+        if literature_needed:
+            literature = fetch_literature_evidence(
                 item,
                 session=literature_session,
             )
-            if literature_needed
-            else _empty_literature("not_triggered")
-        )
+        else:
+            literature = _empty_literature("not_triggered")
+            if literature_triggered:
+                literature["failure_reason"] = (
+                    "disabled_by_configuration"
+                )
+                literature["warnings"] = [
+                    "Literature enrichment is disabled by configuration."
+                ]
         litvar_status = literature["providers"]["litvar"]["status"]
         europe_pmc_status = literature["providers"][
             "europe_pmc"

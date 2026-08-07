@@ -73,6 +73,22 @@ def _get_non_negative_int(name: str, default: int) -> int:
     return value
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    """Read a strict boolean environment variable."""
+
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(
+        f"Environment variable '{name}' must be a boolean."
+    )
+
+
 def _resolve_path(name: str, default: str) -> Path:
     """
     Resolve a path from an environment variable.
@@ -217,6 +233,11 @@ class Settings:
         "https://phen2gene.wglab.org/api",
     ).strip().rstrip("/")
 
+    MONARCH_BASE_URL: str = os.getenv(
+        "MONARCH_BASE_URL",
+        "https://api-v3.monarchinitiative.org/v3/api",
+    ).strip().rstrip("/")
+
     MYDISEASE_BASE_URL: str = os.getenv(
         "MYDISEASE_BASE_URL",
         "https://mydisease.info/v1",
@@ -300,6 +321,16 @@ class Settings:
     CONDITIONAL_ENRICHMENT_MAX_ARTICLES: int = _get_positive_int(
         "CONDITIONAL_ENRICHMENT_MAX_ARTICLES",
         10,
+    )
+
+    ENABLE_GNOMAD_DEEP_LOOKUP: bool = _get_bool(
+        "ENABLE_GNOMAD_DEEP_LOOKUP",
+        True,
+    )
+
+    ENABLE_LITERATURE_ENRICHMENT: bool = _get_bool(
+        "ENABLE_LITERATURE_ENRICHMENT",
+        True,
     )
 
     HPO_ONTOLOGY_URL: str = os.getenv(
@@ -459,6 +490,7 @@ class Settings:
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
+            "MONARCH_BASE_URL": cls.MONARCH_BASE_URL,
             "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
             "GNOMAD_BASE_URL": cls.GNOMAD_BASE_URL,
             "ENSEMBL_VARIATION_BASE_URL": (
@@ -510,6 +542,14 @@ class Settings:
         if not cls.LLM_MODEL_LIGHT or not cls.LLM_MODEL_STRONG:
             raise RuntimeError(
                 "LLM_MODEL_LIGHT and LLM_MODEL_STRONG cannot be empty."
+            )
+
+        if not isinstance(cls.ENABLE_GNOMAD_DEEP_LOOKUP, bool) or not isinstance(
+            cls.ENABLE_LITERATURE_ENRICHMENT,
+            bool,
+        ):
+            raise RuntimeError(
+                "Conditional-enrichment feature flags must be booleans."
             )
 
         if cls.GENOME_ASSEMBLY not in {"GRCh37", "GRCh38"}:

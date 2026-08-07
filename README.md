@@ -77,7 +77,7 @@ flowchart LR
 
 ## API-first continuation
 
-Stages 27–37 are implemented and tested. Stage 38 and later remain planned
+Stages 27–38 are implemented and tested. Stage 39 and later remain planned
 until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
@@ -159,6 +159,10 @@ in input order and provides separate evidence and interpretation report views.
   and a confirmed-interpretation Phase B. Resumption requires confirmation for
   every variant, preserves the same analysis identity, isolates LLM failures
   per variant, and aggregates provider, enrichment, and model warnings.
+- Stage 38 centralizes the Phen2Gene, Monarch, gnomAD, literature, and two-layer
+  LLM settings in `config.py`. Strict feature flags can disable deep gnomAD or
+  literature requests without code edits, and configured provider keys are
+  redacted from application logs.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
@@ -439,6 +443,14 @@ LLM_MODEL=model-name
 LLM_MODEL_LIGHT=light-model-name
 LLM_MODEL_STRONG=strong-model-name
 LLM_TIMEOUT=30
+```
+
+Conditional enrichment can be changed without editing provider code:
+
+```env
+MONARCH_BASE_URL=https://api-v3.monarchinitiative.org/v3/api
+ENABLE_GNOMAD_DEEP_LOOKUP=true
+ENABLE_LITERATURE_ENRICHMENT=true
 ```
 
 <a id="stage-9-clinical-report-generation-complete"></a>
