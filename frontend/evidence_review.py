@@ -97,6 +97,7 @@ def _invalidate_confirmation(
         if item.get("variant_index") != variant_index
     ]
     result["final_interpretation_report"] = None
+    result["workflow_state"] = "awaiting_confirmation"
 
 
 def _render_conflict_status(report: EvidenceReviewReport) -> None:

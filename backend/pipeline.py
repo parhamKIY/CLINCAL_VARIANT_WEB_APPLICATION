@@ -73,7 +73,7 @@ from backend.vcf_processing import (
     parse_manual_variants,
     process_vcf,
 )
-PIPELINE_SCHEMA_VERSION = "2.2"
+PIPELINE_SCHEMA_VERSION = "2.3"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -105,6 +105,13 @@ PipelineAPIStatus = Literal[
     "skipped",
 ]
 PipelineInputMode = Literal["vcf", "manual"]
+PipelineWorkflowState = Literal[
+    "phase_a_running",
+    "awaiting_confirmation",
+    "phase_b_running",
+    "completed",
+    "failed",
+]
 
 PIPELINE_STATUS_VALUES = {
     "pending",
@@ -123,6 +130,13 @@ PIPELINE_STAGE_STATUS_VALUES = {
 }
 PIPELINE_API_STATUS_VALUES = PIPELINE_STAGE_STATUS_VALUES | {
     "no_association"
+}
+PIPELINE_WORKFLOW_STATE_VALUES = {
+    "phase_a_running",
+    "awaiting_confirmation",
+    "phase_b_running",
+    "completed",
+    "failed",
 }
 PIPELINE_STAGE_ORDER = (
     "input",
@@ -185,6 +199,7 @@ class PipelineResult(TypedDict):
     """Versioned JSON-safe output retained for the frontend."""
 
     schema_version: str
+    workflow_state: PipelineWorkflowState
     status: PipelineStatus
     current_stage: str
     progress_percent: int
@@ -343,6 +358,7 @@ def create_pipeline_result() -> PipelineResult:
 
     result: PipelineResult = {
         "schema_version": PIPELINE_SCHEMA_VERSION,
+        "workflow_state": "phase_a_running",
         "status": "pending",
         "current_stage": "input",
         "progress_percent": 0,
@@ -553,6 +569,10 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             "pipeline.schema_version must be "
             f"{PIPELINE_SCHEMA_VERSION}."
         )
+    if value["workflow_state"] not in PIPELINE_WORKFLOW_STATE_VALUES:
+        raise PipelineResultError(
+            "pipeline.workflow_state is unsupported."
+        )
     if value["status"] not in PIPELINE_STATUS_VALUES:
         raise PipelineResultError(
             "pipeline.status is unsupported."
@@ -744,6 +764,19 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 "pipeline.final_interpretation_report does not match "
                 "the Stage 35 results."
             )
+    workflow_state = value["workflow_state"]
+    if workflow_state == "awaiting_confirmation" and not review_reports:
+        raise PipelineResultError(
+            "pipeline.awaiting_confirmation requires editable reports."
+        )
+    if workflow_state == "completed" and final_report is None:
+        raise PipelineResultError(
+            "pipeline.completed requires Output B."
+        )
+    if final_report is not None and workflow_state != "completed":
+        raise PipelineResultError(
+            "pipeline Output B requires the completed workflow state."
+        )
     if value["report_path"] is not None:
         _required_text(
             value["report_path"],
@@ -874,6 +907,19 @@ def _append_warning(
     result["warnings"].append(normalized)
 
 
+def _retain_warnings(
+    result: PipelineResult,
+    warnings: object,
+) -> None:
+    """Aggregate bounded unique warning text from one pipeline output."""
+
+    if not isinstance(warnings, list):
+        return
+    for warning in warnings:
+        if isinstance(warning, str):
+            _append_warning(result, warning)
+
+
 def _record_issue(
     result: PipelineResult,
     *,
@@ -980,6 +1026,7 @@ def _finish_failed_stage(
         if recoverable and has_retained_output
         else "error"
     )
+    result["workflow_state"] = "failed"
     result["current_stage"] = stage
     validated = validate_pipeline_result(result)
     _notify_progress(validated, progress_callback)
@@ -1123,16 +1170,7 @@ def _retain_annotation_warnings(
     """Copy unique annotation warnings into the bounded pipeline result."""
 
     for annotation in annotations:
-        warnings = annotation.get("warnings", [])
-        if not isinstance(warnings, list):
-            continue
-        for warning in warnings:
-            if (
-                not isinstance(warning, str)
-                or not warning.strip()
-            ):
-                continue
-            _append_warning(result, warning)
+        _retain_warnings(result, annotation.get("warnings", []))
 
 
 def _annotate_and_match(
@@ -1548,6 +1586,10 @@ def _build_evidence_and_report(
         literature_session=literature_session,
     )
     result["phenotype_results"] = conditional_result["variants"]
+    for candidate in result["phenotype_results"]:
+        conditional = candidate.get("conditional_enrichment")
+        if isinstance(conditional, Mapping):
+            _retain_warnings(result, conditional.get("warnings"))
     evidence_objects = build_evidence_objects(
         result["phenotype_results"]
     )
@@ -1626,6 +1668,7 @@ def _build_evidence_and_report(
         if result["warnings"] or result["errors"]
         else "success"
     )
+    result["workflow_state"] = "awaiting_confirmation"
     result["current_stage"] = "completed"
     result["progress_percent"] = 100
     _notify_progress(result, progress_callback)
@@ -1895,7 +1938,7 @@ def run_analysis(
     persist_analysis: bool = True,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
-    """Run the complete pipeline and optionally persist terminal output."""
+    """Run Phase A through editable Output A, then pause for confirmation."""
 
     if vcf_path is not None and manual_variants is None:
         input_mode = "vcf"
@@ -2048,6 +2091,7 @@ def confirm_reviewed_evidence(
     ]
     if updated_indexes:
         working["final_interpretation_report"] = None
+        working["workflow_state"] = "awaiting_confirmation"
     return validate_pipeline_result(working)
 
 
@@ -2068,6 +2112,8 @@ def generate_confirmed_interpretations(
         raise PipelineError(
             "Final interpretation requires confirmed reviewed evidence."
         )
+    prior_degraded = bool(working["warnings"] or working["errors"])
+    working["workflow_state"] = "phase_b_running"
     try:
         routing_results = route_reviewed_evidence_packages(
             packages,
@@ -2084,6 +2130,13 @@ def generate_confirmed_interpretations(
     ]
     working["final_interpretation_report"] = None
     failed = sum(item["status"] == "failed" for item in routing_results)
+    model_warnings = sum(
+        len(item["warnings"])
+        for item in routing_results
+        if item["status"] == "success"
+    )
+    for item in routing_results:
+        _retain_warnings(working, item["warnings"])
     if failed:
         message = (
             f"Stage 35 completed with {failed} failed interpretation "
@@ -2098,7 +2151,19 @@ def generate_confirmed_interpretations(
         )
         _set_api_status(working, "llm", "warning", message)
         _append_warning(working, message)
-        working["status"] = "partial"
+    elif model_warnings:
+        message = (
+            f"Stage 35 routed {len(routing_results)} confirmed variant(s) "
+            f"with {model_warnings} model warning(s)."
+        )
+        _set_stage(
+            working,
+            "llm",
+            "warning",
+            progress_percent=100,
+            message=message,
+        )
+        _set_api_status(working, "llm", "warning", message)
     else:
         message = (
             f"Stage 35 routed {len(routing_results)} confirmed variant(s)."
@@ -2111,7 +2176,11 @@ def generate_confirmed_interpretations(
             message=message,
         )
         _set_api_status(working, "llm", "success", message)
-        working["status"] = "success"
+    working["status"] = (
+        "partial"
+        if prior_degraded or failed or model_warnings
+        else "success"
+    )
     working["current_stage"] = "llm"
     working["progress_percent"] = 85
     return validate_pipeline_result(working)
@@ -2168,7 +2237,76 @@ def generate_final_interpretation_report(
             working["status"] = "success"
     working["current_stage"] = "report"
     working["progress_percent"] = 100
+    working["workflow_state"] = "completed"
     return validate_pipeline_result(working)
+
+
+def resume_confirmed_analysis(
+    result: PipelineResult,
+    reports: Sequence[Mapping[str, object]] | None = None,
+    *,
+    light_client: LLMClient | None = None,
+    strong_client: LLMClient | None = None,
+    light_model: str | None = None,
+    strong_model: str | None = None,
+    timestamp: str | None = None,
+    progress_callback: PipelineProgressCallback | None = None,
+) -> PipelineResult:
+    """Resume the same paused analysis through Phase B and Output B."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if working["workflow_state"] != "awaiting_confirmation":
+        raise PipelineError(
+            "Phase B requires an analysis paused after Phase A."
+        )
+    if reports is not None:
+        working = confirm_reviewed_evidence(
+            working,
+            reports,
+            timestamp=timestamp,
+        )
+    expected_indexes = list(range(working["variant_count"]))
+    confirmed_indexes = [
+        package["variant_index"]
+        for package in working["reviewed_evidence_packages"]
+    ]
+    if confirmed_indexes != expected_indexes:
+        raise PipelineError(
+            "Phase B requires confirmed reviewed evidence for every variant."
+        )
+
+    working["workflow_state"] = "phase_b_running"
+    working["status"] = "running"
+    working["current_stage"] = "llm"
+    working["progress_percent"] = 50
+    _set_stage(
+        working,
+        "llm",
+        "running",
+        progress_percent=0,
+        message="Routing confirmed variants to the selected LLM layer.",
+    )
+    _set_stage(
+        working,
+        "report",
+        "pending",
+        progress_percent=0,
+        message="Waiting for confirmed interpretations.",
+    )
+    _notify_progress(working, progress_callback)
+
+    working = generate_confirmed_interpretations(
+        working,
+        light_client=light_client,
+        strong_client=strong_client,
+        light_model=light_model,
+        strong_model=strong_model,
+        timestamp=timestamp,
+    )
+    _notify_progress(working, progress_callback)
+    working = generate_final_interpretation_report(working)
+    _notify_progress(working, progress_callback)
+    return working
 
 
 __all__ = [
@@ -2179,6 +2317,7 @@ __all__ = [
     "PIPELINE_API_ORDER",
     "PIPELINE_SCHEMA_VERSION",
     "PIPELINE_STAGE_ORDER",
+    "PIPELINE_WORKFLOW_STATE_VALUES",
     "PipelineAPIRecord",
     "PipelineAPIStatus",
     "PipelineError",
@@ -2190,9 +2329,11 @@ __all__ = [
     "PipelineStageRecord",
     "PipelineStageStatus",
     "PipelineStatus",
+    "PipelineWorkflowState",
     "confirm_reviewed_evidence",
     "generate_confirmed_interpretations",
     "generate_final_interpretation_report",
+    "resume_confirmed_analysis",
     "create_pipeline_result",
     "run_analysis",
     "run_annotation_and_phenotype",

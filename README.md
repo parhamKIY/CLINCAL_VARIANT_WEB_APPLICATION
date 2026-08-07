@@ -77,7 +77,7 @@ flowchart LR
 
 ## API-first continuation
 
-Stages 27–36 are implemented and tested. Stage 37 and later remain planned
+Stages 27–37 are implemented and tested. Stage 38 and later remain planned
 until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
@@ -155,6 +155,10 @@ in input order and provides separate evidence and interpretation report views.
   contains only final interpretation text or an explicit per-variant failure,
   makes unresolved conflict explicit, excludes raw evidence and ranking, and
   is viewable and downloadable as bounded UTF-8 text.
+- Stage 37 separates the workflow into a pausable evidence-collection Phase A
+  and a confirmed-interpretation Phase B. Resumption requires confirmation for
+  every variant, preserves the same analysis identity, isolates LLM failures
+  per variant, and aggregates provider, enrichment, and model warnings.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.

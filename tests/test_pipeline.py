@@ -146,6 +146,7 @@ from backend.pipeline import (
     create_pipeline_result,
     generate_confirmed_interpretations,
     generate_final_interpretation_report,
+    resume_confirmed_analysis,
     run_analysis,
     run_annotation_and_phenotype,
     run_variant_processing,
@@ -9726,6 +9727,7 @@ class TestStage34EvidenceConfirmation:
         assert confirmed["reviewed_evidence_packages"] == []
         assert confirmed["llm_routing_results"] == []
         assert confirmed["final_interpretation_report"] is None
+        assert confirmed["workflow_state"] == "awaiting_confirmation"
         assert packages == {}
 
 
@@ -10090,6 +10092,127 @@ class TestStage36FinalInterpretationReport:
     def test_pipeline_requires_stage35_results(self) -> None:
         with pytest.raises(PipelineError, match="requires completed Stage 35"):
             generate_final_interpretation_report(create_pipeline_result())
+
+
+class TestStage37PipelineV2Integration:
+    """Verify the paused Phase A to confirmed Phase B workflow."""
+
+    @staticmethod
+    def _paused_result() -> tuple[PipelineResult, list[dict[str, object]]]:
+        first = TestEvidenceObject._complete_evidence_object()
+        second = deepcopy(first)
+        second["variant"]["pos"] = 166848216
+        result = create_pipeline_result()
+        result["workflow_state"] = "awaiting_confirmation"
+        result["status"] = "partial"
+        result["current_stage"] = "completed"
+        result["progress_percent"] = 100
+        result["variant_count"] = 2
+        result["variants"] = [dict(first["variant"]), dict(second["variant"])]
+        result["evidence_objects"] = [first, second]
+        reports = build_evidence_review_reports(
+            [first, second],
+            timestamp="2026-08-08T08:00:00Z",
+        )
+        first_reviewed = deepcopy(reports[0]["reviewed_user_report"])
+        first_reviewed["manual_evidence"] = {
+            "laboratory": "Orthogonal confirmation pending."
+        }
+        reports[0] = save_evidence_review_draft(
+            reports[0],
+            first_reviewed,
+            timestamp="2026-08-08T08:15:00Z",
+        )
+        second_reviewed = deepcopy(reports[1]["reviewed_user_report"])
+        second_reviewed["pathogenicity"][
+            "clinvar_classification"
+        ] = "Benign"
+        reports[1] = save_evidence_review_draft(
+            reports[1],
+            second_reviewed,
+            timestamp="2026-08-08T08:20:00Z",
+        )
+        result["evidence_review_reports"] = [
+            dict(report) for report in reports
+        ]
+        result["warnings"] = ["Phase A provider warning."]
+        result["analysis_id"] = f"analysis-{'a' * 32}"
+        return result, [dict(report) for report in reports]
+
+    def test_resume_preserves_analysis_and_isolates_variant_failure(
+        self,
+    ) -> None:
+        paused, reports = self._paused_result()
+        snapshots: list[PipelineResult] = []
+        light_response = LLMResponse(
+            content=json.dumps(
+                {
+                    "final_interpretation": "Evidence-bound interpretation.",
+                    "resolution_status": "not_applicable",
+                    "warnings": ["Interpretation evidence is limited."],
+                }
+            ),
+            model="light-response",
+        )
+
+        completed = resume_confirmed_analysis(
+            paused,
+            reports,
+            light_client=LLMClient(FakeLLMAdapter(light_response)),
+            strong_client=LLMClient(
+                FakeLLMAdapter(LLMTimeoutError("private timeout"))
+            ),
+            timestamp="2026-08-08T09:00:00Z",
+            progress_callback=snapshots.append,
+        )
+
+        assert paused["reviewed_evidence_packages"] == []
+        assert completed["analysis_id"] == paused["analysis_id"]
+        assert completed["workflow_state"] == "completed"
+        assert completed["status"] == "partial"
+        assert [
+            item["status"] for item in completed["llm_routing_results"]
+        ] == ["success", "failed"]
+        assert [
+            entry["status"]
+            for entry in completed["final_interpretation_report"]["entries"]
+        ] == ["success", "failed"]
+        assert "Phase A provider warning." in completed["warnings"]
+        assert "Interpretation evidence is limited." in completed["warnings"]
+        assert [snapshot["workflow_state"] for snapshot in snapshots] == [
+            "phase_b_running",
+            "phase_b_running",
+            "completed",
+        ]
+        assert [snapshot["progress_percent"] for snapshot in snapshots] == [
+            50,
+            85,
+            100,
+        ]
+
+    def test_resume_requires_confirmation_for_every_variant(self) -> None:
+        paused, reports = self._paused_result()
+
+        with pytest.raises(PipelineError, match="for every variant"):
+            resume_confirmed_analysis(
+                paused,
+                reports[:1],
+                timestamp="2026-08-08T09:00:00Z",
+            )
+
+    def test_resume_requires_phase_a_pause(self) -> None:
+        paused, reports = self._paused_result()
+        paused["workflow_state"] = "phase_b_running"
+
+        with pytest.raises(PipelineError, match="paused after Phase A"):
+            resume_confirmed_analysis(paused, reports)
+
+    def test_completed_state_requires_output_b(self) -> None:
+        paused, _ = self._paused_result()
+        paused["workflow_state"] = "completed"
+
+        with pytest.raises(PipelineResultError, match="requires Output B"):
+            validate_pipeline_result(paused)
 
 
 class TestClinicalInterpretationValidation:
@@ -11751,6 +11874,7 @@ class TestCompletePipelineHappyPath:
         )
 
         assert result["status"] == "success"
+        assert result["workflow_state"] == "awaiting_confirmation"
         assert result["current_stage"] == "completed"
         assert result["progress_percent"] == 100
         assert len(result["evidence_objects"]) == 2
