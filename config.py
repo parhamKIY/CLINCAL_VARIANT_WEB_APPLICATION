@@ -155,6 +155,16 @@ class Settings:
         "LLM_MODEL"
     )
 
+    LLM_MODEL_LIGHT: str = os.getenv(
+        "LLM_MODEL_LIGHT",
+        LLM_MODEL,
+    ).strip()
+
+    LLM_MODEL_STRONG: str = os.getenv(
+        "LLM_MODEL_STRONG",
+        LLM_MODEL,
+    ).strip()
+
     LLM_TIMEOUT: int = _get_positive_int(
         "LLM_TIMEOUT",
         30,
@@ -495,6 +505,11 @@ class Settings:
         if not cls.LLM_PROVIDER:
             raise RuntimeError(
                 "LLM_PROVIDER cannot be empty."
+            )
+
+        if not cls.LLM_MODEL_LIGHT or not cls.LLM_MODEL_STRONG:
+            raise RuntimeError(
+                "LLM_MODEL_LIGHT and LLM_MODEL_STRONG cannot be empty."
             )
 
         if cls.GENOME_ASSEMBLY not in {"GRCh37", "GRCh38"}:

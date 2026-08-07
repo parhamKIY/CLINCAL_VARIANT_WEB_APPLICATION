@@ -91,6 +91,11 @@ def _invalidate_confirmation(
         for package in result.get("reviewed_evidence_packages", [])
         if package.get("variant_index") != variant_index
     ]
+    result["llm_routing_results"] = [
+        item
+        for item in result.get("llm_routing_results", [])
+        if item.get("variant_index") != variant_index
+    ]
 
 
 def _render_conflict_status(report: EvidenceReviewReport) -> None:
@@ -235,8 +240,8 @@ def _render_confirmation(
 
     st.caption(
         "Confirming builds an immutable Reviewed Evidence Package for "
-        "this variant. Final interpretation still requires Stage 35 "
-        "LLM routing, which is not implemented yet."
+        "this variant. Stage 35 interpretation routing is available only "
+        "after confirmation."
     )
     if st.button(
         "Confirm evidence",

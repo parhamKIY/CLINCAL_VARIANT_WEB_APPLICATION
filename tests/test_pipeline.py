@@ -89,6 +89,13 @@ from backend.llm import (
     OpenAICompatibleAdapter,
     call_llm,
 )
+from backend.llm_routing import (
+    LLM1_PROMPT_VERSION,
+    LLM2_PROMPT_VERSION,
+    Stage35RoutingError,
+    route_reviewed_evidence_package,
+    validate_llm_routing_result,
+)
 from backend.logging_config import (
     APP_LOGGER_NAME,
     REDACTED,
@@ -130,6 +137,7 @@ from backend.pipeline import (
     PipelineResultError,
     confirm_reviewed_evidence,
     create_pipeline_result,
+    generate_confirmed_interpretations,
     run_analysis,
     run_annotation_and_phenotype,
     run_variant_processing,
@@ -9695,6 +9703,9 @@ class TestStage34EvidenceConfirmation:
         )
         package = confirmed["reviewed_evidence_packages"][0]
         packages = {report["report_id"]: package}
+        confirmed["llm_routing_results"] = [
+            {"variant_index": report["variant_index"]}
+        ]  # type: ignore[list-item]
 
         _invalidate_confirmation(
             confirmed,
@@ -9704,7 +9715,220 @@ class TestStage34EvidenceConfirmation:
         )
 
         assert confirmed["reviewed_evidence_packages"] == []
+        assert confirmed["llm_routing_results"] == []
         assert packages == {}
+
+
+class TestStage35TwoLayerLLMRouting:
+    """Verify confirmed-evidence routing and bounded model output."""
+
+    @staticmethod
+    def _response(
+        *,
+        model: str,
+        resolution: str,
+        text: str = "Evidence-bound interpretation.",
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "final_interpretation": text,
+                    "resolution_status": resolution,
+                    "warnings": [],
+                }
+            ),
+            model=model,
+            usage=LLMUsage(10, 5, 15),
+        )
+
+    @staticmethod
+    def _confirmed_result(*, conflict: bool = False) -> PipelineResult:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        result = create_pipeline_result()
+        result["evidence_objects"] = [evidence]
+        report = build_evidence_review_reports(
+            [evidence],
+            timestamp="2026-08-07T08:00:00Z",
+        )[0]
+        if conflict:
+            reviewed = deepcopy(report["reviewed_user_report"])
+            reviewed["pathogenicity"]["clinvar_classification"] = "Benign"
+            report = save_evidence_review_draft(
+                report,
+                reviewed,
+                timestamp="2026-08-07T08:30:00Z",
+            )
+        result["evidence_review_reports"] = [dict(report)]
+        return confirm_reviewed_evidence(
+            result,
+            [report],
+            timestamp="2026-08-07T09:00:00Z",
+        )
+
+    def test_no_meaningful_conflict_routes_to_light_model(self) -> None:
+        result = self._confirmed_result()
+        light_adapter = FakeLLMAdapter(
+            self._response(model="light-response", resolution="not_applicable")
+        )
+        strong_adapter = FakeLLMAdapter(
+            LLMRequestError("must not be called")
+        )
+
+        routed = generate_confirmed_interpretations(
+            result,
+            light_client=LLMClient(light_adapter),
+            strong_client=LLMClient(strong_adapter),
+            timestamp="2026-08-07T10:00:00Z",
+        )
+
+        item = routed["llm_routing_results"][0]
+        assert item["route"] == "llm_1"
+        assert item["prompt_version"] == LLM1_PROMPT_VERSION
+        assert item["resolution_status"] == "not_applicable"
+        assert item["response_model"] == "light-response"
+        assert item["configured_model"] == settings.LLM_MODEL_LIGHT
+        assert item["usage"] == {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+        }
+        assert len(light_adapter.requests) == 1
+        assert strong_adapter.requests == []
+        assert "BEGIN_REVIEWED_EVIDENCE_PACKAGE" in (
+            light_adapter.requests[0].messages[1].content
+        )
+        assert routed["api_statuses"][-1]["status"] == "success"
+
+    def test_meaningful_conflict_routes_to_strong_model(self) -> None:
+        result = self._confirmed_result(conflict=True)
+        light_adapter = FakeLLMAdapter(
+            LLMRequestError("must not be called")
+        )
+        strong_adapter = FakeLLMAdapter(
+            self._response(model="strong-response", resolution="unresolved")
+        )
+
+        routed = generate_confirmed_interpretations(
+            result,
+            light_client=LLMClient(light_adapter),
+            strong_client=LLMClient(strong_adapter),
+            timestamp="2026-08-07T10:00:00Z",
+        )
+
+        item = routed["llm_routing_results"][0]
+        assert item["route"] == "llm_2"
+        assert item["prompt_version"] == LLM2_PROMPT_VERSION
+        assert item["resolution_status"] == "unresolved"
+        assert item["configured_model"] == settings.LLM_MODEL_STRONG
+        assert light_adapter.requests == []
+        assert len(strong_adapter.requests) == 1
+
+    def test_routing_requires_confirmation(self) -> None:
+        with pytest.raises(PipelineError, match="requires confirmed"):
+            generate_confirmed_interpretations(create_pipeline_result())
+
+    def test_invalid_model_json_is_isolated_and_evidence_preserved(
+        self,
+    ) -> None:
+        result = self._confirmed_result()
+        adapter = FakeLLMAdapter(
+            LLMResponse(content="not-json", model="light-response")
+        )
+
+        routed = generate_confirmed_interpretations(
+            result,
+            light_client=LLMClient(adapter),
+            timestamp="2026-08-07T10:00:00Z",
+        )
+
+        item = routed["llm_routing_results"][0]
+        assert routed["status"] == "partial"
+        assert item["status"] == "failed"
+        assert item["error_type"] == "Stage35RoutingError"
+        assert item["final_interpretation"] is None
+        assert routed["reviewed_evidence_packages"] == result[
+            "reviewed_evidence_packages"
+        ]
+
+    def test_one_model_failure_does_not_remove_other_variant_result(
+        self,
+    ) -> None:
+        first = TestEvidenceObject._complete_evidence_object()
+        second = deepcopy(first)
+        second["variant"]["pos"] = 166848216
+        result = create_pipeline_result()
+        result["evidence_objects"] = [first, second]
+        reports = build_evidence_review_reports(
+            [first, second],
+            timestamp="2026-08-07T08:00:00Z",
+        )
+        reviewed = deepcopy(reports[1]["reviewed_user_report"])
+        reviewed["pathogenicity"]["clinvar_classification"] = "Benign"
+        reports[1] = save_evidence_review_draft(
+            reports[1],
+            reviewed,
+            timestamp="2026-08-07T08:30:00Z",
+        )
+        result["evidence_review_reports"] = [dict(item) for item in reports]
+        confirmed = confirm_reviewed_evidence(
+            result,
+            reports,
+            timestamp="2026-08-07T09:00:00Z",
+        )
+
+        routed = generate_confirmed_interpretations(
+            confirmed,
+            light_client=LLMClient(
+                FakeLLMAdapter(
+                    self._response(
+                        model="light-response",
+                        resolution="not_applicable",
+                    )
+                )
+            ),
+            strong_client=LLMClient(
+                FakeLLMAdapter(LLMTimeoutError("private timeout"))
+            ),
+            timestamp="2026-08-07T10:00:00Z",
+        )
+
+        assert [item["status"] for item in routed["llm_routing_results"]] == [
+            "success",
+            "failed",
+        ]
+        assert len(routed["reviewed_evidence_packages"]) == 2
+        assert routed["status"] == "partial"
+
+        reconfirmed = confirm_reviewed_evidence(
+            routed,
+            [reports[1]],
+            timestamp="2026-08-07T11:00:00Z",
+        )
+        assert [
+            item["variant_index"]
+            for item in reconfirmed["llm_routing_results"]
+        ] == [0]
+
+    def test_routing_result_rejects_tampering(self) -> None:
+        result = self._confirmed_result()
+        package = result["reviewed_evidence_packages"][0]
+        routed = route_reviewed_evidence_package(
+            package,
+            light_client=LLMClient(
+                FakeLLMAdapter(
+                    self._response(
+                        model="light-response",
+                        resolution="not_applicable",
+                    )
+                )
+            ),
+            timestamp="2026-08-07T10:00:00Z",
+        )
+        tampered = deepcopy(routed)
+        tampered["route"] = "llm_2"
+
+        with pytest.raises(Stage35RoutingError, match="prompt version"):
+            validate_llm_routing_result(tampered, package=package)
 
 
 class TestClinicalInterpretationValidation:

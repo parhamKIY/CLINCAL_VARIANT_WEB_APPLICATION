@@ -69,7 +69,7 @@ flowchart LR
 | **Variant input** | Professor-filtered `.vcf`/`.vcf.gz` upload or a manual VCF-style table, limited to 1–5 rows |
 | **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, UCSC GenCC, and ClinGen CSpec integrations |
 | **Phenotype correlation** | Local HPO matching, Phen2Gene prioritization metadata, and bounded MyDisease.info gene-disease-phenotype context |
-| **LLM boundary** | Provider-neutral configuration with per-analysis model selection |
+| **LLM boundary** | Provider-neutral two-layer routing after confirmed human review |
 | **Reporting** | Editable evidence Output A, confirmed reviewed-evidence packages, and local text/PDF/Word exports |
 | **Safety** | Data minimization, bounded storage, secret scanning, safe errors, and security acceptance gates |
 
@@ -77,7 +77,7 @@ flowchart LR
 
 ## API-first continuation
 
-Stages 27–34 are implemented and tested. Stage 35 and later remain planned
+Stages 27–35 are implemented and tested. Stage 36 and later remain planned
 until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
@@ -149,6 +149,10 @@ LLM interpretation and one report for the first allele.
 - Stage 34 requires explicit human confirmation, stores the validated package
   in pipeline state, reruns the deterministic conflict audit, and invalidates
   confirmation whenever the reviewed draft changes. The LLM remains skipped.
+- Stage 35 routes confirmed packages without meaningful conflict to `LLM-1`
+  and meaningful conflicts to `LLM-2`. Prompts are versioned, responses are
+  bounded, `unresolved` conflicts are supported, and provider/model provenance
+  is retained without allowing one model failure to remove other results.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
@@ -426,6 +430,8 @@ LLM_PROVIDER=openai_compatible
 LLM_BASE_URL=https://provider.example/v1
 LLM_API_KEY=your-api-key
 LLM_MODEL=model-name
+LLM_MODEL_LIGHT=light-model-name
+LLM_MODEL_STRONG=strong-model-name
 LLM_TIMEOUT=30
 ```
 

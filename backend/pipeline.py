@@ -36,6 +36,11 @@ from backend.evidence_review import (
     validate_evidence_review_report,
 )
 from backend.llm import LLMClient
+from backend.llm_routing import (
+    Stage35RoutingError,
+    route_reviewed_evidence_packages,
+    validate_llm_routing_result,
+)
 from backend.logging_config import (
     bind_analysis_run_id,
     get_logger,
@@ -63,7 +68,7 @@ from backend.vcf_processing import (
     parse_manual_variants,
     process_vcf,
 )
-PIPELINE_SCHEMA_VERSION = "2.0"
+PIPELINE_SCHEMA_VERSION = "2.1"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -187,6 +192,7 @@ class PipelineResult(TypedDict):
     evidence_objects: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
     reviewed_evidence_packages: list[dict[str, object]]
+    llm_routing_results: list[dict[str, object]]
     report_path: str | None
     analysis_id: str | None
     warnings: list[str]
@@ -358,6 +364,7 @@ def create_pipeline_result() -> PipelineResult:
         "evidence_objects": [],
         "evidence_review_reports": [],
         "reviewed_evidence_packages": [],
+        "llm_routing_results": [],
         "report_path": None,
         "analysis_id": None,
         "warnings": [],
@@ -577,6 +584,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "phenotype_results",
         "evidence_objects",
         "evidence_review_reports",
+        "llm_routing_results",
     ):
         collection = value[field]
         if (
@@ -595,6 +603,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
+                    "llm_routing_results",
                 )
             },
             context="Pipeline result",
@@ -642,6 +651,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             "pipeline.reviewed_evidence_packages must be a list of "
             "dictionaries."
         )
+    validated_packages: list[dict[str, object]] = []
     if packages:
         try:
             validated_packages = [
@@ -668,6 +678,43 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 raise PipelineResultError(
                     "pipeline.reviewed_evidence_packages must reference "
                     "an unmodified Evidence Object."
+                )
+            previous_index = index
+    routing_results = value["llm_routing_results"]
+    if (
+        not isinstance(routing_results, list)
+        or any(not isinstance(item, dict) for item in routing_results)
+    ):
+        raise PipelineResultError(
+            "pipeline.llm_routing_results must be a list of dictionaries."
+        )
+    if routing_results:
+        packages_by_id = {
+            package["package_id"]: package
+            for package in validated_packages
+        }
+        previous_index = -1
+        for item in routing_results:
+            package = packages_by_id.get(item.get("package_id"))
+            if package is None:
+                raise PipelineResultError(
+                    "pipeline.llm_routing_results must reference a "
+                    "confirmed evidence package."
+                )
+            try:
+                validated_result = validate_llm_routing_result(
+                    item,
+                    package=package,
+                )
+            except Stage35RoutingError as exc:
+                raise PipelineResultError(
+                    "pipeline.llm_routing_results is invalid."
+                ) from exc
+            index = validated_result["variant_index"]
+            if index <= previous_index:
+                raise PipelineResultError(
+                    "pipeline.llm_routing_results must preserve ascending "
+                    "variant order without duplicates."
                 )
             previous_index = index
     if value["report_path"] is not None:
@@ -897,6 +944,7 @@ def _finish_failed_stage(
             "evidence_objects",
             "evidence_review_reports",
             "reviewed_evidence_packages",
+            "llm_routing_results",
         )
     )
     result["status"] = (
@@ -1937,6 +1985,7 @@ def confirm_reviewed_evidence(
         cast(int, package["variant_index"]): dict(package)
         for package in working["reviewed_evidence_packages"]
     }
+    updated_indexes: set[int] = set()
     for report in reports:
         try:
             package = confirm_evidence_review(report, timestamp=timestamp)
@@ -1952,6 +2001,7 @@ def confirm_reviewed_evidence(
                 "Confirmed evidence does not match this analysis."
             )
         packages_by_index[index] = dict(package)
+        updated_indexes.add(index)
         LOGGER.info(
             "event=reviewed_evidence_package_confirmed variant_index=%d "
             "post_review_status=%s",
@@ -1963,6 +2013,76 @@ def confirm_reviewed_evidence(
         packages_by_index[index]
         for index in sorted(packages_by_index.keys())
     ]
+    working["llm_routing_results"] = [
+        item
+        for item in working["llm_routing_results"]
+        if item["variant_index"] not in updated_indexes
+    ]
+    return validate_pipeline_result(working)
+
+
+def generate_confirmed_interpretations(
+    result: PipelineResult,
+    *,
+    light_client: LLMClient | None = None,
+    strong_client: LLMClient | None = None,
+    light_model: str | None = None,
+    strong_model: str | None = None,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Run Stage 35 routing for confirmed packages without building Output B."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    packages = working["reviewed_evidence_packages"]
+    if not packages:
+        raise PipelineError(
+            "Final interpretation requires confirmed reviewed evidence."
+        )
+    try:
+        routing_results = route_reviewed_evidence_packages(
+            packages,
+            light_client=light_client,
+            strong_client=strong_client,
+            light_model=light_model,
+            strong_model=strong_model,
+            timestamp=timestamp,
+        )
+    except (EvidenceConfirmationError, Stage35RoutingError) as exc:
+        raise PipelineError("Stage 35 routing could not start.") from exc
+    working["llm_routing_results"] = [
+        dict(item) for item in routing_results
+    ]
+    failed = sum(item["status"] == "failed" for item in routing_results)
+    if failed:
+        message = (
+            f"Stage 35 completed with {failed} failed interpretation "
+            "request(s); confirmed evidence was preserved."
+        )
+        _set_stage(
+            working,
+            "llm",
+            "warning",
+            progress_percent=100,
+            message=message,
+        )
+        _set_api_status(working, "llm", "warning", message)
+        _append_warning(working, message)
+        working["status"] = "partial"
+    else:
+        message = (
+            f"Stage 35 routed {len(routing_results)} confirmed variant(s)."
+        )
+        _set_stage(
+            working,
+            "llm",
+            "success",
+            progress_percent=100,
+            message=message,
+        )
+        _set_api_status(working, "llm", "success", message)
+        working["status"] = "success"
+    working["current_stage"] = "llm"
+    working["progress_percent"] = 85
     return validate_pipeline_result(working)
 
 
@@ -1986,6 +2106,7 @@ __all__ = [
     "PipelineStageStatus",
     "PipelineStatus",
     "confirm_reviewed_evidence",
+    "generate_confirmed_interpretations",
     "create_pipeline_result",
     "run_analysis",
     "run_annotation_and_phenotype",
