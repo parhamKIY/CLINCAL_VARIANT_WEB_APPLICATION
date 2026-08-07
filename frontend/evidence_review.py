@@ -96,6 +96,7 @@ def _invalidate_confirmation(
         for item in result.get("llm_routing_results", [])
         if item.get("variant_index") != variant_index
     ]
+    result["final_interpretation_report"] = None
 
 
 def _render_conflict_status(report: EvidenceReviewReport) -> None:

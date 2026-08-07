@@ -35,6 +35,11 @@ from backend.evidence_review import (
     build_evidence_review_reports,
     validate_evidence_review_report,
 )
+from backend.final_interpretation_report import (
+    FinalInterpretationReportError,
+    build_final_interpretation_report,
+    validate_final_interpretation_report,
+)
 from backend.llm import LLMClient
 from backend.llm_routing import (
     Stage35RoutingError,
@@ -68,7 +73,7 @@ from backend.vcf_processing import (
     parse_manual_variants,
     process_vcf,
 )
-PIPELINE_SCHEMA_VERSION = "2.1"
+PIPELINE_SCHEMA_VERSION = "2.2"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -193,6 +198,7 @@ class PipelineResult(TypedDict):
     evidence_review_reports: list[dict[str, object]]
     reviewed_evidence_packages: list[dict[str, object]]
     llm_routing_results: list[dict[str, object]]
+    final_interpretation_report: dict[str, object] | None
     report_path: str | None
     analysis_id: str | None
     warnings: list[str]
@@ -365,6 +371,7 @@ def create_pipeline_result() -> PipelineResult:
         "evidence_review_reports": [],
         "reviewed_evidence_packages": [],
         "llm_routing_results": [],
+        "final_interpretation_report": None,
         "report_path": None,
         "analysis_id": None,
         "warnings": [],
@@ -604,6 +611,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "phenotype_results",
                     "evidence_objects",
                     "llm_routing_results",
+                    "final_interpretation_report",
                 )
             },
             context="Pipeline result",
@@ -717,6 +725,25 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "variant order without duplicates."
                 )
             previous_index = index
+    final_report = value["final_interpretation_report"]
+    if final_report is not None:
+        try:
+            validated_report = validate_final_interpretation_report(
+                final_report
+            )
+            expected_report = build_final_interpretation_report(
+                variant_count,
+                routing_results,
+            )
+        except FinalInterpretationReportError as exc:
+            raise PipelineResultError(
+                "pipeline.final_interpretation_report is invalid."
+            ) from exc
+        if validated_report != expected_report:
+            raise PipelineResultError(
+                "pipeline.final_interpretation_report does not match "
+                "the Stage 35 results."
+            )
     if value["report_path"] is not None:
         _required_text(
             value["report_path"],
@@ -945,6 +972,7 @@ def _finish_failed_stage(
             "evidence_review_reports",
             "reviewed_evidence_packages",
             "llm_routing_results",
+            "final_interpretation_report",
         )
     )
     result["status"] = (
@@ -2018,6 +2046,8 @@ def confirm_reviewed_evidence(
         for item in working["llm_routing_results"]
         if item["variant_index"] not in updated_indexes
     ]
+    if updated_indexes:
+        working["final_interpretation_report"] = None
     return validate_pipeline_result(working)
 
 
@@ -2052,6 +2082,7 @@ def generate_confirmed_interpretations(
     working["llm_routing_results"] = [
         dict(item) for item in routing_results
     ]
+    working["final_interpretation_report"] = None
     failed = sum(item["status"] == "failed" for item in routing_results)
     if failed:
         message = (
@@ -2086,6 +2117,60 @@ def generate_confirmed_interpretations(
     return validate_pipeline_result(working)
 
 
+def generate_final_interpretation_report(
+    result: PipelineResult,
+) -> PipelineResult:
+    """Build Stage 36 Output B from Stage 35 results without raw evidence."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if not working["llm_routing_results"]:
+        raise PipelineError(
+            "Output B requires completed Stage 35 routing results."
+        )
+    try:
+        report = build_final_interpretation_report(
+            working["variant_count"],
+            working["llm_routing_results"],
+        )
+    except FinalInterpretationReportError as exc:
+        raise PipelineError("Stage 36 Output B could not be built.") from exc
+    working["final_interpretation_report"] = dict(report)
+    failed = sum(
+        entry["status"] == "failed" for entry in report["entries"]
+    )
+    if failed:
+        message = (
+            f"Stage 36 produced Output B with {failed} explicit "
+            "interpretation failure(s)."
+        )
+        _set_stage(
+            working,
+            "report",
+            "warning",
+            progress_percent=100,
+            message=message,
+        )
+        _append_warning(working, message)
+        working["status"] = "partial"
+    else:
+        message = (
+            f"Stage 36 produced {report['variant_count']} final "
+            "interpretation(s) in input order."
+        )
+        _set_stage(
+            working,
+            "report",
+            "success",
+            progress_percent=100,
+            message=message,
+        )
+        if working["status"] != "partial":
+            working["status"] = "success"
+    working["current_stage"] = "report"
+    working["progress_percent"] = 100
+    return validate_pipeline_result(working)
+
+
 __all__ = [
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
@@ -2107,6 +2192,7 @@ __all__ = [
     "PipelineStatus",
     "confirm_reviewed_evidence",
     "generate_confirmed_interpretations",
+    "generate_final_interpretation_report",
     "create_pipeline_result",
     "run_analysis",
     "run_annotation_and_phenotype",

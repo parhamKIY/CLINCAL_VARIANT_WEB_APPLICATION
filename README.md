@@ -70,23 +70,21 @@ flowchart LR
 | **Clinical evidence** | Isolated Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, UCSC GenCC, and ClinGen CSpec integrations |
 | **Phenotype correlation** | Local HPO matching, Phen2Gene prioritization metadata, and bounded MyDisease.info gene-disease-phenotype context |
 | **LLM boundary** | Provider-neutral two-layer routing after confirmed human review |
-| **Reporting** | Editable evidence Output A, confirmed reviewed-evidence packages, and local text/PDF/Word exports |
+| **Reporting** | Editable evidence Output A, confirmed packages, and downloadable final-interpretation-only Output B |
 | **Safety** | Data minimization, bounded storage, secret scanning, safe errors, and security acceptance gates |
 
 ---
 
 ## API-first continuation
 
-Stages 27–35 are implemented and tested. Stage 36 and later remain planned
+Stages 27–36 are implemented and tested. Stage 37 and later remain planned
 until the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
 [`docs/STAGE_19_REPOSITORY_REALITY_CHECK.md`](docs/STAGE_19_REPOSITORY_REALITY_CHECK.md).
 
-The target contract will retain up to five independently interpreted variants
-and two report views. The current contract accepts one to five filtered source
-rows, builds Evidence Objects for every resulting allele, and generates one
-LLM interpretation and one report for the first allele.
+The API-first contract retains up to five independently interpreted variants
+in input order and provides separate evidence and interpretation report views.
 
 ---
 
@@ -153,6 +151,10 @@ LLM interpretation and one report for the first allele.
   and meaningful conflicts to `LLM-2`. Prompts are versioned, responses are
   bounded, `unresolved` conflicts are supported, and provider/model provenance
   is retained without allowing one model failure to remove other results.
+- Stage 36 builds Output B from Stage 35 results in original input order. It
+  contains only final interpretation text or an explicit per-variant failure,
+  makes unresolved conflict explicit, excludes raw evidence and ranking, and
+  is viewable and downloadable as bounded UTF-8 text.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.

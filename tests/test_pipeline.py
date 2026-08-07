@@ -74,6 +74,13 @@ from backend.evidence_review import (
     save_evidence_review_draft,
     validate_evidence_review_report,
 )
+from backend.final_interpretation_report import (
+    FINAL_INTERPRETATION_REPORT_FILENAME,
+    FinalInterpretationReportError,
+    build_final_interpretation_report,
+    render_final_interpretation_report_text,
+    validate_final_interpretation_report,
+)
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -138,6 +145,7 @@ from backend.pipeline import (
     confirm_reviewed_evidence,
     create_pipeline_result,
     generate_confirmed_interpretations,
+    generate_final_interpretation_report,
     run_analysis,
     run_annotation_and_phenotype,
     run_variant_processing,
@@ -9706,6 +9714,7 @@ class TestStage34EvidenceConfirmation:
         confirmed["llm_routing_results"] = [
             {"variant_index": report["variant_index"]}
         ]  # type: ignore[list-item]
+        confirmed["final_interpretation_report"] = {"stale": True}
 
         _invalidate_confirmation(
             confirmed,
@@ -9716,6 +9725,7 @@ class TestStage34EvidenceConfirmation:
 
         assert confirmed["reviewed_evidence_packages"] == []
         assert confirmed["llm_routing_results"] == []
+        assert confirmed["final_interpretation_report"] is None
         assert packages == {}
 
 
@@ -9745,6 +9755,8 @@ class TestStage35TwoLayerLLMRouting:
     def _confirmed_result(*, conflict: bool = False) -> PipelineResult:
         evidence = TestEvidenceObject._complete_evidence_object()
         result = create_pipeline_result()
+        result["variants"] = [dict(evidence["variant"])]
+        result["variant_count"] = 1
         result["evidence_objects"] = [evidence]
         report = build_evidence_review_reports(
             [evidence],
@@ -9929,6 +9941,155 @@ class TestStage35TwoLayerLLMRouting:
 
         with pytest.raises(Stage35RoutingError, match="prompt version"):
             validate_llm_routing_result(tampered, package=package)
+
+
+class TestStage36FinalInterpretationReport:
+    """Verify Output B is complete, ordered, bounded, and evidence-free."""
+
+    @staticmethod
+    def _routing_result(
+        variant_index: int,
+        *,
+        status: str = "success",
+        resolution: str | None = "not_applicable",
+        interpretation: str | None = "Evidence-bound interpretation.",
+    ) -> dict[str, object]:
+        failed = status == "failed"
+        return {
+            "schema_version": "1.0",
+            "variant_index": variant_index,
+            "package_id": f"package-{variant_index}",
+            "status": status,
+            "route": "llm_2" if resolution in {"resolved", "unresolved"} else "llm_1",
+            "prompt_version": (
+                LLM2_PROMPT_VERSION
+                if resolution in {"resolved", "unresolved"}
+                else LLM1_PROMPT_VERSION
+            ),
+            "provider": "test-provider",
+            "configured_model": "test-model",
+            "response_model": None if failed else "response-model",
+            "resolution_status": None if failed else resolution,
+            "final_interpretation": None if failed else interpretation,
+            "warnings": [],
+            "usage": None,
+            "generated_at": "2026-08-08T10:00:00Z",
+            "error_type": "LLMTimeoutError" if failed else None,
+        }
+
+    def test_output_b_preserves_order_and_contains_no_raw_evidence(self) -> None:
+        report = build_final_interpretation_report(
+            2,
+            [self._routing_result(1), self._routing_result(0)],
+        )
+        text = render_final_interpretation_report_text(report)
+
+        assert [entry["variant_index"] for entry in report["entries"]] == [0, 1]
+        assert set(report) == {"schema_version", "variant_count", "entries"}
+        assert set(report["entries"][0]) == {
+            "variant_index",
+            "status",
+            "final_interpretation",
+            "resolution_status",
+            "failure_status",
+        }
+        assert text.index("Variant 1") < text.index("Variant 2")
+        for raw_field in (
+            "pathogenicity",
+            "phenotype_relationship",
+            "reviewed_user_report",
+            "model",
+            "route",
+            "score",
+            "rank",
+        ):
+            assert raw_field not in text.casefold()
+
+    def test_unresolved_conflict_is_explicit_in_final_text(self) -> None:
+        report = build_final_interpretation_report(
+            1,
+            [
+                self._routing_result(
+                    0,
+                    resolution="unresolved",
+                    interpretation="The supplied sources disagree.",
+                )
+            ],
+        )
+
+        assert report["entries"][0]["final_interpretation"] == (
+            "Conflict remains unresolved. The supplied sources disagree."
+        )
+
+    def test_every_variant_has_interpretation_or_failure_status(self) -> None:
+        report = build_final_interpretation_report(
+            3,
+            [self._routing_result(0), self._routing_result(1, status="failed")],
+        )
+
+        assert [entry["status"] for entry in report["entries"]] == [
+            "success",
+            "failed",
+            "failed",
+        ]
+        assert [entry["failure_status"] for entry in report["entries"]] == [
+            None,
+            "interpretation_generation_failed",
+            "interpretation_not_generated",
+        ]
+
+    def test_report_validation_rejects_extra_evidence_fields(self) -> None:
+        report = build_final_interpretation_report(
+            1,
+            [self._routing_result(0)],
+        )
+        report["entries"][0]["raw_evidence"] = {}  # type: ignore[typeddict-unknown-key]
+
+        with pytest.raises(FinalInterpretationReportError, match="invalid fields"):
+            validate_final_interpretation_report(report)
+
+    def test_pipeline_builds_output_b_and_streamlit_offers_download(self) -> None:
+        confirmed = TestStage35TwoLayerLLMRouting._confirmed_result()
+        routed = generate_confirmed_interpretations(
+            confirmed,
+            light_client=LLMClient(
+                FakeLLMAdapter(
+                    TestStage35TwoLayerLLMRouting._response(
+                        model="light-response",
+                        resolution="not_applicable",
+                    )
+                )
+            ),
+            timestamp="2026-08-08T10:00:00Z",
+        )
+
+        completed = generate_final_interpretation_report(routed)
+
+        assert completed["current_stage"] == "report"
+        assert completed["progress_percent"] == 100
+        assert completed["final_interpretation_report"] is not None
+        validate_pipeline_result(completed)
+
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = completed
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            subheader.value == "Output B — Final interpretation only"
+            for subheader in app.subheader
+        )
+        download = next(
+            button
+            for button in app.get("download_button")
+            if button.label == "Download Output B"
+        )
+        assert download.key == "download_final_interpretation_report"
+        assert FINAL_INTERPRETATION_REPORT_FILENAME.endswith(".txt")
+
+    def test_pipeline_requires_stage35_results(self) -> None:
+        with pytest.raises(PipelineError, match="requires completed Stage 35"):
+            generate_final_interpretation_report(create_pipeline_result())
 
 
 class TestClinicalInterpretationValidation:
