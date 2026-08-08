@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_46_input_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_47_contract_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-686_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.84%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-711_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.93%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -36,12 +36,13 @@ its original input order.
 - Stage 45 has frozen the post-professor-review architecture; it is a documentation
   milestone and does not claim the redesign is implemented.
 - Stage 46 input expansion is implemented and offline-verified.
-- Stage 47 phenotype-extraction LLM contract is the next bounded milestone.
+- Stage 47 phenotype-extraction LLM contract is implemented and offline-verified.
+- Stage 48 local HPO validation and human editing is the next bounded milestone.
 - Pipeline schema: `2.3`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **686 passed, 4 skipped; 85.84% coverage**.
+- Current verified suite: **711 passed, 4 skipped; 85.93% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -54,7 +55,8 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stage 46 has implemented the expanded input boundary; later items remain planned:
+Stages 46 and 47 have implemented the expanded input boundary and the isolated
+phenotype-extraction backend contract; later items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -72,6 +74,21 @@ Stage 46 has implemented the expanded input boundary; later items remain planned
 For new analyses, `Output A`, `Output B`, `LLM-1`, `LLM-2`, and separate
 no-conflict/conflict model selectors are deprecated concepts. They remain below only
 to document the current Stage 44 implementation until Stages 46–62 replace it.
+
+### Stage 47 phenotype-extraction contract
+
+`backend/phenotype_llm.py` implements a dedicated Persian clinical-text task. It
+sends only `task=extract_hpo_candidates` and a bounded, de-identified
+`clinical_text_fa` value, then accepts only a strict structured candidate list with
+`hpo_id`, `label`, and `source_phrase_fa`. The safety prompt prohibits diagnosis,
+unsupported disease inference, invented identifiers, variant interpretation, and
+treatment advice; an empty candidate list represents insufficient evidence.
+
+The Phenotype Extraction Model is configured independently from the Variant
+Interpretation Model. Provider failures and malformed responses remain isolated from
+manual HPO entry. Stage 47 validates the candidate response shape and the exact
+`HP:ddddddd` identifier format only. Local ontology existence checks, candidate
+editing, and explicit user acceptance belong to Stage 48 and are not yet implemented.
 
 ## Current implemented workflow (legacy Stage 44 baseline)
 
@@ -285,6 +302,9 @@ LLM_API_KEY=your-real-api-key
 LLM_MODEL=your-default-model
 LLM_MODEL_LIGHT=your-low-cost-model
 LLM_MODEL_STRONG=your-conflict-model
+PHENOTYPE_EXTRACTION_MODEL=your-phenotype-model
+VARIANT_INTERPRETATION_MODEL=your-interpretation-model
+PHENOTYPE_EXTRACTION_MAX_TOKENS=800
 ```
 
 Use either `GRCh37` or `GRCh38`. Do not commit `.env`.
@@ -384,7 +404,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-686 passed, 4 skipped
+711 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -402,7 +422,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.84%**.
+Current measured coverage is **85.93%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -529,8 +549,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stage 46 input expansion is implemented; the report and model lifecycle remains
-  on Stage 44 behavior until Stages 47–62 are implemented.
+- Stages 46 and 47 are implemented; phenotype candidate acceptance and the report
+  lifecycle remain on Stage 44 behavior until Stages 48–62 are implemented.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before Phase B.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -555,4 +575,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 47 handoff.
+- current limitations and the Stage 48 handoff.

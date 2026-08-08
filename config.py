@@ -182,6 +182,21 @@ class Settings:
         LLM_MODEL,
     ).strip()
 
+    PHENOTYPE_EXTRACTION_MODEL: str = os.getenv(
+        "PHENOTYPE_EXTRACTION_MODEL",
+        LLM_MODEL,
+    ).strip()
+
+    VARIANT_INTERPRETATION_MODEL: str = os.getenv(
+        "VARIANT_INTERPRETATION_MODEL",
+        LLM_MODEL_STRONG,
+    ).strip()
+
+    PHENOTYPE_EXTRACTION_MAX_TOKENS: int = _get_positive_int(
+        "PHENOTYPE_EXTRACTION_MAX_TOKENS",
+        800,
+    )
+
     LLM_TIMEOUT: int = _get_positive_int(
         "LLM_TIMEOUT",
         30,
@@ -610,6 +625,20 @@ class Settings:
         if not cls.LLM_MODEL_LIGHT or not cls.LLM_MODEL_STRONG:
             raise RuntimeError(
                 "LLM_MODEL_LIGHT and LLM_MODEL_STRONG cannot be empty."
+            )
+
+        if (
+            not cls.PHENOTYPE_EXTRACTION_MODEL
+            or not cls.VARIANT_INTERPRETATION_MODEL
+        ):
+            raise RuntimeError(
+                "PHENOTYPE_EXTRACTION_MODEL and "
+                "VARIANT_INTERPRETATION_MODEL cannot be empty."
+            )
+
+        if cls.PHENOTYPE_EXTRACTION_MAX_TOKENS > 4_000:
+            raise RuntimeError(
+                "PHENOTYPE_EXTRACTION_MAX_TOKENS cannot exceed 4000."
             )
 
         if not isinstance(cls.ENABLE_GNOMAD_DEEP_LOOKUP, bool) or not isinstance(

@@ -123,6 +123,7 @@ RAW_VCF_LINE_PATTERN = re.compile(
     r"(?im)^.*(?:##fileformat=VCF|#CHROM[\t ]+POS[\t ]+ID[\t ]+REF[\t ]+ALT).*$"
 )
 CLINICAL_REDACTED = "[REDACTED CLINICAL DATA]"
+MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS = 4_000
 
 
 class ClinicalDataPrivacyError(ValueError):
@@ -282,9 +283,7 @@ def redact_clinical_text(value: str) -> str:
 
     sanitized = RAW_VCF_LINE_PATTERN.sub(CLINICAL_REDACTED, value)
     sanitized = LABELED_CLINICAL_TEXT_PATTERN.sub(
-        lambda match: (
-            f"{match.group(1)}{match.group(2)}{CLINICAL_REDACTED}"
-        ),
+        CLINICAL_REDACTED,
         sanitized,
     )
     sanitized = EMAIL_PATTERN.sub(CLINICAL_REDACTED, sanitized)
@@ -300,14 +299,45 @@ def redact_clinical_text(value: str) -> str:
     return CLINICAL_PATH_PATTERN.sub(CLINICAL_REDACTED, sanitized)
 
 
+def sanitize_phenotype_clinical_text(value: object) -> str:
+    """Return bounded de-identified text for phenotype extraction only."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ClinicalDataPrivacyError(
+            "The clinical description must be non-empty text."
+        )
+    normalized = value.strip()
+    if len(normalized) > MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS:
+        raise ClinicalDataPrivacyError(
+            "The clinical description exceeds the 4000-character limit."
+        )
+    if any(
+        ord(character) < 32 and character not in {"\n", "\r", "\t"}
+        for character in normalized
+    ):
+        raise ClinicalDataPrivacyError(
+            "The clinical description contains invalid control characters."
+        )
+    sanitized = redact_clinical_text(normalized).strip()
+    validate_llm_payload(
+        {
+            "task": "extract_hpo_candidates",
+            "clinical_text_fa": sanitized,
+        }
+    )
+    return sanitized
+
+
 __all__ = [
     "ClinicalDataPrivacyError",
     "CLINICAL_REDACTED",
+    "MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS",
     "PROHIBITED_CLINICAL_FIELD_NAMES",
     "PUBLIC_VARIANT_FIELDS",
     "is_prohibited_clinical_field",
     "minimize_variant",
     "redact_clinical_text",
+    "sanitize_phenotype_clinical_text",
     "validate_human_review_content",
     "validate_llm_payload",
     "validate_no_prohibited_fields",

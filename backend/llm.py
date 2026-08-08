@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
 from time import perf_counter, sleep
@@ -17,6 +20,8 @@ from config import settings
 
 LLMRole = Literal["system", "user", "assistant"]
 LOGGER = get_logger("llm")
+LLM_RESPONSE_SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MAX_LLM_RESPONSE_SCHEMA_BYTES = 64 * 1024
 
 
 class LLMError(RuntimeError):
@@ -151,12 +156,65 @@ class LLMMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMJSONSchema:
+    """Provider-neutral strict JSON-schema response contract."""
+
+    name: str
+    schema: Mapping[str, object]
+    strict: bool = True
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.name, str)
+            or LLM_RESPONSE_SCHEMA_NAME_PATTERN.fullmatch(self.name) is None
+        ):
+            raise LLMValidationError(
+                "JSON schema name must contain 1-64 letters, digits, "
+                "underscores, or hyphens."
+            )
+        if not isinstance(self.schema, Mapping):
+            raise LLMValidationError("JSON schema must be a mapping.")
+        if self.schema.get("type") != "object":
+            raise LLMValidationError(
+                "JSON schema must define a top-level object."
+            )
+        if not isinstance(self.strict, bool):
+            raise LLMValidationError("JSON schema strict must be a boolean.")
+        try:
+            serialized = json.dumps(
+                self.schema,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise LLMValidationError(
+                "JSON schema must be JSON serializable."
+            ) from exc
+        if len(serialized) > MAX_LLM_RESPONSE_SCHEMA_BYTES:
+            raise LLMValidationError("JSON schema is too large.")
+
+    def to_provider_payload(self) -> dict[str, object]:
+        """Return an isolated OpenAI-compatible response-format value."""
+
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": self.name,
+                "schema": deepcopy(dict(self.schema)),
+                "strict": self.strict,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LLMRequest:
     """Validated input passed from application code to an LLM adapter."""
 
     messages: tuple[LLMMessage, ...]
     temperature: float = 0.0
     max_tokens: int = 1000
+    response_format: LLMJSONSchema | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -188,6 +246,13 @@ class LLMRequest:
         ):
             raise LLMValidationError(
                 "max_tokens must be a positive integer."
+            )
+        if (
+            self.response_format is not None
+            and not isinstance(self.response_format, LLMJSONSchema)
+        ):
+            raise LLMValidationError(
+                "response_format must be an LLMJSONSchema object or None."
             )
 
 
@@ -402,6 +467,10 @@ class OpenAICompatibleAdapter:
             "max_tokens": request.max_tokens,
             "stream": False,
         }
+        if request.response_format is not None:
+            payload["response_format"] = (
+                request.response_format.to_provider_payload()
+            )
 
         try:
             response = self._session.post(
@@ -624,6 +693,7 @@ def call_llm(
     client: LLMClient | None = None,
     model: str | None = None,
     max_retries: int | None = None,
+    response_format: LLMJSONSchema | None = None,
 ) -> LLMResponse:
     """Call an LLM without exposing provider-specific SDK details."""
 
@@ -664,6 +734,7 @@ def call_llm(
         ),
         temperature=temperature,
         max_tokens=max_tokens,
+        response_format=response_format,
     )
 
     active_client = (
@@ -710,6 +781,7 @@ __all__ = [
     "LLMConfigurationError",
     "LLMError",
     "LLMMessage",
+    "LLMJSONSchema",
     "LLMRateLimitError",
     "LLMRequest",
     "LLMRequestError",

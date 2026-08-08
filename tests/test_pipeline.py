@@ -97,6 +97,7 @@ from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
     LLMConfigurationError,
+    LLMJSONSchema,
     LLMRateLimitError,
     LLMRequest,
     LLMRequestError,
@@ -145,6 +146,15 @@ from backend.phenotype import (
     update_hpo_ontology,
     validate_hpo_id,
 )
+from backend.phenotype_llm import (
+    MAX_PHENOTYPE_CANDIDATES,
+    PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+    PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA,
+    PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+    PHENOTYPE_EXTRACTION_TASK,
+    PhenotypeExtractionError,
+    extract_hpo_candidates,
+)
 from backend.pipeline import (
     PIPELINE_API_ORDER,
     PIPELINE_SCHEMA_VERSION,
@@ -168,9 +178,12 @@ from backend.pipeline import (
     validate_pipeline_result,
 )
 from backend.privacy import (
+    CLINICAL_REDACTED,
     ClinicalDataPrivacyError,
+    MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS,
     minimize_variant,
     redact_clinical_text,
+    sanitize_phenotype_clinical_text,
     validate_llm_payload,
     validate_no_prohibited_fields,
 )
@@ -498,6 +511,21 @@ class TestConfiguration:
             ),
             ("APP_NAME", "", "APP_NAME cannot be empty"),
             ("LLM_PROVIDER", "", "LLM_PROVIDER cannot be empty"),
+            (
+                "PHENOTYPE_EXTRACTION_MODEL",
+                "",
+                "PHENOTYPE_EXTRACTION_MODEL",
+            ),
+            (
+                "VARIANT_INTERPRETATION_MODEL",
+                "",
+                "VARIANT_INTERPRETATION_MODEL",
+            ),
+            (
+                "PHENOTYPE_EXTRACTION_MAX_TOKENS",
+                4_001,
+                "cannot exceed 4000",
+            ),
             (
                 "GENOME_ASSEMBLY",
                 "hg38",
@@ -9061,6 +9089,77 @@ class TestLLMContract:
             "stream": False,
         }
 
+    def test_strict_json_schema_maps_to_response_format(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "model": "structured-model",
+                        "choices": [
+                            {
+                                "message": {"content": '{"items":[]}'},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    },
+                )
+            ]
+        )
+        schema = LLMJSONSchema(
+            name="bounded_items",
+            schema={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["items"],
+                "properties": {
+                    "items": {"type": "array", "maxItems": 5}
+                },
+            },
+        )
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1",
+                api_key="test-secret",
+                model="structured-model",
+                timeout=10,
+                session=session,
+            )
+        )
+
+        call_llm(
+            "Return structured data.",
+            '{"task":"test"}',
+            client=client,
+            response_format=schema,
+        )
+
+        assert session.post_calls[0]["json"]["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "bounded_items",
+                "schema": dict(schema.schema),
+                "strict": True,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("name", "schema", "message"),
+        [
+            ("invalid name", {"type": "object"}, "schema name"),
+            ("valid_name", {"type": "array"}, "top-level object"),
+            ("valid_name", {"type": "object", "x": object()}, "serializable"),
+        ],
+    )
+    def test_invalid_json_schema_contract_is_rejected(
+        self,
+        name: str,
+        schema: dict[str, object],
+        message: str,
+    ) -> None:
+        with pytest.raises(LLMValidationError, match=message):
+            LLMJSONSchema(name=name, schema=schema)
+
     def test_default_client_uses_central_settings(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -9703,6 +9802,283 @@ class TestLLMContract:
                 TestEvidenceObject._complete_evidence_object(),
                 client=LLMClient(adapter),
             )
+
+
+class TestStage47PhenotypeExtractionLLM:
+    """Verify the bounded Persian-text to HPO-candidate contract."""
+
+    @staticmethod
+    def _response(
+        payload: object,
+        *,
+        finish_reason: str | None = "stop",
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=(
+                payload
+                if isinstance(payload, str)
+                else json.dumps(payload, ensure_ascii=False)
+            ),
+            model="phenotype-model",
+            finish_reason=finish_reason,
+        )
+
+    def test_valid_persian_text_produces_structured_candidates(
+        self,
+    ) -> None:
+        adapter = FakeLLMAdapter(
+            self._response(
+                {
+                    "candidates": [
+                        {
+                            "hpo_id": "HP:0001250",
+                            "label": "Seizure",
+                            "source_phrase_fa": "حملات تشنج",
+                        },
+                        {
+                            "hpo_id": "HP:0001263",
+                            "label": "Global developmental delay",
+                            "source_phrase_fa": "تاخیر تکاملی",
+                        },
+                    ]
+                }
+            )
+        )
+
+        result = extract_hpo_candidates(
+            "کودک دچار حملات تشنج و تاخیر تکاملی است.",
+            client=LLMClient(adapter),
+        )
+
+        assert result == {
+            "schema_version": PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+            "task": PHENOTYPE_EXTRACTION_TASK,
+            "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+            "model": "phenotype-model",
+            "candidates": [
+                {
+                    "hpo_id": "HP:0001250",
+                    "label": "Seizure",
+                    "source_phrase_fa": "حملات تشنج",
+                },
+                {
+                    "hpo_id": "HP:0001263",
+                    "label": "Global developmental delay",
+                    "source_phrase_fa": "تاخیر تکاملی",
+                },
+            ],
+        }
+        request = adapter.requests[0]
+        assert request.temperature == 0.0
+        assert request.max_tokens == settings.PHENOTYPE_EXTRACTION_MAX_TOKENS
+        assert request.response_format is PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA
+        assert json.loads(request.messages[1].content) == {
+            "clinical_text_fa": (
+                "کودک دچار حملات تشنج و تاخیر تکاملی است."
+            ),
+            "task": PHENOTYPE_EXTRACTION_TASK,
+        }
+        system_prompt = request.messages[0].content.casefold()
+        for constraint in (
+            "do not diagnose",
+            "do not invent hpo identifiers",
+            "do not interpret genetic variants",
+            "recommend treatment",
+            "return an empty candidates list",
+        ):
+            assert constraint in system_prompt
+
+    def test_empty_candidate_list_is_valid_uncertainty(self) -> None:
+        result = extract_hpo_candidates(
+            "شرح بالینی برای نگاشت کافی نیست.",
+            client=LLMClient(
+                FakeLLMAdapter(self._response({"candidates": []}))
+            ),
+        )
+
+        assert result["candidates"] == []
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ("not-json", "not valid JSON"),
+            ({"candidate": []}, "invalid fields"),
+            ({"candidates": "not-a-list"}, "must be a list"),
+            (
+                {
+                    "candidates": [
+                        {
+                            "hpo_id": "HP:1250",
+                            "label": "Seizure",
+                            "source_phrase_fa": "تشنج",
+                        }
+                    ]
+                },
+                "invalid HPO ID",
+            ),
+            (
+                {
+                    "candidates": [
+                        {
+                            "hpo_id": "HP:0001250",
+                            "label": "Seizure",
+                            "source_phrase_fa": "تشنج",
+                            "url": "https://model.example/invented",
+                        }
+                    ]
+                },
+                "invalid fields",
+            ),
+            (
+                {
+                    "candidates": [
+                        {
+                            "hpo_id": "HP:0001250",
+                            "label": "Seizure",
+                            "source_phrase_fa": "تشنج",
+                        },
+                        {
+                            "hpo_id": "HP:0001250",
+                            "label": "Seizure",
+                            "source_phrase_fa": "حمله تشنجی",
+                        },
+                    ]
+                },
+                "duplicate HPO IDs",
+            ),
+            (
+                {
+                    "candidates": [
+                        {
+                            "hpo_id": f"HP:{index:07d}",
+                            "label": "Candidate",
+                            "source_phrase_fa": "نشانه",
+                        }
+                        for index in range(MAX_PHENOTYPE_CANDIDATES + 1)
+                    ]
+                },
+                "too many candidates",
+            ),
+        ],
+    )
+    def test_malformed_structured_response_is_rejected(
+        self,
+        payload: object,
+        message: str,
+    ) -> None:
+        with pytest.raises(PhenotypeExtractionError, match=message):
+            extract_hpo_candidates(
+                "شرح فنوتیپی کوتاه.",
+                client=LLMClient(FakeLLMAdapter(self._response(payload))),
+            )
+
+    def test_incomplete_model_response_is_rejected(self) -> None:
+        with pytest.raises(
+            PhenotypeExtractionError,
+            match="did not finish safely",
+        ):
+            extract_hpo_candidates(
+                "شرح فنوتیپی کوتاه.",
+                client=LLMClient(
+                    FakeLLMAdapter(
+                        self._response(
+                            {"candidates": []},
+                            finish_reason="length",
+                        )
+                    )
+                ),
+            )
+
+    def test_clinical_text_is_redacted_before_the_llm_call(self) -> None:
+        adapter = FakeLLMAdapter(self._response({"candidates": []}))
+        raw_text = (
+            "بیمار دچار تشنج است. patient_name: Jane Doe; "
+            "email: jane@example.test"
+        )
+
+        extract_hpo_candidates(raw_text, client=LLMClient(adapter))
+
+        serialized_request = "\n".join(
+            message.content for message in adapter.requests[0].messages
+        )
+        assert "Jane Doe" not in serialized_request
+        assert "jane@example.test" not in serialized_request
+        assert CLINICAL_REDACTED in serialized_request
+        assert "تشنج" in serialized_request
+        assert "raw_vcf" not in serialized_request
+        assert "genotype" not in serialized_request.casefold()
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("", "non-empty"),
+            ("   ", "non-empty"),
+            (
+                "الف" * (MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS + 1),
+                "4000-character limit",
+            ),
+            ("تشنج\x00", "control characters"),
+        ],
+        ids=("empty", "blank", "too-long", "control-character"),
+    )
+    def test_invalid_clinical_text_is_rejected_before_llm(
+        self,
+        value: object,
+        message: str,
+    ) -> None:
+        adapter = FakeLLMAdapter(self._response({"candidates": []}))
+
+        with pytest.raises(ClinicalDataPrivacyError, match=message):
+            extract_hpo_candidates(value, client=LLMClient(adapter))
+
+        assert adapter.requests == []
+
+    def test_selected_model_is_independent_configuration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        observed: dict[str, object] = {}
+
+        def fake_call_llm(*args: object, **kwargs: object) -> LLMResponse:
+            observed["args"] = args
+            observed.update(kwargs)
+            return self._response({"candidates": []})
+
+        monkeypatch.setattr(
+            "backend.phenotype_llm.call_llm",
+            fake_call_llm,
+        )
+        monkeypatch.setattr(
+            settings,
+            "PHENOTYPE_EXTRACTION_MODEL",
+            "phenotype-only-model",
+        )
+        monkeypatch.setattr(
+            settings,
+            "VARIANT_INTERPRETATION_MODEL",
+            "interpretation-only-model",
+        )
+
+        extract_hpo_candidates("شرح فنوتیپی کوتاه.")
+
+        assert observed["model"] == "phenotype-only-model"
+        assert observed["model"] != settings.VARIANT_INTERPRETATION_MODEL
+
+    def test_provider_failure_is_explicit_and_isolated(self) -> None:
+        adapter = FakeLLMAdapter(LLMRequestError("provider unavailable"))
+
+        with pytest.raises(LLMRequestError, match="provider unavailable"):
+            extract_hpo_candidates(
+                "شرح فنوتیپی کوتاه.",
+                client=LLMClient(adapter),
+            )
+
+        assert len(adapter.requests) == 1
+
+    def test_privacy_helper_preserves_deidentified_persian_text(self) -> None:
+        assert sanitize_phenotype_clinical_text(
+            "کودک دچار ضعف عضلانی است."
+        ) == "کودک دچار ضعف عضلانی است."
 
 
 class TestClinicalReportContract:
