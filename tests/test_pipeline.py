@@ -811,6 +811,38 @@ class TestLoggingConfiguration:
         assert provider_key not in contents
         assert REDACTED in contents
 
+    def test_phi_and_raw_vcf_are_redacted_defensively(
+        self,
+        log_path: Path,
+    ) -> None:
+        configure_logging(level="INFO", log_path=log_path, force=True)
+        logger = get_logger("clinical-privacy-test")
+
+        logger.warning("patient_name=%s", "Identified Person")
+        logger.warning(
+            "context=%s",
+            {"patient_name": "Nested Identified Person"},
+        )
+        logger.warning("contact=%s", "identified@example.test")
+        logger.warning("upload=%s", "C:/patients/identified/sample.vcf")
+        logger.warning(
+            "raw=%s",
+            "#CHROM POS ID REF ALT QUAL FILTER INFO FORMAT SAMPLE",
+        )
+        for handler in logging.getLogger(APP_LOGGER_NAME).handlers:
+            handler.flush()
+        contents = log_path.read_text(encoding="utf-8")
+
+        for private_value in (
+            "Identified Person",
+            "Nested Identified Person",
+            "identified@example.test",
+            "C:/patients/identified/sample.vcf",
+            "#CHROM POS ID REF ALT",
+        ):
+            assert private_value not in contents
+        assert "[REDACTED CLINICAL DATA]" in contents
+
     def test_nested_credentials_and_exception_text_are_omitted(
         self,
         log_path: Path,
@@ -10936,6 +10968,121 @@ class TestStage40FrontendReviewWorkflow:
             "reviewed_evidence_packages"
         ]
         assert saved[-1]["llm_routing_results"][0]["status"] == "success"
+
+
+@pytest.mark.stage15_security
+class TestStage42PrivacySecurityAudit:
+    """Verify review, provider, LLM, log, and audit privacy boundaries."""
+
+    @pytest.mark.parametrize(
+        ("review_change", "notes"),
+        [
+            ({"patient_name": "Identified Person"}, []),
+            ({"contact_email": "identified@example.test"}, []),
+            ({}, ["patient_id=identified-123"]),
+            ({}, ["Contact identified@example.test"]),
+            ({}, ["phone: +1-555-0100"]),
+        ],
+    )
+    def test_sensitive_review_content_is_rejected_before_storage(
+        self,
+        review_change: dict[str, object],
+        notes: list[str],
+    ) -> None:
+        report = build_evidence_review_reports(
+            [TestEvidenceObject._complete_evidence_object()],
+            timestamp="2026-08-08T11:00:00Z",
+        )[0]
+        original = deepcopy(report)
+        reviewed = deepcopy(report["reviewed_user_report"])
+        reviewed.update(review_change)
+
+        with pytest.raises(EvidenceReviewError, match="prohibited"):
+            save_evidence_review_draft(
+                report,
+                reviewed,
+                notes,
+                timestamp="2026-08-08T11:01:00Z",
+            )
+
+        assert report == original
+
+    def test_sensitive_audit_path_is_rejected_on_reload(self) -> None:
+        report = build_evidence_review_reports(
+            [TestEvidenceObject._complete_evidence_object()],
+            timestamp="2026-08-08T11:00:00Z",
+        )[0]
+        report["edit_history"] = [
+            {
+                "path": "/patient_name",
+                "change_type": "added",
+                "old_value": None,
+                "new_value": None,
+                "user_added": True,
+                "timestamp": "2026-08-08T11:01:00Z",
+            }
+        ]
+        report["updated_at"] = "2026-08-08T11:01:00Z"
+
+        with pytest.raises(EvidenceReviewError, match="prohibited"):
+            validate_evidence_review_report(report)
+
+    def test_pipeline_privacy_boundary_includes_review_state(self) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        result["evidence_review_reports"][0]["reviewed_user_report"][
+            "sample_id"
+        ] = "identified-sample"
+
+        with pytest.raises(
+            PipelineResultError,
+            match="prohibited clinical data",
+        ):
+            validate_pipeline_result(result)
+
+    def test_external_annotation_calls_exclude_sample_fields(self) -> None:
+        variant = TestAnnotation._variant()
+        variant["sample_name"] = "identified-sample"
+        session = TestStage13IntegrationBoundaries._annotation_session()
+
+        annotate_variants(
+            [variant],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )
+
+        calls = json.dumps(session.calls, default=str).casefold()
+        assert "genotype" not in calls
+        assert "sample_name" not in calls
+        assert "identified-sample" not in calls
+        assert session.genebe_post_calls[0]["json"] == [
+            {"chr": "1", "pos": 100, "ref": "A", "alt": "G"}
+        ]
+
+    def test_llm_receives_exact_bounded_reviewed_package(self) -> None:
+        confirmed = TestStage35TwoLayerLLMRouting._confirmed_result()
+        package = confirmed["reviewed_evidence_packages"][0]
+        adapter = FakeLLMAdapter(
+            TestStage35TwoLayerLLMRouting._response(
+                model="light-response",
+                resolution="not_applicable",
+            )
+        )
+
+        route_reviewed_evidence_package(
+            package,
+            light_client=LLMClient(adapter),
+            timestamp="2026-08-08T11:05:00Z",
+        )
+
+        user_prompt = adapter.requests[0].messages[1].content
+        serialized = user_prompt.split(
+            "BEGIN_REVIEWED_EVIDENCE_PACKAGE\n",
+            1,
+        )[1].split("\nEND_REVIEWED_EVIDENCE_PACKAGE", 1)[0]
+        assert json.loads(serialized) == package
+        assert len(serialized.encode("utf-8")) <= 512 * 1024
+        assert "raw_vcf" not in serialized
+        assert "genotype" not in serialized
 
 
 class TestClinicalInterpretationValidation:

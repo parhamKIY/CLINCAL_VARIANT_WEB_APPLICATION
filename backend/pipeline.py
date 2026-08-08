@@ -635,6 +635,8 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
+                    "evidence_review_reports",
+                    "reviewed_evidence_packages",
                     "llm_routing_results",
                     "final_interpretation_report",
                 )

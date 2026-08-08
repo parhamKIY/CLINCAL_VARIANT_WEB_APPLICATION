@@ -11,6 +11,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from backend.privacy import (
+    CLINICAL_REDACTED,
+    is_prohibited_clinical_field,
+    redact_clinical_text,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -73,10 +78,11 @@ class SecretRedactor:
             ),
             sanitized,
         )
-        return BEARER_PATTERN.sub(
+        sanitized = BEARER_PATTERN.sub(
             f"Bearer {REDACTED}",
             sanitized,
         )
+        return redact_clinical_text(sanitized)
 
     def value(self, value: Any) -> Any:
         """Recursively redact common logging argument containers."""
@@ -86,7 +92,11 @@ class SecretRedactor:
         if isinstance(value, Mapping):
             return {
                 key: (
-                    REDACTED
+                    (
+                        CLINICAL_REDACTED
+                        if is_prohibited_clinical_field(key)
+                        else REDACTED
+                    )
                     if (
                         str(key)
                         .strip()
@@ -94,6 +104,7 @@ class SecretRedactor:
                         .replace("-", "_")
                     )
                     in SENSITIVE_FIELD_NAMES
+                    or is_prohibited_clinical_field(key)
                     else self.value(item)
                 )
                 for key, item in value.items()

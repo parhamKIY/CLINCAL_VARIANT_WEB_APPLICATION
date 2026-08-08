@@ -11,6 +11,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
 
+from backend.privacy import (
+    ClinicalDataPrivacyError,
+    validate_human_review_content,
+)
 from backend.report import EvidenceObject, validate_evidence_object
 
 
@@ -404,6 +408,17 @@ def validate_evidence_review_report(
             "updated_at cannot precede created_at."
         )
     edit_history = _validate_edit_history(value["edit_history"])
+    reviewer_notes = _validate_notes(value["reviewer_notes"])
+    try:
+        validate_human_review_content(
+            reviewed,
+            reviewer_notes,
+            edit_history,
+        )
+    except ClinicalDataPrivacyError as exc:
+        raise EvidenceReviewError(
+            "Human review content contains prohibited clinical data."
+        ) from exc
     if any(
         _timestamp_value(record["timestamp"]) < created_value
         or _timestamp_value(record["timestamp"]) > updated_value
@@ -423,7 +438,7 @@ def validate_evidence_review_report(
         "status": "draft",
         "original_machine_report": original,
         "reviewed_user_report": reviewed,
-        "reviewer_notes": _validate_notes(value["reviewer_notes"]),
+        "reviewer_notes": reviewer_notes,
         "edit_history": edit_history,
         "created_at": created_at,
         "updated_at": updated_at,

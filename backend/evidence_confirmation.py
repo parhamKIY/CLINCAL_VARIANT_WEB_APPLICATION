@@ -19,6 +19,10 @@ from backend.evidence_review import (
     validate_bounded_json_tree,
     validate_evidence_review_report,
 )
+from backend.privacy import (
+    ClinicalDataPrivacyError,
+    validate_human_review_content,
+)
 from backend.report import EvidenceObject, validate_evidence_object
 
 
@@ -465,6 +469,16 @@ def validate_reviewed_evidence_package(
         require_added=True,
     )
     reviewer_notes = _validate_notes(value["reviewer_notes"])
+    try:
+        validate_human_review_content(
+            reviewed,
+            reviewer_notes,
+            edit_history,
+        )
+    except ClinicalDataPrivacyError as exc:
+        raise EvidenceConfirmationError(
+            "Reviewed evidence contains prohibited clinical data."
+        ) from exc
     expected_user_added = [
         deepcopy(item) for item in edit_history if item["user_added"]
     ]

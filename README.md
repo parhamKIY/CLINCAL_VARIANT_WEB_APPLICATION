@@ -175,6 +175,10 @@ in input order and provides separate evidence and interpretation report views.
   normalized annotation cache, explicit missingness safeguards, and targeted
   retry of failed interpretations without losing confirmed evidence, reviewer
   edits, or successful model results.
+- Stage 42 extends privacy enforcement to human review state and audit history,
+  defensively redacts PHI and raw VCF content from logs, verifies minimum-data
+  provider requests, and confirms that Pipeline V2 sends only a bounded,
+  confirmation-gated Reviewed Evidence Package to the LLM.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
