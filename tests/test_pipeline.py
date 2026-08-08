@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
+from openpyxl import Workbook
 from streamlit.testing.v1 import AppTest
 
 import config as config_module
@@ -69,6 +70,10 @@ from backend.conditional_enrichment import (
 from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
+)
+from backend.excel_processing import (
+    ExcelProcessingError,
+    parse_excel_variants,
 )
 from backend.evidence_confirmation import (
     EvidenceConfirmationError,
@@ -210,7 +215,6 @@ from backend.report_exports import (
     render_report_pdf,
 )
 from backend.vcf_processing import (
-    MAX_FILTERED_VCF_ROWS,
     STANDARD_PRIMARY_CHROMOSOMES,
     VCFProcessingError,
     get_primary_chromosome_length,
@@ -219,7 +223,7 @@ from backend.vcf_processing import (
     process_vcf,
     validate_vcf,
 )
-from config import settings
+from config import MAX_VARIANTS_PER_ANALYSIS, settings
 from frontend.execution import (
     AnalysisJob,
     FrontendExecutionError,
@@ -1548,6 +1552,37 @@ def _manual_rows(*variants: str) -> list[dict[str, object]]:
     return rows
 
 
+def _xlsx_bytes(
+    rows: list[tuple[object, ...]],
+    *,
+    headers: tuple[object, ...] = (
+        "CHROM",
+        "POS",
+        "REF",
+        "ALT",
+        "QUAL",
+        "FILTER",
+    ),
+    later_sheet_rows: list[tuple[object, ...]] | None = None,
+) -> bytes:
+    """Build a small in-memory workbook for Excel-boundary tests."""
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Variants"
+    worksheet.append(headers)
+    for row in rows:
+        worksheet.append(row)
+    if later_sheet_rows is not None:
+        ignored = workbook.create_sheet("Ignored")
+        for row in later_sheet_rows:
+            ignored.append(row)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
 class TestVCFProcessing:
     def test_standard_primary_chromosome_contract(self) -> None:
         assert STANDARD_PRIMARY_CHROMOSOMES == (
@@ -1601,6 +1636,26 @@ class TestVCFProcessing:
             },
         ]
 
+    def test_vcf_multiallelic_split_respects_variant_limit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        alternates = ",".join(
+            "A" if index % 2 == 0 else "T"
+            for index in range(MAX_VARIANTS_PER_ANALYSIS + 1)
+        )
+        path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            f"1\t100\t.\tG\t{alternates}\t.\tPASS\t.\n",
+        )
+
+        with pytest.raises(
+            VCFProcessingError,
+            match="after multiallelic splitting",
+        ):
+            parse_vcf(path)
+
     def test_parse_compressed_vcf_ignores_sample_fields(
         self,
         tmp_path: Path,
@@ -1626,7 +1681,7 @@ class TestVCFProcessing:
             }
         ]
 
-    def test_more_than_five_filtered_rows_are_rejected(
+    def test_more_than_ten_filtered_rows_are_rejected(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1635,15 +1690,43 @@ class TestVCFProcessing:
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
             + "".join(
                 f"1\t{position}\t.\tA\tG\t.\tPASS\t.\n"
-                for position in range(1, MAX_FILTERED_VCF_ROWS + 2)
+                for position in range(
+                    1,
+                    MAX_VARIANTS_PER_ANALYSIS + 2,
+                )
             ),
         )
 
         with pytest.raises(
             VCFProcessingError,
-            match="more than 5 data rows",
+            match=f"more than {MAX_VARIANTS_PER_ANALYSIS} data rows",
         ):
             parse_vcf(path)
+
+    def test_vcf_and_manual_inputs_accept_ten_variants(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        compact_variants = [
+            f"1:{position}:A:G"
+            for position in range(1, MAX_VARIANTS_PER_ANALYSIS + 1)
+        ]
+        path = _write_vcf(
+            tmp_path,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            + "".join(
+                f"1\t{position}\t.\tA\tG\t.\tPASS\t.\n"
+                for position in range(
+                    1,
+                    MAX_VARIANTS_PER_ANALYSIS + 1,
+                )
+            ),
+        )
+
+        assert len(parse_vcf(path)) == MAX_VARIANTS_PER_ANALYSIS
+        assert len(
+            parse_manual_variants(_manual_rows(*compact_variants))
+        ) == MAX_VARIANTS_PER_ANALYSIS
 
     def test_missing_file_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(
@@ -1708,6 +1791,21 @@ class TestVCFProcessing:
             },
         ]
 
+    def test_manual_multiallelic_split_respects_variant_limit(
+        self,
+    ) -> None:
+        row = _manual_rows("1:100:G:A")[0]
+        row["alt"] = ",".join(
+            "A" if index % 2 == 0 else "T"
+            for index in range(MAX_VARIANTS_PER_ANALYSIS + 1)
+        )
+
+        with pytest.raises(
+            VCFProcessingError,
+            match="after multiallelic splitting",
+        ):
+            parse_manual_variants([row])
+
     @pytest.mark.parametrize(
         "row",
         [
@@ -1753,17 +1851,20 @@ class TestVCFProcessing:
         with pytest.raises(VCFProcessingError):
             parse_manual_variants([row])
 
-    def test_manual_table_rejects_more_than_five_rows(self) -> None:
+    def test_manual_table_rejects_more_than_ten_rows(self) -> None:
         rows = _manual_rows(
             *[
                 f"1:{position}:A:G"
-                for position in range(1, MAX_FILTERED_VCF_ROWS + 2)
+                for position in range(
+                    1,
+                    MAX_VARIANTS_PER_ANALYSIS + 2,
+                )
             ]
         )
 
         with pytest.raises(
             VCFProcessingError,
-            match="more than 5 rows",
+            match=f"more than {MAX_VARIANTS_PER_ANALYSIS} rows",
         ):
             parse_manual_variants(rows)
 
@@ -1849,6 +1950,140 @@ class TestVCFProcessing:
             parse_manual_variants(
                 _manual_rows("GL000207.1:100:A:G")
             )
+
+
+class TestExcelProcessing:
+    """Verify first-worksheet-only Excel normalization."""
+
+    def test_excel_aliases_use_the_manual_variant_contract(self) -> None:
+        payload = _xlsx_bytes(
+            [("chr1", 941284, "g", "a", 100, "PASS", "ignored")],
+            headers=(
+                "Chromosome",
+                "Position",
+                "Reference",
+                "Alternate",
+                "Quality",
+                "Filter status",
+                "Patient",
+            ),
+        )
+
+        variants = parse_excel_variants(payload)
+
+        assert variants == [
+            {
+                "chrom": "1",
+                "pos": 941284,
+                "ref": "G",
+                "alt": "A",
+                "qual": 100.0,
+                "filter": "PASS",
+            }
+        ]
+        assert "ignored" not in json.dumps(variants)
+
+    def test_excel_reads_only_first_worksheet(self) -> None:
+        secret = "SHEET_TWO_MUST_NEVER_ENTER_THE_PIPELINE"
+        payload = _xlsx_bytes(
+            [("1", 100, "A", "G", None, "PASS")],
+            later_sheet_rows=[
+                ("CHROM", "POS", "REF", "ALT", "PATIENT"),
+                ("2", 200, "C", "T", secret),
+            ],
+        )
+
+        variants = parse_excel_variants(payload)
+
+        assert len(variants) == 1
+        assert variants[0]["pos"] == 100
+        assert secret not in json.dumps(variants)
+
+    def test_excel_accepts_ten_rows_and_preserves_order(self) -> None:
+        payload = _xlsx_bytes(
+            [
+                ("1", position, "A", "G", None, "PASS")
+                for position in range(1, MAX_VARIANTS_PER_ANALYSIS + 1)
+            ]
+        )
+
+        variants = parse_excel_variants(payload)
+
+        assert len(variants) == MAX_VARIANTS_PER_ANALYSIS
+        assert [variant["pos"] for variant in variants] == list(
+            range(1, MAX_VARIANTS_PER_ANALYSIS + 1)
+        )
+
+    def test_excel_rejects_more_than_ten_rows(self) -> None:
+        payload = _xlsx_bytes(
+            [
+                ("1", position, "A", "G", None, "PASS")
+                for position in range(1, MAX_VARIANTS_PER_ANALYSIS + 2)
+            ]
+        )
+
+        with pytest.raises(
+            ExcelProcessingError,
+            match=f"more than {MAX_VARIANTS_PER_ANALYSIS} variant rows",
+        ):
+            parse_excel_variants(payload)
+
+    def test_excel_multiallelic_split_respects_variant_limit(self) -> None:
+        alternates = ",".join(
+            "A" if index % 2 == 0 else "T"
+            for index in range(MAX_VARIANTS_PER_ANALYSIS + 1)
+        )
+        payload = _xlsx_bytes(
+            [("1", 100, "G", alternates, None, "PASS")]
+        )
+
+        with pytest.raises(
+            ExcelProcessingError,
+            match="after multiallelic splitting",
+        ):
+            parse_excel_variants(payload)
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            (b"not an xlsx workbook", "damaged or invalid"),
+            (
+                _xlsx_bytes(
+                    [("1", 100, "A")],
+                    headers=("CHROM", "POS", "REF"),
+                ),
+                "missing required columns: ALT",
+            ),
+            (
+                _xlsx_bytes(
+                    [("1", "not-an-integer", "A", "G")],
+                    headers=("CHROM", "POS", "REF", "ALT"),
+                ),
+                "POS must be an integer",
+            ),
+            (
+                _xlsx_bytes(
+                    [("1", "1", 100, "A", "G")],
+                    headers=(
+                        "CHROM",
+                        "Chromosome",
+                        "POS",
+                        "REF",
+                        "ALT",
+                    ),
+                ),
+                "duplicate CHROM columns",
+            ),
+        ],
+    )
+    def test_invalid_excel_is_rejected_safely(
+        self,
+        payload: bytes,
+        message: str,
+    ) -> None:
+        with pytest.raises(ExcelProcessingError, match=message):
+            parse_excel_variants(payload)
+
 
 class TestPhenotype:
     """Verify the Stage 6 phenotype input contract."""
@@ -12487,6 +12722,16 @@ class TestPipelineContract:
             "phenotypes": [],
         }
 
+    def test_pipeline_result_rejects_more_than_ten_variants(self) -> None:
+        result = create_pipeline_result()
+        result["variant_count"] = MAX_VARIANTS_PER_ANALYSIS + 1
+
+        with pytest.raises(
+            PipelineResultError,
+            match=f"from 0 to {MAX_VARIANTS_PER_ANALYSIS}",
+        ):
+            validate_pipeline_result(result)
+
     @pytest.mark.parametrize(
         ("vcf_path", "manual_variants", "message"),
         [
@@ -14868,6 +15113,82 @@ class TestFrontendExecution:
             assert observed["file_mode"] == 0o600
             assert observed["directory_mode"] == 0o700
 
+    def test_excel_upload_enters_pipeline_as_normalized_variants(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        secret = "IGNORED_SHEET_SECRET"
+        payload = _xlsx_bytes(
+            [("1", 100, "A", "G", None, "PASS")],
+            later_sheet_rows=[("patient", secret)],
+        )
+        observed: dict[str, object] = {}
+        expected = create_pipeline_result()
+
+        def fake_run_analysis(**kwargs: object) -> PipelineResult:
+            observed.update(kwargs)
+            return expected
+
+        monkeypatch.setattr(
+            "frontend.execution.run_analysis",
+            fake_run_analysis,
+        )
+        uploaded = SimpleNamespace(
+            name="variants.xlsx",
+            getvalue=lambda: payload,
+        )
+
+        result = execute_frontend_analysis(
+            uploaded_vcf=uploaded,
+            manual_variants=None,
+            phenotypes=["HP:0001250"],
+        )
+
+        assert result is expected
+        assert observed["vcf_path"] is None
+        assert observed["manual_variants"] == [
+            {
+                "chrom": "1",
+                "pos": 100,
+                "ref": "A",
+                "alt": "G",
+                "qual": None,
+                "filter": "PASS",
+            }
+        ]
+        assert secret not in json.dumps(observed)
+
+    def test_excel_recovery_checkpoint_contains_only_normalized_sheet_one(
+        self,
+    ) -> None:
+        secret = "IGNORED_RECOVERY_SECRET"
+        uploaded = SimpleNamespace(
+            name="variants.xlsx",
+            getvalue=lambda: _xlsx_bytes(
+                [("1", 100, "A", "G", None, "PASS")],
+                later_sheet_rows=[("patient", secret)],
+            ),
+        )
+
+        request = prepare_analysis_recovery_request(
+            uploaded_vcf=uploaded,
+            manual_variants=None,
+            phenotypes=["HP:0001250"],
+            llm_model="model",
+        )
+
+        assert request["manual_variants"] == [
+            {
+                "chrom": "1",
+                "pos": 100,
+                "ref": "A",
+                "alt": "G",
+                "qual": None,
+                "filter": "PASS",
+            }
+        ]
+        assert secret not in json.dumps(request)
+
     @pytest.mark.parametrize(
         "filename",
         [
@@ -14917,6 +15238,11 @@ class TestFrontendExecution:
             (
                 "patient.vcf.gz",
                 b"\x1f\x8b damaged",
+                "damaged or invalid",
+            ),
+            (
+                "patient.xlsx",
+                b"not an Excel workbook",
                 "damaged or invalid",
             ),
             (
@@ -14975,10 +15301,13 @@ class TestFrontendExecution:
                     phenotypes=[],
                 )
 
-    def test_upload_with_more_than_five_rows_is_rejected(self) -> None:
+    def test_upload_with_more_than_ten_rows_is_rejected(self) -> None:
         records = "".join(
             f"1\t{position}\t.\tA\tG\t99\tPASS\t.\n"
-            for position in range(100, 106)
+            for position in range(
+                100,
+                101 + MAX_VARIANTS_PER_ANALYSIS,
+            )
         )
         payload = (
             MINIMAL_HEADER
@@ -14992,7 +15321,35 @@ class TestFrontendExecution:
 
         with pytest.raises(
             FrontendExecutionError,
-            match="cannot contain more than 5",
+            match=(
+                "cannot contain more than "
+                f"{MAX_VARIANTS_PER_ANALYSIS}"
+            ),
+        ):
+            execute_frontend_analysis(
+                uploaded_vcf=uploaded,
+                manual_variants=None,
+                phenotypes=[],
+            )
+
+    def test_vcf_upload_multiallelic_limit_is_enforced(self) -> None:
+        alternates = ",".join(
+            "A" if index % 2 == 0 else "T"
+            for index in range(MAX_VARIANTS_PER_ANALYSIS + 1)
+        )
+        payload = (
+            MINIMAL_HEADER
+            + "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            + f"1\t100\t.\tG\t{alternates}\t99\tPASS\t.\n"
+        ).encode("utf-8")
+        uploaded = SimpleNamespace(
+            name="patient.vcf",
+            getvalue=lambda: payload,
+        )
+
+        with pytest.raises(
+            FrontendExecutionError,
+            match="after multiallelic splitting",
         ):
             execute_frontend_analysis(
                 uploaded_vcf=uploaded,
@@ -16562,10 +16919,10 @@ class TestFrontendFoundation:
             for warning in app.warning
         )
         assert [control.value for control in app.segmented_control] == [
-            "VCF upload"
+            "File upload"
         ]
         assert [uploader.label for uploader in app.file_uploader] == [
-            "VCF file"
+            "Variant file"
         ]
         assert any(
             field.label == "Search HPO terms"
@@ -16804,7 +17161,7 @@ class TestFrontendFoundation:
 
         assert not app.exception
         assert any(
-            "Upload a .vcf or .vcf.gz file"
+            "Upload a .vcf, .vcf.gz, or .xlsx file"
             in error.value
             for error in app.error
         )

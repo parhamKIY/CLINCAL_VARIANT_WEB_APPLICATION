@@ -31,12 +31,13 @@ from backend.pipeline import (
     PipelineResult,
     run_analysis,
 )
+from backend.excel_processing import parse_excel_variants
 from backend.vcf_processing import (
-    MAX_FILTERED_VCF_ROWS,
     VCFProcessingError,
     process_vcf,
 )
 from config import (
+    MAX_VARIANTS_PER_ANALYSIS,
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
     settings,
@@ -60,7 +61,7 @@ class UploadedVCF(Protocol):
         """Return the uploaded file contents."""
 
 
-SUPPORTED_UPLOAD_SUFFIXES = (".vcf", ".vcf.gz")
+SUPPORTED_UPLOAD_SUFFIXES = (".vcf", ".vcf.gz", ".xlsx")
 MAX_UPLOAD_FILENAME_CHARACTERS = 255
 UPLOAD_VALIDATION_CHUNK_BYTES = 64 * 1024
 VCF_COLUMN_HEADER = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
@@ -396,7 +397,7 @@ def _load_recovery_request(
         or time() - float(created_at) > RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS
         or not isinstance(variants, list)
         or not variants
-        or len(variants) > MAX_FILTERED_VCF_ROWS
+        or len(variants) > MAX_VARIANTS_PER_ANALYSIS
         or any(not isinstance(item, dict) for item in variants)
         or not isinstance(phenotypes, list)
         or any(not isinstance(item, str) for item in phenotypes)
@@ -577,7 +578,7 @@ def _validate_upload_filename(filename: object) -> str:
         if lowered_name.endswith(suffix):
             return suffix
     raise FrontendExecutionError(
-        "The uploaded file must end in .vcf or .vcf.gz."
+        "The uploaded file must end in .vcf, .vcf.gz, or .xlsx."
     )
 
 
@@ -588,25 +589,25 @@ def _read_upload(uploaded_vcf: UploadedVCF) -> bytes:
         payload = uploaded_vcf.getvalue()
     except Exception as exc:
         raise FrontendExecutionError(
-            "The uploaded VCF could not be read."
+            "The uploaded variant file could not be read."
         ) from exc
     if not isinstance(payload, bytes):
         raise FrontendExecutionError(
-            "The uploaded VCF content is invalid."
+            "The uploaded variant-file content is invalid."
         )
     if not payload:
         raise FrontendExecutionError(
-            "The uploaded VCF is empty."
+            "The uploaded variant file is empty."
         )
     if len(payload) > settings.MAX_UPLOAD_BYTES:
         raise FrontendExecutionError(
-            "The uploaded VCF exceeds the configured size limit."
+            "The uploaded variant file exceeds the configured size limit."
         )
     return payload
 
 
 def _validate_vcf_stream(stream: BinaryIO) -> None:
-    """Validate one UTF-8 filtered VCF containing one to five rows."""
+    """Validate one UTF-8 VCF within the configured variant limit."""
 
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
     total_bytes = 0
@@ -614,9 +615,10 @@ def _validate_vcf_stream(stream: BinaryIO) -> None:
     first_line: str | None = None
     has_column_header = False
     data_row_count = 0
+    variant_count = 0
 
     def consume_line(line: str) -> None:
-        nonlocal first_line, has_column_header, data_row_count
+        nonlocal first_line, has_column_header, data_row_count, variant_count
         normalized = line.rstrip("\r")
         if first_line is None:
             first_line = normalized
@@ -625,11 +627,23 @@ def _validate_vcf_stream(stream: BinaryIO) -> None:
             return
         if normalized and not normalized.startswith("#"):
             data_row_count += 1
-            if data_row_count > MAX_FILTERED_VCF_ROWS:
+            if data_row_count > MAX_VARIANTS_PER_ANALYSIS:
                 raise FrontendExecutionError(
                     "The filtered VCF cannot contain more than "
-                    f"{MAX_FILTERED_VCF_ROWS} data rows."
+                    f"{MAX_VARIANTS_PER_ANALYSIS} data rows."
                 )
+            fields = normalized.split("\t")
+            if len(fields) >= 5:
+                alternates = [
+                    value for value in fields[4].split(",") if value
+                ]
+                variant_count += max(len(alternates), 1)
+                if variant_count > MAX_VARIANTS_PER_ANALYSIS:
+                    raise FrontendExecutionError(
+                        "The filtered VCF cannot produce more than "
+                        f"{MAX_VARIANTS_PER_ANALYSIS} variants after "
+                        "multiallelic splitting."
+                    )
 
     try:
         while True:
@@ -705,6 +719,11 @@ def _validate_upload_content(payload: bytes, suffix: str) -> None:
                 "The .vcf.gz upload is damaged or invalid."
             ) from exc
         return
+
+    if suffix != ".vcf":
+        raise FrontendExecutionError(
+            "The uploaded variant-file type is unsupported."
+        )
 
     if gzip_magic:
         raise FrontendExecutionError(
@@ -782,7 +801,7 @@ def _write_private_upload(
         except OSError:
             pass
         raise FrontendExecutionError(
-            "The uploaded VCF could not be stored securely."
+            "The uploaded variant file could not be stored securely."
         ) from exc
 
 
@@ -797,7 +816,7 @@ def prepare_analysis_recovery_request(
 
     if uploaded_vcf is not None and manual_variants is not None:
         raise FrontendExecutionError(
-            "Choose either a VCF upload or manual table rows."
+            "Choose either a variant-file upload or manual table rows."
         )
     try:
         if uploaded_vcf is None:
@@ -807,6 +826,15 @@ def prepare_analysis_recovery_request(
         else:
             suffix = _validate_upload_filename(uploaded_vcf.name)
             payload = _read_upload(uploaded_vcf)
+            if suffix == ".xlsx":
+                variants = parse_excel_variants(payload)
+                return AnalysisRecoveryRequest(
+                    schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
+                    manual_variants=[dict(variant) for variant in variants],
+                    phenotypes=list(phenotypes),
+                    llm_model=llm_model,
+                    created_at=time(),
+                )
             _validate_upload_content(payload, suffix)
             upload_directory = _prepare_upload_directory()
             with TemporaryDirectory(
@@ -847,7 +875,7 @@ def execute_analysis(
 
     if uploaded_vcf is not None and manual_variants is not None:
         raise FrontendExecutionError(
-            "Choose either a VCF upload or manual table rows."
+            "Choose either a variant-file upload or manual table rows."
         )
 
     if uploaded_vcf is None:
@@ -863,6 +891,18 @@ def execute_analysis(
         getattr(uploaded_vcf, "name", None)
     )
     payload = _read_upload(uploaded_vcf)
+    if suffix == ".xlsx":
+        try:
+            variants = parse_excel_variants(payload)
+        except VCFProcessingError as exc:
+            raise FrontendExecutionError(str(exc)) from exc
+        return run_analysis(
+            vcf_path=None,
+            manual_variants=variants,
+            phenotypes=phenotypes,
+            llm_model=llm_model,
+            progress_callback=progress_callback,
+        )
     _validate_upload_content(payload, suffix)
     upload_directory = _prepare_upload_directory()
     try:
@@ -895,7 +935,7 @@ def execute_analysis(
         raise
     except OSError as exc:
         raise FrontendExecutionError(
-            "The uploaded VCF could not be prepared for analysis."
+            "The uploaded variant file could not be prepared for analysis."
         ) from exc
 
 

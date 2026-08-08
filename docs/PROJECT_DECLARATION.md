@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 44 software baseline; Stage 45 post-review architecture contract accepted
+**Implementation status:** Stage 46 input contract expansion implemented on the Stage 44 workflow baseline
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 46 input contract expansion
+**Next implementation milestone:** Stage 47 phenotype-extraction LLM contract
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -11,9 +11,10 @@
 ## 1. Executive declaration
 
 This repository implements an evidence-centered clinical variant interpretation
-workflow for one to five already-filtered germline Mendelian variants. It accepts
-a filtered VCF/VCF.GZ file or a manual VCF-style table, validates and standardizes
-each allele, collects independent annotation and phenotype evidence, creates an
+workflow for one to ten already-filtered germline Mendelian variants. It accepts a
+filtered VCF/VCF.GZ file, the first worksheet of an Excel `.xlsx` workbook, or a
+manual VCF-style table, validates and standardizes each allele, collects independent
+annotation and phenotype evidence, creates an
 editable report for every variant, requires explicit human confirmation, and only
 then sends a bounded reviewed evidence package to one of two LLM routes. The final
 output contains interpretation text, provenance, conflict status, and explicit
@@ -34,7 +35,8 @@ Stage 44 baseline and are legacy implementation facts, not the target for new wo
 
 ### In scope
 
-- One to five professor-filtered variants in VCF or manual-table form.
+- One to ten professor-filtered variants in VCF, VCF.GZ, first-worksheet-only
+  Excel `.xlsx`, or manual-table form.
 - Explicit GRCh37 or GRCh38 assembly handling.
 - Germline Mendelian evidence collection and interpretation support.
 - SNV/indel allele validation, multiallelic splitting, and input-order preservation.
@@ -56,6 +58,26 @@ Stage 44 baseline and are legacy implementation facts, not the target for new wo
 - Production identity management, role-based access control, cloud deployment,
   multi-institution workflows, or regulatory certification.
 
+### Stage 46 input contract
+
+`MAX_VARIANTS_PER_ANALYSIS = 10` in `config.py` is the single active limit for
+VCF, manual, Excel, frontend, and recovery validation. The limit applies after
+multiallelic splitting, so no supported input route can produce more than ten
+normalized variants.
+
+Excel `.xlsx` input reads worksheet index 0 only. Later worksheets are not iterated
+and cannot enter normalized input, recovery checkpoints, persistence, logs,
+provider calls, LLM payloads, or exports. Required headers are `CHROM`, `POS`,
+`REF`, and `ALT`; `QUAL` and `FILTER` are optional. Matching is case-insensitive
+with deterministic aliases: `#CHROM`/`Chromosome`, `Position`, `Reference`,
+`Alternate`/`Alternative`, `Quality`, and `Filter status`. Unknown columns are
+discarded before pipeline entry.
+
+Excel rows are projected onto the established manual-table structure and pass
+through the same assembly, coordinate, allele, ordering, and multiallelic
+validation. Excel therefore adds an input adapter, not a separate interpretation
+pipeline.
+
 ## 3. Progress schematic
 
 ```mermaid
@@ -68,12 +90,13 @@ flowchart LR
     F --> G["Stages 35-40: two-layer LLM and full UI workflow"]
     G --> H["Stages 41-44: resilience, privacy, testing, acceptance"]
     H --> I["Stage 45: post-review architecture freeze"]
-    I --> J["Stages 46-62: V3 redesign - pending"]
+    I --> J["Stage 46: XLSX and 10-variant input"]
+    J --> K["Stages 47-62: V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I done
-    class J review
+    class A,B,C,D,E,F,G,H,I,J done
+    class K review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -132,13 +155,14 @@ their original order.
 | 43 | Registered the complete offline Testing V2 suite and a cross-stage human-edit-to-Output-B acceptance scenario. | Complete |
 | 44 | Added the deterministic five-variant, multi-HPO end-to-end gate covering both routes, unresolved conflict, failures, provenance, and ordering. | Complete |
 | 45 | Incorporated professor-review decisions, froze the V3 product contract and terminology, deprecated Stage 44 interaction concepts for new analyses, and defined legacy compatibility boundaries. | Complete, documentation/architecture only |
-| 46–62 | Implement and verify the post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 46 | Centralized the 10-variant limit, expanded VCF/manual input, added first-worksheet-only Excel normalization, and preserved the shared normalized variant contract and ordering. | Complete |
+| 47–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture (legacy Stage 44 baseline)
 
 ```mermaid
 flowchart TD
-    U["Filtered VCF/VCF.GZ or manual table"] --> V["Validation and allele standardization"]
+    U["Filtered VCF/VCF.GZ/XLSX worksheet 1 or manual table"] --> V["Validation and allele standardization<br/>1-10 variants"]
     V --> A["Independent annotation providers"]
     A --> P["Local HPO + Phen2Gene + MyDisease context"]
     P --> E["Evidence Object V2 + lineage"]
@@ -200,7 +224,7 @@ reports every individual LLM request.
   these states are converted into negative clinical evidence.
 - Retries are bounded and limited to transient failures. Timeouts and maximum
   result sizes are provider-specific.
-- Conditional enrichment is capped at five variants and ten articles by default.
+- Conditional enrichment is capped at ten variants and ten articles by default.
 - `ENABLE_GNOMAD_DEEP_LOOKUP` and `ENABLE_LITERATURE_ENRICHMENT` can disable
   those optional calls without code changes.
 
@@ -328,7 +352,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **669 passed, 4 skipped**, with **85.76% coverage**. The Stage 44 acceptance
+baseline is **686 passed, 4 skipped**, with **85.84% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -415,6 +439,7 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 |---|---|
 | Application entry and configuration | `app.py`, `config.py`, `.env.example` |
 | VCF/manual input processing | `backend/vcf_processing.py`, `backend/pipeline.py`, `frontend/ui.py` |
+| Excel first-worksheet adapter | `backend/excel_processing.py`, `frontend/execution.py` |
 | Core annotation providers | `backend/annotation.py` |
 | HPO and Phen2Gene | `backend/phenotype.py` |
 | MyDisease context | `backend/mydisease.py` |
@@ -434,9 +459,8 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 
 ## 15. Known limitations and remaining work
 
-1. The Stage 45 post-review architecture contract is accepted, but the running
-   application remains on the Stage 44 workflow until Stages 46–62 are implemented
-   and verified.
+1. Stage 46 input expansion is implemented, but the report/model lifecycle remains
+   on the Stage 44 workflow until Stages 47–62 are implemented and verified.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -457,7 +481,8 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 
 The implemented project has passed its Stage 44 offline acceptance gate and provides
 a coherent evidence-collection, human-review, two-layer interpretation, and reporting
-workflow with explicit safety boundaries. Stage 45 has incorporated the professor
-review into an authoritative V3 architecture contract without misrepresenting planned
-features as implemented. The correct next action is Stage 46: expand the input
-contract to first-sheet-only Excel input and a centralized 10-variant limit.
+workflow with explicit safety boundaries. Stage 45 incorporated the professor review
+into an authoritative V3 contract, and Stage 46 implemented first-sheet-only Excel
+input plus the centralized ten-variant boundary without changing the interpretation
+pipeline. The correct next action is Stage 47: define the isolated, bounded
+phenotype-extraction LLM contract.

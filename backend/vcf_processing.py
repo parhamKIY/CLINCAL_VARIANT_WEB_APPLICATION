@@ -10,11 +10,13 @@ from pathlib import Path
 
 import vcfpy
 
-from config import settings
+from config import MAX_VARIANTS_PER_ANALYSIS, settings
 
 
 SUPPORTED_VCF_SUFFIXES = (".vcf", ".vcf.gz")
-MAX_FILTERED_VCF_ROWS = 5
+# Compatibility alias for callers that used the Stage 44 name. The active
+# contract is allele-based and centralized in config.py.
+MAX_FILTERED_VCF_ROWS = MAX_VARIANTS_PER_ANALYSIS
 STANDARD_PRIMARY_CHROMOSOMES = (
     *(str(chromosome) for chromosome in range(1, 23)),
     "X",
@@ -232,11 +234,12 @@ def _record_to_variants(
 def iter_vcf_variants(
     vcf_path: str | Path,
 ) -> Iterator[VariantData]:
-    """Read every allele from a filtered VCF of at most five rows."""
+    """Read at most the configured number of normalized VCF alleles."""
 
     path = _validate_vcf_path(vcf_path)
     reader = _open_reader(path)
     record_count = 0
+    variant_count = 0
     try:
         _validate_header(reader, path)
         record_iterator = iter(reader)
@@ -251,12 +254,20 @@ def iter_vcf_variants(
             except StopIteration:
                 break
             record_count += 1
-            if record_count > MAX_FILTERED_VCF_ROWS:
+            if record_count > MAX_VARIANTS_PER_ANALYSIS:
                 raise VCFProcessingError(
                     "Filtered VCF input cannot contain more than "
-                    f"{MAX_FILTERED_VCF_ROWS} data rows."
+                    f"{MAX_VARIANTS_PER_ANALYSIS} data rows."
                 )
-            yield from _record_to_variants(record)
+            record_variants = list(_record_to_variants(record))
+            variant_count += len(record_variants)
+            if variant_count > MAX_VARIANTS_PER_ANALYSIS:
+                raise VCFProcessingError(
+                    "Filtered VCF input cannot produce more than "
+                    f"{MAX_VARIANTS_PER_ANALYSIS} variants after "
+                    "multiallelic splitting."
+                )
+            yield from record_variants
     except VCFProcessingError:
         raise
     except (OSError, ValueError, vcfpy.exceptions.VCFPyException) as exc:
@@ -412,7 +423,7 @@ def _parse_manual_row(
 def parse_manual_variants(
     rows: Sequence[Mapping[str, object]],
 ) -> list[VariantData]:
-    """Validate one to five manually entered VCF-style rows."""
+    """Validate up to the configured number of manual VCF-style rows."""
 
     if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
         raise VCFProcessingError(
@@ -422,10 +433,10 @@ def parse_manual_variants(
         raise VCFProcessingError(
             "At least one manual variant row is required."
         )
-    if len(rows) > MAX_FILTERED_VCF_ROWS:
+    if len(rows) > MAX_VARIANTS_PER_ANALYSIS:
         raise VCFProcessingError(
             "Manual input cannot contain more than "
-            f"{MAX_FILTERED_VCF_ROWS} rows."
+            f"{MAX_VARIANTS_PER_ANALYSIS} rows."
         )
     variants: list[VariantData] = []
     for row_index, row in enumerate(rows):
@@ -434,6 +445,12 @@ def parse_manual_variants(
                 f"Manual row {row_index + 1} must be a mapping."
             )
         variants.extend(_parse_manual_row(row, row_index))
+        if len(variants) > MAX_VARIANTS_PER_ANALYSIS:
+            raise VCFProcessingError(
+                "Manual input cannot produce more than "
+                f"{MAX_VARIANTS_PER_ANALYSIS} variants after "
+                "multiallelic splitting."
+            )
     return variants
 
 
@@ -457,6 +474,7 @@ def process_vcf(
 __all__ = [
     "MANUAL_VARIANT_FIELDS",
     "MAX_FILTERED_VCF_ROWS",
+    "MAX_VARIANTS_PER_ANALYSIS",
     "PRIMARY_CHROMOSOME_LENGTHS",
     "STANDARD_PRIMARY_CHROMOSOMES",
     "SUPPORTED_VCF_SUFFIXES",

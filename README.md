@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_45_contract_frozen-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_46_input_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-669_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.76%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-686_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.84%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -21,9 +21,10 @@ redesign contract.
 
 ## Overview
 
-This project accepts one to five already-filtered germline Mendelian variants,
-collects independent clinical and phenotype evidence, and guides each variant
-through a review-and-confirmation workflow before LLM interpretation.
+This project accepts one to ten already-filtered germline Mendelian variants from
+VCF, VCF.GZ, Excel `.xlsx`, or manual-table input, collects independent clinical
+and phenotype evidence, and guides each variant through a review-and-confirmation
+workflow before LLM interpretation.
 
 The application deliberately does not rank or filter a raw VCF. Candidate
 selection is an upstream responsibility. Every valid supplied allele remains in
@@ -34,12 +35,13 @@ its original input order.
 - The implemented roadmap has passed the Stage 44 offline acceptance gate.
 - Stage 45 has frozen the post-professor-review architecture; it is a documentation
   milestone and does not claim the redesign is implemented.
-- Stage 46 input expansion is the next bounded implementation milestone.
+- Stage 46 input expansion is implemented and offline-verified.
+- Stage 47 phenotype-extraction LLM contract is the next bounded milestone.
 - Pipeline schema: `2.3`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **669 passed, 4 skipped; 85.76% coverage**.
+- Current verified suite: **686 passed, 4 skipped; 85.84% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -49,10 +51,10 @@ guide, and limitations are maintained in
 The authoritative redesign contract and implemented-versus-planned boundary are in
 [`docs/STAGE45_ARCHITECTURE_CONTRACT.md`](docs/STAGE45_ARCHITECTURE_CONTRACT.md).
 
-## Accepted target architecture (not yet implemented)
+## Accepted target architecture (partially implemented)
 
-The Stage 45 contract replaces the Stage 44 interaction model for all new work. Its
-target is:
+The Stage 45 contract replaces the Stage 44 interaction model for all new work.
+Stage 46 has implemented the expanded input boundary; later items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -75,7 +77,7 @@ to document the current Stage 44 implementation until Stages 46–62 replace it.
 
 ```mermaid
 flowchart TD
-    I["Filtered VCF/VCF.GZ or manual table (1-5 variants)"] --> V["Validate input and standardize alleles"]
+    I["Filtered VCF/VCF.GZ/XLSX worksheet 1 or manual table (1-10 variants)"] --> V["Validate input and standardize alleles"]
     V --> A["Independent variant annotation"]
     A --> P["HPO, phenotype, gene, and disease context"]
     P --> E["Evidence Object V2 and source lineage"]
@@ -109,13 +111,13 @@ The pipeline has two resumable phases:
 
 ## Inputs
 
-### Filtered VCF upload
+### Filtered VCF/VCF.GZ upload
 
 Supported formats:
 
 - `.vcf`
 - `.vcf.gz`
-- One to five data rows
+- One to ten normalized variants after multiallelic splitting
 - GRCh37 or GRCh38, selected explicitly in `.env`
 - Multiallelic rows are split into independent ALT alleles
 - Sample, genotype, and patient columns are ignored
@@ -125,7 +127,7 @@ assembly-specific coordinate ranges are validated before annotation.
 
 ### Manual table
 
-The Streamlit form provides five VCF-style rows with:
+The Streamlit form provides ten VCF-style rows with:
 
 - `CHROM`
 - `POS`
@@ -136,6 +138,29 @@ The Streamlit form provides five VCF-style rows with:
 
 Only populated, valid rows are submitted. Coordinates are checked against the
 configured assembly.
+
+### Excel upload
+
+Excel `.xlsx` input reads worksheet index 0 only. Later worksheets are never
+iterated or included in normalized input, recovery checkpoints, persistence, logs,
+provider calls, LLM payloads, or exports.
+
+Required columns are `CHROM`, `POS`, `REF`, and `ALT`. Optional columns are `QUAL`
+and `FILTER`. Headers are matched case-insensitively using these deterministic
+aliases:
+
+| Canonical column | Accepted headers |
+|---|---|
+| `CHROM` | `CHROM`, `#CHROM`, `Chromosome` |
+| `POS` | `POS`, `Position` |
+| `REF` | `REF`, `Reference` |
+| `ALT` | `ALT`, `Alternate`, `Alternative` |
+| `QUAL` | `QUAL`, `Quality` |
+| `FILTER` | `FILTER`, `Filter status` |
+
+Unknown columns are ignored. Excel rows pass through the same assembly, coordinate,
+allele, multiallelic-splitting, ordering, and ten-variant validation contract used
+by the existing input paths.
 
 ### Phenotype input
 
@@ -273,7 +298,7 @@ Important optional controls:
 ```dotenv
 ENABLE_GNOMAD_DEEP_LOOKUP=true
 ENABLE_LITERATURE_ENRICHMENT=true
-CONDITIONAL_ENRICHMENT_MAX_VARIANTS=5
+CONDITIONAL_ENRICHMENT_MAX_VARIANTS=10
 CONDITIONAL_ENRICHMENT_MAX_ARTICLES=10
 ANNOTATION_CACHE_TTL_SECONDS=3600
 ```
@@ -306,8 +331,8 @@ and redacted structured logging is initialized.
 
 ## Using the application
 
-1. Choose filtered VCF upload or manual-table input.
-2. Supply one to five valid variants.
+1. Choose filtered VCF/VCF.GZ/XLSX upload or manual-table input.
+2. Supply one to ten valid variants.
 3. Select or search HPO terms.
 4. Choose the low-cost no-conflict model and the stronger conflict model.
 5. Start Phase A and monitor per-provider progress.
@@ -359,7 +384,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-669 passed, 4 skipped
+686 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -377,7 +402,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.76%**.
+Current measured coverage is **85.84%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -504,8 +529,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- The Stage 45 target contract is accepted, but its Stage 46–62 behavior is not yet
-  implemented; the running application remains on the Stage 44 workflow.
+- Stage 46 input expansion is implemented; the report and model lifecycle remains
+  on Stage 44 behavior until Stages 47–62 are implemented.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before Phase B.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -530,4 +555,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 46 handoff.
+- current limitations and the Stage 47 handoff.

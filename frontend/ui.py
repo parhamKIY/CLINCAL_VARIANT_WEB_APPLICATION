@@ -23,13 +23,12 @@ from backend.phenotype import (
     update_hpo_data,
 )
 from backend.vcf_processing import (
-    MAX_FILTERED_VCF_ROWS,
     STANDARD_PRIMARY_CHROMOSOMES,
     VCFProcessingError,
     get_primary_chromosome_length,
     normalize_primary_chromosome,
 )
-from config import settings
+from config import MAX_VARIANTS_PER_ANALYSIS, settings
 from frontend.execution import (
     AnalysisJob,
     FrontendExecutionError,
@@ -61,7 +60,7 @@ DECISION_SUPPORT_NOTICE = (
     "must be reviewed by a qualified healthcare professional."
 )
 STYLES_PATH = Path(__file__).with_name("styles.css")
-VCF_INPUT_MODE = "VCF upload"
+VCF_INPUT_MODE = "File upload"
 MANUAL_INPUT_MODE = "Manual table"
 MANUAL_VARIANT_COLUMNS = (
     "chrom",
@@ -572,42 +571,42 @@ def _render_llm_model_selector() -> tuple[str, str]:
     return selected_light_model, selected_strong_model
 
 
-def _is_supported_vcf_filename(filename: str) -> bool:
-    """Return whether an uploaded filename is VCF-shaped."""
+def _is_supported_upload_filename(filename: str) -> bool:
+    """Return whether an uploaded filename has a supported suffix."""
 
     lowered_name = filename.casefold()
-    return lowered_name.endswith(".vcf") or lowered_name.endswith(
-        ".vcf.gz"
+    return lowered_name.endswith(
+        (".vcf", ".vcf.gz", ".xlsx")
     )
 
 
 def _manual_variant_table() -> pd.DataFrame:
-    """Return five blank rows with stable editor column types."""
+    """Return blank rows up to the centralized analysis limit."""
 
     return pd.DataFrame(
         {
             "chrom": pd.Series(
-                [pd.NA] * MAX_FILTERED_VCF_ROWS,
+                [pd.NA] * MAX_VARIANTS_PER_ANALYSIS,
                 dtype="string",
             ),
             "pos": pd.Series(
-                [pd.NA] * MAX_FILTERED_VCF_ROWS,
+                [pd.NA] * MAX_VARIANTS_PER_ANALYSIS,
                 dtype="Int64",
             ),
             "ref": pd.Series(
-                [""] * MAX_FILTERED_VCF_ROWS,
+                [""] * MAX_VARIANTS_PER_ANALYSIS,
                 dtype="string",
             ),
             "alt": pd.Series(
-                [""] * MAX_FILTERED_VCF_ROWS,
+                [""] * MAX_VARIANTS_PER_ANALYSIS,
                 dtype="string",
             ),
             "qual": pd.Series(
-                [pd.NA] * MAX_FILTERED_VCF_ROWS,
+                [pd.NA] * MAX_VARIANTS_PER_ANALYSIS,
                 dtype="Float64",
             ),
             "filter": pd.Series(
-                [""] * MAX_FILTERED_VCF_ROWS,
+                [""] * MAX_VARIANTS_PER_ANALYSIS,
                 dtype="string",
             ),
         }
@@ -742,11 +741,11 @@ def _manual_position_error(
 
 def _render_manual_variant_table(
 ) -> tuple[pd.DataFrame, tuple[str, ...]]:
-    """Render five row-aware native Streamlit variant-input rows."""
+    """Render row-aware inputs up to the centralized analysis limit."""
 
     table = _manual_variant_table()
     position_errors: list[str] = []
-    for row_index in range(MAX_FILTERED_VCF_ROWS):
+    for row_index in range(MAX_VARIANTS_PER_ANALYSIS):
         first_row = row_index == 0
         visible_label = "visible" if first_row else "collapsed"
         row_label = row_index + 1
@@ -886,12 +885,16 @@ def _prepare_input(
     ]
     if input_mode == VCF_INPUT_MODE:
         if uploaded_vcf is None:
-            st.error("Upload a .vcf or .vcf.gz file before analysis.")
+            st.error(
+                "Upload a .vcf, .vcf.gz, or .xlsx file before analysis."
+            )
             _clear_analysis_result()
             return None
         filename = str(getattr(uploaded_vcf, "name", ""))
-        if not _is_supported_vcf_filename(filename):
-            st.error("The uploaded file must end in .vcf or .vcf.gz.")
+        if not _is_supported_upload_filename(filename):
+            st.error(
+                "The uploaded file must end in .vcf, .vcf.gz, or .xlsx."
+            )
             _clear_analysis_result()
             return None
         _clear_analysis_result()
@@ -944,7 +947,8 @@ def _render_variant_input(
         position_errors: tuple[str, ...] = ()
         if input_mode == MANUAL_INPUT_MODE:
             st.caption(
-                "Enter up to five already-filtered variants. "
+                f"Enter up to {MAX_VARIANTS_PER_ANALYSIS} already-filtered "
+                "variants. "
                 "CHROM, POS, REF, and ALT are required. Every row "
                 "is annotated; the report focuses on the first listed "
                 "variant."
@@ -956,13 +960,16 @@ def _render_variant_input(
         with st.form("analysis_input_form", border=False):
             if input_mode == VCF_INPUT_MODE:
                 uploaded_vcf = st.file_uploader(
-                    "VCF file",
-                    type=("vcf", "gz"),
+                    "Variant file",
+                    type=("vcf", "gz", "xlsx"),
                     key="vcf_upload",
                     help=(
-                        "Accepted formats: .vcf and .vcf.gz. "
-                        f"The filtered file must contain 1 to "
-                        f"{MAX_FILTERED_VCF_ROWS} data rows. Every row is "
+                        "Accepted formats: .vcf, .vcf.gz, and .xlsx. "
+                        "For Excel, only worksheet 1 is read; required "
+                        "columns are CHROM, POS, REF, and ALT, while QUAL "
+                        "and FILTER are optional. "
+                        f"The filtered input must produce 1 to "
+                        f"{MAX_VARIANTS_PER_ANALYSIS} variants. Every row is "
                         "annotated; the report focuses on the first listed "
                         "variant. "
                         f"Maximum size: "

@@ -79,6 +79,7 @@ from backend.vcf_processing import (
     parse_manual_variants,
     process_vcf,
 )
+from config import MAX_VARIANTS_PER_ANALYSIS
 PIPELINE_SCHEMA_VERSION = "2.3"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
@@ -658,10 +659,11 @@ def validate_pipeline_result(value: object) -> PipelineResult:
     if (
         isinstance(variant_count, bool)
         or not isinstance(variant_count, int)
-        or variant_count < 0
+        or not 0 <= variant_count <= MAX_VARIANTS_PER_ANALYSIS
     ):
         raise PipelineResultError(
-            "pipeline.variant_count must be a non-negative integer."
+            "pipeline.variant_count must be an integer from 0 to "
+            f"{MAX_VARIANTS_PER_ANALYSIS}."
         )
     for field in (
         "variants",

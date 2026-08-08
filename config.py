@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+MAX_VARIANTS_PER_ANALYSIS = 10
 
 # Treat the project's .env file as the single source of configuration.
 load_dotenv(BASE_DIR / ".env", override=True)
@@ -381,7 +382,7 @@ class Settings:
 
     CONDITIONAL_ENRICHMENT_MAX_VARIANTS: int = _get_positive_int(
         "CONDITIONAL_ENRICHMENT_MAX_VARIANTS",
-        5,
+        MAX_VARIANTS_PER_ANALYSIS,
     )
 
     CONDITIONAL_ENRICHMENT_MAX_ARTICLES: int = _get_positive_int(

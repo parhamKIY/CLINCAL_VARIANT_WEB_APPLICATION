@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Next implementation stage:** Stage 46 — Input Contract Expansion
+**Implementation progress:** Stage 46 complete; Stage 47 is next
 
 **Contract date:** 2026-08-08
 
@@ -174,4 +174,6 @@ and relevant verification gates pass.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.
 - New model, report, selection, and final-report terminology is fixed.
 - Legacy persisted analyses have an explicit compatibility boundary.
-- Implementation remains unchanged and the next bounded increment is Stage 46.
+- At the Stage 45 checkpoint, implementation remained unchanged and Stage 46 was
+  the next bounded increment. Current progress is maintained in the project
+  declaration.
