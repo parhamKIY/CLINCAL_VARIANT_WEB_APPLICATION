@@ -140,6 +140,7 @@ def _request_json(
     params: dict[str, str | int | float | bool] | None = None,
     ncbi: bool = False,
     litvar: bool = False,
+    timeout: int,
 ) -> tuple[object, int, int]:
     """Return JSON, final HTTP status, and attempt count."""
 
@@ -155,7 +156,7 @@ def _request_json(
                     "Accept": "application/json",
                     "User-Agent": "ClinicalVariantInterpretation/0.1",
                 },
-                timeout=settings.CONDITIONAL_ENRICHMENT_TIMEOUT,
+                timeout=timeout,
                 verify=True,
             )
         except requests.RequestException:
@@ -233,6 +234,7 @@ def _request_graphql(
     *,
     query: str,
     variables: dict[str, str],
+    timeout: int,
 ) -> tuple[object, int, int]:
     """Return one bounded gnomAD GraphQL response with retry metadata."""
 
@@ -248,7 +250,7 @@ def _request_graphql(
                     "Content-Type": "application/json",
                     "User-Agent": "ClinicalVariantInterpretation/0.1",
                 },
-                timeout=settings.CONDITIONAL_ENRICHMENT_TIMEOUT,
+                timeout=timeout,
                 verify=True,
             )
         except requests.RequestException:
@@ -562,6 +564,7 @@ def fetch_ensembl_population_evidence(
                     f"variation/human/{quote(rsid, safe='')}"
                 ),
                 params={"pops": 1},
+                timeout=settings.ENSEMBL_VARIATION_TIMEOUT,
             )
         except requests.HTTPError as exc:
             response = getattr(exc, "response", None)
@@ -759,6 +762,7 @@ def fetch_gnomad_evidence(
                     "variantId": variant_id,
                     "dataset": dataset,
                 },
+                timeout=settings.GNOMAD_TIMEOUT,
             )
         except requests.RequestException as exc:
             response = getattr(exc, "response", None)
@@ -1564,6 +1568,7 @@ def fetch_literature_evidence(
                 params={"query": autocomplete_query, "limit": 10},
                 ncbi=True,
                 litvar=True,
+                timeout=settings.LITVAR_TIMEOUT,
             )
             litvar_http_status = status
             litvar_id = _litvar_variant_id(
@@ -1593,6 +1598,7 @@ def fetch_literature_evidence(
                     publication_url,
                     ncbi=True,
                     litvar=True,
+                    timeout=settings.LITVAR_TIMEOUT,
                 )
                 litvar_http_status = publication_status
                 litvar_articles, invalid_articles = _litvar_articles(
@@ -1686,6 +1692,7 @@ def fetch_literature_evidence(
                         settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES
                     ),
                 },
+                timeout=settings.EUROPE_PMC_TIMEOUT,
             )
             europe_http_status = europe_status
             europe_articles, invalid = _europe_pmc_articles(
@@ -1781,6 +1788,7 @@ def fetch_literature_evidence(
                     "term": query,
                 },
                 ncbi=True,
+                timeout=settings.PUBMED_TIMEOUT,
             )
             pubmed_http_status = search_status
             pubmed_pmids = _pubmed_search_ids(search_payload)
@@ -1850,6 +1858,7 @@ def fetch_literature_evidence(
                         "tool": "clinical_variant_app",
                     },
                     ncbi=True,
+                    timeout=settings.PUBMED_TIMEOUT,
                 )
                 articles.extend(
                     _summary_articles(

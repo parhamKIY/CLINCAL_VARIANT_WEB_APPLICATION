@@ -28,6 +28,7 @@ import app as app_module
 from backend.annotation import (
     AnnotationError,
     annotate_variants,
+    clear_annotation_cache,
 )
 from backend.database import (
     DATABASE_SCHEMA_VERSION,
@@ -148,6 +149,7 @@ from backend.pipeline import (
     create_pipeline_result,
     generate_confirmed_interpretations,
     generate_final_interpretation_report,
+    retry_failed_interpretations,
     resume_confirmed_analysis,
     resume_saved_analysis,
     run_analysis,
@@ -490,6 +492,21 @@ class TestConfiguration:
                 "VEP_BATCH_SIZE",
                 201,
                 "cannot exceed Ensembl's limit",
+            ),
+            (
+                "VEP_TIMEOUT",
+                121,
+                "VEP_TIMEOUT cannot exceed",
+            ),
+            (
+                "LLM_MAX_RETRIES",
+                11,
+                "LLM_MAX_RETRIES cannot exceed",
+            ),
+            (
+                "ANNOTATION_CACHE_SIZE",
+                1001,
+                "ANNOTATION_CACHE_SIZE cannot exceed",
             ),
             (
                 "GENEBE_EMAIL",
@@ -1432,6 +1449,21 @@ class FakeLLMAdapter:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class SequenceLLMAdapter:
+    """Return a deterministic sequence for retry tests."""
+
+    def __init__(self, results: list[object]) -> None:
+        self.results = list(results)
+        self.requests: list[LLMRequest] = []
+
+    def generate(self, request: LLMRequest) -> object:
+        self.requests.append(request)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def _write_vcf(
@@ -3248,6 +3280,7 @@ class TestPhenotype:
             "HPO_list": "HP:0001250;HP:0001263",
             "weight_model": "sk",
         }
+        assert session.calls[0]["timeout"] == settings.PHEN2GENE_TIMEOUT
         assert [
             variant["variant"]["pos"]  # type: ignore[index]
             for variant in result["variants"]
@@ -3899,6 +3932,71 @@ class TestAnnotation:
             ("cspec", "running"),
             ("cspec", "success"),
         ]
+
+    def test_provider_specific_timeouts_are_applied(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        timeout_settings = {
+            "VEP_TIMEOUT": 11,
+            "GENEBE_TIMEOUT": 12,
+            "MYVARIANT_TIMEOUT": 13,
+            "CLINVAR_TIMEOUT": 14,
+            "CLINGEN_TIMEOUT": 15,
+            "CSPEC_TIMEOUT": 16,
+        }
+        for name, value in timeout_settings.items():
+            monkeypatch.setattr(settings, name, value)
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, self._myvariant_response())],
+        )
+
+        annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )
+
+        assert session.post_calls[0]["timeout"] == 11
+        assert session.genebe_post_calls[0]["timeout"] == 12
+        assert session.myvariant_get_calls[0]["timeout"] == 13
+        assert session.clinvar_get_calls[0]["timeout"] == 14
+        assert session.clingen_get_calls[0]["timeout"] == 15
+        assert session.cspec_get_calls[0]["timeout"] == 16
+
+    def test_annotation_cache_is_bounded_to_normalized_provider_context(
+        self,
+    ) -> None:
+        clear_annotation_cache()
+        first_session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, self._myvariant_response())],
+        )
+        second_session = FakeSession([])
+        first_variant = self._variant()
+        second_variant = self._variant()
+        second_variant["genotype"] = "1/1"
+        try:
+            first = annotate_variants(
+                [first_variant],
+                session=first_session,  # type: ignore[arg-type]
+                max_retries=0,
+                use_cache=True,
+            )
+            second = annotate_variants(
+                [second_variant],
+                session=second_session,  # type: ignore[arg-type]
+                max_retries=0,
+                use_cache=True,
+            )
+        finally:
+            clear_annotation_cache()
+
+        assert first_session.calls
+        assert second_session.calls == []
+        assert second[0]["sources"] == first[0]["sources"]
+        assert second[0]["variant"]["genotype"] == "1/1"
 
     def test_failed_clinvar_variant_is_retried_automatically(
         self,
@@ -6770,6 +6868,7 @@ class TestEvidenceObject:
             "human/rs121913529"
         )
         assert call["params"] == {"pops": 1}
+        assert call["timeout"] == settings.ENSEMBL_VARIATION_TIMEOUT
         assert result["source_url"].endswith(
             "/variation/human/rs121913529?pops=1"
         )
@@ -6918,6 +7017,7 @@ class TestEvidenceObject:
             }
         ]
         assert len(session.post_calls) == 1
+        assert session.post_calls[0]["timeout"] == settings.GNOMAD_TIMEOUT
 
     def test_stage_32_gnomad_rejects_a_different_allele(self) -> None:
         session = FakeConditionalSession(
@@ -6985,6 +7085,10 @@ class TestEvidenceObject:
         assert result["articles"][0]["pmcid"] == "PMC123"
         assert result["articles"][0]["source_providers"] == ["LitVar2"]
         assert len(session.get_calls) == 2
+        assert all(
+            call["timeout"] == settings.LITVAR_TIMEOUT
+            for call in session.get_calls
+        )
         publication_call = session.get_calls[1]
         assert publication_call["url"].endswith(
             "/variant/get/"
@@ -7093,6 +7197,7 @@ class TestEvidenceObject:
         assert session.get_calls[1]["url"] == (
             f"{settings.EUROPE_PMC_BASE_URL}/search"
         )
+        assert session.get_calls[1]["timeout"] == settings.EUROPE_PMC_TIMEOUT
         assert "private timeout" not in json.dumps(result)
 
     def test_stage_32_pubmed_is_second_fallback_and_deduplicates(
@@ -7166,6 +7271,8 @@ class TestEvidenceObject:
         shared = result["articles"][0]
         assert shared["source_providers"] == ["Europe PMC", "PubMed"]
         assert len(session.get_calls) == 4
+        assert session.get_calls[2]["timeout"] == settings.PUBMED_TIMEOUT
+        assert session.get_calls[3]["timeout"] == settings.PUBMED_TIMEOUT
 
     @pytest.mark.parametrize(
         ("failure", "status", "reason"),
@@ -8334,6 +8441,46 @@ class TestLLMContract:
         ]
         assert request.temperature == 0.1
         assert request.max_tokens == 400
+
+    def test_transient_failure_retries_with_exponential_backoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        response = LLMResponse(content="Recovered.", model="test-model")
+        adapter = SequenceLLMAdapter(
+            [LLMTimeoutError("timeout"), LLMRateLimitError("limited"), response]
+        )
+        delays: list[float] = []
+        monkeypatch.setattr("backend.llm.sleep", delays.append)
+
+        result = call_llm(
+            "Instructions",
+            "Evidence",
+            client=LLMClient(adapter),
+            max_retries=2,
+        )
+
+        assert result is response
+        assert len(adapter.requests) == 3
+        assert delays == [1.0, 2.0]
+
+    def test_non_transient_llm_failure_is_not_retried(self) -> None:
+        adapter = SequenceLLMAdapter(
+            [
+                LLMAuthenticationError("denied"),
+                LLMResponse(content="must not run", model="test-model"),
+            ]
+        )
+
+        with pytest.raises(LLMAuthenticationError):
+            call_llm(
+                "Instructions",
+                "Evidence",
+                client=LLMClient(adapter),
+                max_retries=2,
+            )
+
+        assert len(adapter.requests) == 1
 
     def test_unsupported_default_provider_is_explicit(
         self,
@@ -10349,6 +10496,83 @@ class TestStage37PipelineV2Integration:
             validate_pipeline_result(paused)
 
 
+class TestStage41FailureResilience:
+    """Verify failed LLM work can be retried without evidence loss."""
+
+    def test_retry_replaces_only_failed_interpretation(self) -> None:
+        paused, reports = TestStage37PipelineV2Integration._paused_result()
+        light_response = TestStage35TwoLayerLLMRouting._response(
+            model="light-response",
+            resolution="not_applicable",
+        )
+        completed = resume_confirmed_analysis(
+            paused,
+            reports,
+            light_client=LLMClient(FakeLLMAdapter(light_response)),
+            strong_client=LLMClient(
+                FakeLLMAdapter(LLMTimeoutError("temporary timeout"))
+            ),
+            timestamp="2026-08-08T09:00:00Z",
+        )
+        packages = deepcopy(completed["reviewed_evidence_packages"])
+        successful = deepcopy(completed["llm_routing_results"][0])
+        light_retry = FakeLLMAdapter(LLMRequestError("must not be called"))
+        strong_retry = FakeLLMAdapter(
+            TestStage35TwoLayerLLMRouting._response(
+                model="strong-response",
+                resolution="resolved",
+            )
+        )
+
+        retried = retry_failed_interpretations(
+            completed,
+            light_client=LLMClient(light_retry),
+            strong_client=LLMClient(strong_retry),
+            timestamp="2026-08-08T10:00:00Z",
+        )
+
+        assert completed["llm_routing_results"][1]["status"] == "failed"
+        assert retried["reviewed_evidence_packages"] == packages
+        assert retried["llm_routing_results"][0] == successful
+        assert [
+            item["status"] for item in retried["llm_routing_results"]
+        ] == ["success", "success"]
+        assert [
+            entry["status"]
+            for entry in retried["final_interpretation_report"]["entries"]
+        ] == ["success", "success"]
+        assert light_retry.requests == []
+        assert len(strong_retry.requests) == 1
+
+    def test_failed_retry_keeps_confirmed_packages(self) -> None:
+        confirmed = TestStage35TwoLayerLLMRouting._confirmed_result()
+        completed = generate_final_interpretation_report(
+            generate_confirmed_interpretations(
+                confirmed,
+                light_client=LLMClient(
+                    FakeLLMAdapter(LLMTimeoutError("first timeout"))
+                ),
+                timestamp="2026-08-08T09:00:00Z",
+            )
+        )
+
+        retried = retry_failed_interpretations(
+            completed,
+            light_client=LLMClient(
+                FakeLLMAdapter(LLMTimeoutError("second timeout"))
+            ),
+            timestamp="2026-08-08T10:00:00Z",
+        )
+
+        assert retried["reviewed_evidence_packages"] == completed[
+            "reviewed_evidence_packages"
+        ]
+        assert retried["llm_routing_results"][0]["status"] == "failed"
+        assert retried["final_interpretation_report"]["entries"][0][
+            "status"
+        ] == "failed"
+
+
 class TestStage39ReviewStatePersistence:
     """Verify migration and resumable Draft/Confirmed persistence."""
 
@@ -10641,6 +10865,77 @@ class TestStage40FrontendReviewWorkflow:
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
         )
+
+
+    def test_failed_output_exposes_targeted_retry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        confirmed = TestStage35TwoLayerLLMRouting._confirmed_result()
+        completed = generate_final_interpretation_report(
+            generate_confirmed_interpretations(
+                confirmed,
+                light_client=LLMClient(
+                    FakeLLMAdapter(LLMTimeoutError("temporary timeout"))
+                ),
+            )
+        )
+        completed["analysis_id"] = f"analysis-{'5' * 32}"
+        completed = validate_pipeline_result(completed)
+        observed: dict[str, str | None] = {}
+        saved: list[PipelineResult] = []
+
+        def fake_retry(
+            result: PipelineResult,
+            *,
+            light_model: str | None,
+            strong_model: str | None,
+        ) -> PipelineResult:
+            observed.update(
+                {
+                    "light_model": light_model,
+                    "strong_model": strong_model,
+                }
+            )
+            return retry_failed_interpretations(
+                result,
+                light_client=LLMClient(
+                    FakeLLMAdapter(
+                        TestStage35TwoLayerLLMRouting._response(
+                            model="light-response",
+                            resolution="not_applicable",
+                        )
+                    )
+                ),
+            )
+
+        monkeypatch.setattr(
+            "frontend.evidence_review.retry_failed_interpretations",
+            fake_retry,
+        )
+        monkeypatch.setattr(
+            "frontend.evidence_review.save_pipeline_state",
+            lambda result: saved.append(deepcopy(result)) or result,
+        )
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = completed
+        app.run(timeout=10)
+
+        retry_button = next(
+            button
+            for button in app.button
+            if button.label == "Retry failed interpretations"
+        )
+        retry_button.click().run(timeout=10)
+
+        assert observed == {
+            "light_model": settings.LLM_MODEL_LIGHT,
+            "strong_model": settings.LLM_MODEL_STRONG,
+        }
+        assert saved[-1]["reviewed_evidence_packages"] == completed[
+            "reviewed_evidence_packages"
+        ]
+        assert saved[-1]["llm_routing_results"][0]["status"] == "success"
 
 
 class TestClinicalInterpretationValidation:

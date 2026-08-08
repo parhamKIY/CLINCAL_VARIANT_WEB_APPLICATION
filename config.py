@@ -186,6 +186,12 @@ class Settings:
         30,
     )
 
+    # Default for provider-specific HTTP deadlines below.
+    REQUEST_TIMEOUT: int = _get_positive_int(
+        "REQUEST_TIMEOUT",
+        30,
+    )
+
     # ------------------------------------------------------------------
     # External bioinformatics services
     # ------------------------------------------------------------------
@@ -233,6 +239,41 @@ class Settings:
         "https://phen2gene.wglab.org/api",
     ).strip().rstrip("/")
 
+    VEP_TIMEOUT: int = _get_positive_int(
+        "VEP_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    GENEBE_TIMEOUT: int = _get_positive_int(
+        "GENEBE_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    MYVARIANT_TIMEOUT: int = _get_positive_int(
+        "MYVARIANT_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    CLINVAR_TIMEOUT: int = _get_positive_int(
+        "CLINVAR_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    CLINGEN_TIMEOUT: int = _get_positive_int(
+        "CLINGEN_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    CSPEC_TIMEOUT: int = _get_positive_int(
+        "CSPEC_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    PHEN2GENE_TIMEOUT: int = _get_positive_int(
+        "PHEN2GENE_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
     MONARCH_BASE_URL: str = os.getenv(
         "MONARCH_BASE_URL",
         "https://api-v3.monarchinitiative.org/v3/api",
@@ -245,7 +286,7 @@ class Settings:
 
     MYDISEASE_TIMEOUT: int = _get_positive_int(
         "MYDISEASE_TIMEOUT",
-        30,
+        REQUEST_TIMEOUT,
     )
 
     MYDISEASE_MAX_RETRIES: int = _get_non_negative_int(
@@ -306,6 +347,31 @@ class Settings:
     CONDITIONAL_ENRICHMENT_TIMEOUT: int = _get_positive_int(
         "CONDITIONAL_ENRICHMENT_TIMEOUT",
         20,
+    )
+
+    GNOMAD_TIMEOUT: int = _get_positive_int(
+        "GNOMAD_TIMEOUT",
+        CONDITIONAL_ENRICHMENT_TIMEOUT,
+    )
+
+    ENSEMBL_VARIATION_TIMEOUT: int = _get_positive_int(
+        "ENSEMBL_VARIATION_TIMEOUT",
+        CONDITIONAL_ENRICHMENT_TIMEOUT,
+    )
+
+    LITVAR_TIMEOUT: int = _get_positive_int(
+        "LITVAR_TIMEOUT",
+        CONDITIONAL_ENRICHMENT_TIMEOUT,
+    )
+
+    EUROPE_PMC_TIMEOUT: int = _get_positive_int(
+        "EUROPE_PMC_TIMEOUT",
+        CONDITIONAL_ENRICHMENT_TIMEOUT,
+    )
+
+    PUBMED_TIMEOUT: int = _get_positive_int(
+        "PUBMED_TIMEOUT",
+        CONDITIONAL_ENRICHMENT_TIMEOUT,
     )
 
     CONDITIONAL_ENRICHMENT_MAX_RETRIES: int = _get_non_negative_int(
@@ -378,13 +444,14 @@ class Settings:
         2,
     )
 
-    # ------------------------------------------------------------------
-    # Request settings
-    # ------------------------------------------------------------------
+    ANNOTATION_CACHE_SIZE: int = _get_positive_int(
+        "ANNOTATION_CACHE_SIZE",
+        128,
+    )
 
-    REQUEST_TIMEOUT: int = _get_positive_int(
-        "REQUEST_TIMEOUT",
-        30,
+    ANNOTATION_CACHE_TTL_SECONDS: int = _get_positive_int(
+        "ANNOTATION_CACHE_TTL_SECONDS",
+        3600,
     )
 
     # ------------------------------------------------------------------
@@ -568,6 +635,41 @@ class Settings:
         if cls.VEP_BATCH_SIZE > 200:
             raise RuntimeError(
                 "VEP_BATCH_SIZE cannot exceed Ensembl's limit of 200."
+            )
+
+        provider_timeouts = {
+            "VEP_TIMEOUT": cls.VEP_TIMEOUT,
+            "GENEBE_TIMEOUT": cls.GENEBE_TIMEOUT,
+            "MYVARIANT_TIMEOUT": cls.MYVARIANT_TIMEOUT,
+            "CLINVAR_TIMEOUT": cls.CLINVAR_TIMEOUT,
+            "CLINGEN_TIMEOUT": cls.CLINGEN_TIMEOUT,
+            "CSPEC_TIMEOUT": cls.CSPEC_TIMEOUT,
+            "PHEN2GENE_TIMEOUT": cls.PHEN2GENE_TIMEOUT,
+            "GNOMAD_TIMEOUT": cls.GNOMAD_TIMEOUT,
+            "ENSEMBL_VARIATION_TIMEOUT": cls.ENSEMBL_VARIATION_TIMEOUT,
+            "LITVAR_TIMEOUT": cls.LITVAR_TIMEOUT,
+            "EUROPE_PMC_TIMEOUT": cls.EUROPE_PMC_TIMEOUT,
+            "PUBMED_TIMEOUT": cls.PUBMED_TIMEOUT,
+            "CONDITIONAL_ENRICHMENT_TIMEOUT": (
+                cls.CONDITIONAL_ENRICHMENT_TIMEOUT
+            ),
+            "LLM_TIMEOUT": cls.LLM_TIMEOUT,
+        }
+        for name, value in provider_timeouts.items():
+            if value > 120:
+                raise RuntimeError(f"{name} cannot exceed 120.")
+
+        if cls.ANNOTATION_MAX_RETRIES > 10 or cls.LLM_MAX_RETRIES > 10:
+            raise RuntimeError(
+                "ANNOTATION_MAX_RETRIES and LLM_MAX_RETRIES cannot exceed 10."
+            )
+
+        if cls.ANNOTATION_CACHE_SIZE > 1000:
+            raise RuntimeError("ANNOTATION_CACHE_SIZE cannot exceed 1000.")
+
+        if cls.ANNOTATION_CACHE_TTL_SECONDS > 86_400:
+            raise RuntimeError(
+                "ANNOTATION_CACHE_TTL_SECONDS cannot exceed 86400."
             )
 
         if cls.MYDISEASE_TIMEOUT > 120:

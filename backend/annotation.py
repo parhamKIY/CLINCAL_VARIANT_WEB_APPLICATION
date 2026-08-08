@@ -3,6 +3,7 @@
 import math
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -171,6 +172,10 @@ ANNOTATION_SOURCE_LABELS = {
 }
 _CLINVAR_RATE_LOCK = Lock()
 _LAST_CLINVAR_REQUEST_AT = 0.0
+_ANNOTATION_CACHE_LOCK = Lock()
+_ANNOTATION_CACHE: OrderedDict[
+    tuple[object, ...], tuple[float, list[AnnotationData]]
+] = OrderedDict()
 
 
 class AnnotationError(ValueError):
@@ -317,6 +322,24 @@ def _retry_delay(
     return min(float(2**attempt), 5.0)
 
 
+def _annotation_timeout(service: str) -> int:
+    """Return the independently configurable deadline for one provider."""
+
+    setting_name = {
+        "ensembl_vep": "VEP_TIMEOUT",
+        "genebe": "GENEBE_TIMEOUT",
+        "myvariant": "MYVARIANT_TIMEOUT",
+        "ncbi_clinvar": "CLINVAR_TIMEOUT",
+        "ucsc_gencc": "CLINGEN_TIMEOUT",
+        "clingen_cspec": "CSPEC_TIMEOUT",
+    }.get(service)
+    return (
+        getattr(settings, setting_name)
+        if setting_name is not None
+        else settings.REQUEST_TIMEOUT
+    )
+
+
 def _log_api_call(
     *,
     service: str,
@@ -364,7 +387,7 @@ def _log_api_call(
         outcome,
         duration_ms,
         status_code,
-        settings.REQUEST_TIMEOUT,
+        _annotation_timeout(service),
     )
 
 
@@ -421,7 +444,7 @@ def _post_vep_batch(
                 headers=headers,
                 params=params,
                 json={"variants": vep_inputs},
-                timeout=settings.REQUEST_TIMEOUT,
+                timeout=settings.VEP_TIMEOUT,
                 verify=True,
             )
         except requests.RequestException as exc:
@@ -565,7 +588,7 @@ def _post_genebe_batch(
                 params=params,
                 json=variants,
                 auth=auth,
-                timeout=settings.REQUEST_TIMEOUT,
+                timeout=settings.GENEBE_TIMEOUT,
                 verify=True,
             )
         except requests.RequestException as exc:
@@ -780,7 +803,7 @@ def _get_myvariant(
                 endpoint,
                 params=params,
                 headers={"Accept": "application/json"},
-                timeout=settings.REQUEST_TIMEOUT,
+                timeout=settings.MYVARIANT_TIMEOUT,
                 verify=True,
             )
         except requests.RequestException as exc:
@@ -946,7 +969,7 @@ def _get_clinvar_json(
                     "Accept": "application/json",
                     "User-Agent": "ClinicalVariantInterpretation/0.1",
                 },
-                timeout=settings.REQUEST_TIMEOUT,
+                timeout=settings.CLINVAR_TIMEOUT,
                 verify=True,
             )
         except requests.RequestException as exc:
@@ -1319,7 +1342,7 @@ def _get_clingen_gene_validity(
                 endpoint,
                 params=params,
                 headers={"Accept": "application/json"},
-                timeout=settings.REQUEST_TIMEOUT,
+                timeout=settings.CLINGEN_TIMEOUT,
                 verify=True,
             )
         except requests.RequestException as exc:
@@ -1448,7 +1471,7 @@ def _get_cspec_entity(
             response = session.get(
                 endpoint,
                 headers={"Accept": "application/json"},
-                timeout=settings.REQUEST_TIMEOUT,
+                timeout=settings.CSPEC_TIMEOUT,
                 verify=True,
             )
         except requests.RequestException as exc:
@@ -3516,6 +3539,81 @@ def _retry_annotation_copy(
     return candidate
 
 
+def _annotation_cache_key(
+    variants: list[VariantData],
+) -> tuple[object, ...]:
+    """Key normalized alleles with assembly and provider API context."""
+
+    provider_context = (
+        settings.VEP_BASE_URL,
+        settings.GENEBE_BASE_URL,
+        settings.MYVARIANT_BASE_URL,
+        MYVARIANT_API_VERSION,
+        settings.CLINVAR_BASE_URL,
+        settings.CLINGEN_BASE_URL,
+        settings.CSPEC_BASE_URL,
+    )
+    normalized = tuple(
+        (
+            str(variant["chrom"]).removeprefix("chr").upper(),
+            variant["pos"],
+            variant["ref"].strip().upper(),
+            variant["alt"].strip().upper(),
+        )
+        for variant in variants
+    )
+    return (settings.GENOME_ASSEMBLY, provider_context, normalized)
+
+
+def _annotation_cache_get(
+    key: tuple[object, ...],
+    variants: list[VariantData],
+) -> list[AnnotationData] | None:
+    """Return an isolated unexpired entry without retaining caller fields."""
+
+    now = time.monotonic()
+    with _ANNOTATION_CACHE_LOCK:
+        entry = _ANNOTATION_CACHE.get(key)
+        if entry is None:
+            return None
+        cached_at, cached_annotations = entry
+        if now - cached_at > settings.ANNOTATION_CACHE_TTL_SECONDS:
+            _ANNOTATION_CACHE.pop(key, None)
+            return None
+        _ANNOTATION_CACHE.move_to_end(key)
+        result = deepcopy(cached_annotations)
+    for annotation, variant in zip(result, variants, strict=True):
+        annotation["variant"] = dict(variant)
+    return result
+
+
+def _annotation_cache_put(
+    key: tuple[object, ...],
+    annotations: list[AnnotationData],
+) -> None:
+    """Cache only complete non-failure provider results in bounded memory."""
+
+    if any(
+        source.get("status") not in {"success", "not_found"}
+        for annotation in annotations
+        for source in annotation.get("sources", {}).values()
+        if isinstance(source, dict)
+    ):
+        return
+    with _ANNOTATION_CACHE_LOCK:
+        _ANNOTATION_CACHE[key] = (time.monotonic(), deepcopy(annotations))
+        _ANNOTATION_CACHE.move_to_end(key)
+        while len(_ANNOTATION_CACHE) > settings.ANNOTATION_CACHE_SIZE:
+            _ANNOTATION_CACHE.popitem(last=False)
+
+
+def clear_annotation_cache() -> None:
+    """Clear the bounded process-local annotation cache."""
+
+    with _ANNOTATION_CACHE_LOCK:
+        _ANNOTATION_CACHE.clear()
+
+
 def annotate_variants(
     variants: Iterable[VariantData],
     *,
@@ -3523,14 +3621,36 @@ def annotate_variants(
     max_retries: int | None = None,
     session: requests.Session | None = None,
     progress_callback: AnnotationProgressCallback | None = None,
+    use_cache: bool | None = None,
 ) -> list[AnnotationData]:
     """Annotate with VEP, GeneBe, MyVariant, ClinVar, ClinGen, and CSpec evidence.
 
     Each external source fails independently and raw source payloads are not
     retained in the returned standardized evidence.
     """
+    if isinstance(variants, (str, bytes, dict)):
+        raise AnnotationError("variants must be an iterable of dictionaries.")
+    variant_items = list(variants)
+    for index, variant in enumerate(variant_items):
+        _validate_variant(variant, index)
+    resolved_use_cache = session is None if use_cache is None else use_cache
+    if not isinstance(resolved_use_cache, bool):
+        raise AnnotationError("use_cache must be a boolean.")
+
     resolved_batch_size = _resolve_batch_size(batch_size)
     resolved_retries = _resolve_retries(max_retries)
+    cache_key = _annotation_cache_key(variant_items)
+    if resolved_use_cache:
+        cached = _annotation_cache_get(cache_key, variant_items)
+        if cached is not None:
+            for source in ANNOTATION_SOURCE_LABELS:
+                _notify_annotation_progress(
+                    progress_callback,
+                    source,
+                    "success",
+                    f"{ANNOTATION_SOURCE_LABELS[source]} loaded from cache.",
+                )
+            return cached
     active_session = session or requests.Session()
     owns_session = session is None
     annotations: list[AnnotationData] = []
@@ -3542,7 +3662,7 @@ def annotate_variants(
             "running",
             "Sending variants to Ensembl VEP.",
         )
-        for batch in _iter_batches(variants, resolved_batch_size):
+        for batch in _iter_batches(variant_items, resolved_batch_size):
             vep_inputs = [
                 _to_vep_input(token, variant)
                 for token, variant in batch
@@ -3817,4 +3937,6 @@ def annotate_variants(
         if owns_session:
             active_session.close()
 
+    if resolved_use_cache:
+        _annotation_cache_put(cache_key, annotations)
     return annotations

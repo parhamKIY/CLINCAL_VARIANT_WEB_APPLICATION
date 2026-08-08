@@ -1401,7 +1401,7 @@ def enrich_with_phen2gene(
     )
     canonical_hpo_ids = [term["id"] for term in terms]
     resolved_timeout = (
-        settings.REQUEST_TIMEOUT
+        settings.PHEN2GENE_TIMEOUT
         if timeout is None
         else timeout
     )

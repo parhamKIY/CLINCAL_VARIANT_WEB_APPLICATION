@@ -268,8 +268,25 @@ def main() -> int:
     arguments = parse_arguments()
     settings.initialize()
     if arguments.timeout_seconds is not None:
-        settings.REQUEST_TIMEOUT = arguments.timeout_seconds
-        settings.LLM_TIMEOUT = arguments.timeout_seconds
+        for name in (
+            "REQUEST_TIMEOUT",
+            "VEP_TIMEOUT",
+            "GENEBE_TIMEOUT",
+            "MYVARIANT_TIMEOUT",
+            "CLINVAR_TIMEOUT",
+            "CLINGEN_TIMEOUT",
+            "CSPEC_TIMEOUT",
+            "PHEN2GENE_TIMEOUT",
+            "MYDISEASE_TIMEOUT",
+            "CONDITIONAL_ENRICHMENT_TIMEOUT",
+            "GNOMAD_TIMEOUT",
+            "ENSEMBL_VARIATION_TIMEOUT",
+            "LITVAR_TIMEOUT",
+            "EUROPE_PMC_TIMEOUT",
+            "PUBMED_TIMEOUT",
+            "LLM_TIMEOUT",
+        ):
+            setattr(settings, name, arguments.timeout_seconds)
 
     summaries: list[dict[str, object]] = []
     try:

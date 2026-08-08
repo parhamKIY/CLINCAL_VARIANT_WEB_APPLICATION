@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -549,12 +549,26 @@ def call_llm(
     max_tokens: int = 1000,
     client: LLMClient | None = None,
     model: str | None = None,
+    max_retries: int | None = None,
 ) -> LLMResponse:
     """Call an LLM without exposing provider-specific SDK details."""
 
     if client is not None and model is not None:
         raise LLMConfigurationError(
             "Choose either a custom LLM client or a model override."
+        )
+    resolved_retries = (
+        (0 if client is not None else settings.LLM_MAX_RETRIES)
+        if max_retries is None
+        else max_retries
+    )
+    if (
+        isinstance(resolved_retries, bool)
+        or not isinstance(resolved_retries, int)
+        or resolved_retries < 0
+    ):
+        raise LLMValidationError(
+            "max_retries must be a non-negative integer."
         )
 
     request = LLMRequest(
@@ -589,7 +603,30 @@ def call_llm(
             "client must be an LLMClient object."
         )
 
-    return active_client.generate(request)
+    for attempt in range(resolved_retries + 1):
+        try:
+            return active_client.generate(request)
+        except (
+            LLMAuthenticationError,
+            LLMConfigurationError,
+            LLMResponseError,
+            LLMValidationError,
+        ):
+            raise
+        except LLMRequestError as exc:
+            if attempt >= resolved_retries:
+                raise
+            delay_seconds = min(float(2**attempt), 5.0)
+            LOGGER.warning(
+                "event=llm_retry_scheduled next_attempt=%d "
+                "reason=%s delay_ms=%d",
+                attempt + 2,
+                _llm_error_outcome(exc),
+                round(delay_seconds * 1000),
+            )
+            sleep(delay_seconds)
+
+    raise LLMRequestError("The LLM provider request failed.")
 
 
 __all__ = [

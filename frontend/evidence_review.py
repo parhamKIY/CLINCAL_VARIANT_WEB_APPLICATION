@@ -20,6 +20,7 @@ from backend.pipeline import (
     PipelineError,
     PipelineResult,
     confirm_reviewed_evidence,
+    retry_failed_interpretations,
     resume_confirmed_analysis,
 )
 
@@ -403,6 +404,10 @@ def _render_interpretation_action(
         and confirmed_indexes == set(range(variant_count))
     )
     completed = result.get("workflow_state") == "completed"
+    failed_count = sum(
+        item.get("status") == "failed"
+        for item in result.get("llm_routing_results", [])
+    )
 
     with st.container(border=True):
         st.markdown("**Generate final interpretation**")
@@ -446,7 +451,42 @@ def _render_interpretation_action(
                 )
             st.rerun()
         if completed:
-            st.success("Output B has been generated from confirmed evidence.")
+            if failed_count:
+                st.warning(
+                    f"Output B contains {failed_count} failed "
+                    "interpretation(s). Confirmed evidence is preserved."
+                )
+            else:
+                st.success(
+                    "Output B has been generated from confirmed evidence."
+                )
+        if completed and failed_count and st.button(
+            "Retry failed interpretations",
+            icon=":material/refresh:",
+            key=f"{_REVIEW_WIDGET_PREFIX}retry_interpretations",
+        ):
+            try:
+                with st.spinner("Retrying failed interpretations..."):
+                    retried = retry_failed_interpretations(
+                        result,
+                        light_model=light_model,
+                        strong_model=strong_model,
+                    )
+            except PipelineError as exc:
+                st.error(f"Interpretation retry failed: {exc}")
+                return
+            result.clear()
+            result.update(retried)
+            st.session_state["pipeline_result"] = result
+            persisted = _persist_review_state(result)
+            if persisted:
+                _set_notice("success", "Failed interpretations retried.")
+            else:
+                _set_notice(
+                    "warning",
+                    "Interpretations retried, but database persistence failed.",
+                )
+            st.rerun()
 
 
 def render_evidence_review(

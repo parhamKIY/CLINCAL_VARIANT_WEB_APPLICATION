@@ -2256,6 +2256,89 @@ def generate_final_interpretation_report(
     return validate_pipeline_result(working)
 
 
+def retry_failed_interpretations(
+    result: PipelineResult,
+    *,
+    light_client: LLMClient | None = None,
+    strong_client: LLMClient | None = None,
+    light_model: str | None = None,
+    strong_model: str | None = None,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Retry only failed LLM results while preserving confirmed evidence."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if working["workflow_state"] != "completed":
+        raise PipelineError("LLM retry requires a completed Output B.")
+    failed_indexes = {
+        item["variant_index"]
+        for item in working["llm_routing_results"]
+        if item["status"] == "failed"
+    }
+    if not failed_indexes:
+        raise PipelineError("Output B has no failed interpretations to retry.")
+    packages = [
+        package
+        for package in working["reviewed_evidence_packages"]
+        if package["variant_index"] in failed_indexes
+    ]
+    if {package["variant_index"] for package in packages} != failed_indexes:
+        raise PipelineError(
+            "Failed interpretations do not match the confirmed evidence."
+        )
+
+    try:
+        retried = route_reviewed_evidence_packages(
+            packages,
+            light_client=light_client,
+            strong_client=strong_client,
+            light_model=light_model,
+            strong_model=strong_model,
+            timestamp=timestamp,
+        )
+    except (EvidenceConfirmationError, Stage35RoutingError) as exc:
+        raise PipelineError("Failed interpretations could not be retried.") from exc
+
+    merged = {
+        item["variant_index"]: dict(item)
+        for item in working["llm_routing_results"]
+    }
+    for item in retried:
+        merged[item["variant_index"]] = dict(item)
+        _retain_warnings(working, item["warnings"])
+    working["llm_routing_results"] = [
+        merged[index] for index in sorted(merged)
+    ]
+    remaining = sum(
+        item["status"] == "failed"
+        for item in working["llm_routing_results"]
+    )
+    message = (
+        f"LLM retry completed with {remaining} failed interpretation(s); "
+        "confirmed evidence was preserved."
+        if remaining
+        else "LLM retry recovered all failed interpretations."
+    )
+    _set_stage(
+        working,
+        "llm",
+        "warning" if remaining else "success",
+        progress_percent=100,
+        message=message,
+    )
+    _set_api_status(
+        working,
+        "llm",
+        "warning" if remaining else "success",
+        message,
+    )
+    if remaining:
+        _append_warning(working, message)
+    working["final_interpretation_report"] = None
+    working["workflow_state"] = "phase_b_running"
+    return generate_final_interpretation_report(working)
+
+
 def resume_confirmed_analysis(
     result: PipelineResult,
     reports: Sequence[Mapping[str, object]] | None = None,

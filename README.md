@@ -171,6 +171,10 @@ in input order and provides separate evidence and interpretation report views.
   compare immutable originals, confirm each variant, and generate Output B only
   after every variant is confirmed. Separate selectors configure the low-cost
   no-conflict model and the strong conflict model.
+- Stage 41 adds independent provider timeouts, bounded LLM retry/backoff, a
+  normalized annotation cache, explicit missingness safeguards, and targeted
+  retry of failed interpretations without losing confirmed evidence, reviewer
+  edits, or successful model results.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.
