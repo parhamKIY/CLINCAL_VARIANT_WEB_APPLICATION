@@ -8,8 +8,8 @@ two-layer LLM routing.
 [![Status](https://img.shields.io/badge/status-Stage_44_accepted-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-667_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.80%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-669_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.76%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -37,7 +37,7 @@ its original input order.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **667 passed, 4 skipped; 85.80% coverage**.
+- Current verified suite: **669 passed, 4 skipped; 85.76% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -210,8 +210,8 @@ Word export without additional external-provider calls.
 - Python `3.13` is the currently verified runtime.
 - Internet access is required for live annotation and LLM requests.
 - An OpenAI-compatible LLM endpoint and API key are required for Phase B.
-- Direct dependencies are exactly pinned in `requirements.txt` for reproducible
-  installation.
+- Runtime dependencies are exactly pinned in `requirements.txt`; deterministic
+  test tooling is isolated in `requirements-dev.txt`.
 
 ## Installation
 
@@ -298,7 +298,8 @@ and individual Phase B LLM request.
 A browser refresh reconnects through an opaque recovery token. A private,
 one-hour sanitized checkpoint lets a restarted server safely rerun interrupted
 Phase A work from normalized variants and HPO terms; it never stores raw VCF
-content. Persisted Draft or Confirmed results reload from SQLite by random
+content. Expired checkpoints and abandoned atomic temporary files are pruned
+automatically. Persisted Draft or Confirmed results reload from SQLite by random
 analysis ID.
 
 ## HPO data
@@ -316,6 +317,12 @@ phenotype evidence contract.
 
 ## Verification
 
+Install the runtime and test dependencies:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
 Run the complete deterministic offline suite:
 
 ```powershell
@@ -325,7 +332,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-667 passed, 4 skipped
+669 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -343,7 +350,10 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.80%**.
+Current measured coverage is **85.76%**.
+
+The same Stage 44 gate runs automatically on every push and pull request through
+the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
 
 Automated tests mock or block external HTTP traffic. Run the bounded live
 contract gate separately; it checks every active annotation, phenotype,
@@ -460,6 +470,7 @@ clinical_variant_app/
 │   ├── run_stage44_acceptance.py
 │   └── manual_*.py
 ├── .env.example
+├── requirements-dev.txt
 ├── requirements.txt
 └── run_app.bat
 ```

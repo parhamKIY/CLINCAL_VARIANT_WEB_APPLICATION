@@ -374,14 +374,18 @@ def _load_recovery_request(
     except (FrontendExecutionError, OSError):
         return None
     if not payload or len(payload) > MAX_RECOVERY_REQUEST_BYTES:
+        _delete_recovery_request(token)
         return None
     try:
         value = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
+        _delete_recovery_request(token)
         return None
     if not isinstance(value, dict):
+        _delete_recovery_request(token)
         return None
     if value.get("schema_version") != RECOVERY_REQUEST_SCHEMA_VERSION:
+        _delete_recovery_request(token)
         return None
     created_at = value.get("created_at")
     variants = value.get("manual_variants")
@@ -398,6 +402,7 @@ def _load_recovery_request(
         or any(not isinstance(item, str) for item in phenotypes)
         or (llm_model is not None and not isinstance(llm_model, str))
     ):
+        _delete_recovery_request(token)
         return None
     return AnalysisRecoveryRequest(
         schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
@@ -413,6 +418,43 @@ def _delete_recovery_request(token: str) -> None:
         _recovery_request_path(token).unlink(missing_ok=True)
     except (FrontendExecutionError, OSError):
         pass
+
+
+def _prune_stale_recovery_requests() -> None:
+    """Remove expired checkpoint and abandoned atomic-temporary files."""
+
+    sentinel = f"job-{'0' * 32}"
+    try:
+        root = _recovery_request_path(sentinel).parent
+        cutoff = time() - RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS
+        inspected = 0
+        for candidate in root.iterdir():
+            if inspected >= 1024:
+                break
+            inspected += 1
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            name = candidate.name
+            is_checkpoint = (
+                name.endswith(".json")
+                and ANALYSIS_JOB_TOKEN_PATTERN.fullmatch(
+                    name.removesuffix(".json")
+                )
+                is not None
+            )
+            is_temporary = bool(
+                re.fullmatch(
+                    r"job-[0-9a-f]{32}\.[0-9a-f]{32}\.tmp",
+                    name,
+                )
+            )
+            if (
+                (is_checkpoint or is_temporary)
+                and candidate.stat().st_mtime <= cutoff
+            ):
+                candidate.unlink(missing_ok=True)
+    except (FrontendExecutionError, OSError):
+        return
 
 
 def _prune_analysis_job_registry(now: float) -> None:
@@ -441,6 +483,7 @@ def register_analysis_job(
 
     if not isinstance(job, AnalysisJob):
         raise FrontendExecutionError("Analysis job registration is invalid.")
+    _prune_stale_recovery_requests()
     now = monotonic()
     with _ANALYSIS_JOB_REGISTRY_LOCK:
         _prune_analysis_job_registry(now)

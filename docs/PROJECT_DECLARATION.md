@@ -274,6 +274,8 @@ recoverable without rerunning.
 - LLM and GeneBe credentials are never written into result objects or normal logs.
 - Upload type, size, row count, and content are validated before processing.
 - Temporary uploads and generated artifacts use bounded application-controlled paths.
+- Generated reports, validation output, coverage files, and effective Streamlit
+  configuration dumps are excluded from version control.
 - Sample columns, patient identifiers, genotypes, and raw VCF rows are stripped at the
   input boundary and excluded from public pipeline and LLM payloads.
 - Logs use safe correlation IDs, provider names, timing, retry/outcome metadata, and
@@ -302,20 +304,22 @@ and formal privacy/regulatory review.
 - Provider calls use independent timeouts, bounded retry/backoff, and safe status
   normalization.
 - Normalized annotation caching reduces repeated external calls and has a bounded TTL.
+- Expired restart checkpoints and abandoned atomic temporary files are pruned without
+  touching unrelated files in the recovery directory.
 - Failures are shown as explicit source/model states rather than fabricated evidence.
 - Successful variant/model results remain available when another variant fails.
 - Failed LLM interpretations can be retried without discarding confirmed evidence,
   reviewer edits, or successful interpretations.
 - User cancellation removes partial session output, temporary uploads, and newly
   generated drafts owned by the cancelled job.
-- Progress updates occur for each normal annotation API start/completion event and for
-  Phen2Gene, MyDisease, and LLM transitions.
+- Progress updates occur for each normal annotation API, conditional population and
+  literature provider, Phen2Gene/MyDisease request, and individual LLM request.
 
 ## 11. Verification status
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **667 passed, 4 skipped**, with **85.80% coverage**. The Stage 44 acceptance
+baseline is **669 passed, 4 skipped**, with **85.76% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -324,6 +328,10 @@ ordered Output A/Output B generation.
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe tests\run_stage44_acceptance.py
 ```
+
+`requirements.txt` contains runtime dependencies only. `requirements-dev.txt` adds
+the pinned test toolchain, and `.github/workflows/verify.yml` executes the Stage 44
+gate for every push and pull request without live-provider traffic.
 
 Live-provider connectivity is intentionally a separate manual activity. A passing
 offline suite proves application contracts and failure handling; it does not prove

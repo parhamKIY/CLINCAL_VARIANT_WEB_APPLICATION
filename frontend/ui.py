@@ -81,6 +81,7 @@ ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
 LLM_MODEL_KEY = "selected_llm_model"
 LLM_LIGHT_MODEL_KEY = "selected_llm_light_model"
 LLM_PROVIDER_MODELS_KEY = "llm_provider_models"
+LLM_PROVIDER_MODELS_ERROR_KEY = "llm_provider_models_error"
 ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
 ANALYSIS_RESULT_QUERY_PARAM = "analysis"
 PIPELINE_STAGE_LABELS = {
@@ -133,13 +134,13 @@ class AnalysisSubmission(TypedDict):
 
 
 @st.cache_data(ttl=300, max_entries=1, show_spinner=False)
-def _provider_llm_models() -> tuple[str, ...]:
+def _provider_llm_models() -> tuple[tuple[str, ...], bool]:
     """Return a short-lived provider model catalog when supported."""
 
     try:
-        return get_available_llm_models()
+        return get_available_llm_models(), False
     except LLMError:
-        return ()
+        return (), True
 
 
 def _llm_model_options(
@@ -256,6 +257,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_NOTICE_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     st.session_state.setdefault(LLM_PROVIDER_MODELS_KEY, ())
+    st.session_state.setdefault(LLM_PROVIDER_MODELS_ERROR_KEY, False)
     model_options = _llm_model_options()
     if st.session_state.get(LLM_MODEL_KEY) not in model_options:
         st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL_STRONG
@@ -514,9 +516,9 @@ def _render_llm_model_selector() -> tuple[str, str]:
             icon=":material/refresh:",
         ):
             _provider_llm_models.clear()
-            st.session_state[LLM_PROVIDER_MODELS_KEY] = (
-                _provider_llm_models()
-            )
+            provider_models, provider_error = _provider_llm_models()
+            st.session_state[LLM_PROVIDER_MODELS_KEY] = provider_models
+            st.session_state[LLM_PROVIDER_MODELS_ERROR_KEY] = provider_error
         provider_models = tuple(
             st.session_state[LLM_PROVIDER_MODELS_KEY]
         )
@@ -525,6 +527,11 @@ def _render_llm_model_selector() -> tuple[str, str]:
                 f"Loaded {len(provider_models)} current provider models. "
                 "The catalog does not include prices; verify the low-cost "
                 "choice against the provider's current pricing."
+            )
+        elif st.session_state[LLM_PROVIDER_MODELS_ERROR_KEY]:
+            st.warning(
+                "The provider model catalog is unavailable. Configured "
+                "defaults and custom model IDs remain available."
             )
         else:
             st.caption(

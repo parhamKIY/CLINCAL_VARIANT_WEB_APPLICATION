@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 import zipfile
 from copy import deepcopy
@@ -8528,6 +8529,24 @@ class TestLLMContract:
         assert str(session.get_calls[0]["url"]).endswith("/models")
         assert session.get_calls[0]["timeout"] == 5.0
 
+    def test_provider_model_catalog_failure_has_safe_ui_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_catalog() -> tuple[str, ...]:
+            raise LLMRequestError("private provider detail")
+
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "get_available_llm_models",
+            fail_catalog,
+        )
+        frontend_ui_module._provider_llm_models.clear()
+        try:
+            assert frontend_ui_module._provider_llm_models() == ((), True)
+        finally:
+            frontend_ui_module._provider_llm_models.clear()
+
     def test_transient_failure_retries_with_exponential_backoff(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -16603,6 +16622,34 @@ class TestFrontendFoundation:
         assert recovered.view().state == "completed"
         release_registered_analysis_job(token)
         assert not (tmp_path / "recovery_jobs" / f"{token}.json").exists()
+
+    def test_expired_recovery_checkpoints_are_pruned_safely(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(tmp_path / "analysis.sqlite3"),
+        )
+        recovery_dir = tmp_path / "recovery_jobs"
+        recovery_dir.mkdir()
+        stale = recovery_dir / f"job-{'a' * 32}.json"
+        unrelated = recovery_dir / "reviewer-notes.json"
+        stale.write_text("{}", encoding="utf-8")
+        unrelated.write_text("keep", encoding="utf-8")
+        old = time.time() - 7200
+        os.utime(stale, (old, old))
+        os.utime(unrelated, (old, old))
+
+        token = register_analysis_job(
+            AnalysisJob(lambda _: create_pipeline_result())
+        )
+
+        assert not stale.exists()
+        assert unrelated.read_text(encoding="utf-8") == "keep"
+        release_registered_analysis_job(token)
 
     def test_page_refresh_reconnects_active_analysis(self) -> None:
         first_progress = threading.Event()
