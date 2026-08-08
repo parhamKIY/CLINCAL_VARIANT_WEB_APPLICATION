@@ -11,6 +11,10 @@ import streamlit as st
 from backend.database import DatabaseError, load_pipeline_state
 from backend.error_handling import safe_ui_error_message
 from backend.llm import LLMError, get_available_llm_models
+from backend.phenotype_llm import (
+    PhenotypeExtractionError,
+    extract_hpo_candidates,
+)
 from backend.pipeline import (
     PipelineProgressCallback,
     PipelineResult,
@@ -22,6 +26,12 @@ from backend.phenotype import (
     search_hpo_terms,
     update_hpo_data,
 )
+from backend.phenotype_selection import (
+    PhenotypeSelectionError,
+    accept_hpo_candidates,
+    validate_hpo_candidates,
+)
+from backend.privacy import ClinicalDataPrivacyError
 from backend.vcf_processing import (
     STANDARD_PRIMARY_CHROMOSOMES,
     VCFProcessingError,
@@ -72,6 +82,9 @@ MANUAL_VARIANT_COLUMNS = (
 )
 SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
+HPO_MODEL_CANDIDATES_KEY = "hpo_model_candidates"
+HPO_MODEL_REJECTIONS_KEY = "hpo_model_rejections"
+HPO_CANDIDATE_EDITOR_KEY = "hpo_candidate_editor"
 PIPELINE_RESULT_KEY = "pipeline_result"
 ANALYSIS_JOB_KEY = "analysis_job"
 ANALYSIS_JOB_TOKEN_KEY = "analysis_job_token"
@@ -250,6 +263,8 @@ def _initialize_session_state() -> None:
 
     st.session_state.setdefault(SELECTED_HPO_KEY, [])
     st.session_state.setdefault(HPO_RESULTS_KEY, [])
+    st.session_state.setdefault(HPO_MODEL_CANDIDATES_KEY, [])
+    st.session_state.setdefault(HPO_MODEL_REJECTIONS_KEY, [])
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
@@ -403,6 +418,173 @@ def _render_hpo_update_control() -> None:
     )
 
 
+def _clear_hpo_candidate_draft() -> None:
+    """Discard unaccepted model suggestions when their source text changes."""
+
+    st.session_state[HPO_MODEL_CANDIDATES_KEY] = []
+    st.session_state[HPO_MODEL_REJECTIONS_KEY] = []
+    st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
+
+
+def _render_phenotype_extraction() -> None:
+    """Render optional extraction, local validation, editing, and acceptance."""
+
+    st.markdown("**Optional Persian phenotype extraction**")
+    st.caption(
+        "Enter only a short de-identified clinical description. Suggestions "
+        "are checked against the installed HPO ontology and are not used "
+        "until you explicitly accept them."
+    )
+    clinical_text = st.text_area(
+        "Persian clinical description",
+        key="phenotype_clinical_text_fa",
+        max_chars=4_000,
+        height=120,
+        placeholder="شرح کوتاه و بدون نام یا شناسه بیمار",
+        on_change=_clear_hpo_candidate_draft,
+    )
+    if st.button(
+        "Extract HPO candidates",
+        key="extract_hpo_candidates",
+        icon=":material/auto_awesome:",
+        disabled=not clinical_text.strip(),
+    ):
+        try:
+            with st.spinner("Extracting and validating HPO candidates..."):
+                extraction = extract_hpo_candidates(clinical_text)
+                validation = validate_hpo_candidates(
+                    extraction["candidates"]
+                )
+        except (
+            ClinicalDataPrivacyError,
+            HPODataError,
+            LLMError,
+            PhenotypeError,
+            PhenotypeExtractionError,
+            PhenotypeSelectionError,
+        ) as exc:
+            _clear_hpo_candidate_draft()
+            st.error(
+                safe_ui_error_message(
+                    exc,
+                    context="phenotype_extraction",
+                )
+            )
+        else:
+            st.session_state[HPO_MODEL_CANDIDATES_KEY] = [
+                {"include": True, **candidate}
+                for candidate in validation["validated_candidates"]
+            ]
+            st.session_state[HPO_MODEL_REJECTIONS_KEY] = list(
+                validation["rejected_candidates"]
+            )
+            st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
+            if (
+                not validation["validated_candidates"]
+                and not validation["rejected_candidates"]
+            ):
+                st.info(
+                    "No supported HPO candidates were returned. Manual HPO "
+                    "selection remains available."
+                )
+
+    rejected_candidates = st.session_state[HPO_MODEL_REJECTIONS_KEY]
+    if rejected_candidates:
+        rejected_ids = ", ".join(
+            candidate["hpo_id"] or "invalid ID"
+            for candidate in rejected_candidates
+        )
+        st.warning(
+            "Excluded model suggestions that did not pass local ontology "
+            f"validation: {rejected_ids}."
+        )
+
+    candidates = st.session_state[HPO_MODEL_CANDIDATES_KEY]
+    if not candidates:
+        return
+    st.caption(
+        "Edit identifiers or source phrases, remove rows, and choose which "
+        "terms to include. The complete edited selection is revalidated "
+        "locally when accepted."
+    )
+    edited = st.data_editor(
+        pd.DataFrame(candidates),
+        key=HPO_CANDIDATE_EDITOR_KEY,
+        hide_index=True,
+        num_rows="dynamic",
+        disabled=["label"],
+        column_order=(
+            "include",
+            "hpo_id",
+            "label",
+            "source_phrase_fa",
+        ),
+        column_config={
+            "include": st.column_config.CheckboxColumn(
+                "Include",
+                default=True,
+            ),
+            "hpo_id": st.column_config.TextColumn(
+                "HPO ID",
+                required=True,
+                max_chars=10,
+            ),
+            "label": st.column_config.TextColumn(
+                "Local ontology label"
+            ),
+            "source_phrase_fa": st.column_config.TextColumn(
+                "Persian source phrase",
+                required=True,
+                max_chars=500,
+            ),
+        },
+    )
+    if not st.button(
+        "Accept HPO candidates",
+        key="accept_hpo_candidates",
+        type="primary",
+        icon=":material/check:",
+    ):
+        return
+
+    selected_rows = [
+        row
+        for row in edited.to_dict(orient="records")
+        if row.get("include") is True
+    ]
+    candidate_rows = [
+        {
+            "hpo_id": row.get("hpo_id"),
+            "label": row.get("label"),
+            "source_phrase_fa": row.get("source_phrase_fa"),
+        }
+        for row in selected_rows
+    ]
+    existing_ids = [
+        term["id"] for term in st.session_state[SELECTED_HPO_KEY]
+    ]
+    try:
+        accepted = accept_hpo_candidates(
+            candidate_rows,
+            existing_hpo_ids=existing_ids,
+        )
+    except (HPODataError, PhenotypeSelectionError) as exc:
+        st.error(
+            safe_ui_error_message(
+                exc,
+                context="phenotype_acceptance",
+            )
+        )
+        return
+
+    st.session_state[SELECTED_HPO_KEY] = accepted
+    st.session_state[HPO_MODEL_CANDIDATES_KEY] = []
+    st.session_state[HPO_MODEL_REJECTIONS_KEY] = []
+    _clear_analysis_result()
+    st.success("Accepted the locally validated HPO candidate set.")
+    st.rerun()
+
+
 def _render_hpo_picker() -> None:
     """Render local HPO search and selected-phenotype controls."""
 
@@ -412,6 +594,8 @@ def _render_hpo_picker() -> None:
             "Search the locally installed Human Phenotype Ontology "
             "by term, synonym, or HPO ID."
         )
+        _render_phenotype_extraction()
+        st.divider()
 
         with st.form("hpo_search_form", border=False):
             query = st.text_input(

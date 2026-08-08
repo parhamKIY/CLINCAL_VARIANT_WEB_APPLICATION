@@ -25,7 +25,12 @@ from backend.vcf_processing import VCFProcessingError
 
 
 LOGGER = get_logger("error_handling")
-UIErrorContext = Literal["hpo_update", "phenotype_search"]
+UIErrorContext = Literal[
+    "hpo_update",
+    "phenotype_search",
+    "phenotype_extraction",
+    "phenotype_acceptance",
+]
 
 
 class PipelineError(RuntimeError):
@@ -199,6 +204,14 @@ def safe_ui_error_message(
         "phenotype_search": (
             "Phenotype search could not be completed. Verify the local "
             "HPO data and try again."
+        ),
+        "phenotype_extraction": (
+            "Phenotype candidates could not be extracted safely. Manual "
+            "HPO selection remains available."
+        ),
+        "phenotype_acceptance": (
+            "The edited candidates could not be accepted. Correct or "
+            "remove invalid HPO identifiers and try again."
         ),
     }
     LOGGER.warning(

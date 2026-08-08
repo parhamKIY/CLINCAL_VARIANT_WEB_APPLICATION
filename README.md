@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_47_contract_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_48_acceptance_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-711_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.93%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-725_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-86.01%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -37,12 +37,14 @@ its original input order.
   milestone and does not claim the redesign is implemented.
 - Stage 46 input expansion is implemented and offline-verified.
 - Stage 47 phenotype-extraction LLM contract is implemented and offline-verified.
-- Stage 48 local HPO validation and human editing is the next bounded milestone.
+- Stage 48 local HPO validation, editing, and explicit acceptance is implemented
+  and offline-verified.
+- Stage 49 UI layout and task-specific model controls is the next bounded milestone.
 - Pipeline schema: `2.3`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **711 passed, 4 skipped; 85.93% coverage**.
+- Current verified suite: **725 passed, 4 skipped; 86.01% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -55,8 +57,8 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46 and 47 have implemented the expanded input boundary and the isolated
-phenotype-extraction backend contract; later items remain planned:
+Stages 46-48 have implemented the expanded input boundary and the isolated,
+human-reviewed phenotype-extraction flow; later items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -86,9 +88,19 @@ treatment advice; an empty candidate list represents insufficient evidence.
 
 The Phenotype Extraction Model is configured independently from the Variant
 Interpretation Model. Provider failures and malformed responses remain isolated from
-manual HPO entry. Stage 47 validates the candidate response shape and the exact
-`HP:ddddddd` identifier format only. Local ontology existence checks, candidate
-editing, and explicit user acceptance belong to Stage 48 and are not yet implemented.
+manual HPO entry. Stage 47 validates the candidate response shape and exact
+`HP:ddddddd` format.
+
+### Stage 48 local validation and acceptance
+
+`backend/phenotype_selection.py` resolves every suggested identifier against the
+installed ontology, canonicalizes alternate IDs, replaces model labels with local
+ontology labels, and excludes invalid, absent, duplicate, or unsafe suggestions. The
+Streamlit phenotype panel presents only locally validated candidates in an editable
+table. Candidates remain separate from the analysis HPO set until the user explicitly
+accepts them; acceptance revalidates all edited rows and merges them with manually
+selected terms in stable order. Extraction or validation failure leaves manual HPO
+search fully available.
 
 ## Current implemented workflow (legacy Stage 44 baseline)
 
@@ -278,7 +290,8 @@ Word export without additional external-provider calls.
 - Windows is the primary verified development environment.
 - Python `3.13` is the currently verified runtime.
 - Internet access is required for live annotation and LLM requests.
-- An OpenAI-compatible LLM endpoint and API key are required for Phase B.
+- An OpenAI-compatible LLM endpoint and API key are required for Phase B and
+  optional Persian phenotype extraction.
 - Runtime dependencies are exactly pinned in `requirements.txt`; deterministic
   test tooling is isolated in `requirements-dev.txt`.
 
@@ -353,7 +366,8 @@ and redacted structured logging is initialized.
 
 1. Choose filtered VCF/VCF.GZ/XLSX upload or manual-table input.
 2. Supply one to ten valid variants.
-3. Select or search HPO terms.
+3. Select/search HPO terms manually, or extract candidates from a de-identified
+   Persian description, edit them, and explicitly accept the locally validated set.
 4. Choose the low-cost no-conflict model and the stronger conflict model.
 5. Start Phase A and monitor per-provider progress.
 6. Inspect every Output A report and provider status.
@@ -404,7 +418,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-711 passed, 4 skipped
+725 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -422,7 +436,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.93%**.
+Current measured coverage is **86.01%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -549,8 +563,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46 and 47 are implemented; phenotype candidate acceptance and the report
-  lifecycle remain on Stage 44 behavior until Stages 48–62 are implemented.
+- Stages 46-48 are implemented; task-specific model controls and the report lifecycle
+  remain on Stage 44 behavior until Stages 49–62 are implemented.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before Phase B.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -575,4 +589,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 48 handoff.
+- current limitations and the Stage 49 handoff.

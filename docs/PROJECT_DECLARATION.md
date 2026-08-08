@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 47 phenotype-extraction LLM contract implemented on the Stage 44 workflow baseline
+**Implementation status:** Stage 48 local HPO validation and explicit acceptance implemented on the Stage 44 workflow baseline
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 48 local HPO validation and human editing
+**Next implementation milestone:** Stage 49 UI layout and task-specific model controls
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -90,9 +90,8 @@ identifiers are prohibited.
 The model response uses a strict JSON-schema contract containing only a bounded
 `candidates` array. Every candidate must contain exactly `hpo_id`, `label`, and
 `source_phrase_fa`. Stage 47 enforces the exact `HP:ddddddd` format, bounded text,
-unique identifiers, safe completion state, and strict response fields. It does not
-claim that a well-formed identifier exists in the installed ontology; that local
-validation, editing, and explicit user acceptance belongs to Stage 48.
+unique identifiers, safe completion state, and strict response fields. These are
+format-level checks; Stage 48 performs the separate local ontology acceptance gate.
 
 The system prompt restricts this model to phenotype extraction and prohibits
 diagnosis, unsupported disease inference, invented HPO identifiers, variant
@@ -100,6 +99,23 @@ interpretation, and treatment recommendations. Insufficient evidence produces an
 empty candidate list. `PHENOTYPE_EXTRACTION_MODEL` and
 `VARIANT_INTERPRETATION_MODEL` are separate validated settings. Provider failures
 remain explicit and do not disable the existing manual HPO path.
+
+### Stage 48 local validation and explicit acceptance
+
+`backend/phenotype_selection.py` validates every model suggestion against the
+installed `hp.obo` ontology. Alternate identifiers are resolved to their canonical
+active terms, model-provided labels are replaced with local ontology labels, and
+invalid, absent, duplicate, malformed, or unsafe candidates are excluded. A missing
+or unreadable ontology remains an explicit data failure rather than being misreported
+as model invalidity.
+
+The Streamlit phenotype panel accepts an optional de-identified Persian description,
+runs the Stage 47 extraction task, and displays only locally validated suggestions in
+an editable table. Editing or extraction alone does not alter the analysis phenotype
+set. The **Accept HPO candidates** action revalidates the complete edited selection,
+then atomically merges it with manually selected HPO terms while preserving stable
+order and the established 50-term cap. Failed extraction, validation, or acceptance
+does not disable the existing local manual-search path.
 
 ## 3. Progress schematic
 
@@ -115,12 +131,13 @@ flowchart LR
     H --> I["Stage 45: post-review architecture freeze"]
     I --> J["Stage 46: XLSX and 10-variant input"]
     J --> K["Stage 47: phenotype-extraction contract"]
-    K --> L["Stages 48-62: V3 redesign - pending"]
+    K --> L["Stage 48: local HPO acceptance"]
+    L --> M["Stages 49-62: V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K done
-    class L review
+    class A,B,C,D,E,F,G,H,I,J,K,L done
+    class M review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -181,7 +198,8 @@ their original order.
 | 45 | Incorporated professor-review decisions, froze the V3 product contract and terminology, deprecated Stage 44 interaction concepts for new analyses, and defined legacy compatibility boundaries. | Complete, documentation/architecture only |
 | 46 | Centralized the 10-variant limit, expanded VCF/manual input, added first-worksheet-only Excel normalization, and preserved the shared normalized variant contract and ordering. | Complete |
 | 47 | Added a dedicated de-identified Persian text to structured HPO-candidate LLM contract, separate phenotype/interpretation model settings, strict response validation, and isolated failures. | Complete |
-| 48–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 48 | Added local ontology validation for every model suggestion, canonical ID/label resolution, editable candidate review, atomic explicit acceptance, and manual-path failure isolation. | Complete |
+| 49–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture (legacy Stage 44 baseline)
 
@@ -377,7 +395,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **711 passed, 4 skipped**, with **85.93% coverage**. The Stage 44 acceptance
+baseline is **725 passed, 4 skipped**, with **86.01% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -470,7 +488,7 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 | Excel first-worksheet adapter | `backend/excel_processing.py`, `frontend/execution.py` |
 | Core annotation providers | `backend/annotation.py` |
 | HPO and Phen2Gene | `backend/phenotype.py` |
-| Persian phenotype-extraction LLM contract | `backend/phenotype_llm.py`, `backend/llm.py`, `backend/privacy.py` |
+| Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
 | MyDisease context | `backend/mydisease.py` |
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
@@ -488,9 +506,9 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46 and 47 are implemented, but candidate ontology acceptance and the
-   report/model lifecycle remain on the Stage 44 workflow until Stages 48–62 are
-   implemented and verified.
+1. Stages 46-48 are implemented, but task-specific model controls and the report/model
+   lifecycle remain on the Stage 44 workflow until Stages 49–62 are implemented and
+   verified.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -513,7 +531,8 @@ The implemented project has passed its Stage 44 offline acceptance gate and prov
 a coherent evidence-collection, human-review, two-layer interpretation, and reporting
 workflow with explicit safety boundaries. Stage 45 incorporated the professor review
 into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel input
-plus the centralized ten-variant boundary, and Stage 47 implemented the isolated,
-bounded phenotype-extraction LLM contract without changing the active UI/report
-lifecycle. The correct next action is Stage 48: validate candidates against the
-local ontology and add human editing and explicit acceptance.
+plus the centralized ten-variant boundary, Stage 47 implemented the isolated bounded
+phenotype-extraction LLM contract, and Stage 48 added local ontology validation,
+editable review, and explicit acceptance without changing the report lifecycle. The
+correct next action is Stage 49: implement the accepted UI layout and task-specific
+model controls.

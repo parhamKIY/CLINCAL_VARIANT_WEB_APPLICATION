@@ -155,6 +155,11 @@ from backend.phenotype_llm import (
     PhenotypeExtractionError,
     extract_hpo_candidates,
 )
+from backend.phenotype_selection import (
+    PhenotypeSelectionError,
+    accept_hpo_candidates,
+    validate_hpo_candidates,
+)
 from backend.pipeline import (
     PIPELINE_API_ORDER,
     PIPELINE_SCHEMA_VERSION,
@@ -10081,6 +10086,170 @@ class TestStage47PhenotypeExtractionLLM:
         ) == "کودک دچار ضعف عضلانی است."
 
 
+class TestStage48HPOCandidateAcceptance:
+    """Verify local ontology validation and explicit human acceptance."""
+
+    @staticmethod
+    def _candidate(
+        hpo_id: object,
+        *,
+        label: object = "Untrusted model label",
+        source_phrase_fa: object = "تشنج",
+    ) -> dict[str, object]:
+        return {
+            "hpo_id": hpo_id,
+            "label": label,
+            "source_phrase_fa": source_phrase_fa,
+        }
+
+    def test_candidates_are_resolved_against_local_ontology(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+
+        result = validate_hpo_candidates(
+            [
+                self._candidate("HP:0001275"),
+                self._candidate(
+                    "HP:0001263",
+                    source_phrase_fa="تاخیر تکاملی",
+                ),
+            ],
+            ontology_path=ontology_path,
+        )
+
+        assert result == {
+            "validated_candidates": [
+                {
+                    "hpo_id": "HP:0001250",
+                    "label": "Seizure",
+                    "source_phrase_fa": "تشنج",
+                },
+                {
+                    "hpo_id": "HP:0001263",
+                    "label": "Global developmental delay",
+                    "source_phrase_fa": "تاخیر تکاملی",
+                },
+            ],
+            "rejected_candidates": [],
+        }
+
+    def test_invalid_unknown_duplicate_and_unsafe_candidates_are_excluded(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+
+        result = validate_hpo_candidates(
+            [
+                self._candidate("HP:0001250"),
+                self._candidate("HP:0001275"),
+                self._candidate("HP:9999999"),
+                self._candidate("HP:1250"),
+                self._candidate("HP:0001263", source_phrase_fa=""),
+                self._candidate(
+                    "HP:0001263",
+                    source_phrase_fa="patient_name: Jane Doe",
+                ),
+                "not-a-candidate",
+            ],
+            ontology_path=ontology_path,
+        )
+
+        assert result["validated_candidates"] == [
+            {
+                "hpo_id": "HP:0001250",
+                "label": "Seizure",
+                "source_phrase_fa": "تشنج",
+            }
+        ]
+        assert [
+            candidate["reason"]
+            for candidate in result["rejected_candidates"]
+        ] == [
+            "duplicate",
+            "not_found",
+            "invalid_hpo_id",
+            "invalid_source_phrase",
+            "prohibited_content",
+            "invalid_candidate",
+        ]
+
+    def test_missing_local_ontology_is_not_treated_as_invalid_model_data(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(HPODataError, match="Unable to open"):
+            validate_hpo_candidates(
+                [self._candidate("HP:0001250")],
+                ontology_path=tmp_path / "missing.obo",
+            )
+
+    def test_acceptance_merges_manual_terms_and_preserves_order(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+
+        accepted = accept_hpo_candidates(
+            [
+                self._candidate("HP:0001275"),
+                self._candidate(
+                    "HP:0001263",
+                    source_phrase_fa="تاخیر تکاملی",
+                ),
+            ],
+            existing_hpo_ids=["HP:0001263"],
+            ontology_path=ontology_path,
+        )
+
+        assert accepted == [
+            {
+                "id": "HP:0001263",
+                "name": "Global developmental delay",
+            },
+            {"id": "HP:0001250", "name": "Seizure"},
+        ]
+
+    @pytest.mark.parametrize(
+        "candidates",
+        [
+            [],
+            [
+                {
+                    "hpo_id": "HP:9999999",
+                    "label": "Invented",
+                    "source_phrase_fa": "نشانه",
+                }
+            ],
+        ],
+        ids=("empty", "invalid"),
+    )
+    def test_acceptance_is_atomic_for_empty_or_invalid_edits(
+        self,
+        tmp_path: Path,
+        candidates: list[dict[str, object]],
+    ) -> None:
+        with pytest.raises(PhenotypeSelectionError):
+            accept_hpo_candidates(
+                candidates,
+                existing_hpo_ids=["HP:0001250"],
+                ontology_path=TestPhenotype._write_hpo_fixture(tmp_path),
+            )
+
+    @pytest.mark.parametrize(
+        "value",
+        [None, "candidates", {"hpo_id": "HP:0001250"}],
+    )
+    def test_invalid_candidate_collection_is_rejected(
+        self,
+        value: object,
+    ) -> None:
+        with pytest.raises(PhenotypeSelectionError, match="sequence"):
+            validate_hpo_candidates(value)
+
+
 class TestClinicalReportContract:
     """Verify the render-ready Stage 9 report boundary."""
 
@@ -14799,6 +14968,16 @@ class TestSafeErrorHandling:
                 "Phenotype search could not be completed. Verify the "
                 "local HPO data and try again.",
             ),
+            (
+                "phenotype_extraction",
+                "Phenotype candidates could not be extracted safely. "
+                "Manual HPO selection remains available.",
+            ),
+            (
+                "phenotype_acceptance",
+                "The edited candidates could not be accepted. Correct "
+                "or remove invalid HPO identifiers and try again.",
+            ),
         ],
     )
     def test_ui_mapper_discards_exception_text(
@@ -17275,6 +17454,183 @@ class TestFrontendFoundation:
                 "local HPO data and try again."
             )
             for message in app.error
+        )
+        assert "secret" not in str(app).casefold()
+
+    def test_model_candidates_require_explicit_human_acceptance(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_extract(_: object) -> dict[str, object]:
+            return {
+                "candidates": [
+                    {
+                        "hpo_id": "HP:0001250",
+                        "label": "Untrusted label",
+                        "source_phrase_fa": "تشنج",
+                    }
+                ]
+            }
+
+        def fake_validate(_: object) -> dict[str, object]:
+            return {
+                "validated_candidates": [
+                    {
+                        "hpo_id": "HP:0001250",
+                        "label": "Seizure",
+                        "source_phrase_fa": "تشنج",
+                    }
+                ],
+                "rejected_candidates": [],
+            }
+
+        def fake_accept(
+            _: object,
+            *,
+            existing_hpo_ids: object,
+        ) -> list[dict[str, str]]:
+            assert existing_hpo_ids == []
+            return [{"id": "HP:0001250", "name": "Seizure"}]
+
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "extract_hpo_candidates",
+            fake_extract,
+        )
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "validate_hpo_candidates",
+            fake_validate,
+        )
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "accept_hpo_candidates",
+            fake_accept,
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        description = next(
+            area
+            for area in app.text_area
+            if area.label == "Persian clinical description"
+        )
+        description.set_value("کودک دچار تشنج است.").run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "Extract HPO candidates"
+        ).click().run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["selected_hpo_terms"] == []
+        assert any(
+            button.label == "Accept HPO candidates"
+            for button in app.button
+        )
+
+        next(
+            button
+            for button in app.button
+            if button.label == "Accept HPO candidates"
+        ).click().run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["selected_hpo_terms"] == [
+            {"id": "HP:0001250", "name": "Seizure"}
+        ]
+        assert app.session_state["hpo_model_candidates"] == []
+
+    def test_failed_local_validation_excludes_model_candidates(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "extract_hpo_candidates",
+            lambda _: {
+                "candidates": [
+                    {
+                        "hpo_id": "HP:9999999",
+                        "label": "Invented",
+                        "source_phrase_fa": "نشانه",
+                    }
+                ]
+            },
+        )
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "validate_hpo_candidates",
+            lambda _: {
+                "validated_candidates": [],
+                "rejected_candidates": [
+                    {"hpo_id": "HP:9999999", "reason": "not_found"}
+                ],
+            },
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        next(
+            area
+            for area in app.text_area
+            if area.label == "Persian clinical description"
+        ).set_value("شرح فنوتیپی کوتاه.").run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "Extract HPO candidates"
+        ).click().run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["selected_hpo_terms"] == []
+        assert not any(
+            button.label == "Accept HPO candidates"
+            for button in app.button
+        )
+        assert any(
+            "HP:9999999" in warning.value
+            for warning in app.warning
+        )
+
+    def test_extraction_failure_keeps_manual_hpo_search_available(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail_extraction(_: object) -> object:
+            raise PhenotypeExtractionError("secret model output")
+
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "extract_hpo_candidates",
+            fail_extraction,
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        next(
+            area
+            for area in app.text_area
+            if area.label == "Persian clinical description"
+        ).set_value("شرح فنوتیپی کوتاه.").run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "Extract HPO candidates"
+        ).click().run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            error.value
+            == (
+                "Phenotype candidates could not be extracted safely. "
+                "Manual HPO selection remains available."
+            )
+            for error in app.error
+        )
+        assert any(
+            field.label == "Search HPO terms"
+            for field in app.text_input
         )
         assert "secret" not in str(app).casefold()
 
