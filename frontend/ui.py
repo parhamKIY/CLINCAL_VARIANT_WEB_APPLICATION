@@ -8,6 +8,7 @@ from typing import TypedDict, cast
 import pandas as pd
 import streamlit as st
 
+from backend.database import DatabaseError, load_pipeline_state
 from backend.error_handling import safe_ui_error_message
 from backend.pipeline import (
     PipelineProgressCallback,
@@ -30,8 +31,12 @@ from backend.vcf_processing import (
 from config import settings
 from frontend.execution import (
     AnalysisJob,
+    FrontendExecutionError,
     UploadedVCF,
     execute_analysis,
+    get_registered_analysis_job,
+    register_analysis_job,
+    release_registered_analysis_job,
 )
 from frontend.evidence_review import (
     clear_evidence_review_state,
@@ -67,10 +72,13 @@ SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 PIPELINE_RESULT_KEY = "pipeline_result"
 ANALYSIS_JOB_KEY = "analysis_job"
+ANALYSIS_JOB_TOKEN_KEY = "analysis_job_token"
 ANALYSIS_NOTICE_KEY = "analysis_notice"
 ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
 LLM_MODEL_KEY = "selected_llm_model"
 LLM_LIGHT_MODEL_KEY = "selected_llm_light_model"
+ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
+ANALYSIS_RESULT_QUERY_PARAM = "analysis"
 LLM_PINNED_MODELS = (
     "gpt-5.4-mini",
     "gpt-5.4",
@@ -246,6 +254,65 @@ def _select_pinned_llm_model(model: str) -> None:
     st.session_state[LLM_MODEL_KEY] = model
 
 
+def _query_param_value(name: str) -> str | None:
+    """Return one bounded scalar query parameter."""
+
+    value = st.query_params.get(name)
+    if isinstance(value, str) and 0 < len(value) <= 128:
+        return value
+    return None
+
+
+def _clear_query_param(name: str) -> None:
+    """Remove one application-owned query parameter when present."""
+
+    if name in st.query_params:
+        del st.query_params[name]
+
+
+def _restore_refresh_state() -> None:
+    """Reconnect active work or reload a persisted completed analysis."""
+
+    if (
+        st.session_state[ANALYSIS_JOB_KEY] is None
+        and st.session_state[PIPELINE_RESULT_KEY] is None
+    ):
+        token = _query_param_value(ANALYSIS_JOB_QUERY_PARAM)
+        job = get_registered_analysis_job(token)
+        if job is not None:
+            st.session_state[ANALYSIS_JOB_KEY] = job
+            st.session_state[ANALYSIS_JOB_TOKEN_KEY] = token
+            st.session_state[ANALYSIS_NOTICE_KEY] = (
+                "Reconnected to the active analysis after page refresh."
+            )
+            st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "info"
+        elif token is not None:
+            _clear_query_param(ANALYSIS_JOB_QUERY_PARAM)
+
+    if (
+        st.session_state[ANALYSIS_JOB_KEY] is not None
+        or st.session_state[PIPELINE_RESULT_KEY] is not None
+    ):
+        return
+    analysis_id = _query_param_value(ANALYSIS_RESULT_QUERY_PARAM)
+    if analysis_id is None:
+        return
+    try:
+        restored = load_pipeline_state(analysis_id)
+    except DatabaseError:
+        _clear_query_param(ANALYSIS_RESULT_QUERY_PARAM)
+        st.session_state[ANALYSIS_NOTICE_KEY] = (
+            "The saved analysis referenced by this page is unavailable."
+        )
+        st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "warning"
+        return
+    st.session_state[PIPELINE_RESULT_KEY] = restored
+    st.session_state[ANALYSIS_NOTICE_KEY] = (
+        "Restored the saved analysis after page refresh."
+    )
+    st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "info"
+
+
 def _initialize_session_state() -> None:
     """Initialize frontend-only state in one place."""
 
@@ -253,6 +320,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(HPO_RESULTS_KEY, [])
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
+    st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     model_options = _llm_model_options()
@@ -261,12 +329,18 @@ def _initialize_session_state() -> None:
     light_model_options = _light_llm_model_options()
     if st.session_state.get(LLM_LIGHT_MODEL_KEY) not in light_model_options:
         st.session_state[LLM_LIGHT_MODEL_KEY] = settings.LLM_MODEL_LIGHT
+    _restore_refresh_state()
 
 
 def _clear_analysis_result() -> None:
     """Discard an earlier result when analysis inputs change."""
 
     st.session_state[PIPELINE_RESULT_KEY] = None
+    _clear_query_param(ANALYSIS_RESULT_QUERY_PARAM)
+    if _analysis_job() is None:
+        token = _query_param_value(ANALYSIS_JOB_QUERY_PARAM)
+        release_registered_analysis_job(token)
+        _clear_query_param(ANALYSIS_JOB_QUERY_PARAM)
     st.session_state.pop("selected_evidence_object", None)
     clear_evidence_review_state()
 
@@ -1105,8 +1179,26 @@ def _start_submission(
     _clear_analysis_result()
     st.session_state[ANALYSIS_NOTICE_KEY] = None
     job = AnalysisJob(runner)
+    try:
+        token = register_analysis_job(job)
+    except FrontendExecutionError as exc:
+        st.session_state[ANALYSIS_NOTICE_KEY] = str(exc)
+        st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"
+        return
     st.session_state[ANALYSIS_JOB_KEY] = job
-    job.start()
+    st.session_state[ANALYSIS_JOB_TOKEN_KEY] = token
+    st.query_params[ANALYSIS_JOB_QUERY_PARAM] = token
+    try:
+        job.start()
+    except RuntimeError:
+        release_registered_analysis_job(token)
+        st.session_state[ANALYSIS_JOB_KEY] = None
+        st.session_state[ANALYSIS_JOB_TOKEN_KEY] = None
+        _clear_query_param(ANALYSIS_JOB_QUERY_PARAM)
+        st.session_state[ANALYSIS_NOTICE_KEY] = (
+            "The analysis worker could not be started."
+        )
+        st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"
 
 
 def _finish_analysis_job(job: AnalysisJob) -> None:
@@ -1136,6 +1228,17 @@ def _finish_analysis_job(job: AnalysisJob) -> None:
         )
         st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"
 
+    token = st.session_state.get(ANALYSIS_JOB_TOKEN_KEY)
+    st.session_state[ANALYSIS_JOB_TOKEN_KEY] = None
+    durable_result = False
+    if view.state == "completed" and view.result is not None:
+        analysis_id = view.result.get("analysis_id")
+        if isinstance(analysis_id, str):
+            durable_result = True
+            st.query_params[ANALYSIS_RESULT_QUERY_PARAM] = analysis_id
+    if view.state != "completed" or durable_result:
+        release_registered_analysis_job(token)
+        _clear_query_param(ANALYSIS_JOB_QUERY_PARAM)
     st.session_state[ANALYSIS_JOB_KEY] = None
     st.rerun()
 

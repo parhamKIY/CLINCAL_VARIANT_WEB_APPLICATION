@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 import gzip
 import os
+import re
 import threading
 import zlib
 from copy import deepcopy
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 from typing import (
     BinaryIO,
     Callable,
@@ -20,6 +22,7 @@ from typing import (
     Protocol,
     Sequence,
 )
+from uuid import uuid4
 
 from backend.pipeline import (
     PipelineProgressCallback,
@@ -67,6 +70,9 @@ AnalysisRunner = Callable[
     [PipelineProgressCallback],
     PipelineResult,
 ]
+ANALYSIS_JOB_TOKEN_PATTERN = re.compile(r"job-[0-9a-f]{32}")
+MAX_RECOVERABLE_ANALYSIS_JOBS = 32
+RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS = 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +273,96 @@ class AnalysisJob:
             self._state = "completed"
             self._latest_result = deepcopy(result)
             self._result = deepcopy(result)
+
+
+@dataclass(slots=True)
+class _RegisteredAnalysisJob:
+    job: AnalysisJob
+    last_accessed_at: float
+
+
+_ANALYSIS_JOB_REGISTRY: dict[str, _RegisteredAnalysisJob] = {}
+_ANALYSIS_JOB_REGISTRY_LOCK = threading.Lock()
+
+
+def _prune_analysis_job_registry(now: float) -> None:
+    """Remove abandoned terminal jobs while preserving active work."""
+
+    expired = [
+        token
+        for token, registered in _ANALYSIS_JOB_REGISTRY.items()
+        if registered.job.view().state
+        in {"completed", "cancelled", "error"}
+        and now - registered.last_accessed_at
+        >= RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS
+    ]
+    for token in expired:
+        _ANALYSIS_JOB_REGISTRY.pop(token, None)
+
+
+def register_analysis_job(job: AnalysisJob) -> str:
+    """Register a job under an unguessable refresh-recovery token."""
+
+    if not isinstance(job, AnalysisJob):
+        raise FrontendExecutionError("Analysis job registration is invalid.")
+    now = monotonic()
+    with _ANALYSIS_JOB_REGISTRY_LOCK:
+        _prune_analysis_job_registry(now)
+        if len(_ANALYSIS_JOB_REGISTRY) >= MAX_RECOVERABLE_ANALYSIS_JOBS:
+            terminal = sorted(
+                (
+                    (registered.last_accessed_at, token)
+                    for token, registered
+                    in _ANALYSIS_JOB_REGISTRY.items()
+                    if registered.job.view().state
+                    in {"completed", "cancelled", "error"}
+                )
+            )
+            if terminal:
+                _ANALYSIS_JOB_REGISTRY.pop(terminal[0][1], None)
+            else:
+                raise FrontendExecutionError(
+                    "The server is already processing the maximum "
+                    "number of recoverable analyses."
+                )
+        token = f"job-{uuid4().hex}"
+        _ANALYSIS_JOB_REGISTRY[token] = _RegisteredAnalysisJob(
+            job=job,
+            last_accessed_at=now,
+        )
+    return token
+
+
+def get_registered_analysis_job(token: object) -> AnalysisJob | None:
+    """Resolve a refresh token without exposing other registered jobs."""
+
+    if (
+        not isinstance(token, str)
+        or ANALYSIS_JOB_TOKEN_PATTERN.fullmatch(token) is None
+    ):
+        return None
+    now = monotonic()
+    with _ANALYSIS_JOB_REGISTRY_LOCK:
+        registered = _ANALYSIS_JOB_REGISTRY.get(token)
+        if registered is not None:
+            registered.last_accessed_at = now
+        _prune_analysis_job_registry(now)
+        registered = _ANALYSIS_JOB_REGISTRY.get(token)
+        if registered is None:
+            return None
+        return registered.job
+
+
+def release_registered_analysis_job(token: object) -> None:
+    """Forget one terminal or cancelled refresh-recovery token."""
+
+    if (
+        not isinstance(token, str)
+        or ANALYSIS_JOB_TOKEN_PATTERN.fullmatch(token) is None
+    ):
+        return
+    with _ANALYSIS_JOB_REGISTRY_LOCK:
+        _ANALYSIS_JOB_REGISTRY.pop(token, None)
 
 
 def _validate_upload_filename(filename: object) -> str:
@@ -569,4 +665,7 @@ __all__ = [
     "FrontendExecutionError",
     "UploadedVCF",
     "execute_analysis",
+    "get_registered_analysis_job",
+    "register_analysis_job",
+    "release_registered_analysis_job",
 ]

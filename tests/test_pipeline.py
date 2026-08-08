@@ -26,6 +26,7 @@ from streamlit.testing.v1 import AppTest
 
 import config as config_module
 import app as app_module
+import frontend.ui as frontend_ui_module
 from backend.annotation import (
     AnnotationError,
     annotate_variants,
@@ -220,6 +221,9 @@ from frontend.execution import (
     AnalysisJob,
     FrontendExecutionError,
     execute_analysis as execute_frontend_analysis,
+    get_registered_analysis_job,
+    register_analysis_job,
+    release_registered_analysis_job,
 )
 from frontend.evidence_review import _invalidate_confirmation
 from frontend.results import (
@@ -14581,6 +14585,20 @@ class TestFrontendExecution:
         assert "Correct this value before analysis" in error
         assert _manual_position_error("MT", 16_569, 0) is None
 
+    def test_analysis_job_registry_uses_isolated_recovery_tokens(
+        self,
+    ) -> None:
+        job = AnalysisJob(lambda _: create_pipeline_result())
+        token = register_analysis_job(job)
+        try:
+            assert re.fullmatch(r"job-[0-9a-f]{32}", token)
+            assert get_registered_analysis_job(token) is job
+            assert get_registered_analysis_job("invalid-token") is None
+        finally:
+            release_registered_analysis_job(token)
+
+        assert get_registered_analysis_job(token) is None
+
     def test_cancelled_job_discards_result_and_new_report(
         self,
         tmp_path: Path,
@@ -16430,6 +16448,96 @@ class TestFrontendFoundation:
             if button.label == "Cancel"
         )
         assert cancel_button.disabled
+
+    def test_page_refresh_reconnects_active_analysis(self) -> None:
+        first_progress = threading.Event()
+        continue_analysis = threading.Event()
+
+        def runner(
+            callback: PipelineProgressCallback,
+        ) -> PipelineResult:
+            result = create_pipeline_result()
+            result["status"] = "running"
+            result["current_stage"] = "annotation"
+            result["progress_percent"] = 35
+            callback(result)
+            first_progress.set()
+            assert continue_analysis.wait(5)
+            return result
+
+        job = AnalysisJob(runner)
+        token = register_analysis_job(job)
+        job.start()
+        assert first_progress.wait(2)
+        try:
+            refreshed = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
+            refreshed.query_params["analysis_job"] = token
+            refreshed.run(timeout=10)
+
+            assert not refreshed.exception
+            assert refreshed.session_state["analysis_job"] is job
+            assert refreshed.query_params["analysis_job"] == [token]
+            assert any(
+                "Reconnected to the active analysis"
+                in message.value
+                for message in refreshed.info
+            )
+        finally:
+            job.request_cancel()
+            continue_analysis.set()
+            job.join(2)
+            release_registered_analysis_job(token)
+
+    def test_completed_job_refresh_switches_to_durable_analysis(self) -> None:
+        analysis_id = f"analysis-{'b' * 32}"
+        expected = TestStage40FrontendReviewWorkflow._draft_result()
+        expected["analysis_id"] = analysis_id
+        job = AnalysisJob(lambda _: deepcopy(expected))
+        token = register_analysis_job(job)
+        job.start()
+        job.join(2)
+        assert job.view().state == "completed"
+
+        refreshed = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
+        refreshed.query_params["analysis_job"] = token
+        refreshed.run(timeout=10)
+
+        assert not refreshed.exception
+        assert refreshed.session_state["pipeline_result"] == expected
+        assert "analysis_job" not in refreshed.query_params
+        assert refreshed.query_params["analysis"] == [analysis_id]
+        assert get_registered_analysis_job(token) is None
+
+    def test_page_refresh_restores_persisted_analysis(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        analysis_id = f"analysis-{'a' * 32}"
+        expected = TestStage40FrontendReviewWorkflow._draft_result()
+        expected["analysis_id"] = analysis_id
+        observed: list[str] = []
+
+        def fake_load_pipeline_state(value: str) -> PipelineResult:
+            observed.append(value)
+            return deepcopy(expected)
+
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "load_pipeline_state",
+            fake_load_pipeline_state,
+        )
+        refreshed = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
+        refreshed.query_params["analysis"] = analysis_id
+        refreshed.run(timeout=10)
+
+        assert not refreshed.exception
+        assert observed == [analysis_id]
+        assert refreshed.session_state["pipeline_result"] == expected
+        assert any(
+            "Restored the saved analysis"
+            in message.value
+            for message in refreshed.info
+        )
 
     def test_external_api_status_panel_shows_each_service_state(
         self,
