@@ -17,3 +17,4 @@ storage/logs/*
 data/cache/*
 /docs/*
 !/docs/PROJECT_DECLARATION.md
+!/docs/STAGE45_ARCHITECTURE_CONTRACT.md

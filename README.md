@@ -2,10 +2,10 @@
 
 # Clinical Variant Interpretation
 
-Evidence-centered germline variant review with explicit human confirmation and
-two-layer LLM routing.
+Evidence-centered germline variant review with an accepted post-professor-review
+redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_44_accepted-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_45_contract_frozen-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
 [![Tests](https://img.shields.io/badge/tests-669_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
@@ -32,7 +32,9 @@ its original input order.
 ### Current status
 
 - The implemented roadmap has passed the Stage 44 offline acceptance gate.
-- Stage 45 professor review is the next formal milestone.
+- Stage 45 has frozen the post-professor-review architecture; it is a documentation
+  milestone and does not claim the redesign is implemented.
+- Stage 46 input expansion is the next bounded implementation milestone.
 - Pipeline schema: `2.3`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
@@ -44,7 +46,32 @@ The complete stage register, API catalog, safety declaration, demonstration
 guide, and limitations are maintained in
 [`docs/PROJECT_DECLARATION.md`](docs/PROJECT_DECLARATION.md).
 
-## Workflow
+The authoritative redesign contract and implemented-versus-planned boundary are in
+[`docs/STAGE45_ARCHITECTURE_CONTRACT.md`](docs/STAGE45_ARCHITECTURE_CONTRACT.md).
+
+## Accepted target architecture (not yet implemented)
+
+The Stage 45 contract replaces the Stage 44 interaction model for all new work. Its
+target is:
+
+- VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
+  pre-filtered variants;
+- optional de-identified Persian clinical text processed by a separately selected
+  **Phenotype Extraction Model**;
+- locally validated, editable, explicitly accepted HPO terms;
+- one **Variant Interpretation Model** used for every variant, with conflict state
+  retained as context rather than a model-routing decision;
+- an evidence-and-interpretation **Draft Variant Report** for every variant;
+- a human-edited **Reviewed Variant Report** with immutable original and edit history;
+- a human `include_in_final_report` choice that does not rank variants; and
+- one confirmed **Final Clinical Report** containing only selected reports, with
+  backend-controlled canonical references.
+
+For new analyses, `Output A`, `Output B`, `LLM-1`, `LLM-2`, and separate
+no-conflict/conflict model selectors are deprecated concepts. They remain below only
+to document the current Stage 44 implementation until Stages 46–62 replace it.
+
+## Current implemented workflow (legacy Stage 44 baseline)
 
 ```mermaid
 flowchart TD
@@ -477,7 +504,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stage 45 professor review remains pending.
+- The Stage 45 target contract is accepted, but its Stage 46–62 behavior is not yet
+  implemented; the running application remains on the Stage 44 workflow.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before Phase B.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -502,4 +530,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 45 handoff.
+- current limitations and the Stage 46 handoff.

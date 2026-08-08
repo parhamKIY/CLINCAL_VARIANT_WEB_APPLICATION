@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Implemented roadmap advanced through Stage 44; intentional numbering gaps are recorded below  
+**Implementation status:** Stage 44 software baseline; Stage 45 post-review architecture contract accepted
 **Current release gate:** Stage 44 acceptance passed  
-**Next formal milestone:** Stage 45 professor review  
+**Next implementation milestone:** Stage 46 input contract expansion
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -22,6 +22,13 @@ per-variant failures in original input order.
 The application is clinical decision-support software for educational and research
 use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
+
+The professor review on 2026-08-08 changed the accepted target architecture. Stage
+45 freezes that architecture without claiming that the redesign is already
+implemented. The authoritative target is defined in
+[`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
+describing Output A, Output B, or two-layer routing below document the still-running
+Stage 44 baseline and are legacy implementation facts, not the target for new work.
 
 ## 2. Current project boundaries
 
@@ -60,12 +67,13 @@ flowchart LR
     E --> F["Stages 27-34: Evidence V2 and human review"]
     F --> G["Stages 35-40: two-layer LLM and full UI workflow"]
     G --> H["Stages 41-44: resilience, privacy, testing, acceptance"]
-    H --> I["Stage 45: professor review - pending"]
+    H --> I["Stage 45: post-review architecture freeze"]
+    I --> J["Stages 46-62: V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H done
-    class I review
+    class A,B,C,D,E,F,G,H,I done
+    class J review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -123,9 +131,10 @@ their original order.
 | 42 | Extended privacy, minimum-data enforcement, PHI/raw-VCF log redaction, audit metadata, and confirmation-gated LLM payload checks. | Complete |
 | 43 | Registered the complete offline Testing V2 suite and a cross-stage human-edit-to-Output-B acceptance scenario. | Complete |
 | 44 | Added the deterministic five-variant, multi-HPO end-to-end gate covering both routes, unresolved conflict, failures, provenance, and ordering. | Complete |
-| 45 | Formal professor evaluation of the final workflow, results, clinical boundaries, and future scope. | Pending |
+| 45 | Incorporated professor-review decisions, froze the V3 product contract and terminology, deprecated Stage 44 interaction concepts for new analyses, and defined legacy compatibility boundaries. | Complete, documentation/architecture only |
+| 46–62 | Implement and verify the post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
-## 5. Current architecture
+## 5. Current implemented architecture (legacy Stage 44 baseline)
 
 ```mermaid
 flowchart TD
@@ -425,7 +434,9 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 
 ## 15. Known limitations and remaining work
 
-1. Stage 45 professor review is still pending.
+1. The Stage 45 post-review architecture contract is accepted, but the running
+   application remains on the Stage 44 workflow until Stages 46–62 are implemented
+   and verified.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -444,8 +455,9 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 
 ## 16. Completion statement
 
-The implemented project has passed its Stage 44 offline acceptance gate and now
-provides a coherent evidence-collection, human-review, two-layer interpretation, and
-reporting workflow with explicit safety boundaries. The correct next action is Stage
-45: professor review of clinical usefulness, evidence presentation, unresolved
-conflict behavior, LLM roles, evaluation cases, and deployment requirements.
+The implemented project has passed its Stage 44 offline acceptance gate and provides
+a coherent evidence-collection, human-review, two-layer interpretation, and reporting
+workflow with explicit safety boundaries. Stage 45 has incorporated the professor
+review into an authoritative V3 architecture contract without misrepresenting planned
+features as implemented. The correct next action is Stage 46: expand the input
+contract to first-sheet-only Excel input and a centralized 10-variant limit.
