@@ -13,7 +13,7 @@ professor-facing workflow.
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=for-the-badge&logo=python&logoColor=white)](#environment)
 [![Streamlit](https://img.shields.io/badge/Streamlit-frontend-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#stage-11-streamlit-frontend-complete)
 [![Tests](https://img.shields.io/badge/tests-657_pass%2C_4_skipped-2e7d32?style=for-the-badge)](#tests)
-[![Coverage](https://img.shields.io/badge/coverage-86.28%25-2e7d32?style=for-the-badge)](#tests)
+[![Coverage](https://img.shields.io/badge/coverage-86.23%25-2e7d32?style=for-the-badge)](#tests)
 [![Security](https://img.shields.io/badge/security-Stage_15_complete-5c6bc0?style=for-the-badge)](#stage-15-security-complete)
 
 </div>
@@ -32,7 +32,7 @@ professor-facing workflow.
 | [Environment](#environment) | [Annotation](#stage-5-annotation-complete) | [Comprehensive testing](#stage-13-comprehensive-testing-complete) |
 | [Run the frontend](#stage-11-streamlit-frontend-complete) | [Phenotype and HPO](#stage-6-phenotype-and-hpo-complete) | [Logging and error handling](#stage-14-logging-and-error-handling-complete) |
 | [Run tests](#tests) | [Evidence and LLM](#stage-7-evidence-object-complete) | [Security](#stage-15-security-complete) |
-| [MVP demo](docs/STAGE_16_MVP_DEMO_RUNBOOK.md) | [Reports and persistence](#stage-9-clinical-report-generation-complete) | [MVP release](#stage-16-mvp-preparation-complete) |
+| [Project declaration](docs/PROJECT_DECLARATION.md) | [Reports and persistence](#stage-9-clinical-report-generation-complete) | [MVP release](#stage-16-mvp-preparation-complete) |
 
 ## How the system works
 
@@ -80,8 +80,8 @@ flowchart LR
 Stages 27–44 are implemented and tested. Later stages remain planned until
 the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
-are recorded in
-[`docs/STAGE_19_REPOSITORY_REALITY_CHECK.md`](docs/STAGE_19_REPOSITORY_REALITY_CHECK.md).
+are summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
 The API-first contract retains up to five independently interpreted variants
 in input order and provides separate evidence and interpretation report views.
@@ -277,18 +277,18 @@ The live API panel reports automatic retry rounds without requiring user
 interaction. LLM generation also uses its own bounded retry budget configured
 by `LLM_MAX_RETRIES`.
 
-The Stage 22 verification and exact schema additions are recorded in
-[`docs/STAGE_22_VEP_ANNOTATION_HARDENING.md`](docs/STAGE_22_VEP_ANNOTATION_HARDENING.md).
+The Stage 22 verification and exact schema additions are summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
-The Stage 23 GeneBe contract and source-independence rules are recorded in
-[`docs/STAGE_23_GENEBE_INTEGRATION.md`](docs/STAGE_23_GENEBE_INTEGRATION.md).
+The Stage 23 GeneBe contract and source-independence rules are summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
 The Stage 24 direct ClinVar query, missingness, provenance, and conflict
-contract is recorded in
-[`docs/STAGE_24_DIRECT_CLINVAR_INTEGRATION.md`](docs/STAGE_24_DIRECT_CLINVAR_INTEGRATION.md).
+contract is summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
-The Stage 25 ClinGen context and CSpec availability contract is recorded in
-[`docs/STAGE_25_CLINGEN_CSPEC_UPGRADE.md`](docs/STAGE_25_CLINGEN_CSPEC_UPGRADE.md).
+The Stage 25 ClinGen context and CSpec availability contract is summarized in
+the [`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
 Run live Ensembl VEP, GeneBe, MyVariant.info, NCBI ClinVar, ClinGen, and CSpec
 checks through the production annotation path:
@@ -351,8 +351,8 @@ normalized-response cache, and provider failure isolation. The Streamlit
 phenotype table and external API panel expose the new evidence without
 displaying raw API payloads.
 
-The exact contract and verification evidence are recorded in
-[`docs/STAGE_27_PHEN2GENE_INTEGRATION.md`](docs/STAGE_27_PHEN2GENE_INTEGRATION.md).
+The exact contract and verification evidence are summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
 <a id="stage-28-mydisease-context-complete"></a>
 
@@ -377,8 +377,8 @@ disease context. CTD pathway inference is labelled context-only and is not
 treated as causal evidence. Historical Monarch evidence remains displayable
 as legacy, inactive, read-only provenance.
 
-The exact contract and verification evidence are recorded in
-[`docs/STAGE_28_MYDISEASE_CONTEXT.md`](docs/STAGE_28_MYDISEASE_CONTEXT.md).
+The exact contract and verification evidence are summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register).
 
 Run the bounded live MyDisease diagnostic separately from the mocked
 test suite:
@@ -850,7 +850,7 @@ place an authenticated HTTPS reverse proxy on the same host in front of this
 loopback-only service; Stage 15 does not add authentication by itself.
 
 Stage 15 step 6 completes the offline security review and acceptance gate.
-`docs/STAGE_15_SECURITY_ACCEPTANCE.md` records the implemented controls, exact
+The [`Project Declaration`](docs/PROJECT_DECLARATION.md#9-privacy-security-and-audit-position) records the implemented controls, exact
 acceptance criterion, live-test boundary, and remaining production blockers.
 `tests/run_stage15_acceptance.py` compiles the project, verifies installed
 dependency consistency without network access, runs the repository secrets
@@ -861,8 +861,8 @@ test suite to pass with at least 80% coverage.
 
 ## 🏁 Stage 16 MVP preparation: complete
 
-Stage 16 step 1 completes the MVP requirements audit in
-`docs/STAGE_16_MVP_REQUIREMENTS.md`. Every roadmap capability is mapped to its
+Stage 16 step 1 completes the MVP requirements audit, summarized in the
+[`Project Declaration`](docs/PROJECT_DECLARATION.md#4-stage-register). Every roadmap capability is mapped to its
 implementation and offline verification evidence. The audit found no missing
 core feature. Dedicated MVP acceptance, fresh live-provider validation, a
 professor-facing demo runbook, and the final release decision remain.
@@ -880,8 +880,8 @@ stage, saved the report, and returned zero errors. UCSC GenCC had no exact
 SAMD11 validity claim, so the pipeline correctly returned one explicit
 missing-evidence warning and an acceptable partial status.
 
-Stage 16 step 4 adds the presentation-safe `data/samples/mvp_demo.vcf` and the
-professor-facing `docs/STAGE_16_MVP_DEMO_RUNBOOK.md`. The runbook contains
+Stage 16 step 4 adds the presentation-safe `data/samples/mvp_demo.vcf`. The
+project declaration contains
 preflight commands, the primary VCF workflow, a manual-input fallback, expected
 results, the verified live baseline, presentation talking points, and network
 troubleshooting. The demo VCF is GRCh38, contains one public variant, and has no
@@ -891,7 +891,7 @@ Stage 16 step 5 completes the MVP release decision.
 `tests/run_stage16_final_acceptance.py` compiles the project, checks installed
 dependency consistency, runs the secrets audit, executes the Stage 15 security
 and Stage 16 MVP checks, and requires the complete suite to pass with at least
-80% coverage. `docs/STAGE_16_MVP_RELEASE_CHECKLIST.md` records the
+80% coverage. The [`Project Declaration`](docs/PROJECT_DECLARATION.md#11-verification-status) records the
 professor-demonstration decision, evidence, assets, pre-presentation checks,
 accepted MVP limitations, and production restriction.
 

@@ -164,11 +164,25 @@ def _repository_paths() -> tuple[list[str], list[Finding]]:
         return [], [
             Finding("repository", "git ls-files", "git_query_failed")
         ]
-    paths = [
+    deleted = _git("ls-files", "--deleted", "-z")
+    if deleted.returncode != 0:
+        return [], [
+            Finding("repository", "git ls-files", "git_query_failed")
+        ]
+    deleted_paths = {
         _normalize_path(item.decode("utf-8", errors="replace"))
-        for item in completed.stdout.split(b"\0")
+        for item in deleted.stdout.split(b"\0")
         if item
-    ]
+    }
+    paths: list[str] = []
+    for item in completed.stdout.split(b"\0"):
+        if not item:
+            continue
+        path = _normalize_path(
+            item.decode("utf-8", errors="replace")
+        )
+        if path not in deleted_paths:
+            paths.append(path)
     return paths, []
 
 

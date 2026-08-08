@@ -1,0 +1,417 @@
+# Clinical Variant Interpretation Project Declaration
+
+**Project:** Clinical Variant Interpretation  
+**Implementation status:** Implemented roadmap advanced through Stage 44; intentional numbering gaps are recorded below  
+**Current release gate:** Stage 44 acceptance passed  
+**Next formal milestone:** Stage 45 professor review  
+**Document date:** 2026-08-08  
+**Primary interface:** Streamlit  
+**Primary language:** Python
+
+## 1. Executive declaration
+
+This repository implements an evidence-centered clinical variant interpretation
+workflow for one to five already-filtered germline Mendelian variants. It accepts
+a filtered VCF/VCF.GZ file or a manual VCF-style table, validates and standardizes
+each allele, collects independent annotation and phenotype evidence, creates an
+editable report for every variant, requires explicit human confirmation, and only
+then sends a bounded reviewed evidence package to one of two LLM routes. The final
+output contains interpretation text, provenance, conflict status, and explicit
+per-variant failures in original input order.
+
+The application is clinical decision-support software for educational and research
+use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
+judgment, or replace review by a qualified genetics professional.
+
+## 2. Current project boundaries
+
+### In scope
+
+- One to five professor-filtered variants in VCF or manual-table form.
+- Explicit GRCh37 or GRCh38 assembly handling.
+- Germline Mendelian evidence collection and interpretation support.
+- SNV/indel allele validation, multiallelic splitting, and input-order preservation.
+- Independent evidence collection from variant, clinical, population, disease,
+  phenotype, specification, and literature sources.
+- Human-editable evidence, immutable machine originals, confirmation invalidation
+  after edits, and append-only review history.
+- Two-layer LLM routing after confirmation.
+- Local SQLite persistence, secure report exports, audit metadata, failure
+  isolation, and browser-refresh recovery.
+
+### Explicitly out of scope
+
+- Raw-VCF filtering, clinical prioritization, ranking, or Top-N selection.
+- Autonomous pathogenicity classification or diagnosis.
+- Automatic application of ClinGen CSpec rules.
+- Treatment recommendations or independent medical decisions.
+- Sending raw VCF records, sample names, genotypes, or patient columns to an LLM.
+- Production identity management, role-based access control, cloud deployment,
+  multi-institution workflows, or regulatory certification.
+
+## 3. Progress schematic
+
+```mermaid
+flowchart LR
+    A["Stages 0-4: scope, environment, input foundation"] --> B["Stages 5-16: annotation-to-report MVP"]
+    B --> C["Stage 17: professor review checkpoint"]
+    C --> D["Stage 19: repository reality audit"]
+    D --> E["Stages 22-25: annotation hardening"]
+    E --> F["Stages 27-34: Evidence V2 and human review"]
+    F --> G["Stages 35-40: two-layer LLM and full UI workflow"]
+    G --> H["Stages 41-44: resilience, privacy, testing, acceptance"]
+    H --> I["Stage 45: professor review - pending"]
+
+    classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
+    classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
+    class A,B,C,D,E,F,G,H done
+    class I review
+```
+
+Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
+adopted roadmap. They are intentional numbering gaps, not missing code. Stage 4's
+initial internal prioritization experiment was later superseded by the current
+filtered-input contract; the application now preserves all supplied variants in
+their original order.
+
+## 4. Stage register
+
+| Stage | Delivered outcome | Current status |
+|---:|---|---|
+| 0 | Defined inputs, outputs, safety boundary, data sources, and MVP acceptance contract. | Complete |
+| 1 | Created the Python environment, repository structure, dependencies, and Git hygiene. | Complete |
+| 2 | Centralized environment and application configuration in `config.py` and `.env`. | Complete |
+| 3 | Implemented streaming VCF/VCF.GZ validation, parsing, multiallelic splitting, and safe normalization boundaries. | Complete |
+| 4 | Implemented an initial prioritization prototype. The later professor-filtered input decision removed it from the active workflow. | Complete, superseded |
+| 5 | Integrated independent VEP, MyVariant, ClinVar, and ClinGen-related annotation contracts with explicit source status. | Complete |
+| 6 | Added HPO validation, ontology management, text search, gene/disease associations, normalization, and phenotype similarity. | Complete |
+| 7 | Added a versioned, bounded, sanitized Evidence Object contract. | Complete |
+| 8 | Added a provider-neutral LLM client, evidence-bound prompts, response validation, and safe failures. | Complete |
+| 9 | Added deterministic clinical-report composition, sanitization, storage, and text/PDF/Word exports. | Complete |
+| 10 | Connected input, annotation, phenotype, evidence, LLM, reporting, and frontend-safe errors into one pipeline. | Complete |
+| 11 | Built the Streamlit input, progress, cancellation, results, report, and download experience. | Complete |
+| 12 | Added versioned SQLite persistence for analyses, candidates, Evidence Objects, and report references. | Complete |
+| 13 | Added offline unit/integration/regression gates and separate manual live-provider validation tools. | Complete |
+| 14 | Added redacted structured logging, correlation IDs, API timing/retry telemetry, and safe user errors. | Complete |
+| 15 | Added secret scanning, upload validation, secure temporary storage, data minimization, and transport/runtime hardening. | Complete |
+| 16 | Finalized and accepted the original MVP, demo input, presentation runbook, and release gate. | Complete |
+| 17 | Established the professor-review checkpoint for evidence weights, filtering policy, LLM role, report format, evaluation data, security, and deployment. | Governance checkpoint complete |
+| 18 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
+| 19 | Audited the real repository, classified keep/modify/new/bypass/defer boundaries, and confirmed that ranking is not active. | Complete |
+| 20 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
+| 21 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
+| 22 | Hardened Ensembl VEP with exact assembly-aware allele matching, bounded batches, provenance, missingness, and retries. | Complete |
+| 23 | Added GeneBe as an independent source for automated ACMG evidence and provider metadata without overriding other sources. | Complete |
+| 24 | Added direct NCBI ClinVar query, exact-record validation, germline classification/review evidence, provenance, and missingness. | Complete |
+| 25 | Added exact ClinGen-submitted GenCC context and ClinGen CSpec Registry availability metadata. CSpec is context-only. | Complete |
+| 26 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
+| 27 | Added one Phen2Gene request per analysis and attached bounded gene score/rank context without reordering variants. | Complete |
+| 28 | Added MyDisease.info disease/HPO context with exact MONDO material-basis HGNC validation and bounded provenance. | Complete |
+| 29 | Introduced Evidence Object V2 with bounded source-specific evidence and explicit missingness. | Complete |
+| 30 | Added evidence lineage, upstream-source identity, derivation metadata, and shared-vote collapsing. | Complete |
+| 31 | Added deterministic conflict auditing before and after review, severity assignment, and meaningful-conflict routing. | Complete |
+| 32 | Added conflict-triggered gnomAD and literature enrichment with exact-allele checks, limits, feature flags, and isolated failures. | Complete and reverified |
+| 33 | Added one editable detailed Evidence Review Report per variant, immutable originals, reviewer notes, and edit history. | Complete |
+| 34 | Added explicit human confirmation, Reviewed Evidence Packages, confirmation invalidation after edits, and post-review conflict audit. | Complete and reverified |
+| 35 | Added two-layer routing: a low-cost no-conflict LLM and a stronger conflict-resolution LLM, with separate model selection and provenance. | Complete |
+| 36 | Added final-interpretation-only Output B with ordered results, unresolved-conflict disclosure, and explicit failures but no raw evidence. | Complete |
+| 37 | Split the workflow into pausable Phase A evidence collection and confirmation-gated Phase B interpretation. | Complete |
+| 38 | Centralized new provider limits, timeouts, feature flags, model settings, and secret-redaction validation. | Complete |
+| 39 | Migrated SQLite to schema version 2 for validated Pipeline V2 snapshots, draft review state, confirmation state, and resumption. | Complete |
+| 40 | Added the complete Streamlit human-review workflow, separate LLM selectors, confirmation gate, and Output B generation. | Complete |
+| 41 | Added independent provider resilience, bounded retry/backoff, annotation caching, explicit missingness, and targeted failed-interpretation retry. | Complete |
+| 42 | Extended privacy, minimum-data enforcement, PHI/raw-VCF log redaction, audit metadata, and confirmation-gated LLM payload checks. | Complete |
+| 43 | Registered the complete offline Testing V2 suite and a cross-stage human-edit-to-Output-B acceptance scenario. | Complete |
+| 44 | Added the deterministic five-variant, multi-HPO end-to-end gate covering both routes, unresolved conflict, failures, provenance, and ordering. | Complete |
+| 45 | Formal professor evaluation of the final workflow, results, clinical boundaries, and future scope. | Pending |
+
+## 5. Current architecture
+
+```mermaid
+flowchart TD
+    U["Filtered VCF/VCF.GZ or manual table"] --> V["Validation and allele standardization"]
+    V --> A["Independent annotation providers"]
+    A --> P["Local HPO + Phen2Gene + MyDisease context"]
+    P --> E["Evidence Object V2 + lineage"]
+    E --> C1["Deterministic pre-review conflict audit"]
+    C1 --> CE{"Conditional enrichment needed?"}
+    CE -- Yes --> X["gnomAD and bounded literature services"]
+    CE -- No --> O
+    X --> O["Output A: editable Evidence Review Reports"]
+    O --> H["Human edit, notes, compare, confirm"]
+    H --> RP["Reviewed Evidence Packages"]
+    RP --> C2["Deterministic post-review conflict audit"]
+    C2 --> R{"Meaningful conflict?"}
+    R -- No --> L1["LLM-1: low-cost arrangement/synthesis"]
+    R -- Yes --> L2["LLM-2: stronger conflict interpretation"]
+    L1 --> B["Output B: final interpretation only"]
+    L2 --> B
+    E --> DB["SQLite draft snapshot"]
+    RP --> DB
+    B --> DB
+    B --> DL["Streamlit view and bounded text download"]
+```
+
+### Active pipeline provider order
+
+The normal progress stream reports `vep`, `genebe`, `myvariant`, `clinvar`,
+`clingen`, `cspec`, `phen2gene`, `mydisease`, and `llm`. Annotation progress is
+updated on each provider start/completion event instead of remaining fixed at 35%.
+
+## 6. External API and data-source catalog
+
+| Provider or resource | Default interface | Request purpose | Evidence returned and implementation responsibility |
+|---|---|---|---|
+| Ensembl VEP REST | `https://rest.ensembl.org/vep/homo_sapiens/region` | Submit bounded, assembly-explicit alleles. | Consequence, transcript, gene, identifiers, and available colocated evidence. Exact allele/coordinate validation is enforced in `backend/annotation.py`. |
+| GeneBe API | `https://api.genebe.net/cloud/api-public/v1/variants` | Batch-query normalized variants; optional account credentials are supported. | Independent automated ACMG criteria, classifications, scores, identifiers, and provenance. It is evidence, not the application's final classification. |
+| MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier. | Aggregated identifiers, clinical annotations, and population frequencies. Returned coordinates/alleles must match before use. |
+| NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize a direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. No record is represented as missingness, not negative evidence. |
+| UCSC Genome Browser API, GenCC track | `https://genome-euro.ucsc.edu/cgi-bin/hubApi/getData/track` | Query the assembly-specific locus and retain exact gene claims submitted by ClinGen. | Gene-disease validity context, submitter, classification, disease identifiers, and report links. It does not classify the variant. |
+| ClinGen CSpec Registry | `https://cspec.clinicalgenome.org/cspec/{entity}/id/{identifier}` | Resolve matching VCEP/disease/specification entities. | Released specification names, versions, VCEP metadata, and URLs. The app records availability/context only and never executes CSpec rules. |
+| Phen2Gene | `https://phen2gene.wglab.org/api` | Send the canonical HPO set once per analysis with the `sk` weighting model. | Gene score and provider rank metadata attached to matching annotated genes. It supports phenotype correlation and never reorders input variants. |
+| MyDisease.info | `https://mydisease.info/v1/query` | Search bounded disease records by normalized gene symbol. | MONDO/DOID/OMIM/MedGen context, names, synonyms, HPO terms, pathways, and references. Primary records require an exact MONDO material-basis HGNC relation. |
+| Monarch API | `https://api-v3.monarchinitiative.org/v3/api` | Retained as centralized configuration/compatibility metadata. | It is not called by the active Stage 28 path; MyDisease.info supplies the bounded Monarch-derived disease context. |
+| gnomAD GraphQL | `https://gnomad.broadinstitute.org/api` | Conflict-triggered exact-allele lookup using an assembly-specific dataset (`gnomad_r2_1` or `gnomad_r4`). | Global and population allele-frequency evidence, release/dataset provenance, and explicit no-match/unavailable states. |
+| Ensembl Variation REST | `https://rest.ensembl.org` | Conditional population-evidence fallback when exact usable gnomAD evidence is unavailable and an rsID is available. | Bounded population-frequency context with separate provider provenance; it does not masquerade as gnomAD evidence. |
+| NCBI LitVar2 | `https://www.ncbi.nlm.nih.gov/research/litvar2-api` | Resolve a variant and collect related publication identifiers. | Variant-linked PMID/PMCID references used only in bounded conditional literature enrichment. |
+| Europe PMC | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | Search bounded variant/gene literature and normalize metadata. | Titles, identifiers, dates, journals, and source metadata; article count is capped. |
+| PubMed E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Search and summarize bounded variant/gene literature. | PMID-linked article metadata. PubMed is independent of the direct ClinVar use of the same NCBI interface. |
+| OpenAI-compatible LLM API | Configured by `LLM_BASE_URL`, `LLM_API_KEY`, and model settings. | Send only a bounded, confirmed Reviewed Evidence Package through the provider-neutral client. | LLM-1 synthesizes no-conflict packages; LLM-2 interprets meaningful conflicts. Both retain route, model, prompt, response, and failure provenance. |
+| Human Phenotype Ontology files | `hp.obo`, `phenotype_to_genes.txt`, and `phenotype.hpoa` release URLs | Download/update coordinated local ontology, gene, and disease association datasets. | Local HPO validation, search, normalization, association lookup, and explainable similarity scoring without a per-analysis ontology API call. |
+
+### Provider request and failure rules
+
+- Genome assembly remains explicit wherever coordinates leave the application.
+- Only the minimum fields needed for a provider query are transmitted.
+- Providers are isolated: one failure cannot delete another provider's evidence.
+- `not_found`/`no_match` means the source had no matching record; `unavailable`,
+  timeout, HTTP failure, and invalid response are operational failures. None of
+  these states are converted into negative clinical evidence.
+- Retries are bounded and limited to transient failures. Timeouts and maximum
+  result sizes are provider-specific.
+- Conditional enrichment is capped at five variants and ten articles by default.
+- `ENABLE_GNOMAD_DEEP_LOOKUP` and `ENABLE_LITERATURE_ENRICHMENT` can disable
+  those optional calls without code changes.
+
+## 7. Evidence, conflict, and human-review contracts
+
+### Evidence Object V2
+
+The active Evidence Object schema is `2.4`. Each object contains a normalized
+variant identity, assembly, source-specific evidence, phenotype context,
+provider statuses, warnings, provenance, and bounded lineage. Raw provider payloads,
+sample fields, and genotype data are excluded.
+
+Lineage records provider, upstream dataset/source, retrieval time, derivation, and
+version where available. Shared upstream sources are collapsed before conflict
+assessment so the same database cannot create artificial voting weight through
+multiple aggregators.
+
+### Deterministic conflict audit
+
+The auditor runs before human review and after confirmation. It detects conflicting
+clinical assertions, meaningful pathogenicity disagreements, and source failures
+without making a final classification. Severity and routing are deterministic.
+Conditional enrichment is invoked only when the audit says additional population or
+literature context is justified.
+
+### Output A and confirmation
+
+Output A is one complete editable Evidence Review Report per variant. The machine
+original remains immutable. Reviewers may edit/add/delete nested evidence, add notes,
+save/reset a draft, and compare the draft with the original. Changes are recorded in
+bounded append-only history. Confirmation creates a validated Reviewed Evidence
+Package; any later draft change invalidates that confirmation.
+
+### Two-layer LLM routing
+
+- **LLM-1:** a separately selectable low-cost model used when no meaningful
+  conflict remains. Its role is controlled synthesis and arrangement, not conflict
+  resolution.
+- **LLM-2:** a separately selectable stronger model used when meaningful conflict
+  remains. It must explain evidence tension and may return `unresolved`.
+- One model failure becomes an explicit per-variant failure and does not remove
+  confirmed evidence or successful results for other variants.
+- Prompts and responses are versioned, validated, bounded, and stored with model and
+  route provenance.
+
+### Output B
+
+Output B is schema version `1.0`. It preserves the original variant order and contains
+only the final interpretation or an explicit failure, model/route provenance, and
+unresolved-conflict disclosure. Raw evidence, reviewer drafts, ranking, and raw VCF
+content are excluded. The Streamlit UI supports viewing and downloading a bounded
+UTF-8 text representation.
+
+## 8. Pipeline, persistence, and refresh recovery
+
+- Active pipeline schema: `2.3`.
+- SQLite schema: `2`.
+- Evidence Review Report schema: `1.0`.
+- Reviewed Evidence Package schema: `1.0`.
+- Two-layer routing schema: `1.0`.
+- Final Interpretation Report schema: `1.0`.
+
+Phase A collects evidence, performs the pre-review audit and optional enrichment,
+creates Output A, and persists a Draft snapshot. Phase B requires every variant to be
+confirmed, reruns the audit, executes per-variant LLM routing, creates Output B, and
+persists Confirmed state without changing the analysis ID.
+
+Long analyses execute in cancellable background jobs. The browser stores only an
+opaque, unguessable recovery token. A page refresh reconnects to an active in-process
+job; when the job has completed and the result was persisted, the UI reloads it from
+SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
+A process/server restart cannot resume an in-flight Python thread, but persisted Draft
+or Confirmed snapshots remain recoverable.
+
+## 9. Privacy, security, and audit position
+
+- Secrets are loaded from `.env`; `.env` is excluded from Git.
+- LLM and GeneBe credentials are never written into result objects or normal logs.
+- Upload type, size, row count, and content are validated before processing.
+- Temporary uploads and generated artifacts use bounded application-controlled paths.
+- Sample columns, patient identifiers, genotypes, and raw VCF rows are stripped at the
+  input boundary and excluded from public pipeline and LLM payloads.
+- Logs use safe correlation IDs, provider names, timing, retry/outcome metadata, and
+  defensive redaction instead of clinical payloads.
+- Human-review state and audit history are bounded and validated before persistence.
+- The application uses verified HTTPS requests and explicit deadlines.
+- Reports are generated locally; PDF/Word export does not make additional provider
+  calls.
+- Reviewers must not enter protected health information in free-text notes.
+
+This is an application-level security baseline, not a claim of production clinical
+compliance. Deployment would require institutional authentication, authorization,
+encryption/key management, retention policy, backups, monitoring, threat modeling,
+and formal privacy/regulatory review.
+
+## 10. Failure handling and operational behavior
+
+- Provider calls use independent timeouts, bounded retry/backoff, and safe status
+  normalization.
+- Normalized annotation caching reduces repeated external calls and has a bounded TTL.
+- Failures are shown as explicit source/model states rather than fabricated evidence.
+- Successful variant/model results remain available when another variant fails.
+- Failed LLM interpretations can be retried without discarding confirmed evidence,
+  reviewer edits, or successful interpretations.
+- User cancellation removes partial session output, temporary uploads, and newly
+  generated drafts owned by the cancelled job.
+- Progress updates occur for each normal annotation API start/completion event and for
+  Phen2Gene, MyDisease, and LLM transitions.
+
+## 11. Verification status
+
+The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
+so it is deterministic and does not consume external API quotas. The current recorded
+baseline is **657 passed, 4 skipped**, with **86.23% coverage**. The Stage 44 acceptance
+runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
+both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
+ordered Output A/Output B generation.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe tests\run_stage44_acceptance.py
+```
+
+Live-provider connectivity is intentionally a separate manual activity. A passing
+offline suite proves application contracts and failure handling; it does not prove
+that every external provider is currently available or that external schemas have
+not changed.
+
+## 12. Configuration and execution
+
+Required configuration includes `GENOME_ASSEMBLY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
+`LLM_API_KEY`, and default LLM model settings. The UI can choose the no-conflict and
+conflict models separately per analysis. Provider base URLs, timeouts, retry limits,
+cache limits, enrichment limits, HPO release locations, database location, upload and
+report paths, and feature flags are centralized in `config.py` and documented by
+`.env.example`.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+On Windows, `run_app.bat` is also available. Running `python app.py` delegates to
+Streamlit automatically.
+
+## 13. Demonstration runbook
+
+Before a demonstration, confirm that `.env` contains the intended assembly and LLM
+provider settings, that the coordinated HPO files exist, and that the automated
+suite and Stage 44 gate pass. Start the application with `run_app.bat` or the
+Streamlit command above.
+
+The primary demonstration uses `data/samples/mvp_demo.vcf`, a public one-row GRCh38
+example without sample or patient columns. Select several relevant HPO terms, choose
+the separate low-cost and strong LLM models, run Phase A, inspect provider states and
+Output A, make a clearly identifiable review edit, confirm every variant, and run
+Phase B. Show that the confirmation gate blocks premature LLM use, the route matches
+the deterministic conflict result, and Output B excludes raw evidence and ranking.
+
+The manual-input fallback uses the same public allele entered through the table UI.
+The expected safe result is a validated variant in original order with explicit
+provider evidence or missingness, an editable Output A, a confirmation-gated model
+route, and a downloadable Output B. A historical Stage 16 live check completed the
+SAMD11 demo workflow; UCSC GenCC returned no exact claim and was correctly represented
+as missing evidence. This historical result is not a current provider-availability
+guarantee.
+
+If a live source fails, check network access, the provider's service status, assembly,
+configured base URL, timeout, and credentials where applicable. Do not alter evidence
+or hide an unavailable state for a demonstration; use the deterministic offline gate
+to demonstrate application behavior when external connectivity is unreliable.
+
+Key presentation points are independent-source provenance, correct missingness,
+immutable machine evidence, explicit human confirmation, two-layer LLM routing,
+per-variant failure isolation, privacy boundaries, and the non-diagnostic disclaimer.
+
+## 14. Implementation map
+
+| Area | Primary files |
+|---|---|
+| Application entry and configuration | `app.py`, `config.py`, `.env.example` |
+| VCF/manual input processing | `backend/vcf_processing.py`, `backend/pipeline.py`, `frontend/ui.py` |
+| Core annotation providers | `backend/annotation.py` |
+| HPO and Phen2Gene | `backend/phenotype.py` |
+| MyDisease context | `backend/mydisease.py` |
+| Evidence schemas and original reports | `backend/report.py` |
+| Conflict audit | `backend/conflict_auditor.py` |
+| Conditional enrichment | `backend/conditional_enrichment.py` |
+| Editable Output A | `backend/evidence_review.py`, `frontend/evidence_review.py` |
+| Confirmation packages | `backend/evidence_confirmation.py` |
+| LLM provider and two-layer routing | `backend/llm.py`, `backend/llm_routing.py` |
+| Output B | `backend/final_interpretation_report.py`, `frontend/final_interpretation_view.py` |
+| Pipeline V2 and progress | `backend/pipeline.py` |
+| SQLite persistence | `backend/database.py` |
+| Privacy, logging, and safe errors | `backend/privacy.py`, `backend/logging_config.py`, `backend/error_handling.py` |
+| Background jobs and refresh recovery | `frontend/execution.py`, `frontend/ui.py` |
+| Report rendering/export | `backend/report_exports.py`, `frontend/report_viewer.py` |
+| Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage44_acceptance.py`, `tests/manual_*.py` |
+
+## 15. Known limitations and remaining work
+
+1. Stage 45 professor review is still pending.
+2. The system assumes that variant filtering and candidate selection happened before
+   upload; it must not be presented as a genome-wide prioritization engine.
+3. External APIs can change, throttle, or become unavailable. Live smoke tests should
+   be run before a demonstration or deployment.
+4. CSpec records are contextual metadata only; no specification rule engine exists.
+5. GeneBe automated ACMG results are retained as source evidence, not adopted as a
+   final application classification.
+6. Human review is required for every variant before Phase B.
+7. In-flight jobs survive a browser refresh only while the application process remains
+   alive. A production queue would be required for restart-resilient execution.
+8. SQLite is suitable for the current bounded single-application workflow, not a
+   production multi-user clinical deployment.
+9. Interpretation quality still depends on upstream data quality, evidence currency,
+   reviewer judgment, prompt/model behavior, and phenotype completeness.
+
+## 16. Completion statement
+
+The implemented project has passed its Stage 44 offline acceptance gate and now
+provides a coherent evidence-collection, human-review, two-layer interpretation, and
+reporting workflow with explicit safety boundaries. The correct next action is Stage
+45: professor review of clinical usefulness, evidence presentation, unresolved
+conflict behavior, LLM roles, evaluation cases, and deployment requirements.
