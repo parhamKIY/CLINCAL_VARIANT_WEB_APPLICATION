@@ -70,6 +70,7 @@ def check_production_annotation(variant_text: str) -> None:
 
     annotation = annotations[0]
     vep_result = annotation["sources"]["vep"]
+    genebe_result = annotation["sources"]["genebe"]
     myvariant_result = annotation["sources"]["myvariant"]
     clinvar_result = annotation["sources"]["clinvar"]
     clingen_result = annotation["sources"]["clingen"]
@@ -82,6 +83,7 @@ def check_production_annotation(variant_text: str) -> None:
     print(f"Variant: {variant_text}")
     print(f"Response time: {elapsed_seconds:.2f} seconds")
     print(f"VEP status: {vep_result['status']}")
+    print(f"GeneBe status: {genebe_result['status']}")
     print(f"MyVariant.info status: {myvariant_result['status']}")
     print(f"NCBI ClinVar status: {clinvar_result['status']}")
     print(f"ClinGen/GenCC status: {clingen_result['status']}")
@@ -90,6 +92,12 @@ def check_production_annotation(variant_text: str) -> None:
     if vep_result["status"] != "success":
         warning_text = "; ".join(annotation["warnings"]) or "No details"
         raise RuntimeError(f"VEP annotation failed: {warning_text}")
+
+    if genebe_result["status"] not in {"success", "not_found"}:
+        warning_text = "; ".join(annotation["warnings"]) or "No details"
+        raise RuntimeError(
+            f"GeneBe annotation failed: {warning_text}"
+        )
 
     if myvariant_result["status"] != "success":
         warning_text = "; ".join(annotation["warnings"]) or "No details"

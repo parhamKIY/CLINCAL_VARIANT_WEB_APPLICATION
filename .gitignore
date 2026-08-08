@@ -9,6 +9,7 @@ coverage.xml
 htmlcov/
 tmp/coverage-*.json
 output/stage13-manual-validation*.json
+output/live-provider-validation*.json
 storage/uploads/*
 storage/reports/*
 storage/database/*

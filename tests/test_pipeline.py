@@ -163,6 +163,7 @@ from backend.pipeline import (
 from backend.privacy import (
     ClinicalDataPrivacyError,
     minimize_variant,
+    redact_clinical_text,
     validate_llm_payload,
     validate_no_prohibited_fields,
 )
@@ -10876,6 +10877,20 @@ class TestStage40FrontendReviewWorkflow:
             for subheader in app.subheader
         )
 
+        confirm = next(
+            button
+            for button in app.button
+            if button.label == "Confirm evidence"
+        )
+        assert confirm.disabled
+        next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.label.startswith(
+                "I confirm that this reviewed evidence contains no names"
+            )
+        ).set_value(True).run(timeout=10)
+
         next(
             button
             for button in app.button
@@ -10988,6 +11003,17 @@ class TestStage42PrivacySecurityAudit:
             ({}, ["patient_id=identified-123"]),
             ({}, ["Contact identified@example.test"]),
             ({}, ["phone: +1-555-0100"]),
+            ({}, ["Call +98 912 123 4567 after review."]),
+            ({}, ["SSN 123-45-6789"]),
+            ({}, ["Patient is John Smith"]),
+            (
+                {
+                    "manual_evidence": {
+                        "contact": "Call +98 912 123 4567."
+                    }
+                },
+                [],
+            ),
         ],
     )
     def test_sensitive_review_content_is_rejected_before_storage(
@@ -11012,6 +11038,44 @@ class TestStage42PrivacySecurityAudit:
             )
 
         assert report == original
+
+    @pytest.mark.parametrize(
+        "safe_note",
+        [
+            "Variant 2:166848215 C>T was reviewed.",
+            "PMID 12345678 supports the assertion.",
+            "Orthogonal confirmation remains pending.",
+        ],
+    )
+    def test_clinical_review_text_is_not_overblocked(
+        self,
+        safe_note: str,
+    ) -> None:
+        report = build_evidence_review_reports(
+            [TestEvidenceObject._complete_evidence_object()],
+            timestamp="2026-08-08T11:00:00Z",
+        )[0]
+
+        saved = save_evidence_review_draft(
+            report,
+            deepcopy(report["reviewed_user_report"]),
+            [safe_note],
+            timestamp="2026-08-08T11:01:00Z",
+        )
+
+        assert saved["reviewer_notes"] == [safe_note]
+
+    def test_high_risk_free_text_is_redacted_from_logs(self) -> None:
+        message = (
+            "Patient is John Smith; call +98 912 123 4567; "
+            "SSN 123-45-6789."
+        )
+
+        redacted = redact_clinical_text(message)
+
+        assert "John Smith" not in redacted
+        assert "912 123 4567" not in redacted
+        assert "123-45-6789" not in redacted
 
     def test_sensitive_audit_path_is_rejected_on_reload(self) -> None:
         report = build_evidence_review_reports(

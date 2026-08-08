@@ -8,8 +8,8 @@ two-layer LLM routing.
 [![Status](https://img.shields.io/badge/status-Stage_44_accepted-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-657_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-86.23%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-665_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-86.26%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -37,7 +37,7 @@ its original input order.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **657 passed, 4 skipped; 86.23% coverage**.
+- Current verified suite: **665 passed, 4 skipped; 86.26% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -319,7 +319,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-657 passed, 4 skipped
+665 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -337,10 +337,27 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **86.23%**.
+Current measured coverage is **86.26%**.
 
-Automated tests mock or block external HTTP traffic. Live-provider diagnostics
-are intentionally separate and may consume quotas:
+Automated tests mock or block external HTTP traffic. Run the bounded live
+contract gate separately; it checks every active annotation, phenotype,
+population, literature, and configured LLM endpoint through production clients:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_live_provider_validation.py
+```
+
+Use `--skip-llm` when only biomedical providers should be checked. The gate
+writes a non-clinical, ignored summary to
+`output/live-provider-validation.json`. It may consume provider quotas.
+
+The complete live gate passed on **2026-08-08**. VEP, GeneBe, MyVariant,
+ClinVar, Phen2Gene, MyDisease, gnomAD, Ensembl Variation, and the configured LLM
+returned usable responses. GenCC, CSpec, LitVar2, Europe PMC, and PubMed returned
+valid no-match responses for the public probe, which is acceptable missingness.
+This is a point-in-time result, not a future availability guarantee.
+
+Component-specific diagnostics remain available:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\manual_annotation_smoke.py
@@ -376,9 +393,18 @@ production multi-user clinical deployment.
   minimum required query fields.
 - Logs use correlation IDs and operational metadata with defensive PHI,
   credential, and raw-VCF redaction.
+- Reviewer notes reject detected phone numbers, government identifiers, email
+  addresses, contextual person names, labelled identifiers, and raw VCF text.
+- The confirmation button remains disabled until the reviewer explicitly
+  attests that the reviewed evidence contains no PHI or direct identifiers;
+  editing the Draft clears that attestation and invalidates confirmation.
 - Provider failures are isolated and represented explicitly.
 - Reviewer state and audit history are bounded and validated before storage.
 - Review notes must not contain protected health information.
+
+Free-text detection is defense in depth, not guaranteed de-identification.
+Unlabelled identifiers or names can be linguistically ambiguous, so users must
+still provide de-identified evidence only.
 
 These controls are an application baseline, not a claim of production clinical
 compliance. Institutional deployment requires authentication, authorization,
@@ -424,6 +450,7 @@ clinical_variant_app/
 ├── tests/
 │   ├── test_pipeline.py
 │   ├── test_mydisease.py
+│   ├── run_live_provider_validation.py
 │   ├── run_stage44_acceptance.py
 │   └── manual_*.py
 ├── .env.example

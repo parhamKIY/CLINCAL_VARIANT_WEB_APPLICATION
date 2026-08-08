@@ -10,9 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.database import get_analysis
 from backend.llm import call_llm
-from backend.pipeline import run_analysis
+from backend.pipeline import resume_saved_analysis, run_analysis
 from backend.report import (
     CLINICAL_REPORT_SECTION_ORDER,
     generate_and_save_clinical_report,
@@ -215,7 +214,7 @@ def check_complete_pipeline(
     variant: str,
     phenotypes: list[str],
 ) -> None:
-    """Run the production pipeline from manual input to saved report."""
+    """Run live Phase A, confirmation, Phase B, and Output B."""
 
     try:
         chrom, pos, ref, alt = variant.split(":")
@@ -243,9 +242,9 @@ def check_complete_pipeline(
             "Pipeline stopped at "
             f"{result['current_stage']}: {result['errors']}"
         )
-    if result["report_path"] is None:
+    if result["workflow_state"] != "awaiting_confirmation":
         raise RuntimeError(
-            "Pipeline completed without a saved clinical report: "
+            "Phase A did not pause for human confirmation: "
             f"{result['errors']}"
         )
     if result["analysis_id"] is None:
@@ -253,11 +252,6 @@ def check_complete_pipeline(
             "Pipeline completed without a stored analysis ID."
         )
 
-    report_path = Path(result["report_path"])
-    if not report_path.is_file():
-        raise RuntimeError(
-            "Pipeline returned a report path that is not a file."
-        )
     if len(result["evidence_objects"]) != 1:
         raise RuntimeError(
             "Pipeline did not retain exactly one Evidence Object."
@@ -269,29 +263,36 @@ def check_complete_pipeline(
         raise RuntimeError(
             f"Pipeline returned a fatal issue: {result['errors']}"
         )
-    stored = get_analysis(result["analysis_id"])
-    if stored["report_path"] != str(report_path.resolve()):
+    completed = resume_saved_analysis(
+        result["analysis_id"],
+        result["evidence_review_reports"],
+        light_model=settings.LLM_MODEL_LIGHT,
+        strong_model=settings.LLM_MODEL_STRONG,
+    )
+    if completed["workflow_state"] != "completed":
         raise RuntimeError(
-            "Stored analysis does not reference the generated report."
+            "Phase B did not reach completed state."
         )
-    if stored["evidence_objects"] != result["evidence_objects"]:
+    if completed["final_interpretation_report"] is None:
         raise RuntimeError(
-            "Stored analysis did not preserve the Evidence Objects."
+            "Phase B did not create Output B."
         )
 
     print(f"Pipeline status: {result['status']}")
     print(f"Analysis ID: {result['analysis_id']}")
     print(f"Variant: {variant}")
     print(f"HPO terms: {', '.join(phenotypes)}")
-    for stage in result["stages"]:
+    for stage in completed["stages"]:
         print(
             f"{stage['stage']}: {stage['status']} "
             f"({stage['progress_percent']}%)"
         )
-    for warning in result["warnings"]:
+    for warning in completed["warnings"]:
         print(f"Warning: {warning}")
-    print(f"Saved report: {report_path}")
-    print(f"Saved bytes: {len(report_path.read_bytes())}")
+    routing = completed["llm_routing_results"][0]
+    print(f"LLM route: {routing['route']}")
+    print(f"LLM status: {routing['status']}")
+    print("Output B: available")
 
 
 def parse_arguments() -> argparse.Namespace:

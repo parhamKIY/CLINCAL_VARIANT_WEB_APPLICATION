@@ -274,11 +274,19 @@ or Confirmed snapshots remain recoverable.
   input boundary and excluded from public pipeline and LLM payloads.
 - Logs use safe correlation IDs, provider names, timing, retry/outcome metadata, and
   defensive redaction instead of clinical payloads.
+- Human-review notes reject detected phone numbers, government identifiers, email
+  addresses, contextual person names, labelled identifiers, and raw VCF text before
+  storage or LLM use. The same high-risk patterns are redacted from logs.
+- Evidence confirmation requires an explicit no-PHI attestation in the Streamlit UI;
+  saving or resetting a Draft clears the attestation and invalidates confirmation.
 - Human-review state and audit history are bounded and validated before persistence.
 - The application uses verified HTTPS requests and explicit deadlines.
 - Reports are generated locally; PDF/Word export does not make additional provider
   calls.
 - Reviewers must not enter protected health information in free-text notes.
+
+Free-text detection is defense in depth and cannot guarantee de-identification of
+linguistically ambiguous, unlabelled names. Only de-identified evidence may be used.
 
 This is an application-level security baseline, not a claim of production clinical
 compliance. Deployment would require institutional authentication, authorization,
@@ -303,7 +311,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **657 passed, 4 skipped**, with **86.23% coverage**. The Stage 44 acceptance
+baseline is **665 passed, 4 skipped**, with **86.26% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -317,6 +325,19 @@ Live-provider connectivity is intentionally a separate manual activity. A passin
 offline suite proves application contracts and failure handling; it does not prove
 that every external provider is currently available or that external schemas have
 not changed.
+
+The bounded production-client gate validates every active annotation, phenotype,
+population, literature, and configured LLM endpoint:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_live_provider_validation.py
+```
+
+The complete gate passed on **2026-08-08**. GenCC, CSpec, LitVar2, Europe PMC, and
+PubMed returned valid no-match responses for the public probe; all other checked
+providers returned usable evidence or model responses. The ignored JSON summary is
+written to `output/live-provider-validation.json`. This remains a point-in-time
+connectivity/schema result, not a future availability guarantee.
 
 ## 12. Configuration and execution
 
@@ -388,7 +409,7 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 | Privacy, logging, and safe errors | `backend/privacy.py`, `backend/logging_config.py`, `backend/error_handling.py` |
 | Background jobs and refresh recovery | `frontend/execution.py`, `frontend/ui.py` |
 | Report rendering/export | `backend/report_exports.py`, `frontend/report_viewer.py` |
-| Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage44_acceptance.py`, `tests/manual_*.py` |
+| Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage44_acceptance.py`, `tests/run_live_provider_validation.py`, `tests/manual_*.py` |
 
 ## 15. Known limitations and remaining work
 

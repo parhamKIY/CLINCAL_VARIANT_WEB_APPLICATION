@@ -112,6 +112,10 @@ def _invalidate_confirmation(
     ]
     result["final_interpretation_report"] = None
     result["workflow_state"] = "awaiting_confirmation"
+    st.session_state.pop(
+        f"{_REVIEW_WIDGET_PREFIX}privacy_{report_id}",
+        None,
+    )
 
 
 def _persist_review_state(result: PipelineResult) -> bool:
@@ -193,7 +197,9 @@ def _render_editor(
             key=editor_key,
             help=(
                 "Every section is editable. New clinical, laboratory, "
-                "family, or manual evidence fields may be added."
+                "family, or manual evidence fields may be added. Do not "
+                "enter names, contact details, record numbers, or other "
+                "direct identifiers."
             ),
         )
         notes_text = st.text_area(
@@ -201,6 +207,10 @@ def _render_editor(
             value="\n".join(report["reviewer_notes"]),
             height=120,
             key=notes_key,
+            help=(
+                "Do not enter names, contact details, record numbers, "
+                "dates of birth, or other protected health information."
+            ),
         )
         with st.container(horizontal=True):
             save = st.form_submit_button(
@@ -338,9 +348,18 @@ def _render_confirmation(
         "this variant. Stage 35 interpretation routing is available only "
         "after confirmation."
     )
+    privacy_attested = st.checkbox(
+        (
+            "I confirm that this reviewed evidence contains no names, "
+            "contact details, record numbers, dates of birth, or other "
+            "protected health information."
+        ),
+        key=f"{_REVIEW_WIDGET_PREFIX}privacy_{report_id}",
+    )
     if st.button(
         "Confirm evidence",
         key=f"{_REVIEW_WIDGET_PREFIX}confirm_{report_id}",
+        disabled=not privacy_attested,
     ):
         evidence_objects = result.get("evidence_objects", [])
         variant_index = report["variant_index"]

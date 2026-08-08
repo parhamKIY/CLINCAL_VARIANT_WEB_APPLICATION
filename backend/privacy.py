@@ -101,6 +101,20 @@ LABELED_CLINICAL_TEXT_PATTERN = re.compile(
 EMAIL_PATTERN = re.compile(
     r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
 )
+PHONE_PATTERN = re.compile(
+    r"(?<![\w:])(?:\+?\d{1,3}[ .-])?"
+    r"(?:\(?\d{2,4}\)?[ .-]){2,4}\d{2,4}(?!\w)"
+)
+GOVERNMENT_ID_PATTERN = re.compile(
+    r"(?i)\b(?:ssn|social[ _-]?security|national[ _-]?id|"
+    r"passport|identity[ _-]?(?:number|no|id))"
+    r"\s*(?::|=|is)?\s*[A-Z0-9][A-Z0-9 .-]{4,30}\b"
+)
+PERSON_NAME_CONTEXT_PATTERN = re.compile(
+    r"(?i)\b(?:patient|subject|individual|proband|participant)"
+    r"(?:[ _-]?name)?\s*(?::|=|is|was)\s*"
+    r"[A-Z][A-Z'’-]{1,39}(?:\s+[A-Z][A-Z'’-]{1,39}){1,3}\b"
+)
 CLINICAL_PATH_PATTERN = re.compile(
     r"(?i)(?:[A-Z]:[\\/]|/)[^\s\r\n]*"
     r"(?:patient|sample)[^\s\r\n]*"
@@ -210,6 +224,32 @@ def validate_human_review_content(
             "edit_history": edit_history,
         }
     )
+
+    def inspect_free_text(item: object) -> None:
+        if isinstance(item, str):
+            if any(
+                pattern.search(item)
+                for pattern in (
+                    PHONE_PATTERN,
+                    GOVERNMENT_ID_PATTERN,
+                    PERSON_NAME_CONTEXT_PATTERN,
+                )
+            ):
+                raise ClinicalDataPrivacyError(
+                    "Human review content contains prohibited "
+                    "clinical data."
+                )
+        elif isinstance(item, Mapping):
+            for nested in item.values():
+                inspect_free_text(nested)
+        elif (
+            isinstance(item, Sequence)
+            and not isinstance(item, (str, bytes, bytearray))
+        ):
+            for nested in item:
+                inspect_free_text(nested)
+
+    inspect_free_text(reviewer_notes)
     if not isinstance(edit_history, Sequence) or isinstance(
         edit_history,
         (str, bytes, bytearray),
@@ -233,6 +273,8 @@ def validate_human_review_content(
             raise ClinicalDataPrivacyError(
                 "Human review audit data contains prohibited clinical data."
             )
+        if item.get("change_type") in {"added", "modified"}:
+            inspect_free_text(item.get("new_value"))
 
 
 def redact_clinical_text(value: str) -> str:
@@ -246,6 +288,15 @@ def redact_clinical_text(value: str) -> str:
         sanitized,
     )
     sanitized = EMAIL_PATTERN.sub(CLINICAL_REDACTED, sanitized)
+    sanitized = PHONE_PATTERN.sub(CLINICAL_REDACTED, sanitized)
+    sanitized = GOVERNMENT_ID_PATTERN.sub(
+        CLINICAL_REDACTED,
+        sanitized,
+    )
+    sanitized = PERSON_NAME_CONTEXT_PATTERN.sub(
+        CLINICAL_REDACTED,
+        sanitized,
+    )
     return CLINICAL_PATH_PATTERN.sub(CLINICAL_REDACTED, sanitized)
 
 

@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.database import get_analysis
+from backend.database import load_pipeline_state
 from backend.pipeline import PipelineResult, run_analysis
 from config import settings
 
@@ -101,10 +101,8 @@ def _selected_cases(case_name: str) -> list[ManualCase]:
 
 def _validate_live_result(
     result: PipelineResult,
-    *,
-    allow_missing_report: bool,
 ) -> None:
-    """Check the minimum manual acceptance criteria."""
+    """Check the current confirmation-gated Phase A contract."""
 
     if result["status"] not in {"success", "partial"}:
         raise RuntimeError(
@@ -122,33 +120,36 @@ def _validate_live_result(
         raise RuntimeError(
             "The pipeline did not persist the analysis."
         )
-    if result["report_path"] is None and not allow_missing_report:
+    if result["workflow_state"] != "awaiting_confirmation":
         raise RuntimeError(
-            "The pipeline did not create a clinical report."
+            "The pipeline did not pause for human confirmation."
         )
-    if (
-        result["report_path"] is not None
-        and not Path(result["report_path"]).is_file()
-    ):
+    if result["report_path"] is not None:
         raise RuntimeError(
-            "The pipeline report path is not a readable file."
+            "Phase A unexpectedly created a legacy clinical report."
         )
+    if len(result["evidence_review_reports"]) != result["variant_count"]:
+        raise RuntimeError(
+            "Phase A did not create one evidence report per variant."
+        )
+    if result["llm_routing_results"]:
+        raise RuntimeError("The LLM ran before human confirmation.")
 
-    stored = get_analysis(result["analysis_id"])
-    if stored["status"] != result["status"]:
+    stored = load_pipeline_state(result["analysis_id"])
+    if stored["workflow_state"] != "awaiting_confirmation":
         raise RuntimeError(
-            "The retrieved analysis status differs from the result."
+            "The persisted analysis did not retain Draft state."
         )
-    if stored["report_path"] != result["report_path"]:
+    if stored["evidence_review_reports"] != result[
+        "evidence_review_reports"
+    ]:
         raise RuntimeError(
-            "The retrieved analysis report differs from the result."
+            "The persisted analysis did not retain review reports."
         )
 
 
 def _run_case(
     case: ManualCase,
-    *,
-    allow_missing_report: bool,
 ) -> dict[str, object]:
     """Run and summarize one live case without storing raw patient data."""
 
@@ -165,10 +166,7 @@ def _run_case(
         phenotypes=case["phenotypes"],
     )
     elapsed_seconds = perf_counter() - started_at
-    _validate_live_result(
-        result,
-        allow_missing_report=allow_missing_report,
-    )
+    _validate_live_result(result)
 
     return {
         "name": case["name"],
@@ -292,12 +290,7 @@ def main() -> int:
     try:
         for case in _selected_cases(arguments.case):
             print(f"Running case: {case['name']}")
-            summary = _run_case(
-                case,
-                allow_missing_report=(
-                    arguments.timeout_seconds is not None
-                ),
-            )
+            summary = _run_case(case)
             summaries.append(summary)
             print(
                 f"Result: {summary['status']} "
