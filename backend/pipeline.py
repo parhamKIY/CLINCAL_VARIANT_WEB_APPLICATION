@@ -163,6 +163,13 @@ PIPELINE_API_ORDER = (
     "mydisease",
     "llm",
 )
+ANNOTATION_API_ORDER = PIPELINE_API_ORDER[:6]
+ANNOTATION_PROGRESS_START = 35
+ANNOTATION_PROGRESS_END = 49
+PHENOTYPE_API_PROGRESS = {
+    "phen2gene": (52, 54),
+    "mydisease": (56, 59),
+}
 
 
 class AnalysisInput(TypedDict):
@@ -235,6 +242,51 @@ PIPELINE_STAGE_FIELDS = frozenset(
 PIPELINE_API_FIELDS = frozenset(PipelineAPIRecord.__required_keys__)
 PIPELINE_ISSUE_FIELDS = frozenset(PipelineIssue.__required_keys__)
 PIPELINE_RESULT_FIELDS = frozenset(PipelineResult.__required_keys__)
+
+
+def _annotation_api_progress_percent(
+    source: str,
+    status: AnnotationProgressStatus,
+) -> int:
+    """Map each normal annotation API update into the 35-49% range."""
+
+    try:
+        source_index = ANNOTATION_API_ORDER.index(source)
+    except ValueError:
+        return ANNOTATION_PROGRESS_START
+    event_index = source_index * 2 + (1 if status == "running" else 2)
+    event_count = len(ANNOTATION_API_ORDER) * 2
+    progress_span = ANNOTATION_PROGRESS_END - ANNOTATION_PROGRESS_START
+    return ANNOTATION_PROGRESS_START + (
+        event_index * progress_span + event_count // 2
+    ) // event_count
+
+
+def _notify_api_progress(
+    result: PipelineResult,
+    source: str,
+    status: PipelineAPIStatus,
+    callback: PipelineProgressCallback | None,
+) -> None:
+    """Advance and publish the progress assigned to one API update."""
+
+    if source in ANNOTATION_API_ORDER:
+        progress = _annotation_api_progress_percent(
+            source,
+            cast(AnnotationProgressStatus, status),
+        )
+    else:
+        progress_points = PHENOTYPE_API_PROGRESS.get(source)
+        progress = (
+            progress_points[0 if status == "running" else 1]
+            if progress_points is not None
+            else result["progress_percent"]
+        )
+    result["progress_percent"] = max(
+        result["progress_percent"],
+        progress,
+    )
+    _notify_progress(result, callback)
 
 
 def _exact_fields(
@@ -1224,7 +1276,12 @@ def _annotate_and_match(
         message: str,
     ) -> None:
         _set_api_status(result, source, status, message)
-        _notify_progress(result, progress_callback)
+        _notify_api_progress(
+            result,
+            source,
+            cast(PipelineAPIStatus, status),
+            progress_callback,
+        )
 
     annotations = annotate_variants(
         result["variants"],
@@ -1292,6 +1349,12 @@ def _annotate_and_match(
             progress_percent=100,
             message="No HPO phenotypes were supplied.",
         )
+        _notify_api_progress(
+            result,
+            "phen2gene",
+            "skipped",
+            progress_callback,
+        )
     else:
         _set_stage(
             result,
@@ -1337,6 +1400,12 @@ def _annotate_and_match(
                 progress_percent=100,
                 message=message,
             )
+            _notify_api_progress(
+                result,
+                "phen2gene",
+                "skipped",
+                progress_callback,
+            )
         else:
             _set_api_status(
                 result,
@@ -1344,7 +1413,12 @@ def _annotate_and_match(
                 "running",
                 "Submitting the analysis HPO set once to Phen2Gene.",
             )
-            _notify_progress(result, progress_callback)
+            _notify_api_progress(
+                result,
+                "phen2gene",
+                "running",
+                progress_callback,
+            )
             try:
                 phen2gene_result = enrich_with_phen2gene(
                     phenotype_results,
@@ -1369,6 +1443,7 @@ def _annotate_and_match(
                     "error",
                     message,
                 )
+                phen2gene_api_status: PipelineAPIStatus = "error"
                 _record_issue(
                     result,
                     stage="phenotype",
@@ -1419,6 +1494,7 @@ def _annotate_and_match(
                     api_status,
                     phen2gene_result["message"],
                 )
+                phen2gene_api_status = api_status
                 phenotype_message = (
                     "Attached local and Phen2Gene phenotype evidence "
                     f"to {len(phenotype_results)} variants."
@@ -1446,6 +1522,12 @@ def _annotate_and_match(
                 progress_percent=100,
                 message=phenotype_message,
             )
+            _notify_api_progress(
+                result,
+                "phen2gene",
+                phen2gene_api_status,
+                progress_callback,
+            )
 
     _set_api_status(
         result,
@@ -1453,7 +1535,12 @@ def _annotate_and_match(
         "running",
         "Retrieving bounded gene-disease-phenotype context.",
     )
-    _notify_progress(result, progress_callback)
+    _notify_api_progress(
+        result,
+        "mydisease",
+        "running",
+        progress_callback,
+    )
     try:
         mydisease_result = enrich_with_mydisease(
             result["phenotype_results"],
@@ -1484,6 +1571,12 @@ def _annotate_and_match(
             "warning",
             progress_percent=100,
             message=mydisease_message,
+        )
+        _notify_api_progress(
+            result,
+            "mydisease",
+            "error",
+            progress_callback,
         )
     else:
         public_mydisease_results = [
@@ -1563,6 +1656,12 @@ def _annotate_and_match(
                 "Phenotype and Phen2Gene evidence were retained. "
                 f"{mydisease_result['message']}"
             ),
+        )
+        _notify_api_progress(
+            result,
+            "mydisease",
+            mydisease_api_status,
+            progress_callback,
         )
 
     result["current_stage"] = "evidence"

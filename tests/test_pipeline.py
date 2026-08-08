@@ -12749,6 +12749,84 @@ class TestPipelineAnnotationAndPhenotype:
         assert stage_statuses["phenotype"] == "success"
         assert stage_statuses["evidence"] == "pending"
 
+    def test_progress_advances_for_every_annotation_api_update(
+        self,
+    ) -> None:
+        snapshots: list[PipelineResult] = []
+
+        run_analysis(
+            vcf_path=None,
+            manual_variants=_manual_rows("1:100:A:G"),
+            phenotypes=[],
+            annotation_max_retries=0,
+            annotation_session=(
+                TestStage13IntegrationBoundaries._annotation_session()
+            ),  # type: ignore[arg-type]
+            progress_callback=snapshots.append,
+            persist_analysis=False,
+        )
+
+        annotation_progress = [
+            snapshot["progress_percent"]
+            for snapshot in snapshots
+            if snapshot["current_stage"] == "annotation"
+            and snapshot["progress_percent"] >= 35
+        ]
+        assert annotation_progress == [
+            35,
+            36,
+            37,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            46,
+            47,
+            48,
+            49,
+        ]
+        assert all(
+            later > earlier
+            for earlier, later in zip(
+                annotation_progress,
+                annotation_progress[1:],
+            )
+        )
+
+    def test_progress_advances_for_phenotype_api_updates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        snapshots: list[PipelineResult] = []
+
+        run_analysis(
+            vcf_path=None,
+            manual_variants=_manual_rows("1:100:A:G"),
+            phenotypes=["HP:0001250"],
+            annotation_max_retries=0,
+            annotation_session=(
+                TestStage13IntegrationBoundaries._annotation_session()
+            ),  # type: ignore[arg-type]
+            ontology_path=TestPhenotype._write_hpo_fixture(tmp_path),
+            associations_path=(
+                TestPhenotype._write_hpo_gene_fixture(tmp_path)
+            ),
+            phen2gene_max_retries=0,
+            phen2gene_session=_successful_phen2gene_session(),
+            phen2gene_use_cache=False,
+            progress_callback=snapshots.append,
+            persist_analysis=False,
+        )
+
+        phenotype_progress = [
+            snapshot["progress_percent"]
+            for snapshot in snapshots
+            if 50 <= snapshot["progress_percent"] <= 60
+        ]
+        assert phenotype_progress == [50, 52, 54, 56, 59, 60]
+
     def test_phen2gene_failure_isolated_from_local_phenotype_results(
         self,
         tmp_path: Path,
