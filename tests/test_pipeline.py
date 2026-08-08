@@ -160,6 +160,16 @@ from backend.phenotype_selection import (
     accept_hpo_candidates,
     validate_hpo_candidates,
 )
+from backend.variant_interpretation import (
+    MAX_INTERPRETATION_CHARACTERS,
+    VARIANT_INTERPRETATION_PROMPT_VERSION,
+    VARIANT_INTERPRETATION_RESPONSE_SCHEMA,
+    VARIANT_INTERPRETATION_SCHEMA_VERSION,
+    VariantInterpretationError,
+    interpret_variant,
+    interpret_variants,
+    validate_variant_interpretation_result,
+)
 from backend.pipeline import (
     PIPELINE_API_ORDER,
     PIPELINE_SCHEMA_VERSION,
@@ -530,6 +540,11 @@ class TestConfiguration:
                 "PHENOTYPE_EXTRACTION_MAX_TOKENS",
                 4_001,
                 "cannot exceed 4000",
+            ),
+            (
+                "VARIANT_INTERPRETATION_MAX_TOKENS",
+                8_001,
+                "cannot exceed 8000",
             ),
             (
                 "GENOME_ASSEMBLY",
@@ -10248,6 +10263,316 @@ class TestStage48HPOCandidateAcceptance:
     ) -> None:
         with pytest.raises(PhenotypeSelectionError, match="sequence"):
             validate_hpo_candidates(value)
+
+
+class TestStage50SingleModelInterpretation:
+    """Verify route-free interpretation with preserved conflict context."""
+
+    @staticmethod
+    def _response(
+        payload: object,
+        *,
+        finish_reason: str | None = "stop",
+        model: str = "variant-model",
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=(
+                payload
+                if isinstance(payload, str)
+                else json.dumps(payload, ensure_ascii=False)
+            ),
+            model=model,
+            finish_reason=finish_reason,
+            usage=LLMUsage(
+                input_tokens=100,
+                output_tokens=40,
+                total_tokens=140,
+            ),
+        )
+
+    @staticmethod
+    def _payload(
+        *,
+        conflict_assessment: str = "No meaningful conflict is present.",
+    ) -> dict[str, object]:
+        return {
+            "interpretation": (
+                "The supplied source evidence supports cautious review."
+            ),
+            "conflict_assessment": conflict_assessment,
+            "warnings": ["Human review remains required."],
+        }
+
+    @staticmethod
+    def _conflicting_evidence() -> dict[str, object]:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        pathogenicity = evidence["pathogenicity"]
+        assert isinstance(pathogenicity, dict)
+        pathogenicity["automated_acmg_classification"] = "Benign"
+        annotations = evidence["annotations"]
+        assert isinstance(annotations, dict)
+        annotations["genebe"] = {
+            "review_status": "criteria provided, single submitter",
+        }
+        conflict_audit = evidence["conflict_audit"]
+        assert isinstance(conflict_audit, dict)
+        conflict_audit["pre_review"] = audit_evidence_conflicts(
+            evidence,
+            phase="pre_review",
+        )
+        return evidence
+
+    def test_valid_result_uses_bounded_structured_contract(self) -> None:
+        adapter = FakeLLMAdapter(self._response(self._payload()))
+        result = interpret_variant(
+            TestEvidenceObject._complete_evidence_object(),
+            variant_index=3,
+            client=LLMClient(adapter),
+            timestamp="2026-08-08T10:00:00Z",
+        )
+
+        assert result == {
+            "schema_version": VARIANT_INTERPRETATION_SCHEMA_VERSION,
+            "variant_index": 3,
+            "variant": {
+                "chrom": "2",
+                "pos": 166848215,
+                "ref": "C",
+                "alt": "T",
+            },
+            "status": "success",
+            "prompt_version": VARIANT_INTERPRETATION_PROMPT_VERSION,
+            "prompt_mode": "standard",
+            "conflict_status": "no_conflict",
+            "conflict_severity": "none",
+            "provider": settings.LLM_PROVIDER,
+            "configured_model": settings.VARIANT_INTERPRETATION_MODEL,
+            "response_model": "variant-model",
+            "interpretation": (
+                "The supplied source evidence supports cautious review."
+            ),
+            "conflict_assessment": "No meaningful conflict is present.",
+            "warnings": ["Human review remains required."],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 40,
+                "total_tokens": 140,
+            },
+            "generated_at": "2026-08-08T10:00:00Z",
+            "error_type": None,
+        }
+        request = adapter.requests[0]
+        assert request.temperature == 0.0
+        assert request.max_tokens == settings.VARIANT_INTERPRETATION_MAX_TOKENS
+        assert request.response_format is VARIANT_INTERPRETATION_RESPONSE_SCHEMA
+        assert "Do not add URLs" in request.messages[0].content
+        assert "Human review is required" in request.messages[0].content
+        assert "BEGIN_VALIDATED_EVIDENCE_OBJECT" in (
+            request.messages[1].content
+        )
+
+    def test_conflict_and_no_conflict_use_exact_same_selected_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        observed: list[dict[str, object]] = []
+
+        def fake_call_llm(*args: object, **kwargs: object) -> LLMResponse:
+            observed.append({"args": args, **kwargs})
+            return self._response(
+                self._payload(
+                    conflict_assessment=(
+                        "The supplied classifications disagree and remain "
+                        "unresolved."
+                    )
+                ),
+                model="provider-returned-model",
+            )
+
+        monkeypatch.setattr(
+            "backend.variant_interpretation.call_llm",
+            fake_call_llm,
+        )
+        results = interpret_variants(
+            [
+                TestEvidenceObject._complete_evidence_object(),
+                self._conflicting_evidence(),
+            ],
+            model="one-selected-interpretation-model",
+            timestamp="2026-08-08T10:00:00Z",
+        )
+
+        assert [item["status"] for item in results] == ["success", "success"]
+        assert [item["prompt_mode"] for item in results] == [
+            "standard",
+            "conflict_aware",
+        ]
+        assert [item["conflict_severity"] for item in results] == [
+            "none",
+            "major",
+        ]
+        assert {
+            item["configured_model"] for item in results
+        } == {"one-selected-interpretation-model"}
+        assert [call["model"] for call in observed] == [
+            "one-selected-interpretation-model",
+            "one-selected-interpretation-model",
+        ]
+        assert all(
+            call["response_format"] is VARIANT_INTERPRETATION_RESPONSE_SCHEMA
+            for call in observed
+        )
+        assert "LLM-1" not in str(observed)
+        assert "LLM-2" not in str(observed)
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ("not-json", "not valid JSON"),
+            (
+                {
+                    "interpretation": "Text",
+                    "conflict_assessment": "None",
+                },
+                "invalid fields",
+            ),
+            (
+                {
+                    "interpretation": "Text",
+                    "conflict_assessment": "None",
+                    "warnings": [],
+                    "route": "llm_1",
+                },
+                "invalid fields",
+            ),
+            (
+                {
+                    "interpretation": "x"
+                    * (MAX_INTERPRETATION_CHARACTERS + 1),
+                    "conflict_assessment": "None",
+                    "warnings": [],
+                },
+                "size limit",
+            ),
+            (
+                {
+                    "interpretation": "See https://invented.example",
+                    "conflict_assessment": "None",
+                    "warnings": [],
+                },
+                "must not contain URLs",
+            ),
+            (
+                {
+                    "interpretation": "Text",
+                    "conflict_assessment": "None",
+                    "warnings": ["Repeated", "Repeated"],
+                },
+                "must be unique",
+            ),
+        ],
+    )
+    def test_malformed_response_is_rejected(
+        self,
+        payload: object,
+        message: str,
+    ) -> None:
+        with pytest.raises(VariantInterpretationError, match=message):
+            interpret_variant(
+                TestEvidenceObject._complete_evidence_object(),
+                client=LLMClient(
+                    FakeLLMAdapter(self._response(payload))
+                ),
+            )
+
+    def test_incomplete_response_is_rejected(self) -> None:
+        with pytest.raises(
+            VariantInterpretationError,
+            match="did not finish safely",
+        ):
+            interpret_variant(
+                TestEvidenceObject._complete_evidence_object(),
+                client=LLMClient(
+                    FakeLLMAdapter(
+                        self._response(
+                            self._payload(),
+                            finish_reason="length",
+                        )
+                    )
+                ),
+            )
+
+    def test_prohibited_evidence_is_rejected_before_llm(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        annotations = evidence["annotations"]
+        assert isinstance(annotations, dict)
+        annotations["genebe"] = {
+            "raw_api_payload": "patient_id: secret",
+        }
+        adapter = FakeLLMAdapter(self._response(self._payload()))
+
+        with pytest.raises(
+            VariantInterpretationError,
+            match="prohibited from LLM processing",
+        ):
+            interpret_variant(evidence, client=LLMClient(adapter))
+
+        assert adapter.requests == []
+
+    def test_provider_failure_is_isolated_and_order_is_stable(self) -> None:
+        response = self._response(self._payload())
+        adapter = SequenceLLMAdapter(
+            [
+                response,
+                LLMRequestError("provider unavailable"),
+                response,
+            ]
+        )
+        progress: list[tuple[int, int, str]] = []
+        evidence = TestEvidenceObject._complete_evidence_object()
+
+        results = interpret_variants(
+            [evidence, deepcopy(evidence), deepcopy(evidence)],
+            client=LLMClient(adapter),
+            timestamp="2026-08-08T10:00:00Z",
+            progress_callback=lambda index, total, status: progress.append(
+                (index, total, status)
+            ),
+        )
+
+        assert [item["variant_index"] for item in results] == [0, 1, 2]
+        assert [item["status"] for item in results] == [
+            "success",
+            "failed",
+            "success",
+        ]
+        assert results[1]["error_type"] == "LLMRequestError"
+        assert results[1]["interpretation"] is None
+        assert len(adapter.requests) == 3
+        assert progress == [
+            (1, 3, "running"),
+            (1, 3, "success"),
+            (2, 3, "running"),
+            (2, 3, "failed"),
+            (3, 3, "running"),
+            (3, 3, "success"),
+        ]
+
+    def test_result_validator_rejects_obsolete_route_semantics(self) -> None:
+        result = interpret_variant(
+            TestEvidenceObject._complete_evidence_object(),
+            client=LLMClient(
+                FakeLLMAdapter(self._response(self._payload()))
+            ),
+        )
+        invalid = dict(result)
+        invalid["route"] = "llm_1"
+
+        with pytest.raises(
+            VariantInterpretationError,
+            match="invalid fields",
+        ):
+            validate_variant_interpretation_result(invalid)
 
 
 class TestClinicalReportContract:

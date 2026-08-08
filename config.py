@@ -172,6 +172,8 @@ class Settings:
         "LLM_MODEL"
     )
 
+    # Deprecated Stage 44 compatibility settings. New interpretation work uses
+    # VARIANT_INTERPRETATION_MODEL exclusively.
     LLM_MODEL_LIGHT: str = os.getenv(
         "LLM_MODEL_LIGHT",
         LLM_MODEL,
@@ -195,6 +197,11 @@ class Settings:
     PHENOTYPE_EXTRACTION_MAX_TOKENS: int = _get_positive_int(
         "PHENOTYPE_EXTRACTION_MAX_TOKENS",
         800,
+    )
+
+    VARIANT_INTERPRETATION_MAX_TOKENS: int = _get_positive_int(
+        "VARIANT_INTERPRETATION_MAX_TOKENS",
+        2_000,
     )
 
     LLM_TIMEOUT: int = _get_positive_int(
@@ -639,6 +646,11 @@ class Settings:
         if cls.PHENOTYPE_EXTRACTION_MAX_TOKENS > 4_000:
             raise RuntimeError(
                 "PHENOTYPE_EXTRACTION_MAX_TOKENS cannot exceed 4000."
+            )
+
+        if cls.VARIANT_INTERPRETATION_MAX_TOKENS > 8_000:
+            raise RuntimeError(
+                "VARIANT_INTERPRETATION_MAX_TOKENS cannot exceed 8000."
             )
 
         if not isinstance(cls.ENABLE_GNOMAD_DEEP_LOOKUP, bool) or not isinstance(

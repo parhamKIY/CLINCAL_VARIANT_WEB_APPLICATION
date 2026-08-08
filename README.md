@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_49_UI_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_50_contract_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-728_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-86.01%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-741_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.83%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -41,12 +41,15 @@ its original input order.
   and offline-verified.
 - Stage 49 UI layout and task-specific model controls are implemented and
   offline-verified.
-- Stage 50 single-model interpretation contract is the next bounded milestone.
+- Stage 50 single-model, conflict-aware variant interpretation contract is
+  implemented and offline-verified.
+- Stage 51 interpretation-before-final-review pipeline refactor is the next bounded
+  milestone.
 - Pipeline schema: `2.3`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **728 passed, 4 skipped; 86.01% coverage**.
+- Current verified suite: **741 passed, 4 skipped; 85.83% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -59,8 +62,9 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-49 have implemented the expanded input boundary, isolated human-reviewed
-phenotype extraction, and task-specific UI model controls; later items remain planned:
+Stages 46-50 have implemented the expanded input boundary, isolated human-reviewed
+phenotype extraction, task-specific UI model controls, and the route-free
+interpretation contract; later items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -111,8 +115,24 @@ then **Variant input**. Separate selectors configure one Phenotype Extraction Mo
 and one Variant Interpretation Model; provider-advertised and custom model IDs remain
 available. Phenotype extraction receives only the phenotype model. The selected
 variant model is forwarded for every current interpretation request, while the legacy
-route records and prompt mechanics remain until Stages 50-51 replace them. Conflict
-status no longer selects a different model in the UI.
+route records and prompt mechanics remain active only until Stage 51 connects the
+Stage 50 contract. Conflict status no longer selects a different model in the UI.
+
+### Stage 50 single-model interpretation contract
+
+`backend/variant_interpretation.py` accepts one validated, sanitized Evidence Object
+per variant and calls the same selected Variant Interpretation Model regardless of
+conflict state. The deterministic pre-review audit remains in the prompt and result
+provenance. Meaningful conflict changes only the bounded instruction mode; it never
+changes the selected model.
+
+Responses must satisfy a strict route-free JSON schema containing interpretation,
+conflict assessment, and warnings. The contract records model and prompt provenance,
+conflict status/severity, completion state, token usage, and explicit isolated
+failures while preserving variant order. It rejects obsolete `LLM-1`/`LLM-2` route
+fields, malformed or incomplete responses, unsafe evidence, invented response URLs,
+and unbounded text. Stage 50 does not move the active Stage 44 pipeline; Stage 51 will
+connect this contract before final human review.
 
 ## Current implemented workflow (legacy Stage 44 baseline)
 
@@ -430,7 +450,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-728 passed, 4 skipped
+741 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -448,7 +468,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **86.01%**.
+Current measured coverage is **85.83%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -543,10 +563,12 @@ clinical_variant_app/
 │   ├── llm_routing.py            # LLM-1/LLM-2 routing
 │   ├── mydisease.py
 │   ├── phenotype.py              # HPO and Phen2Gene
+│   ├── phenotype_llm.py          # Bounded phenotype-extraction contract
 │   ├── pipeline.py               # Phase A/Phase B orchestration
 │   ├── privacy.py
 │   ├── report.py
-│   └── report_exports.py
+│   ├── report_exports.py
+│   └── variant_interpretation.py # Single-model interpretation contract
 ├── frontend/
 │   ├── evidence_review.py
 │   ├── execution.py              # Background jobs and refresh recovery
@@ -575,8 +597,9 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-49 are implemented; interpretation routing/report mechanics remain on
-  Stage 44 behavior until Stages 50–62 are implemented.
+- Stages 46-50 are implemented; the Stage 50 contract is not yet connected to the
+  active workflow, whose interpretation/report mechanics remain on Stage 44 behavior
+  until the Stage 51 pipeline refactor.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before Phase B.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -601,4 +624,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 50 handoff.
+- current limitations and the Stage 51 handoff.

@@ -1,4 +1,9 @@
-"""Stage 35 deterministic routing across two logical LLM roles."""
+"""Deprecated Stage 35 dual routing retained for Stage 44 compatibility.
+
+New analyses must use ``backend.variant_interpretation``. This module remains
+available only until the Stage 51 orchestration migration can retire the legacy
+persisted-workflow path safely.
+"""
 
 from __future__ import annotations
 

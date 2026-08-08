@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 49 task-specific model UI implemented on the Stage 44 interpretation backend
+**Implementation status:** Stage 50 single-model interpretation contract implemented; Stage 44 orchestration remains active pending Stage 51
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 50 single-model interpretation contract
+**Next implementation milestone:** Stage 51 interpretation-before-final-review pipeline refactor
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -130,9 +130,32 @@ The selected phenotype model is passed only to the Stage 47 extraction task. The
 selected variant model is forwarded as both compatibility arguments to the current
 Stage 44 interpretation backend, so conflict status cannot select a different model
 through the Stage 49 UI. Legacy route records, route-specific prompt contracts, and
-the old report lifecycle remain implementation facts until Stages 50-51 replace that
-backend behavior. Changing either task model invalidates stale analysis output and
-unaccepted phenotype suggestions.
+the old report lifecycle remain deprecated compatibility facts until Stage 51
+connects the Stage 50 contract. Changing either task model invalidates stale analysis
+output and unaccepted phenotype suggestions.
+
+### Stage 50 single-model interpretation contract
+
+`backend/variant_interpretation.py` defines the new route-free interpretation
+boundary. Each validated and sanitized Evidence Object is sent to exactly one
+selected `VARIANT_INTERPRETATION_MODEL`. Conflict-free and conflict-containing
+variants therefore use the same model. The deterministic pre-review conflict audit
+is retained as bounded context and provenance; meaningful conflict changes only the
+prompt instruction mode, not model selection.
+
+The strict structured response contains only `interpretation`,
+`conflict_assessment`, and bounded `warnings`. The validated result carries stable
+variant identity and order, prompt version/mode, conflict status/severity, configured
+and returned models, token usage, timestamp, and explicit failure state. Obsolete
+`LLM-1`, `LLM-2`, and route fields are rejected. Unsafe evidence, incomplete or
+malformed model output, response URLs, invalid controls, and oversized content fail
+closed. Batch calls isolate provider/model failures without changing the selected
+model for later variants.
+
+`VARIANT_INTERPRETATION_MAX_TOKENS` is independently bounded in centralized
+configuration. Stage 50 intentionally does not alter persistence or the active
+Stage 44 review/confirmation ordering; Stage 51 owns integration of this contract
+before final human review.
 
 ## 3. Progress schematic
 
@@ -150,12 +173,13 @@ flowchart LR
     J --> K["Stage 47: phenotype-extraction contract"]
     K --> L["Stage 48: local HPO acceptance"]
     L --> M["Stage 49: task-specific model UI"]
-    M --> N["Stages 50-62: V3 redesign - pending"]
+    M --> N["Stage 50: single-model interpretation contract"]
+    N --> O["Stages 51-62: remaining V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M done
-    class N review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N done
+    class O review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -218,7 +242,8 @@ their original order.
 | 47 | Added a dedicated de-identified Persian text to structured HPO-candidate LLM contract, separate phenotype/interpretation model settings, strict response validation, and isolated failures. | Complete |
 | 48 | Added local ontology validation for every model suggestion, canonical ID/label resolution, editable candidate review, atomic explicit acceptance, and manual-path failure isolation. | Complete |
 | 49 | Reordered the Streamlit input flow, added separate task-specific model selectors, connected phenotype extraction to its selected model, and removed conflict-based model choice from the UI. | Complete |
-| 50–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 50 | Added a strict single-model variant interpretation contract with conflict-aware prompt context, route-free provenance, bounded response validation, and per-variant failure isolation. | Complete |
+| 51–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture (legacy Stage 44 baseline)
 
@@ -414,7 +439,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **728 passed, 4 skipped**, with **86.01% coverage**. The Stage 44 acceptance
+baseline is **741 passed, 4 skipped**, with **85.83% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -453,7 +478,8 @@ Required configuration includes `GENOME_ASSEMBLY`, `LLM_PROVIDER`, `LLM_BASE_URL
 `PHENOTYPE_EXTRACTION_MODEL`, `VARIANT_INTERPRETATION_MODEL`, and bounded
 `PHENOTYPE_EXTRACTION_MAX_TOKENS` settings. Stage 49 exposes the two task settings
 as independent UI selectors and removes the legacy route selectors from the input
-flow. Provider base URLs, timeouts, retry limits,
+flow. Stage 50 adds the independently bounded
+`VARIANT_INTERPRETATION_MAX_TOKENS` setting. Provider base URLs, timeouts, retry limits,
 cache limits, enrichment limits, HPO release locations, database location, upload and
 report paths, and feature flags are centralized in `config.py` and documented by
 `.env.example`.
@@ -510,6 +536,7 @@ the non-diagnostic disclaimer.
 | HPO and Phen2Gene | `backend/phenotype.py` |
 | Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
 | Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
+| Single-model interpretation contract | `backend/variant_interpretation.py`, `backend/llm.py`, `backend/conflict_auditor.py`, `backend/privacy.py`, `config.py` |
 | MyDisease context | `backend/mydisease.py` |
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
@@ -527,9 +554,9 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-49 are implemented, but route-specific prompt/result contracts and the
-   report lifecycle remain on the Stage 44 workflow until Stages 50–62 are implemented
-   and verified.
+1. Stages 46-50 are implemented. The Stage 50 route-free contract is isolated and
+   verified, but active orchestration, persistence, and report lifecycle remain on
+   the Stage 44 workflow until the Stage 51 pipeline refactor is implemented.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -555,5 +582,6 @@ into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel i
 plus the centralized ten-variant boundary, Stage 47 implemented the isolated bounded
 phenotype-extraction LLM contract, Stage 48 added local ontology validation and
 explicit acceptance, and Stage 49 implemented the task-specific model selectors and
-accepted input layout. The correct next action is Stage 50: replace the legacy
-route-specific interpretation contract with one Variant Interpretation Model path.
+accepted input layout. Stage 50 added and verified the route-free, single Variant
+Interpretation Model contract while preserving conflict as prompt context. The
+correct next action is Stage 51: integrate interpretation before final human review.
