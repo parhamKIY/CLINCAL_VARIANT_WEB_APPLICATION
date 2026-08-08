@@ -272,6 +272,13 @@ class LLMHTTPSession(Protocol):
     ) -> requests.Response:
         """Send one HTTP POST request."""
 
+    def get(
+        self,
+        url: str,
+        **kwargs: object,
+    ) -> requests.Response:
+        """Send one HTTP GET request."""
+
 
 class OpenAICompatibleAdapter:
     """Translate the neutral contract to OpenAI-compatible chat HTTP."""
@@ -323,10 +330,61 @@ class OpenAICompatibleAdapter:
         self._endpoint = (
             f"{base_url.strip().rstrip('/')}/chat/completions"
         )
+        self._models_endpoint = f"{base_url.strip().rstrip('/')}/models"
         self._api_key = api_key.strip()
         self._model = model.strip()
         self._timeout = timeout
         self._session = session or requests
+
+    def list_models(self) -> tuple[str, ...]:
+        """Return validated model identifiers advertised by the provider."""
+
+        try:
+            response = self._session.get(
+                self._models_endpoint,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Accept": "application/json",
+                },
+                timeout=min(float(self._timeout), 5.0),
+                verify=True,
+            )
+        except requests.Timeout as exc:
+            raise LLMTimeoutError(
+                "The LLM model catalog request timed out."
+            ) from exc
+        except requests.RequestException as exc:
+            raise LLMRequestError(
+                "Could not load the LLM provider model catalog."
+            ) from exc
+        self._raise_for_status(response)
+        try:
+            payload = response.json()
+        except (requests.JSONDecodeError, ValueError) as exc:
+            raise LLMResponseError(
+                "The LLM provider model catalog returned invalid JSON."
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise LLMResponseError(
+                "The LLM provider model catalog must be a JSON object."
+            )
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise LLMResponseError(
+                "The LLM provider model catalog has no valid data list."
+            )
+        models: list[str] = []
+        for item in data[:500]:
+            if not isinstance(item, Mapping):
+                continue
+            model_id = item.get("id")
+            if (
+                isinstance(model_id, str)
+                and 0 < len(model_id.strip()) <= 200
+                and all(ord(character) >= 32 for character in model_id)
+            ):
+                models.append(model_id.strip())
+        return tuple(dict.fromkeys(models))
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         """Execute and standardize one non-streaming chat completion."""
@@ -539,6 +597,22 @@ def get_default_llm_client(
             timeout=settings.LLM_TIMEOUT,
         )
     )
+
+
+def get_available_llm_models() -> tuple[str, ...]:
+    """Load the current model catalog from the configured provider."""
+
+    if settings.LLM_PROVIDER != "openai_compatible":
+        raise LLMConfigurationError(
+            f"Unsupported LLM_PROVIDER '{settings.LLM_PROVIDER}'."
+        )
+    adapter = OpenAICompatibleAdapter(
+        base_url=settings.LLM_BASE_URL,
+        api_key=settings.LLM_API_KEY,
+        model=settings.LLM_MODEL,
+        timeout=settings.LLM_TIMEOUT,
+    )
+    return adapter.list_models()
 
 
 def call_llm(

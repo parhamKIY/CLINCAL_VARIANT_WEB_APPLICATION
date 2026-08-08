@@ -7,7 +7,7 @@ import json
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
@@ -34,6 +34,11 @@ _NCBI_RATE_LOCK = Lock()
 _LAST_NCBI_REQUEST_AT = 0.0
 _GNOMAD_RATE_LOCK = Lock()
 _LAST_GNOMAD_REQUEST_AT = 0.0
+EnrichmentProgressCallback = Callable[
+    [int, int, str, str],
+    None,
+]
+ProviderProgressCallback = Callable[[str, str], None]
 
 GNOMAD_VARIANT_QUERY = """
 query Variant($variantId: String!, $dataset: DatasetId!) {
@@ -1525,12 +1530,18 @@ def fetch_literature_evidence(
     candidate: Mapping[str, object],
     *,
     session: requests.Session | None = None,
+    progress_callback: ProviderProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Fetch LitVar2 citations with failure-only bounded fallbacks."""
 
     if not isinstance(candidate, Mapping):
         raise ConditionalEnrichmentError("Candidate must be a mapping.")
     result = _empty_literature("unavailable")
+
+    def notify(provider: str, status: str) -> None:
+        if progress_callback is not None:
+            progress_callback(provider, status)
+
     identifiers, gene = _candidate_identifiers(candidate)
     query = _pubmed_query(candidate, identifiers, gene)
     result["query_basis"] = [
@@ -1547,6 +1558,8 @@ def fetch_literature_evidence(
                 failure_reason="insufficient_query_identifiers",
             )
         result["failure_reason"] = "insufficient_query_identifiers"
+        for name in ("litvar", "europe_pmc", "pubmed"):
+            notify(name, "missing_identifier")
         return result
 
     owns_session = session is None
@@ -1555,6 +1568,7 @@ def fetch_literature_evidence(
     litvar_failed = False
     litvar_http_status: int | None = None
     if identifiers:
+        notify("litvar", "running")
         autocomplete_query = (
             f"{gene} {identifiers[0]}" if gene else identifiers[0]
         )
@@ -1676,10 +1690,12 @@ def fetch_literature_evidence(
             retrieved_at=result["retrieved_at"],
             failure_reason="missing_variant_identifier",
         )
+    notify("litvar", str(result["providers"]["litvar"]["status"]))
 
     europe_failed = False
     europe_http_status: int | None = None
     if litvar_failed and query is not None:
+        notify("europe_pmc", "running")
         europe_url = f"{settings.EUROPE_PMC_BASE_URL}/search"
         try:
             europe_payload, europe_status, _ = _request_json(
@@ -1768,8 +1784,13 @@ def fetch_literature_evidence(
                 failure_reason="insufficient_query_identifiers",
             )
         )
+    notify(
+        "europe_pmc",
+        str(result["providers"]["europe_pmc"]["status"]),
+    )
 
     if europe_failed and query is not None:
+        notify("pubmed", "running")
         search_url = f"{settings.PUBMED_BASE_URL}/esearch.fcgi"
         pubmed_pmids: list[str] = []
         pubmed_http_status: int | None = None
@@ -1878,6 +1899,7 @@ def fetch_literature_evidence(
                 provider["status"] = "partial"
                 provider["response_status"] = "partial"
                 provider["failure_reason"] = "metadata_unavailable"
+    notify("pubmed", str(result["providers"]["pubmed"]["status"]))
     if owns_session:
         client.close()
 
@@ -2055,6 +2077,7 @@ def enrich_conditionally(
     *,
     population_session: requests.Session | None = None,
     literature_session: requests.Session | None = None,
+    progress_callback: EnrichmentProgressCallback | None = None,
 ) -> ConditionalEnrichmentResult:
     """Enrich only triggered variants without changing their order."""
 
@@ -2076,6 +2099,7 @@ def enrich_conditionally(
     litvar_statuses: list[str] = []
     europe_pmc_statuses: list[str] = []
     pubmed_statuses: list[str] = []
+    total_steps = max(1, len(candidate_items) * 4)
     for index, (candidate, evidence) in enumerate(
         zip(candidate_items, evidence_items, strict=True)
     ):
@@ -2140,9 +2164,41 @@ def enrich_conditionally(
             litvar_statuses.append("not_triggered")
             europe_pmc_statuses.append("not_triggered")
             pubmed_statuses.append("not_triggered")
+            if progress_callback is not None:
+                progress_callback(
+                    index * 4 + 1,
+                    total_steps,
+                    "population evidence",
+                    "not_triggered",
+                )
+                progress_callback(
+                    index * 4 + 2,
+                    total_steps,
+                    "LitVar",
+                    "not_triggered",
+                )
+                progress_callback(
+                    index * 4 + 3,
+                    total_steps,
+                    "Europe PMC",
+                    "not_triggered",
+                )
+                progress_callback(
+                    index * 4 + 4,
+                    total_steps,
+                    "PubMed",
+                    "not_triggered",
+                )
             continue
 
         if population_needed:
+            if progress_callback is not None:
+                progress_callback(
+                    index * 4 + 1,
+                    total_steps,
+                    "population evidence",
+                    "running",
+                )
             population = fetch_gnomad_evidence(
                 item,
                 session=population_session,
@@ -2159,10 +2215,36 @@ def enrich_conditionally(
                 population["warnings"] = [
                     "gnomAD deep lookup is disabled by configuration."
                 ]
+        if progress_callback is not None:
+            progress_callback(
+                index * 4 + 1,
+                total_steps,
+                "population evidence",
+                str(population["status"]),
+            )
         if literature_needed:
+            def notify_literature_provider(
+                provider: str,
+                status: str,
+            ) -> None:
+                if progress_callback is None:
+                    return
+                offset = {
+                    "litvar": 2,
+                    "europe_pmc": 3,
+                    "pubmed": 4,
+                }[provider]
+                progress_callback(
+                    index * 4 + offset,
+                    total_steps,
+                    provider,
+                    status,
+                )
+
             literature = fetch_literature_evidence(
                 item,
                 session=literature_session,
+                progress_callback=notify_literature_provider,
             )
         else:
             literature = _empty_literature("not_triggered")
@@ -2173,6 +2255,17 @@ def enrich_conditionally(
                 literature["warnings"] = [
                     "Literature enrichment is disabled by configuration."
                 ]
+            if progress_callback is not None:
+                for offset, provider in enumerate(
+                    ("litvar", "europe_pmc", "pubmed"),
+                    start=2,
+                ):
+                    progress_callback(
+                        index * 4 + offset,
+                        total_steps,
+                        provider,
+                        "not_triggered",
+                    )
         litvar_status = literature["providers"]["litvar"]["status"]
         europe_pmc_status = literature["providers"][
             "europe_pmc"

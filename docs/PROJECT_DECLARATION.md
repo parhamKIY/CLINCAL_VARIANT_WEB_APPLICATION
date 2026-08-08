@@ -157,6 +157,8 @@ flowchart TD
 The normal progress stream reports `vep`, `genebe`, `myvariant`, `clinvar`,
 `clingen`, `cspec`, `phen2gene`, `mydisease`, and `llm`. Annotation progress is
 updated on each provider start/completion event instead of remaining fixed at 35%.
+Conditional population/literature work reports each variant step, and Phase B
+reports every individual LLM request.
 
 ## 6. External API and data-source catalog
 
@@ -261,8 +263,10 @@ Long analyses execute in cancellable background jobs. The browser stores only an
 opaque, unguessable recovery token. A page refresh reconnects to an active in-process
 job; when the job has completed and the result was persisted, the UI reloads it from
 SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
-A process/server restart cannot resume an in-flight Python thread, but persisted Draft
-or Confirmed snapshots remain recoverable.
+A private one-hour checkpoint stores normalized variants and HPO terms, never raw VCF
+content. After a process/server restart, the same token reruns interrupted Phase A work
+from that sanitized checkpoint. Persisted Draft or Confirmed snapshots remain
+recoverable without rerunning.
 
 ## 9. Privacy, security, and audit position
 
@@ -311,7 +315,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **665 passed, 4 skipped**, with **86.26% coverage**. The Stage 44 acceptance
+baseline is **667 passed, 4 skipped**, with **85.80% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -422,8 +426,9 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 5. GeneBe automated ACMG results are retained as source evidence, not adopted as a
    final application classification.
 6. Human review is required for every variant before Phase B.
-7. In-flight jobs survive a browser refresh only while the application process remains
-   alive. A production queue would be required for restart-resilient execution.
+7. Local restart recovery reruns Phase A from a sanitized checkpoint; it does not resume
+   the exact interrupted HTTP call. A durable distributed queue would still be required
+   for multi-instance production execution.
 8. SQLite is suitable for the current bounded single-application workflow, not a
    production multi-user clinical deployment.
 9. Interpretation quality still depends on upstream data quality, evidence currency,

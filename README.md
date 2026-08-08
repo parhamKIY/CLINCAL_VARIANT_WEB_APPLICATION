@@ -8,8 +8,8 @@ two-layer LLM routing.
 [![Status](https://img.shields.io/badge/status-Stage_44_accepted-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-665_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-86.26%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-667_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.80%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -37,7 +37,7 @@ its original input order.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **665 passed, 4 skipped; 86.26% coverage**.
+- Current verified suite: **667 passed, 4 skipped; 85.80% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -176,6 +176,10 @@ The interface exposes separate model selectors:
   conflict remains;
 - **LLM-2:** a stronger model for interpreting meaningful evidence conflicts.
 
+The selectors start with the `.env` defaults. The user can load the current
+provider `/models` catalog through a bounded five-minute cache or enter another
+provider-supported model ID; no speculative model list is hardcoded.
+
 Only a bounded, confirmed Reviewed Evidence Package can reach the LLM. Raw VCF
 content, sample data, and unconfirmed drafts are excluded. A failed model call
 affects only its variant and can be retried without losing confirmed evidence
@@ -206,7 +210,8 @@ Word export without additional external-provider calls.
 - Python `3.13` is the currently verified runtime.
 - Internet access is required for live annotation and LLM requests.
 - An OpenAI-compatible LLM endpoint and API key are required for Phase B.
-- Core dependencies are listed in `requirements.txt`.
+- Direct dependencies are exactly pinned in `requirements.txt` for reproducible
+  installation.
 
 ## Installation
 
@@ -287,13 +292,14 @@ and redacted structured logging is initialized.
 11. Retry only failed interpretations when necessary.
 
 Analyses run in cancellable background jobs. Progress updates on each normal
-annotation provider start/completion event and on later phenotype and LLM
-transitions.
+annotation provider, conditional-enrichment variant step, phenotype provider,
+and individual Phase B LLM request.
 
-A browser refresh reconnects to an active job through an opaque recovery token
-while the Streamlit process remains alive. Persisted Draft or Confirmed results
-can be reloaded from SQLite by random analysis ID. A server/process restart
-cannot resume an in-flight Python thread.
+A browser refresh reconnects through an opaque recovery token. A private,
+one-hour sanitized checkpoint lets a restarted server safely rerun interrupted
+Phase A work from normalized variants and HPO terms; it never stores raw VCF
+content. Persisted Draft or Confirmed results reload from SQLite by random
+analysis ID.
 
 ## HPO data
 
@@ -319,7 +325,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-665 passed, 4 skipped
+667 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -337,7 +343,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **86.26%**.
+Current measured coverage is **85.80%**.
 
 Automated tests mock or block external HTTP traffic. Run the bounded live
 contract gate separately; it checks every active annotation, phenotype,
@@ -468,7 +474,8 @@ clinical_variant_app/
 - Interpretation quality depends on evidence currency, phenotype completeness,
   reviewer judgment, and model behavior.
 - Live services can change, throttle, or become unavailable.
-- In-flight refresh recovery requires the same running application process.
+- Restart recovery reruns interrupted Phase A requests from their last sanitized
+  input checkpoint; it does not resume an operating-system thread mid-request.
 - Production use requires controls beyond the current local SQLite/Streamlit
   architecture.
 

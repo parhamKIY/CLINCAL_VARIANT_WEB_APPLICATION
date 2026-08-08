@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import gzip
+import json
 import os
 import re
 import threading
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from time import monotonic
+from time import monotonic, time
 from typing import (
     BinaryIO,
     Callable,
@@ -21,6 +22,7 @@ from typing import (
     Mapping,
     Protocol,
     Sequence,
+    TypedDict,
 )
 from uuid import uuid4
 
@@ -29,7 +31,11 @@ from backend.pipeline import (
     PipelineResult,
     run_analysis,
 )
-from backend.vcf_processing import MAX_FILTERED_VCF_ROWS
+from backend.vcf_processing import (
+    MAX_FILTERED_VCF_ROWS,
+    VCFProcessingError,
+    process_vcf,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -73,6 +79,18 @@ AnalysisRunner = Callable[
 ANALYSIS_JOB_TOKEN_PATTERN = re.compile(r"job-[0-9a-f]{32}")
 MAX_RECOVERABLE_ANALYSIS_JOBS = 32
 RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS = 60 * 60
+RECOVERY_REQUEST_SCHEMA_VERSION = 1
+MAX_RECOVERY_REQUEST_BYTES = 1024 * 1024
+
+
+class AnalysisRecoveryRequest(TypedDict):
+    """Sanitized input sufficient to restart an interrupted Phase A run."""
+
+    schema_version: int
+    manual_variants: list[dict[str, object]]
+    phenotypes: list[str]
+    llm_model: str | None
+    created_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +303,118 @@ _ANALYSIS_JOB_REGISTRY: dict[str, _RegisteredAnalysisJob] = {}
 _ANALYSIS_JOB_REGISTRY_LOCK = threading.Lock()
 
 
+def _recovery_request_path(token: str) -> Path:
+    root = Path(settings.DATABASE_PATH).expanduser().parent / "recovery_jobs"
+    try:
+        if root.is_symlink():
+            raise FrontendExecutionError(
+                "The recovery request directory is unsafe."
+            )
+        root.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE,
+            parents=True,
+            exist_ok=True,
+        )
+        root.chmod(PRIVATE_DIRECTORY_MODE)
+        resolved = root.resolve(strict=True)
+    except FrontendExecutionError:
+        raise
+    except OSError as exc:
+        raise FrontendExecutionError(
+            "The recovery request directory is unavailable."
+        ) from exc
+    return resolved / f"{token}.json"
+
+
+def _persist_recovery_request(
+    token: str,
+    request: AnalysisRecoveryRequest,
+) -> None:
+    payload = json.dumps(
+        request,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > MAX_RECOVERY_REQUEST_BYTES:
+        raise FrontendExecutionError(
+            "The recovery request exceeds the safe storage limit."
+        )
+    path = _recovery_request_path(token)
+    temporary_path = path.with_suffix(f".{uuid4().hex}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(temporary_path, flags, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = None
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        path.chmod(PRIVATE_FILE_MODE)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+        raise FrontendExecutionError(
+            "The analysis recovery checkpoint could not be saved."
+        ) from exc
+
+
+def _load_recovery_request(
+    token: str,
+) -> AnalysisRecoveryRequest | None:
+    try:
+        path = _recovery_request_path(token)
+        if not path.is_file() or path.is_symlink():
+            return None
+        payload = path.read_bytes()
+    except (FrontendExecutionError, OSError):
+        return None
+    if not payload or len(payload) > MAX_RECOVERY_REQUEST_BYTES:
+        return None
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("schema_version") != RECOVERY_REQUEST_SCHEMA_VERSION:
+        return None
+    created_at = value.get("created_at")
+    variants = value.get("manual_variants")
+    phenotypes = value.get("phenotypes")
+    llm_model = value.get("llm_model")
+    if (
+        not isinstance(created_at, (int, float))
+        or time() - float(created_at) > RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS
+        or not isinstance(variants, list)
+        or not variants
+        or len(variants) > MAX_FILTERED_VCF_ROWS
+        or any(not isinstance(item, dict) for item in variants)
+        or not isinstance(phenotypes, list)
+        or any(not isinstance(item, str) for item in phenotypes)
+        or (llm_model is not None and not isinstance(llm_model, str))
+    ):
+        return None
+    return AnalysisRecoveryRequest(
+        schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
+        manual_variants=variants,
+        phenotypes=phenotypes,
+        llm_model=llm_model,
+        created_at=float(created_at),
+    )
+
+
+def _delete_recovery_request(token: str) -> None:
+    try:
+        _recovery_request_path(token).unlink(missing_ok=True)
+    except (FrontendExecutionError, OSError):
+        pass
+
+
 def _prune_analysis_job_registry(now: float) -> None:
     """Remove abandoned terminal jobs while preserving active work."""
 
@@ -298,9 +428,15 @@ def _prune_analysis_job_registry(now: float) -> None:
     ]
     for token in expired:
         _ANALYSIS_JOB_REGISTRY.pop(token, None)
+        _delete_recovery_request(token)
 
 
-def register_analysis_job(job: AnalysisJob) -> str:
+def register_analysis_job(
+    job: AnalysisJob,
+    *,
+    recovery_request: AnalysisRecoveryRequest | None = None,
+    token: str | None = None,
+) -> str:
     """Register a job under an unguessable refresh-recovery token."""
 
     if not isinstance(job, AnalysisJob):
@@ -325,12 +461,25 @@ def register_analysis_job(job: AnalysisJob) -> str:
                     "The server is already processing the maximum "
                     "number of recoverable analyses."
                 )
-        token = f"job-{uuid4().hex}"
-        _ANALYSIS_JOB_REGISTRY[token] = _RegisteredAnalysisJob(
+        resolved_token = token or f"job-{uuid4().hex}"
+        if ANALYSIS_JOB_TOKEN_PATTERN.fullmatch(resolved_token) is None:
+            raise FrontendExecutionError(
+                "Analysis job recovery token is invalid."
+            )
+        if resolved_token in _ANALYSIS_JOB_REGISTRY:
+            return resolved_token
+        _ANALYSIS_JOB_REGISTRY[resolved_token] = _RegisteredAnalysisJob(
             job=job,
             last_accessed_at=now,
         )
-    return token
+    try:
+        if recovery_request is not None:
+            _persist_recovery_request(resolved_token, recovery_request)
+    except FrontendExecutionError:
+        with _ANALYSIS_JOB_REGISTRY_LOCK:
+            _ANALYSIS_JOB_REGISTRY.pop(resolved_token, None)
+        raise
+    return resolved_token
 
 
 def get_registered_analysis_job(token: object) -> AnalysisJob | None:
@@ -363,6 +512,7 @@ def release_registered_analysis_job(token: object) -> None:
         return
     with _ANALYSIS_JOB_REGISTRY_LOCK:
         _ANALYSIS_JOB_REGISTRY.pop(token, None)
+    _delete_recovery_request(token)
 
 
 def _validate_upload_filename(filename: object) -> str:
@@ -593,6 +743,55 @@ def _write_private_upload(
         ) from exc
 
 
+def prepare_analysis_recovery_request(
+    *,
+    uploaded_vcf: UploadedVCF | None,
+    manual_variants: Sequence[Mapping[str, object]] | None,
+    phenotypes: list[str],
+    llm_model: str | None,
+) -> AnalysisRecoveryRequest:
+    """Normalize input into a private restart-safe Phase A checkpoint."""
+
+    if uploaded_vcf is not None and manual_variants is not None:
+        raise FrontendExecutionError(
+            "Choose either a VCF upload or manual table rows."
+        )
+    try:
+        if uploaded_vcf is None:
+            variants = list(
+                process_vcf(manual_variants=manual_variants)
+            )
+        else:
+            suffix = _validate_upload_filename(uploaded_vcf.name)
+            payload = _read_upload(uploaded_vcf)
+            _validate_upload_content(payload, suffix)
+            upload_directory = _prepare_upload_directory()
+            with TemporaryDirectory(
+                prefix="recovery-",
+                dir=upload_directory,
+            ) as temporary_directory:
+                root = Path(temporary_directory).resolve(strict=True)
+                root.chmod(PRIVATE_DIRECTORY_MODE)
+                path = root / f"input{suffix}"
+                _write_private_upload(
+                    path,
+                    payload,
+                    temporary_directory=root,
+                )
+                variants = list(process_vcf(vcf_path=path))
+    except (VCFProcessingError, OSError) as exc:
+        raise FrontendExecutionError(
+            "The analysis input could not be prepared for recovery."
+        ) from exc
+    return AnalysisRecoveryRequest(
+        schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
+        manual_variants=[dict(variant) for variant in variants],
+        phenotypes=list(phenotypes),
+        llm_model=llm_model,
+        created_at=time(),
+    )
+
+
 def execute_analysis(
     *,
     uploaded_vcf: UploadedVCF | None,
@@ -657,6 +856,42 @@ def execute_analysis(
         ) from exc
 
 
+def recover_analysis_job(token: object) -> AnalysisJob | None:
+    """Restart an interrupted job from its sanitized local checkpoint."""
+
+    if (
+        not isinstance(token, str)
+        or ANALYSIS_JOB_TOKEN_PATTERN.fullmatch(token) is None
+    ):
+        return None
+    existing = get_registered_analysis_job(token)
+    if existing is not None:
+        return existing
+    request = _load_recovery_request(token)
+    if request is None:
+        return None
+
+    def runner(
+        progress_callback: PipelineProgressCallback,
+    ) -> PipelineResult:
+        return execute_analysis(
+            uploaded_vcf=None,
+            manual_variants=request["manual_variants"],
+            phenotypes=request["phenotypes"],
+            llm_model=request["llm_model"],
+            progress_callback=progress_callback,
+        )
+
+    job = AnalysisJob(runner)
+    try:
+        register_analysis_job(job, token=token)
+        job.start()
+    except (FrontendExecutionError, RuntimeError):
+        release_registered_analysis_job(token)
+        return None
+    return job
+
+
 __all__ = [
     "AnalysisCancelled",
     "AnalysisJob",
@@ -666,6 +901,8 @@ __all__ = [
     "UploadedVCF",
     "execute_analysis",
     "get_registered_analysis_job",
+    "prepare_analysis_recovery_request",
+    "recover_analysis_job",
     "register_analysis_job",
     "release_registered_analysis_job",
 ]

@@ -27,6 +27,7 @@ from streamlit.testing.v1 import AppTest
 import config as config_module
 import app as app_module
 import frontend.ui as frontend_ui_module
+import frontend.execution as frontend_execution_module
 from backend.annotation import (
     AnnotationError,
     annotate_variants,
@@ -223,6 +224,8 @@ from frontend.execution import (
     FrontendExecutionError,
     execute_analysis as execute_frontend_analysis,
     get_registered_analysis_job,
+    prepare_analysis_recovery_request,
+    recover_analysis_job,
     register_analysis_job,
     release_registered_analysis_job,
 )
@@ -7083,6 +7086,7 @@ class TestEvidenceObject:
     def test_stage_32_litvar_publication_success_avoids_fallback(
         self,
     ) -> None:
+        progress: list[tuple[str, str]] = []
         session = FakeConditionalSession(
             get_responses=[
                 FakeResponse(
@@ -7112,6 +7116,9 @@ class TestEvidenceObject:
         result = fetch_literature_evidence(
             self._candidate_with_rsid(),
             session=session,  # type: ignore[arg-type]
+            progress_callback=lambda provider, status: progress.append(
+                (provider, status)
+            ),
         )
 
         assert result["status"] == "available"
@@ -7120,6 +7127,12 @@ class TestEvidenceObject:
             "not_triggered"
         )
         assert result["providers"]["pubmed"]["status"] == "not_triggered"
+        assert progress == [
+            ("litvar", "running"),
+            ("litvar", "available"),
+            ("europe_pmc", "not_triggered"),
+            ("pubmed", "not_triggered"),
+        ]
         assert result["articles"][0]["pmid"] == "123"
         assert result["articles"][0]["pmcid"] == "PMC123"
         assert result["articles"][0]["source_providers"] == ["LitVar2"]
@@ -8480,6 +8493,40 @@ class TestLLMContract:
         ]
         assert request.temperature == 0.1
         assert request.max_tokens == 400
+
+    def test_provider_model_catalog_is_validated_and_deduplicated(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [],
+            get_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "data": [
+                            {"id": "provider-strong"},
+                            {"id": "provider-light"},
+                            {"id": "provider-strong"},
+                            {"invalid": "ignored"},
+                        ]
+                    },
+                )
+            ],
+        )
+        adapter = OpenAICompatibleAdapter(
+            base_url="https://provider.example/v1",
+            api_key="secret",
+            model="configured",
+            timeout=30,
+            session=session,
+        )
+
+        assert adapter.list_models() == (
+            "provider-strong",
+            "provider-light",
+        )
+        assert str(session.get_calls[0]["url"]).endswith("/models")
+        assert session.get_calls[0]["timeout"] == 5.0
 
     def test_transient_failure_retries_with_exponential_backoff(
         self,
@@ -10499,16 +10546,19 @@ class TestStage37PipelineV2Integration:
         ] == ["success", "failed"]
         assert "Phase A provider warning." in completed["warnings"]
         assert "Interpretation evidence is limited." in completed["warnings"]
-        assert [snapshot["workflow_state"] for snapshot in snapshots] == [
-            "phase_b_running",
-            "phase_b_running",
-            "completed",
-        ]
-        assert [snapshot["progress_percent"] for snapshot in snapshots] == [
-            50,
-            85,
-            100,
-        ]
+        assert all(
+            snapshot["workflow_state"] == "phase_b_running"
+            for snapshot in snapshots[:-1]
+        )
+        assert snapshots[-1]["workflow_state"] == "completed"
+        assert [
+            snapshot["progress_percent"] for snapshot in snapshots
+        ] == sorted(
+            snapshot["progress_percent"] for snapshot in snapshots
+        )
+        assert snapshots[0]["progress_percent"] == 50
+        assert snapshots[-2]["progress_percent"] == 85
+        assert snapshots[-1]["progress_percent"] == 100
 
     def test_resume_requires_confirmation_for_every_variant(self) -> None:
         paused, reports = self._paused_result()
@@ -16513,6 +16563,47 @@ class TestFrontendFoundation:
         )
         assert cancel_button.disabled
 
+    def test_server_restart_recovers_private_analysis_checkpoint(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(tmp_path / "analysis.sqlite3"),
+        )
+        request = prepare_analysis_recovery_request(
+            uploaded_vcf=None,
+            manual_variants=_manual_rows("1:941284:G:A"),
+            phenotypes=["HP:0001250"],
+            llm_model="configured-model",
+        )
+        token = register_analysis_job(
+            AnalysisJob(lambda _: create_pipeline_result()),
+            recovery_request=request,
+        )
+        with frontend_execution_module._ANALYSIS_JOB_REGISTRY_LOCK:
+            frontend_execution_module._ANALYSIS_JOB_REGISTRY.clear()
+
+        def fake_execute_analysis(**_: object) -> PipelineResult:
+            result = create_pipeline_result()
+            result["status"] = "success"
+            return result
+
+        monkeypatch.setattr(
+            frontend_execution_module,
+            "execute_analysis",
+            fake_execute_analysis,
+        )
+        recovered = recover_analysis_job(token)
+
+        assert recovered is not None
+        recovered.join(2)
+        assert recovered.view().state == "completed"
+        release_registered_analysis_job(token)
+        assert not (tmp_path / "recovery_jobs" / f"{token}.json").exists()
+
     def test_page_refresh_reconnects_active_analysis(self) -> None:
         first_progress = threading.Event()
         continue_analysis = threading.Event()
@@ -16833,100 +16924,18 @@ class TestFrontendFoundation:
             for field in app.selectbox
             if field.label == "Strong conflict model"
         )
-        assert model_selector.options[:6] == [
-            (
-                "gpt-5.4-mini — Pinned — Recommended: best balance for "
-                "conclusions, report quality, speed, and cost"
-            ),
-            (
-                "gpt-5.4 — Pinned — Best for difficult cases and deeper "
-                "conclusions; higher cost"
-            ),
-            (
-                "gemini-3.1-pro-preview — Pinned — High-quality "
-                "comparison model for complex interpretation"
-            ),
-            (
-                "claude-sonnet-4-6 — Pinned — Strong professional "
-                "report writing; higher cost"
-            ),
-            (
-                "gemini-3.1-flash-lite — Pinned — Cheap and fast for "
-                "draft reports"
-            ),
-            (
-                "gpt-5.4-nano — Pinned — Lowest-cost option for basic "
-                "testing; less detailed conclusions"
-            ),
-        ]
-        assert model_selector.options[6:] == [
-            (
-                "gpt-5.5 — Maximum-quality option for the hardest "
-                "conclusions; extremely high cost and potentially more "
-                "billed reasoning tokens"
-            ),
-            (
-                "claude-opus-4-8 — Premium nuanced synthesis and "
-                "polished reports; very high cost"
-            ),
-            (
-                "deepseek-v4-pro — Strong analytical synthesis at "
-                "comparatively low cost"
-            ),
-            (
-                "gemini-3.5-flash — Latest fast Google option with "
-                "strong quality; costly for a Flash model"
-            ),
-            (
-                "claude-haiku-4-5 — Fast, polished report writing at "
-                "moderate cost"
-            ),
-            (
-                "gpt-4.1-mini — Reliable structured reports at "
-                "low-to-moderate cost"
-            ),
-            (
-                "gpt-5-nano — Very cheap and fast for screening; "
-                "reduced conclusion depth"
-            ),
-            (
-                "gemini-2.5-flash-lite — Ultra-low-cost fast drafts; "
-                "reduced conclusion depth"
-            ),
-            (
-                "deepseek-v4-flash — Lowest-cost analytical "
-                "alternative; validate report consistency"
-            ),
+        assert model_selector.options == [
+            "gpt-5.4-mini — Available from the configured provider"
         ]
         light_selector = next(
             field
             for field in app.selectbox
             if field.label == "Low-cost no-conflict model"
         )
-        assert light_selector.options[:5] == [
-            (
-                "gpt-5.4-nano — Lowest-cost option for basic testing; "
-                "less detailed conclusions"
-            ),
-            "gemini-3.1-flash-lite — Cheap and fast for draft reports",
-            (
-                "gpt-5-nano — Very cheap and fast for screening; "
-                "reduced conclusion depth"
-            ),
-            (
-                "gemini-2.5-flash-lite — Ultra-low-cost fast drafts; "
-                "reduced conclusion depth"
-            ),
-            (
-                "deepseek-v4-flash — Lowest-cost analytical alternative; "
-                "validate report consistency"
-            ),
+        assert light_selector.options == [
+            f"{settings.LLM_MODEL_LIGHT} — Available from the configured "
+            "provider"
         ]
-        next(
-            button
-            for button in app.button
-            if button.label == "gpt-5.4-nano"
-        ).click().run(timeout=10)
         app.segmented_control[0].set_value("Manual table").run(
             timeout=10
         )
@@ -16967,7 +16976,7 @@ class TestFrontendFoundation:
             "uploaded_vcf": None,
             "manual_variants": manual_rows,
             "phenotypes": [],
-            "llm_model": "gpt-5.4-nano",
+            "llm_model": "gpt-5.4-mini",
         }
         assert app.session_state["pipeline_result"]["status"] == (
             "success"

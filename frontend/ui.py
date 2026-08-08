@@ -10,6 +10,7 @@ import streamlit as st
 
 from backend.database import DatabaseError, load_pipeline_state
 from backend.error_handling import safe_ui_error_message
+from backend.llm import LLMError, get_available_llm_models
 from backend.pipeline import (
     PipelineProgressCallback,
     PipelineResult,
@@ -35,6 +36,8 @@ from frontend.execution import (
     UploadedVCF,
     execute_analysis,
     get_registered_analysis_job,
+    prepare_analysis_recovery_request,
+    recover_analysis_job,
     register_analysis_job,
     release_registered_analysis_job,
 )
@@ -77,85 +80,9 @@ ANALYSIS_NOTICE_KEY = "analysis_notice"
 ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
 LLM_MODEL_KEY = "selected_llm_model"
 LLM_LIGHT_MODEL_KEY = "selected_llm_light_model"
+LLM_PROVIDER_MODELS_KEY = "llm_provider_models"
 ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
 ANALYSIS_RESULT_QUERY_PARAM = "analysis"
-LLM_PINNED_MODELS = (
-    "gpt-5.4-mini",
-    "gpt-5.4",
-    "gemini-3.1-pro-preview",
-    "claude-sonnet-4-6",
-    "gemini-3.1-flash-lite",
-    "gpt-5.4-nano",
-)
-LLM_RECOMMENDED_MODELS = (
-    "gpt-5.5",
-    "claude-opus-4-8",
-    "deepseek-v4-pro",
-    "gemini-3.5-flash",
-    "claude-haiku-4-5",
-    "gpt-4.1-mini",
-    "gpt-5-nano",
-    "gemini-2.5-flash-lite",
-    "deepseek-v4-flash",
-)
-LLM_LOW_COST_MODELS = (
-    "gpt-5.4-nano",
-    "gemini-3.1-flash-lite",
-    "gpt-5-nano",
-    "gemini-2.5-flash-lite",
-    "deepseek-v4-flash",
-)
-LLM_MODEL_CATALOG = LLM_PINNED_MODELS + LLM_RECOMMENDED_MODELS
-LLM_MODEL_ADVANTAGES = {
-    "gpt-5.4-mini": (
-        "Recommended: best balance for conclusions, report quality, "
-        "speed, and cost"
-    ),
-    "gpt-5.4": (
-        "Best for difficult cases and deeper conclusions; higher cost"
-    ),
-    "gemini-3.1-pro-preview": (
-        "High-quality comparison model for complex interpretation"
-    ),
-    "claude-sonnet-4-6": (
-        "Strong professional report writing; higher cost"
-    ),
-    "gemini-3.1-flash-lite": (
-        "Cheap and fast for draft reports"
-    ),
-    "gpt-5.4-nano": (
-        "Lowest-cost option for basic testing; less detailed conclusions"
-    ),
-    "gpt-5.5": (
-        "Maximum-quality option for the hardest conclusions; extremely "
-        "high cost and potentially more billed reasoning tokens"
-    ),
-    "claude-opus-4-8": (
-        "Premium nuanced synthesis and polished reports; very high cost"
-    ),
-    "deepseek-v4-pro": (
-        "Strong analytical synthesis at comparatively low cost"
-    ),
-    "gemini-3.5-flash": (
-        "Latest fast Google option with strong quality; costly for a "
-        "Flash model"
-    ),
-    "claude-haiku-4-5": (
-        "Fast, polished report writing at moderate cost"
-    ),
-    "gpt-4.1-mini": (
-        "Reliable structured reports at low-to-moderate cost"
-    ),
-    "gpt-5-nano": (
-        "Very cheap and fast for screening; reduced conclusion depth"
-    ),
-    "gemini-2.5-flash-lite": (
-        "Ultra-low-cost fast drafts; reduced conclusion depth"
-    ),
-    "deepseek-v4-flash": (
-        "Lowest-cost analytical alternative; validate report consistency"
-    ),
-}
 PIPELINE_STAGE_LABELS = {
     "input": "Input validation",
     "vcf_processing": "VCF processing",
@@ -205,53 +132,55 @@ class AnalysisSubmission(TypedDict):
     llm_model: str
 
 
-def _llm_model_options() -> tuple[str, ...]:
-    """Return pinned, recommended, and configured model options."""
+@st.cache_data(ttl=300, max_entries=1, show_spinner=False)
+def _provider_llm_models() -> tuple[str, ...]:
+    """Return a short-lived provider model catalog when supported."""
+
+    try:
+        return get_available_llm_models()
+    except LLMError:
+        return ()
+
+
+def _llm_model_options(
+    provider_models: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return configured choices plus provider-advertised models."""
 
     return tuple(
         dict.fromkeys(
             (
-                *LLM_MODEL_CATALOG,
                 settings.LLM_MODEL_STRONG,
                 settings.LLM_MODEL,
+                *provider_models,
             )
         )
     )
 
 
-def _light_llm_model_options() -> tuple[str, ...]:
-    """Return low-cost role choices plus its configured fallback."""
+def _light_llm_model_options(
+    provider_models: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return configured light choice plus provider-advertised models."""
 
     return tuple(
-        dict.fromkeys((*LLM_LOW_COST_MODELS, settings.LLM_MODEL_LIGHT))
+        dict.fromkeys((settings.LLM_MODEL_LIGHT, *provider_models))
     )
 
 
 def _format_llm_model_option(model: str) -> str:
     """Add a concise use-case advantage to one model identifier."""
 
-    advantage = LLM_MODEL_ADVANTAGES.get(
-        model,
-        "Custom model configured in .env",
-    )
-    pin_label = "Pinned — " if model in LLM_PINNED_MODELS else ""
+    advantage = "Available from the configured provider"
+    pin_label = ""
     return f"{model} — {pin_label}{advantage}"
 
 
 def _format_light_llm_model_option(model: str) -> str:
     """Describe a model only in its low-cost routing role."""
 
-    advantage = LLM_MODEL_ADVANTAGES.get(
-        model,
-        "Custom low-cost model configured in .env",
-    )
+    advantage = "Available from the configured provider"
     return f"{model} — {advantage}"
-
-
-def _select_pinned_llm_model(model: str) -> None:
-    """Select one pinned model for meaningful conflict interpretation."""
-
-    st.session_state[LLM_MODEL_KEY] = model
 
 
 def _query_param_value(name: str) -> str | None:
@@ -279,11 +208,14 @@ def _restore_refresh_state() -> None:
     ):
         token = _query_param_value(ANALYSIS_JOB_QUERY_PARAM)
         job = get_registered_analysis_job(token)
+        if job is None:
+            job = recover_analysis_job(token)
         if job is not None:
             st.session_state[ANALYSIS_JOB_KEY] = job
             st.session_state[ANALYSIS_JOB_TOKEN_KEY] = token
             st.session_state[ANALYSIS_NOTICE_KEY] = (
-                "Reconnected to the active analysis after page refresh."
+                "Reconnected to the active analysis after page refresh; "
+                "restart recovery is also enabled."
             )
             st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "info"
         elif token is not None:
@@ -323,6 +255,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
+    st.session_state.setdefault(LLM_PROVIDER_MODELS_KEY, ())
     model_options = _llm_model_options()
     if st.session_state.get(LLM_MODEL_KEY) not in model_options:
         st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL_STRONG
@@ -575,53 +508,50 @@ def _render_llm_model_selector() -> tuple[str, str]:
             "Choose the strong conflict model first. The low-cost model is "
             "used only when confirmed evidence has no meaningful conflict."
         )
+        if st.button(
+            "Load models from provider",
+            key="load_provider_models",
+            icon=":material/refresh:",
+        ):
+            _provider_llm_models.clear()
+            st.session_state[LLM_PROVIDER_MODELS_KEY] = (
+                _provider_llm_models()
+            )
+        provider_models = tuple(
+            st.session_state[LLM_PROVIDER_MODELS_KEY]
+        )
+        if provider_models:
+            st.caption(
+                f"Loaded {len(provider_models)} current provider models. "
+                "The catalog does not include prices; verify the low-cost "
+                "choice against the provider's current pricing."
+            )
+        else:
+            st.caption(
+                "Configured defaults are shown. Load the provider catalog "
+                "or enter another supported model identifier."
+            )
         selected_strong_model = st.selectbox(
             "Strong conflict model",
-            _llm_model_options(),
+            _llm_model_options(provider_models),
             key=LLM_MODEL_KEY,
             format_func=_format_llm_model_option,
             placeholder="Search or select a strong AvalAI model",
             filter_mode="contains",
+            accept_new_options=True,
             help=(
                 "Used only for moderate, major, or critical conflicts. "
                 "Every result still requires qualified human review."
             ),
         )
-        with st.container(
-            key="pinned_llm_models",
-            gap="xsmall",
-        ):
-            st.markdown(
-                "**:material/push_pin: Pinned conflict-model quick picks**"
-            )
-            st.caption(
-                "Frequently used models are grouped here for fast "
-                "access. Hover over a model to see its advantage."
-            )
-            with st.container(
-                horizontal=True,
-                gap="xsmall",
-            ):
-                for model in LLM_PINNED_MODELS:
-                    st.button(
-                        model,
-                        key=f"select_{model}",
-                        type=(
-                            "primary"
-                            if st.session_state[LLM_MODEL_KEY] == model
-                            else "secondary"
-                        ),
-                        help=LLM_MODEL_ADVANTAGES[model],
-                        on_click=_select_pinned_llm_model,
-                        args=(model,),
-                    )
         selected_light_model = st.selectbox(
             "Low-cost no-conflict model",
-            _light_llm_model_options(),
+            _light_llm_model_options(provider_models),
             key=LLM_LIGHT_MODEL_KEY,
             format_func=_format_light_llm_model_option,
             placeholder="Select a low-cost AvalAI model",
             filter_mode="contains",
+            accept_new_options=True,
             help=(
                 "Used only to rearrange confirmed evidence when the "
                 "deterministic audit finds no meaningful conflict."
@@ -1180,7 +1110,16 @@ def _start_submission(
     st.session_state[ANALYSIS_NOTICE_KEY] = None
     job = AnalysisJob(runner)
     try:
-        token = register_analysis_job(job)
+        recovery_request = prepare_analysis_recovery_request(
+            uploaded_vcf=submission["uploaded_vcf"],
+            manual_variants=submission["manual_variants"],
+            phenotypes=submission["phenotypes"],
+            llm_model=submission["llm_model"],
+        )
+        token = register_analysis_job(
+            job,
+            recovery_request=recovery_request,
+        )
     except FrontendExecutionError as exc:
         st.session_state[ANALYSIS_NOTICE_KEY] = str(exc)
         st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"

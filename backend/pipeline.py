@@ -47,6 +47,7 @@ from backend.final_interpretation_report import (
 )
 from backend.llm import LLMClient
 from backend.llm_routing import (
+    RoutingProgressCallback,
     Stage35RoutingError,
     route_reviewed_evidence_packages,
     validate_llm_routing_result,
@@ -1695,11 +1696,33 @@ def _build_evidence_and_report(
     preliminary_evidence = build_evidence_objects(
         result["phenotype_results"]
     )
+
+    def notify_enrichment_progress(
+        step: int,
+        total: int,
+        provider: str,
+        provider_status: str,
+    ) -> None:
+        completed = step if provider_status != "running" else step - 1
+        result["progress_percent"] = 65 + int((completed / total) * 9)
+        _set_stage(
+            result,
+            "evidence",
+            "running",
+            progress_percent=int((completed / total) * 100),
+            message=(
+                f"Variant enrichment {step} of {total}: "
+                f"{provider} {provider_status}."
+            ),
+        )
+        _notify_progress(result, progress_callback)
+
     conditional_result = enrich_conditionally(
         result["phenotype_results"],
         preliminary_evidence,
         population_session=population_session,
         literature_session=literature_session,
+        progress_callback=notify_enrichment_progress,
     )
     result["phenotype_results"] = conditional_result["variants"]
     for candidate in result["phenotype_results"]:
@@ -2219,6 +2242,7 @@ def generate_confirmed_interpretations(
     light_model: str | None = None,
     strong_model: str | None = None,
     timestamp: str | None = None,
+    progress_callback: RoutingProgressCallback | None = None,
 ) -> PipelineResult:
     """Run Stage 35 routing for confirmed packages without building Output B."""
 
@@ -2238,6 +2262,7 @@ def generate_confirmed_interpretations(
             light_model=light_model,
             strong_model=strong_model,
             timestamp=timestamp,
+            progress_callback=progress_callback,
         )
     except (EvidenceConfirmationError, Stage35RoutingError) as exc:
         raise PipelineError("Stage 35 routing could not start.") from exc
@@ -2494,6 +2519,30 @@ def resume_confirmed_analysis(
     )
     _notify_progress(working, progress_callback)
 
+    def notify_routing_progress(
+        index: int,
+        total: int,
+        route: str,
+        route_status: str,
+    ) -> None:
+        completed = index if route_status != "running" else index - 1
+        overall_progress = 50 + int((completed / total) * 34)
+        role = "strong" if route == "llm_2" else "low-cost"
+        message = (
+            f"Variant {index} of {total}: {role} LLM request "
+            f"{('started' if route_status == 'running' else 'finished')}."
+        )
+        working["progress_percent"] = overall_progress
+        _set_stage(
+            working,
+            "llm",
+            "running",
+            progress_percent=int((completed / total) * 100),
+            message=message,
+        )
+        _set_api_status(working, "llm", "running", message)
+        _notify_progress(working, progress_callback)
+
     working = generate_confirmed_interpretations(
         working,
         light_client=light_client,
@@ -2501,7 +2550,9 @@ def resume_confirmed_analysis(
         light_model=light_model,
         strong_model=strong_model,
         timestamp=timestamp,
+        progress_callback=notify_routing_progress,
     )
+    working["progress_percent"] = 85
     _notify_progress(working, progress_callback)
     working = generate_final_interpretation_report(working)
     _notify_progress(working, progress_callback)

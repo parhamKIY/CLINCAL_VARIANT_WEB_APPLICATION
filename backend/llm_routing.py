@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict, cast
@@ -30,6 +30,10 @@ MEANINGFUL_CONFLICT_SEVERITIES = {"moderate", "major", "critical"}
 Stage35Route = Literal["llm_1", "llm_2"]
 Stage35Status = Literal["success", "failed"]
 ResolutionStatus = Literal["not_applicable", "resolved", "unresolved"]
+RoutingProgressCallback = Callable[
+    [int, int, Stage35Route, Stage35Status | Literal["running"]],
+    None,
+]
 
 
 class Stage35RoutingError(ValueError):
@@ -311,6 +315,7 @@ def route_reviewed_evidence_packages(
     light_model: str | None = None,
     strong_model: str | None = None,
     timestamp: str | None = None,
+    progress_callback: RoutingProgressCallback | None = None,
 ) -> list[Stage35RoutingResult]:
     """Route confirmed packages independently while preserving order."""
 
@@ -321,8 +326,11 @@ def route_reviewed_evidence_packages(
         for package in packages
     ]
     results: list[Stage35RoutingResult] = []
-    for package in validated_packages:
+    total = len(validated_packages)
+    for index, package in enumerate(validated_packages, start=1):
         route = _route_for_package(package)
+        if progress_callback is not None:
+            progress_callback(index, total, route, "running")
         model = _configured_model(
             route,
             light_model=light_model,
@@ -346,6 +354,8 @@ def route_reviewed_evidence_packages(
                 timestamp=timestamp,
             )
         results.append(result)
+        if progress_callback is not None:
+            progress_callback(index, total, route, result["status"])
     return results
 
 
