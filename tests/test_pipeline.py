@@ -17302,6 +17302,141 @@ class TestDatabaseFoundation:
             )
 
 
+class TestStage49TaskSpecificModelUI:
+    """Verify the accepted task-model controls and workflow layout."""
+
+    def test_layout_uses_two_task_roles_and_removes_route_selectors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "PHENOTYPE_EXTRACTION_MODEL",
+            "phenotype-layout-model",
+        )
+        monkeypatch.setattr(
+            settings,
+            "VARIANT_INTERPRETATION_MODEL",
+            "variant-layout-model",
+        )
+        monkeypatch.setattr(settings, "LLM_MODEL", "provider-default")
+
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+
+        assert not app.exception
+        subheaders = [item.value for item in app.subheader]
+        assert subheaders.index("Task-specific models") < subheaders.index(
+            "Phenotypes"
+        ) < subheaders.index("Variant input")
+        selectors = {field.label: field for field in app.selectbox}
+        assert selectors["Phenotype Extraction Model"].options == [
+            "phenotype-layout-model",
+            "provider-default",
+        ]
+        assert selectors["Variant Interpretation Model"].options == [
+            "variant-layout-model",
+            "provider-default",
+        ]
+        assert "Strong conflict model" not in selectors
+        assert "Low-cost no-conflict model" not in selectors
+        assert frontend_ui_module._task_model_options(
+            "configured-model",
+            ("provider-model",),
+            "custom-model",
+        ) == (
+            "configured-model",
+            "custom-model",
+            "provider-default",
+            "provider-model",
+        )
+
+    def test_task_model_choice_survives_reruns_independently(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "PHENOTYPE_EXTRACTION_MODEL",
+            "phenotype-default",
+        )
+        monkeypatch.setattr(
+            settings,
+            "VARIANT_INTERPRETATION_MODEL",
+            "variant-default",
+        )
+        monkeypatch.setattr(
+            settings,
+            "LLM_MODEL",
+            "shared-provider-model",
+        )
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        next(
+            field
+            for field in app.selectbox
+            if field.label == "Phenotype Extraction Model"
+        ).select("shared-provider-model").run(timeout=10)
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state[
+            "selected_phenotype_extraction_model"
+        ] == "shared-provider-model"
+        assert app.session_state[
+            "selected_variant_interpretation_model"
+        ] == "variant-default"
+
+    def test_one_variant_model_is_forwarded_to_both_legacy_arguments(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        observed: dict[str, object] = {}
+
+        def fake_render_review(
+            result: PipelineResult,
+            *,
+            light_model: str | None,
+            strong_model: str | None,
+        ) -> None:
+            observed.update(
+                result=result,
+                light_model=light_model,
+                strong_model=strong_model,
+            )
+
+        monkeypatch.setattr(
+            settings,
+            "VARIANT_INTERPRETATION_MODEL",
+            "one-variant-model",
+        )
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "render_analysis_results",
+            lambda _: None,
+        )
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "render_evidence_review",
+            fake_render_review,
+        )
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        app = AppTest.from_file(
+            str(PROJECT_ROOT / "app.py")
+        ).run(timeout=10)
+        app.session_state["pipeline_result"] = result
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert observed == {
+            "result": result,
+            "light_model": "one-variant-model",
+            "strong_model": "one-variant-model",
+        }
+
+
 class TestFrontendFoundation:
     """Verify the Stage 11 Streamlit shell and input controls."""
 
@@ -17461,7 +17596,14 @@ class TestFrontendFoundation:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def fake_extract(_: object) -> dict[str, object]:
+        observed_model: list[str] = []
+
+        def fake_extract(
+            _: object,
+            *,
+            model: str,
+        ) -> dict[str, object]:
+            observed_model.append(model)
             return {
                 "candidates": [
                     {
@@ -17523,6 +17665,7 @@ class TestFrontendFoundation:
         ).click().run(timeout=10)
 
         assert not app.exception
+        assert observed_model == [settings.PHENOTYPE_EXTRACTION_MODEL]
         assert app.session_state["selected_hpo_terms"] == []
         assert any(
             button.label == "Accept HPO candidates"
@@ -17548,7 +17691,7 @@ class TestFrontendFoundation:
         monkeypatch.setattr(
             frontend_ui_module,
             "extract_hpo_candidates",
-            lambda _: {
+            lambda _, **__: {
                 "candidates": [
                     {
                         "hpo_id": "HP:9999999",
@@ -17597,7 +17740,7 @@ class TestFrontendFoundation:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def fail_extraction(_: object) -> object:
+        def fail_extraction(_: object, **__: object) -> object:
             raise PhenotypeExtractionError("secret model output")
 
         monkeypatch.setattr(
@@ -17996,6 +18139,16 @@ class TestFrontendFoundation:
             "LLM_MODEL",
             "gpt-5.4-mini",
         )
+        monkeypatch.setattr(
+            settings,
+            "PHENOTYPE_EXTRACTION_MODEL",
+            "phenotype-test-model",
+        )
+        monkeypatch.setattr(
+            settings,
+            "VARIANT_INTERPRETATION_MODEL",
+            "variant-test-model",
+        )
 
         def fake_execute_analysis(
             *,
@@ -18055,23 +18208,29 @@ class TestFrontendFoundation:
             str(PROJECT_ROOT / "app.py")
         ).run(timeout=10)
 
-        model_selector = next(
+        phenotype_model_selector = next(
             field
             for field in app.selectbox
-            if field.label == "Strong conflict model"
+            if field.label == "Phenotype Extraction Model"
         )
-        assert model_selector.options == [
-            "gpt-5.4-mini — Available from the configured provider"
+        assert phenotype_model_selector.options == [
+            "phenotype-test-model",
+            "gpt-5.4-mini",
         ]
-        light_selector = next(
+        variant_model_selector = next(
             field
             for field in app.selectbox
-            if field.label == "Low-cost no-conflict model"
+            if field.label == "Variant Interpretation Model"
         )
-        assert light_selector.options == [
-            f"{settings.LLM_MODEL_LIGHT} — Available from the configured "
-            "provider"
+        assert variant_model_selector.options == [
+            "variant-test-model",
+            "gpt-5.4-mini",
         ]
+        assert not any(
+            field.label
+            in {"Strong conflict model", "Low-cost no-conflict model"}
+            for field in app.selectbox
+        )
         app.segmented_control[0].set_value("Manual table").run(
             timeout=10
         )
@@ -18112,7 +18271,7 @@ class TestFrontendFoundation:
             "uploaded_vcf": None,
             "manual_variants": manual_rows,
             "phenotypes": [],
-            "llm_model": "gpt-5.4-mini",
+            "llm_model": "variant-test-model",
         }
         assert app.session_state["pipeline_result"]["status"] == (
             "success"

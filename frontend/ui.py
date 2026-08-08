@@ -90,8 +90,8 @@ ANALYSIS_JOB_KEY = "analysis_job"
 ANALYSIS_JOB_TOKEN_KEY = "analysis_job_token"
 ANALYSIS_NOTICE_KEY = "analysis_notice"
 ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
-LLM_MODEL_KEY = "selected_llm_model"
-LLM_LIGHT_MODEL_KEY = "selected_llm_light_model"
+PHENOTYPE_MODEL_KEY = "selected_phenotype_extraction_model"
+VARIANT_MODEL_KEY = "selected_variant_interpretation_model"
 LLM_PROVIDER_MODELS_KEY = "llm_provider_models"
 LLM_PROVIDER_MODELS_ERROR_KEY = "llm_provider_models_error"
 ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
@@ -155,15 +155,23 @@ def _provider_llm_models() -> tuple[tuple[str, ...], bool]:
         return (), True
 
 
-def _llm_model_options(
+def _task_model_options(
+    configured_model: str,
     provider_models: tuple[str, ...] = (),
+    current_model: object = None,
 ) -> tuple[str, ...]:
-    """Return configured choices plus provider-advertised models."""
+    """Return one task default plus provider-advertised model IDs."""
 
+    current_options = (
+        (current_model.strip(),)
+        if isinstance(current_model, str) and current_model.strip()
+        else ()
+    )
     return tuple(
         dict.fromkeys(
             (
-                settings.LLM_MODEL_STRONG,
+                configured_model,
+                *current_options,
                 settings.LLM_MODEL,
                 *provider_models,
             )
@@ -171,29 +179,12 @@ def _llm_model_options(
     )
 
 
-def _light_llm_model_options(
-    provider_models: tuple[str, ...] = (),
-) -> tuple[str, ...]:
-    """Return configured light choice plus provider-advertised models."""
+def _initialize_task_model(key: str, default: str) -> None:
+    """Initialize one model role without discarding a typed custom ID."""
 
-    return tuple(
-        dict.fromkeys((settings.LLM_MODEL_LIGHT, *provider_models))
-    )
-
-
-def _format_llm_model_option(model: str) -> str:
-    """Add a concise use-case advantage to one model identifier."""
-
-    advantage = "Available from the configured provider"
-    pin_label = ""
-    return f"{model} — {pin_label}{advantage}"
-
-
-def _format_light_llm_model_option(model: str) -> str:
-    """Describe a model only in its low-cost routing role."""
-
-    advantage = "Available from the configured provider"
-    return f"{model} — {advantage}"
+    current = st.session_state.get(key)
+    if not isinstance(current, str) or not current.strip():
+        st.session_state[key] = default
 
 
 def _query_param_value(name: str) -> str | None:
@@ -272,12 +263,14 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     st.session_state.setdefault(LLM_PROVIDER_MODELS_KEY, ())
     st.session_state.setdefault(LLM_PROVIDER_MODELS_ERROR_KEY, False)
-    model_options = _llm_model_options()
-    if st.session_state.get(LLM_MODEL_KEY) not in model_options:
-        st.session_state[LLM_MODEL_KEY] = settings.LLM_MODEL_STRONG
-    light_model_options = _light_llm_model_options()
-    if st.session_state.get(LLM_LIGHT_MODEL_KEY) not in light_model_options:
-        st.session_state[LLM_LIGHT_MODEL_KEY] = settings.LLM_MODEL_LIGHT
+    _initialize_task_model(
+        PHENOTYPE_MODEL_KEY,
+        settings.PHENOTYPE_EXTRACTION_MODEL,
+    )
+    _initialize_task_model(
+        VARIANT_MODEL_KEY,
+        settings.VARIANT_INTERPRETATION_MODEL,
+    )
     _restore_refresh_state()
 
 
@@ -426,14 +419,15 @@ def _clear_hpo_candidate_draft() -> None:
     st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
 
 
-def _render_phenotype_extraction() -> None:
+def _render_phenotype_extraction(phenotype_model: str) -> None:
     """Render optional extraction, local validation, editing, and acceptance."""
 
     st.markdown("**Optional Persian phenotype extraction**")
     st.caption(
         "Enter only a short de-identified clinical description. Suggestions "
         "are checked against the installed HPO ontology and are not used "
-        "until you explicitly accept them."
+        "until you explicitly accept them. "
+        f"Selected model: {phenotype_model}."
     )
     clinical_text = st.text_area(
         "Persian clinical description",
@@ -451,7 +445,10 @@ def _render_phenotype_extraction() -> None:
     ):
         try:
             with st.spinner("Extracting and validating HPO candidates..."):
-                extraction = extract_hpo_candidates(clinical_text)
+                extraction = extract_hpo_candidates(
+                    clinical_text,
+                    model=phenotype_model,
+                )
                 validation = validate_hpo_candidates(
                     extraction["candidates"]
                 )
@@ -585,7 +582,7 @@ def _render_phenotype_extraction() -> None:
     st.rerun()
 
 
-def _render_hpo_picker() -> None:
+def _render_hpo_picker(phenotype_model: str) -> None:
     """Render local HPO search and selected-phenotype controls."""
 
     with st.container(border=True):
@@ -594,7 +591,7 @@ def _render_hpo_picker() -> None:
             "Search the locally installed Human Phenotype Ontology "
             "by term, synonym, or HPO ID."
         )
-        _render_phenotype_extraction()
+        _render_phenotype_extraction(phenotype_model)
         st.divider()
 
         with st.form("hpo_search_form", border=False):
@@ -684,19 +681,29 @@ def _render_hpo_picker() -> None:
                     st.rerun()
 
 
-def _render_llm_model_selector() -> tuple[str, str]:
-    """Render separate low-cost and strong interpretation role choices."""
+def _task_models_changed() -> None:
+    """Invalidate stale work when either task-specific model changes."""
+
+    _clear_hpo_candidate_draft()
+    _clear_analysis_result()
+
+
+def _render_task_model_selectors() -> tuple[str, str]:
+    """Render one independent model choice for each accepted LLM task."""
 
     with st.container(border=True):
-        st.subheader("Interpretation models")
+        st.subheader("Task-specific models")
         st.caption(
-            "Choose the strong conflict model first. The low-cost model is "
-            "used only when confirmed evidence has no meaningful conflict."
+            "Choose one model for Persian phenotype extraction and one "
+            "model for variant interpretation. Conflict status does not "
+            "select a different model."
         )
+        job_active = _analysis_job() is not None
         if st.button(
             "Load models from provider",
             key="load_provider_models",
             icon=":material/refresh:",
+            disabled=job_active,
         ):
             _provider_llm_models.clear()
             provider_models, provider_error = _provider_llm_models()
@@ -708,8 +715,8 @@ def _render_llm_model_selector() -> tuple[str, str]:
         if provider_models:
             st.caption(
                 f"Loaded {len(provider_models)} current provider models. "
-                "The catalog does not include prices; verify the low-cost "
-                "choice against the provider's current pricing."
+                "The provider catalog does not include prices or clinical "
+                "suitability metadata."
             )
         elif st.session_state[LLM_PROVIDER_MODELS_ERROR_KEY]:
             st.warning(
@@ -718,41 +725,54 @@ def _render_llm_model_selector() -> tuple[str, str]:
             )
         else:
             st.caption(
-                "Configured defaults are shown. Load the provider catalog "
-                "or enter another supported model identifier."
+                "Configured task defaults are shown. Load the provider "
+                "catalog or enter another supported model identifier."
             )
-        selected_strong_model = st.selectbox(
-            "Strong conflict model",
-            _llm_model_options(provider_models),
-            key=LLM_MODEL_KEY,
-            format_func=_format_llm_model_option,
-            placeholder="Search or select a strong AvalAI model",
-            filter_mode="contains",
-            accept_new_options=True,
-            help=(
-                "Used only for moderate, major, or critical conflicts. "
-                "Every result still requires qualified human review."
-            ),
-        )
-        selected_light_model = st.selectbox(
-            "Low-cost no-conflict model",
-            _light_llm_model_options(provider_models),
-            key=LLM_LIGHT_MODEL_KEY,
-            format_func=_format_light_llm_model_option,
-            placeholder="Select a low-cost AvalAI model",
-            filter_mode="contains",
-            accept_new_options=True,
-            help=(
-                "Used only to rearrange confirmed evidence when the "
-                "deterministic audit finds no meaningful conflict."
-            ),
-        )
+
+        phenotype_column, interpretation_column = st.columns(2)
+        with phenotype_column:
+            phenotype_model = st.selectbox(
+                "Phenotype Extraction Model",
+                _task_model_options(
+                    settings.PHENOTYPE_EXTRACTION_MODEL,
+                    provider_models,
+                    st.session_state.get(PHENOTYPE_MODEL_KEY),
+                ),
+                key=PHENOTYPE_MODEL_KEY,
+                placeholder="Select or enter a phenotype model",
+                filter_mode="contains",
+                accept_new_options=True,
+                disabled=job_active,
+                on_change=_task_models_changed,
+                help=(
+                    "Used only for the optional de-identified Persian "
+                    "clinical-text to HPO-candidate task."
+                ),
+            )
+        with interpretation_column:
+            variant_model = st.selectbox(
+                "Variant Interpretation Model",
+                _task_model_options(
+                    settings.VARIANT_INTERPRETATION_MODEL,
+                    provider_models,
+                    st.session_state.get(VARIANT_MODEL_KEY),
+                ),
+                key=VARIANT_MODEL_KEY,
+                placeholder="Select or enter an interpretation model",
+                filter_mode="contains",
+                accept_new_options=True,
+                disabled=job_active,
+                on_change=_task_models_changed,
+                help=(
+                    "Selected once for every variant; deterministic "
+                    "conflict status remains evidence context only."
+                ),
+            )
         st.caption(
-            "Selected routes: "
-            f"no conflict → {selected_light_model}; "
-            f"meaningful conflict → {selected_strong_model}."
+            f"Phenotype extraction: {phenotype_model}  |  "
+            f"Variant interpretation: {variant_model}"
         )
-    return selected_light_model, selected_strong_model
+    return phenotype_model, variant_model
 
 
 def _is_supported_upload_filename(filename: str) -> bool:
@@ -1467,9 +1487,9 @@ def render_app() -> None:
     st.subheader("Analysis workflow")
     _render_workflow_overview()
     st.divider()
-    light_model, strong_model = _render_llm_model_selector()
-    submission = _render_variant_input(strong_model)
-    _render_hpo_picker()
+    phenotype_model, variant_model = _render_task_model_selectors()
+    _render_hpo_picker(phenotype_model)
+    submission = _render_variant_input(variant_model)
     st.divider()
 
     _render_analysis_notice()
@@ -1493,8 +1513,8 @@ def render_app() -> None:
         st.divider()
         render_evidence_review(
             pipeline_result,
-            light_model=light_model,
-            strong_model=strong_model,
+            light_model=variant_model,
+            strong_model=variant_model,
         )
         if pipeline_result.get("final_interpretation_report") is not None:
             st.divider()

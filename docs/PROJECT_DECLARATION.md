@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 48 local HPO validation and explicit acceptance implemented on the Stage 44 workflow baseline
+**Implementation status:** Stage 49 task-specific model UI implemented on the Stage 44 interpretation backend
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 49 UI layout and task-specific model controls
+**Next implementation milestone:** Stage 50 single-model interpretation contract
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -117,6 +117,23 @@ then atomically merges it with manually selected HPO terms while preserving stab
 order and the established 50-term cap. Failed extraction, validation, or acceptance
 does not disable the existing local manual-search path.
 
+### Stage 49 task-specific model UI
+
+The active Streamlit input flow is ordered as **Task-specific models**,
+**Phenotypes**, then **Variant input**. It replaces the visible low-cost/no-conflict
+and strong/conflict selectors with one **Phenotype Extraction Model** and one
+**Variant Interpretation Model** selector. Both selectors support configured defaults,
+provider-advertised models, and bounded custom model IDs; choices remain independent
+across reruns and are disabled while an analysis job is active.
+
+The selected phenotype model is passed only to the Stage 47 extraction task. The
+selected variant model is forwarded as both compatibility arguments to the current
+Stage 44 interpretation backend, so conflict status cannot select a different model
+through the Stage 49 UI. Legacy route records, route-specific prompt contracts, and
+the old report lifecycle remain implementation facts until Stages 50-51 replace that
+backend behavior. Changing either task model invalidates stale analysis output and
+unaccepted phenotype suggestions.
+
 ## 3. Progress schematic
 
 ```mermaid
@@ -132,12 +149,13 @@ flowchart LR
     I --> J["Stage 46: XLSX and 10-variant input"]
     J --> K["Stage 47: phenotype-extraction contract"]
     K --> L["Stage 48: local HPO acceptance"]
-    L --> M["Stages 49-62: V3 redesign - pending"]
+    L --> M["Stage 49: task-specific model UI"]
+    M --> N["Stages 50-62: V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L done
-    class M review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M done
+    class N review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -199,7 +217,8 @@ their original order.
 | 46 | Centralized the 10-variant limit, expanded VCF/manual input, added first-worksheet-only Excel normalization, and preserved the shared normalized variant contract and ordering. | Complete |
 | 47 | Added a dedicated de-identified Persian text to structured HPO-candidate LLM contract, separate phenotype/interpretation model settings, strict response validation, and isolated failures. | Complete |
 | 48 | Added local ontology validation for every model suggestion, canonical ID/label resolution, editable candidate review, atomic explicit acceptance, and manual-path failure isolation. | Complete |
-| 49–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 49 | Reordered the Streamlit input flow, added separate task-specific model selectors, connected phenotype extraction to its selected model, and removed conflict-based model choice from the UI. | Complete |
+| 50–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture (legacy Stage 44 baseline)
 
@@ -395,7 +414,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **725 passed, 4 skipped**, with **86.01% coverage**. The Stage 44 acceptance
+baseline is **728 passed, 4 skipped**, with **86.01% coverage**. The Stage 44 acceptance
 runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
 both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
 ordered Output A/Output B generation.
@@ -432,9 +451,9 @@ connectivity/schema result, not a future availability guarantee.
 Required configuration includes `GENOME_ASSEMBLY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
 `LLM_API_KEY`, and default LLM model settings. Stage 47 adds the independent
 `PHENOTYPE_EXTRACTION_MODEL`, `VARIANT_INTERPRETATION_MODEL`, and bounded
-`PHENOTYPE_EXTRACTION_MAX_TOKENS` settings. The existing UI still chooses the
-legacy no-conflict and conflict models separately per analysis. Provider base URLs,
-timeouts, retry limits,
+`PHENOTYPE_EXTRACTION_MAX_TOKENS` settings. Stage 49 exposes the two task settings
+as independent UI selectors and removes the legacy route selectors from the input
+flow. Provider base URLs, timeouts, retry limits,
 cache limits, enrichment limits, HPO release locations, database location, upload and
 report paths, and feature flags are centralized in `config.py` and documented by
 `.env.example`.
@@ -476,8 +495,9 @@ or hide an unavailable state for a demonstration; use the deterministic offline 
 to demonstrate application behavior when external connectivity is unreliable.
 
 Key presentation points are independent-source provenance, correct missingness,
-immutable machine evidence, explicit human confirmation, two-layer LLM routing,
-per-variant failure isolation, privacy boundaries, and the non-diagnostic disclaimer.
+immutable machine evidence, explicit human confirmation, task-specific model controls,
+legacy route compatibility, per-variant failure isolation, privacy boundaries, and
+the non-diagnostic disclaimer.
 
 ## 14. Implementation map
 
@@ -489,6 +509,7 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 | Core annotation providers | `backend/annotation.py` |
 | HPO and Phen2Gene | `backend/phenotype.py` |
 | Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
+| Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
 | MyDisease context | `backend/mydisease.py` |
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
@@ -506,9 +527,9 @@ per-variant failure isolation, privacy boundaries, and the non-diagnostic discla
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-48 are implemented, but task-specific model controls and the report/model
-   lifecycle remain on the Stage 44 workflow until Stages 49–62 are implemented and
-   verified.
+1. Stages 46-49 are implemented, but route-specific prompt/result contracts and the
+   report lifecycle remain on the Stage 44 workflow until Stages 50–62 are implemented
+   and verified.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -532,7 +553,7 @@ a coherent evidence-collection, human-review, two-layer interpretation, and repo
 workflow with explicit safety boundaries. Stage 45 incorporated the professor review
 into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel input
 plus the centralized ten-variant boundary, Stage 47 implemented the isolated bounded
-phenotype-extraction LLM contract, and Stage 48 added local ontology validation,
-editable review, and explicit acceptance without changing the report lifecycle. The
-correct next action is Stage 49: implement the accepted UI layout and task-specific
-model controls.
+phenotype-extraction LLM contract, Stage 48 added local ontology validation and
+explicit acceptance, and Stage 49 implemented the task-specific model selectors and
+accepted input layout. The correct next action is Stage 50: replace the legacy
+route-specific interpretation contract with one Variant Interpretation Model path.

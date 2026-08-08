@@ -427,14 +427,26 @@ def _render_interpretation_action(
         item.get("status") == "failed"
         for item in result.get("llm_routing_results", [])
     )
+    single_model = (
+        isinstance(light_model, str)
+        and bool(light_model)
+        and light_model == strong_model
+    )
 
     with st.container(border=True):
         st.markdown("**Generate final interpretation**")
-        st.caption(
-            f"Confirmed variants: {len(confirmed_indexes)} of {variant_count}. "
-            "No-conflict variants use the low-cost model; meaningful "
-            "conflicts use the strong model."
-        )
+        if single_model:
+            st.caption(
+                f"Confirmed variants: {len(confirmed_indexes)} of "
+                f"{variant_count}. Every variant uses {strong_model}; "
+                "conflict status remains interpretation context."
+            )
+        else:
+            st.caption(
+                f"Confirmed variants: {len(confirmed_indexes)} of "
+                f"{variant_count}. No-conflict variants use the low-cost "
+                "model; meaningful conflicts use the strong model."
+            )
         if not fully_confirmed:
             st.info(
                 "Confirm the reviewed evidence for every variant before "
