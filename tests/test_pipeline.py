@@ -14,6 +14,7 @@ import tomllib
 import zipfile
 from copy import deepcopy
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from io import BytesIO
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -11200,6 +11201,254 @@ class TestStage43TestingV2:
         )
         serialized_output_b = json.dumps(output_b).casefold()
         for prohibited in ("ranking", "rank", "top_n", "raw_evidence"):
+            assert prohibited not in serialized_output_b
+        validate_pipeline_result(completed)
+
+
+@pytest.mark.stage44_acceptance
+class TestStage44EndToEndAcceptance:
+    """Verify the final five-variant MVP workflow gate."""
+
+    def test_five_variant_case_reaches_both_outputs_with_isolation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        case = json.loads(
+            (
+                PROJECT_ROOT
+                / "data"
+                / "samples"
+                / "stage44_acceptance_case.json"
+            ).read_text(encoding="utf-8")
+        )
+        variants = case["variants"]
+        hpo_terms = case["hpo_terms"]
+
+        def fake_annotate(
+            normalized_variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for normalized in normalized_variants:  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._pipeline_candidate()
+                variant = dict(normalized)
+                candidate["variant"] = variant
+                sources = candidate["sources"]
+                sources["genebe"] = {
+                    "status": "success",
+                    "provider": "GeneBe",
+                    "transcript": candidate["transcript"],
+                    "automated_acmg_classification": "Pathogenic",
+                    "automated_acmg_criteria": ["PS3", "PM2"],
+                }
+                sources["cspec"] = {
+                    "status": "success",
+                    "provider": "ClinGen CSpec Registry",
+                    "specifications": [
+                        {
+                            "specification_id": "SCN1A-EP",
+                            "title": "SCN1A VCEP specification",
+                            "version": "1.0",
+                            "status": "Released",
+                            "matched_disease_ids": ["MONDO:0100062"],
+                            "scope_match": "gene_and_disease",
+                        }
+                    ],
+                }
+                myvariant = sources["myvariant"]
+                myvariant["variant_id"] = (
+                    f"chr{variant['chrom']}:g.{variant['pos']}"
+                    f"{variant['ref']}>{variant['alt']}"
+                )
+                annotations.append(candidate)
+            return annotations
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        preconfirmation_adapter = FakeLLMAdapter(
+            LLMRequestError("must not run before confirmation")
+        )
+
+        phase_a = run_analysis(
+            vcf_path=None,
+            manual_variants=variants,
+            phenotypes=hpo_terms,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=_successful_phen2gene_session(),
+            phen2gene_use_cache=False,
+            llm_client=LLMClient(preconfirmation_adapter),
+            persist_analysis=False,
+        )
+
+        assert phase_a["variant_count"] == 5
+        assert phase_a["workflow_state"] == "awaiting_confirmation"
+        assert preconfirmation_adapter.requests == []
+        assert [
+            evidence["variant"]["pos"]
+            for evidence in phase_a["evidence_objects"]
+        ] == [100, 101, 102, 103, 104]
+        assert all(
+            {
+                "vep",
+                "myvariant",
+                "clinvar",
+                "clingen",
+            }.issubset(evidence["source_statuses"])
+            for evidence in phase_a["evidence_objects"]
+        )
+        assert all(
+            evidence["annotations"]["genebe"]["status"] == "success"
+            and evidence["pathogenicity"]["cspec_context"]
+            for evidence in phase_a["evidence_objects"]
+        )
+        assert all(
+            evidence["provenance"]["lineage"]
+            for evidence in phase_a["evidence_objects"]
+        )
+        assert all(
+            evidence["conflict_audit"]["pre_review"]["phase"]
+            == "pre_review"
+            for evidence in phase_a["evidence_objects"]
+        )
+        assert all(
+            "conditional_enrichment" in evidence
+            for evidence in phase_a["evidence_objects"]
+        )
+
+        reports = deepcopy(phase_a["evidence_review_reports"])
+        base_time = datetime.fromisoformat(
+            reports[0]["updated_at"].replace("Z", "+00:00")
+        )
+
+        def stage_time(minutes: int) -> str:
+            return (
+                (base_time + timedelta(minutes=minutes))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+
+        reviewed = deepcopy(reports[0]["reviewed_user_report"])
+        reviewed["manual_evidence"] = {
+            "laboratory": "Orthogonal confirmation pending."
+        }
+        reports[0] = save_evidence_review_draft(
+            reports[0],
+            reviewed,
+            ["Manual evidence reviewed."],
+            timestamp=stage_time(1),
+        )
+        reviewed = deepcopy(reports[1]["reviewed_user_report"])
+        reviewed["pathogenicity"][
+            "clinvar_classification"
+        ] = "Benign"
+        reports[1] = save_evidence_review_draft(
+            reports[1],
+            reviewed,
+            timestamp=stage_time(2),
+        )
+
+        assert "manual_evidence" not in reports[0][
+            "original_machine_report"
+        ]
+        assert reports[0]["edit_history"]
+        with pytest.raises(PipelineError, match="requires confirmed"):
+            generate_confirmed_interpretations(phase_a)
+
+        confirmed = confirm_reviewed_evidence(
+            phase_a,
+            reports,
+            timestamp=stage_time(3),
+        )
+        packages = confirmed["reviewed_evidence_packages"]
+        assert [package["variant_index"] for package in packages] == [
+            0,
+            1,
+            2,
+            3,
+            4,
+        ]
+        assert packages[0]["user_added_evidence"]
+        assert packages[1]["post_review_conflict"]["status"] == (
+            "conflict"
+        )
+        assert any(
+            finding["conflict_type"] == "user_override_conflict"
+            for finding in packages[1]["post_review_conflict"][
+                "findings"
+            ]
+        )
+
+        success = TestStage35TwoLayerLLMRouting._response(
+            model="light-response",
+            resolution="not_applicable",
+        )
+        light_adapter = SequenceLLMAdapter(
+            [
+                success,
+                LLMTimeoutError("isolated timeout"),
+                success,
+                success,
+            ]
+        )
+        strong_adapter = FakeLLMAdapter(
+            TestStage35TwoLayerLLMRouting._response(
+                model="strong-response",
+                resolution="unresolved",
+                text="The reviewed sources remain in conflict.",
+            )
+        )
+        routed = generate_confirmed_interpretations(
+            confirmed,
+            light_client=LLMClient(light_adapter),
+            strong_client=LLMClient(strong_adapter),
+            timestamp=stage_time(4),
+        )
+        completed = generate_final_interpretation_report(routed)
+
+        assert [
+            item["route"] for item in completed["llm_routing_results"]
+        ] == ["llm_1", "llm_2", "llm_1", "llm_1", "llm_1"]
+        assert [
+            item["status"] for item in completed["llm_routing_results"]
+        ] == ["success", "success", "failed", "success", "success"]
+        assert completed["llm_routing_results"][1][
+            "resolution_status"
+        ] == "unresolved"
+        assert len(completed["evidence_review_reports"]) == 5
+        output_b = completed["final_interpretation_report"]
+        assert [entry["variant_index"] for entry in output_b["entries"]] == [
+            0,
+            1,
+            2,
+            3,
+            4,
+        ]
+        assert [entry["status"] for entry in output_b["entries"]] == [
+            "success",
+            "success",
+            "failed",
+            "success",
+            "success",
+        ]
+        assert output_b["entries"][2]["failure_status"] == (
+            "interpretation_generation_failed"
+        )
+        serialized_output_b = json.dumps(output_b).casefold()
+        for prohibited in (
+            "ranking",
+            "top_n",
+            "raw_evidence",
+            "reviewed_user_report",
+        ):
             assert prohibited not in serialized_output_b
         validate_pipeline_result(completed)
 
