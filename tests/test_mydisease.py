@@ -22,6 +22,9 @@ from frontend.results import (
 )
 
 
+pytestmark = pytest.mark.stage43_testing_v2
+
+
 class FakeResponse:
     def __init__(self, status_code: int, payload: object) -> None:
         self.status_code = status_code

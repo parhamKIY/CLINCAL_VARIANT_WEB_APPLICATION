@@ -12,7 +12,7 @@ professor-facing workflow.
 [![MVP status](https://img.shields.io/badge/MVP-Stage_16_complete-24708a?style=for-the-badge)](#stage-16-mvp-preparation-complete)
 [![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=for-the-badge&logo=python&logoColor=white)](#environment)
 [![Streamlit](https://img.shields.io/badge/Streamlit-frontend-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#stage-11-streamlit-frontend-complete)
-[![Tests](https://img.shields.io/badge/tests-567_pass%2C_3_skipped-2e7d32?style=for-the-badge)](#tests)
+[![Tests](https://img.shields.io/badge/tests-650_pass%2C_4_skipped-2e7d32?style=for-the-badge)](#tests)
 [![Coverage](https://img.shields.io/badge/coverage-86.92%25-2e7d32?style=for-the-badge)](#tests)
 [![Security](https://img.shields.io/badge/security-Stage_15_complete-5c6bc0?style=for-the-badge)](#stage-15-security-complete)
 
@@ -77,8 +77,8 @@ flowchart LR
 
 ## API-first continuation
 
-Stages 27–40 are implemented and tested. Stage 41 and later remain planned
-until the code and tests for each stage are completed. The repository
+Stages 27–43 are implemented and tested. Later stages remain planned until
+the code and tests for each stage are completed. The repository
 audit and the exact `KEEP`, `MODIFY`, `BYPASS`, `VERIFY`, and `NEW` boundaries
 are recorded in
 [`docs/STAGE_19_REPOSITORY_REALITY_CHECK.md`](docs/STAGE_19_REPOSITORY_REALITY_CHECK.md).
@@ -179,6 +179,10 @@ in input order and provides separate evidence and interpretation report views.
   defensively redacts PHI and raw VCF content from logs, verifies minimum-data
   provider requests, and confirms that Pipeline V2 sends only a bounded,
   confirmation-gated Reviewed Evidence Package to the LLM.
+- Stage 43 registers the complete offline suite as the selectable Testing V2
+  acceptance gate and adds a cross-stage test covering human edits,
+  confirmation, two-layer routing, unresolved conflict, and complete ordered
+  Output A/Output B generation without ranking or raw evidence in Output B.
 - Generated clinical reports can be downloaded as text, PDF, or Word.
   PDF and Word files are created locally in memory from the validated
   text report, without additional provider calls or clinical data.

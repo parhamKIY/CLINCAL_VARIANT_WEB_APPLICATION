@@ -239,6 +239,7 @@ from frontend.ui import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.stage43_testing_v2
 
 MINIMAL_HEADER = (
     "##fileformat=VCFv4.2\n"
@@ -11083,6 +11084,124 @@ class TestStage42PrivacySecurityAudit:
         assert len(serialized.encode("utf-8")) <= 512 * 1024
         assert "raw_vcf" not in serialized
         assert "genotype" not in serialized
+
+
+class TestStage43TestingV2:
+    """Verify the complete review-to-routing-to-output contract."""
+
+    def test_multi_variant_review_routing_and_outputs_are_complete(
+        self,
+    ) -> None:
+        evidence = [
+            TestEvidenceObject._complete_evidence_object()
+            for _ in range(3)
+        ]
+        evidence[1]["variant"]["pos"] = 166848216
+        evidence[2]["variant"]["pos"] = 166848217
+        result = create_pipeline_result()
+        result["variant_count"] = 3
+        result["variants"] = [dict(item["variant"]) for item in evidence]
+        result["evidence_objects"] = evidence
+        reports = build_evidence_review_reports(
+            evidence,
+            timestamp="2026-08-08T12:00:00Z",
+        )
+
+        reviewed = deepcopy(reports[0]["reviewed_user_report"])
+        reviewed["manual_evidence"] = {
+            "laboratory": "Orthogonal confirmation pending."
+        }
+        reports[0] = save_evidence_review_draft(
+            reports[0],
+            reviewed,
+            timestamp="2026-08-08T12:10:00Z",
+        )
+        reviewed = deepcopy(reports[1]["reviewed_user_report"])
+        reviewed["pathogenicity"][
+            "clinvar_classification"
+        ] = "Benign"
+        reports[1] = save_evidence_review_draft(
+            reports[1],
+            reviewed,
+            timestamp="2026-08-08T12:20:00Z",
+        )
+        result["evidence_review_reports"] = [dict(item) for item in reports]
+
+        light_adapter = FakeLLMAdapter(
+            TestStage35TwoLayerLLMRouting._response(
+                model="light-response",
+                resolution="not_applicable",
+            )
+        )
+        strong_adapter = FakeLLMAdapter(
+            TestStage35TwoLayerLLMRouting._response(
+                model="strong-response",
+                resolution="unresolved",
+            )
+        )
+        with pytest.raises(PipelineError, match="requires confirmed"):
+            generate_confirmed_interpretations(
+                result,
+                light_client=LLMClient(light_adapter),
+                strong_client=LLMClient(strong_adapter),
+            )
+        assert light_adapter.requests == []
+        assert strong_adapter.requests == []
+
+        confirmed = confirm_reviewed_evidence(
+            result,
+            reports,
+            timestamp="2026-08-08T13:00:00Z",
+        )
+        routed = generate_confirmed_interpretations(
+            confirmed,
+            light_client=LLMClient(light_adapter),
+            strong_client=LLMClient(strong_adapter),
+            timestamp="2026-08-08T14:00:00Z",
+        )
+        completed = generate_final_interpretation_report(routed)
+
+        assert [
+            report["variant_index"]
+            for report in completed["evidence_review_reports"]
+        ] == [0, 1, 2]
+        assert [
+            item["route"] for item in completed["llm_routing_results"]
+        ] == ["llm_1", "llm_2", "llm_1"]
+        assert completed["llm_routing_results"][1][
+            "resolution_status"
+        ] == "unresolved"
+        assert len(light_adapter.requests) == 2
+        assert len(strong_adapter.requests) == 1
+
+        light_prompt = light_adapter.requests[0].messages[1].content
+        assert "Orthogonal confirmation pending." in light_prompt
+        assert '"user_added_evidence"' in light_prompt
+        assert '"original_machine_report"' in light_prompt
+        assert '"reviewed_user_report"' in light_prompt
+        assert reports[0]["original_machine_report"] == evidence[0]
+
+        output_b = completed["final_interpretation_report"]
+        assert [entry["variant_index"] for entry in output_b["entries"]] == [
+            0,
+            1,
+            2,
+        ]
+        assert all(
+            set(entry)
+            == {
+                "variant_index",
+                "status",
+                "final_interpretation",
+                "resolution_status",
+                "failure_status",
+            }
+            for entry in output_b["entries"]
+        )
+        serialized_output_b = json.dumps(output_b).casefold()
+        for prohibited in ("ranking", "rank", "top_n", "raw_evidence"):
+            assert prohibited not in serialized_output_b
+        validate_pipeline_result(completed)
 
 
 class TestClinicalInterpretationValidation:
