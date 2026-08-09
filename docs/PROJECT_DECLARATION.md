@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 63 provider-resilience contract complete
+**Implementation status:** Stage 64 shared provider-call policy complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 64 shared retry, timeout, and circuit-breaker layer
+**Next checkpoint:** Stage 65 simple local HPO-gene fallback
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -28,8 +28,9 @@ The professor review on 2026-08-08 changed the accepted target architecture. Sta
 phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. Stage 63 begins the separate provider-resilience roadmap
-with a central operational-status and fallback-provenance contract. The authoritative
+bounded live validation. Stages 63-64 begin the separate provider-resilience roadmap
+with central operational-status, retry, timeout, circuit, and fallback-provenance
+contracts. The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
@@ -278,12 +279,13 @@ flowchart LR
     X --> Y["Stage 61: live provider and link validation"]
     Y --> Z["Stage 62: documentation and demo handoff"]
     Z --> AA["Stage 63: provider-resilience contract"]
-    AA --> AB["Stage 64: shared request policy - pending"]
+    AA --> AB["Stage 64: shared request policy"]
+    AB --> AC["Stage 65: local HPO-gene fallback - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA done
-    class AB review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB done
+    class AC review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -360,6 +362,7 @@ their original order.
 | 61 | Revalidated every configured biomedical provider and both task-specific LLM contracts, live-probed representative report links, and removed non-navigable provider POST endpoints from canonical hyperlinks. | Complete |
 | 62 | Reconciled V3 documentation, added a reproducible multi-sheet Excel demo, corrected stale UI wording, and prepared the exact demonstration and professor-feedback checklist. | Complete; external professor feedback pending |
 | 63 | Added one strict provider operational-status taxonomy, centralized retry/fallback decisions, request/HTTP classification, and validated primary/fallback provenance while preserving `no_match` as a non-failure. | Complete |
+| 64 | Added one bounded provider-call wrapper with separate connect/read deadlines, centralized retry/backoff and practical `Retry-After` handling, analysis-scoped circuits, safe transition logging, and initial MyDisease adoption. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -599,6 +602,26 @@ fallback provenance. A valid `no_match` is neither retryable nor a fallback trig
 Stage 63 does not modify provider clients or implement retries, circuits, or fallback
 calls; those integrations begin in Stage 64.
 
+### Stage 64 shared retry, timeout, and circuit-breaker layer
+
+`backend/provider_resilience.py` now provides one reusable provider-call wrapper with
+validated connect/read timeout tuples, a default two-attempt policy, bounded
+exponential backoff, small practical `Retry-After` support, and a hard three-attempt
+upper bound. `403` is not retried; timeout, connection, `408`, `429`, `5xx`, and
+temporarily invalid responses follow the centralized retry taxonomy. Capability-
+specific HTTP no-match states remain terminal and never open a circuit.
+
+`ProviderCircuitState` is created per analysis operation and preserves only a bounded
+provider failure category plus optional HTTP status. Once a persistent failure opens
+a circuit, later calls for that provider in the same analysis are skipped. Separate
+analysis instances do not share circuit state. Logs contain provider, operation,
+attempt, normalized failure, circuit state, retry decision, and fallback eligibility,
+without exception text or clinical payloads.
+
+MyDisease metadata and gene-query operations now use the shared policy. Repeated
+MyDisease calls in one analysis therefore reuse strict deadlines, retry decisions,
+and one analysis-scoped circuit without implementing Stage 65 fallback behavior.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -686,8 +709,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **841 passed, 4 skipped**,
-with **85.14% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **858 passed, 4 skipped**,
+with **85.34% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -788,7 +811,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
 | Conditional enrichment | `backend/conditional_enrichment.py` |
-| Provider resilience contract | `backend/provider_resilience.py`, `tests/test_provider_resilience.py` |
+| Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
 | Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
 | LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
@@ -804,9 +827,9 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-63 are implemented and documented. Provider-client adoption of the
-   Stage 63 contract begins in Stage 64; professor feedback and sign-off remain
-   external pending checkpoints.
+1. Stages 46-64 are implemented and documented. Capability-specific fallback
+   implementation begins in Stage 65; professor feedback and sign-off remain external
+   pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should

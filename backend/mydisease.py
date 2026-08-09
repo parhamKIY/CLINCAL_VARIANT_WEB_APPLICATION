@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
 
 import requests
 
-from backend.logging_config import get_logger
+from backend.provider_resilience import (
+    ProviderCircuitState,
+    ProviderInvalidResponseError,
+    ProviderRetryPolicy,
+    ProviderTimeouts,
+    call_provider_with_policy,
+)
 from config import settings
 
 
@@ -38,14 +44,6 @@ MYDISEASE_QUERY_FIELDS = (
     "ctd.pathway_related_to_disease",
     "umls.umls",
 )
-MYDISEASE_TRANSIENT_HTTP_STATUSES = {
-    408,
-    429,
-    500,
-    502,
-    503,
-    504,
-}
 MYDISEASE_MAX_PATHWAY_CONTEXTS = 10
 MYDISEASE_MAX_SYNONYMS = 20
 MYDISEASE_MAX_CROSS_REFERENCES = 20
@@ -61,7 +59,6 @@ MYDISEASE_HGNC_URL_PATTERN = re.compile(
     r"https?://identifiers\.org/hgnc/([1-9][0-9]*)",
     re.IGNORECASE,
 )
-LOGGER = get_logger("mydisease")
 _CACHE: OrderedDict[tuple[object, ...], dict[str, Any]] = OrderedDict()
 _CACHE_LOCK = threading.RLock()
 
@@ -189,25 +186,11 @@ def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _retry_delay(attempt: int) -> float:
-    return min(0.25 * (2 ** max(attempt - 1, 0)), 2.0)
-
-
-def _log_attempt(
-    *,
-    operation: str,
-    attempt: int,
-    outcome: str,
-    status_code: int | None = None,
-) -> None:
-    LOGGER.info(
-        "event=external_api_request service=mydisease operation=%s "
-        "attempt=%d outcome=%s status_code=%s",
-        operation,
-        attempt,
-        outcome,
-        status_code if status_code is not None else "none",
-    )
+@dataclass(frozen=True)
+class _ParsedJSONResponse:
+    status_code: int
+    headers: Mapping[str, object]
+    payload: Mapping[str, object]
 
 
 def _request_json(
@@ -216,99 +199,71 @@ def _request_json(
     *,
     params: Mapping[str, object] | None,
     operation: str,
+    circuit_state: ProviderCircuitState,
 ) -> tuple[Mapping[str, object], int, int]:
-    attempts = settings.MYDISEASE_MAX_RETRIES + 1
     url = f"{settings.MYDISEASE_BASE_URL}/{path.lstrip('/')}"
-    for attempt in range(1, attempts + 1):
-        try:
-            response = session.get(
-                url,
-                params=params,
-                headers={"Accept": "application/json"},
-                timeout=settings.MYDISEASE_TIMEOUT,
-            )
-        except requests.Timeout as error:
-            _log_attempt(
-                operation=operation,
-                attempt=attempt,
-                outcome="timeout",
-            )
-            if attempt < attempts:
-                time.sleep(_retry_delay(attempt))
-                continue
-            raise MyDiseaseError(
-                "MyDisease request timed out.",
-                attempts=attempt,
-                kind="timeout",
-            ) from error
-        except requests.RequestException as error:
-            _log_attempt(
-                operation=operation,
-                attempt=attempt,
-                outcome="request_error",
-            )
-            if attempt < attempts:
-                time.sleep(_retry_delay(attempt))
-                continue
-            raise MyDiseaseError(
-                "MyDisease request failed.",
-                attempts=attempt,
-                kind="network",
-            ) from error
+    timeout_seconds = float(settings.MYDISEASE_TIMEOUT)
 
-        status_code = response.status_code
-        if status_code != 200:
-            _log_attempt(
-                operation=operation,
-                attempt=attempt,
-                outcome="http_error",
-                status_code=status_code,
-            )
-            if (
-                status_code in MYDISEASE_TRANSIENT_HTTP_STATUSES
-                and attempt < attempts
-            ):
-                time.sleep(_retry_delay(attempt))
-                continue
-            raise MyDiseaseError(
-                "MyDisease returned an unsuccessful response.",
-                attempts=attempt,
-                kind="http_error",
-                status_code=status_code,
-            )
+    def request(
+        timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
+        response = session.get(
+            url,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return response
         try:
             payload = response.json()
         except (TypeError, ValueError) as error:
-            _log_attempt(
-                operation=operation,
-                attempt=attempt,
-                outcome="invalid_json",
-                status_code=status_code,
-            )
-            raise MyDiseaseError(
-                "MyDisease returned invalid JSON.",
-                attempts=attempt,
-                kind="invalid_response",
-                status_code=status_code,
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
             ) from error
         if not isinstance(payload, Mapping):
-            raise MyDiseaseError(
-                "MyDisease returned an invalid response object.",
-                attempts=attempt,
-                kind="invalid_response",
-                status_code=status_code,
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
             )
-        _log_attempt(
-            operation=operation,
-            attempt=attempt,
-            outcome="success",
-            status_code=status_code,
+        headers = getattr(response, "headers", {})
+        return _ParsedJSONResponse(
+            status_code=response.status_code,
+            headers=headers if isinstance(headers, Mapping) else {},
+            payload=payload,
         )
-        return payload, attempt, status_code
+
+    result = call_provider_with_policy(
+        provider="mydisease",
+        operation_name=operation,
+        operation=request,
+        timeouts=ProviderTimeouts(
+            connect=min(timeout_seconds, 5.0),
+            read=timeout_seconds,
+        ),
+        retry_policy=ProviderRetryPolicy(
+            max_attempts=min(settings.MYDISEASE_MAX_RETRIES + 1, 2),
+            backoff_base_seconds=0.25,
+            backoff_max_seconds=2.0,
+            max_retry_after_seconds=2.0,
+        ),
+        circuit_state=circuit_state,
+    )
+    if result.status == "success" and isinstance(
+        result.value,
+        _ParsedJSONResponse,
+    ):
+        return result.value.payload, result.attempts, result.value.status_code
+    kind = {
+        "timeout": "timeout",
+        "invalid_response": "invalid_response",
+        "unavailable": "network" if result.http_status is None else "http_error",
+    }.get(result.status, "http_error")
     raise MyDiseaseError(
-        "MyDisease request failed.",
-        attempts=attempts,
-        kind="network",
+        "MyDisease request did not complete successfully.",
+        attempts=result.attempts,
+        kind=kind,
+        status_code=result.http_status,
     )
 
 
@@ -389,6 +344,7 @@ def _query_params(gene: str) -> dict[str, object]:
 
 def _metadata(
     session: requests.Session,
+    circuit_state: ProviderCircuitState,
 ) -> tuple[str | None, int, str | None]:
     try:
         payload, attempts, _status = _request_json(
@@ -396,6 +352,7 @@ def _metadata(
             "metadata",
             params=None,
             operation="get_metadata",
+            circuit_state=circuit_state,
         )
     except MyDiseaseError as error:
         return (
@@ -745,6 +702,7 @@ def _lookup_gene(
     *,
     gene: str,
     gene_id: str,
+    circuit_state: ProviderCircuitState,
 ) -> tuple[dict[str, Any], int]:
     params = _query_params(gene)
     payload, attempts, status_code = _request_json(
@@ -752,6 +710,7 @@ def _lookup_gene(
         "query",
         params=params,
         operation="query_gene",
+        circuit_state=circuit_state,
     )
     total = payload.get("total")
     hits = payload.get("hits")
@@ -1110,6 +1069,7 @@ def enrich_with_mydisease(
     target_genes = list(target_gene_by_key.values())
     owns_session = session is None
     client = session or requests.Session()
+    circuit_state = ProviderCircuitState()
     attempts = 0
     provider_version: str | None = None
     metadata_warning: str | None = None
@@ -1120,7 +1080,7 @@ def enrich_with_mydisease(
                 provider_version,
                 metadata_attempts,
                 metadata_warning,
-            ) = _metadata(client)
+            ) = _metadata(client, circuit_state)
             attempts += metadata_attempts
         for gene in target_genes:
             gene_id = identifiers.get(gene.casefold())
@@ -1147,6 +1107,7 @@ def enrich_with_mydisease(
                         client,
                         gene=gene,
                         gene_id=gene_id,
+                        circuit_state=circuit_state,
                     )
                     attempts += request_attempts
                 except MyDiseaseError as error:

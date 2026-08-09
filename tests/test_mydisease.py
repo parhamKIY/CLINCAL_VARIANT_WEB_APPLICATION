@@ -370,7 +370,10 @@ def test_retryable_error_retries_but_nonretryable_does_not(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "MYDISEASE_MAX_RETRIES", 1)
-    monkeypatch.setattr("backend.mydisease.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "backend.provider_resilience.time.sleep",
+        lambda _: None,
+    )
     result, session = run(
         [
             metadata(),
@@ -387,6 +390,23 @@ def test_retryable_error_retries_but_nonretryable_does_not(
     )
     assert result["status"] == "unavailable"
     assert len(session.calls) == 2
+
+
+def test_analysis_circuit_skips_repeated_provider_failure() -> None:
+    first = variant("SCN1A", 10585)
+    second = variant("BRCA1", 1100)
+    second["variant"]["pos"] = 43071077
+    result, session = run(
+        [metadata(), FakeResponse(403, {"error": "forbidden"})],
+        variants=[first, second],
+    )
+    assert result["status"] == "unavailable"
+    assert result["request_attempts"] == 2
+    assert len(session.calls) == 2
+    assert [
+        item["mydisease"]["failure_reason"]
+        for item in result["variants"]
+    ] == ["http_error", "http_error"]
 
 
 def test_duplicate_genes_query_once_and_cache_is_bounded_context() -> None:

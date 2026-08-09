@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import io
+import logging
+
 import pytest
 import requests
 
 from backend.provider_resilience import (
     PROVIDER_STATUSES,
+    ProviderCircuitState,
+    ProviderInvalidResponseError,
+    ProviderRetryPolicy,
+    ProviderTimeouts,
     ProviderContractError,
     build_provider_provenance,
+    call_provider_with_policy,
     classify_http_status,
     classify_request_exception,
     is_operational_failure,
@@ -17,6 +25,17 @@ from backend.provider_resilience import (
     validate_provider_provenance,
     validate_provider_status,
 )
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        status_code: int,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
 
 
 @pytest.mark.parametrize(
@@ -197,3 +216,231 @@ def test_provenance_rejects_invalid_roles(invalid_role: object) -> None:
     provenance["provider_role"] = invalid_role
     with pytest.raises(ProviderContractError):
         validate_provider_provenance(provenance)
+
+
+def test_shared_policy_passes_strict_connect_read_timeouts() -> None:
+    calls: list[tuple[tuple[float, float], int]] = []
+
+    def operation(
+        timeout: tuple[float, float],
+        attempt: int,
+    ) -> FakeResponse:
+        calls.append((timeout, attempt))
+        return FakeResponse(200)
+
+    result = call_provider_with_policy(
+        provider="gnomad",
+        operation_name="lookup_variant",
+        operation=operation,
+        timeouts=ProviderTimeouts(connect=2, read=7),
+    )
+    assert result.status == "success"
+    assert result.attempts == 1
+    assert result.value is not None
+    assert calls == [((2.0, 7.0), 1)]
+
+
+def test_timeout_retries_once_then_opens_analysis_circuit() -> None:
+    calls = 0
+    sleeps: list[float] = []
+    circuits = ProviderCircuitState()
+
+    def operation(
+        _timeout: tuple[float, float],
+        _attempt: int,
+    ) -> FakeResponse:
+        nonlocal calls
+        calls += 1
+        raise requests.Timeout("private timeout detail")
+
+    result = call_provider_with_policy(
+        provider="gnomad",
+        operation_name="lookup_variant",
+        operation=operation,
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        circuit_state=circuits,
+        sleep=sleeps.append,
+    )
+    assert result.status == "timeout"
+    assert result.attempts == 2
+    assert result.circuit_open is True
+    assert calls == 2
+    assert sleeps == [1.0]
+    assert circuits.get("gnomad") is not None
+
+    skipped = call_provider_with_policy(
+        provider="gnomad",
+        operation_name="lookup_variant",
+        operation=operation,
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        circuit_state=circuits,
+    )
+    assert skipped.status == "timeout"
+    assert skipped.attempts == 0
+    assert skipped.circuit_open is True
+    assert calls == 2
+
+
+def test_forbidden_opens_circuit_without_retry() -> None:
+    sleeps: list[float] = []
+    circuits = ProviderCircuitState()
+    result = call_provider_with_policy(
+        provider="gnomad",
+        operation_name="lookup_variant",
+        operation=lambda _timeout, _attempt: FakeResponse(403),
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        circuit_state=circuits,
+        sleep=sleeps.append,
+    )
+    assert result.status == "forbidden"
+    assert result.attempts == 1
+    assert result.circuit_open is True
+    assert sleeps == []
+
+
+def test_small_retry_after_is_honored() -> None:
+    responses = iter(
+        [
+            FakeResponse(429, headers={"Retry-After": "2"}),
+            FakeResponse(200),
+        ]
+    )
+    sleeps: list[float] = []
+    result = call_provider_with_policy(
+        provider="pubmed",
+        operation_name="search_literature",
+        operation=lambda _timeout, _attempt: next(responses),
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        sleep=sleeps.append,
+    )
+    assert result.status == "success"
+    assert result.attempts == 2
+    assert sleeps == [2.0]
+
+
+def test_impractical_retry_after_fails_without_waiting() -> None:
+    sleeps: list[float] = []
+    result = call_provider_with_policy(
+        provider="pubmed",
+        operation_name="search_literature",
+        operation=lambda _timeout, _attempt: FakeResponse(
+            429,
+            headers={"Retry-After": "60"},
+        ),
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        sleep=sleeps.append,
+    )
+    assert result.status == "rate_limited"
+    assert result.attempts == 1
+    assert sleeps == []
+
+
+def test_server_error_retries_then_succeeds() -> None:
+    responses = iter([FakeResponse(503), FakeResponse(200)])
+    sleeps: list[float] = []
+    result = call_provider_with_policy(
+        provider="ensembl_vep",
+        operation_name="annotate_batch",
+        operation=lambda _timeout, _attempt: next(responses),
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        sleep=sleeps.append,
+    )
+    assert result.status == "success"
+    assert result.attempts == 2
+    assert sleeps == [1.0]
+
+
+def test_capability_specific_404_remains_terminal_no_match() -> None:
+    circuits = ProviderCircuitState()
+    result = call_provider_with_policy(
+        provider="myvariant",
+        operation_name="lookup_variant",
+        operation=lambda _timeout, _attempt: FakeResponse(404),
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        circuit_state=circuits,
+        no_match_http_statuses=frozenset({404}),
+    )
+    assert result.status == "no_match"
+    assert result.attempts == 1
+    assert result.circuit_open is False
+    assert circuits.snapshot() == {}
+
+
+def test_invalid_response_can_be_retried_by_shared_policy() -> None:
+    attempts = 0
+
+    def operation(
+        _timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ProviderInvalidResponseError("malformed body")
+        return {"usable": True}
+
+    result = call_provider_with_policy(
+        provider="clingen_cspec",
+        operation_name="lookup_gene",
+        operation=operation,
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        sleep=lambda _delay: None,
+    )
+    assert result.status == "success"
+    assert result.value == {"usable": True}
+    assert result.attempts == 2
+
+
+def test_circuits_are_scoped_to_their_analysis_instance() -> None:
+    first = ProviderCircuitState()
+    second = ProviderCircuitState()
+    first.open("gnomad", "forbidden", http_status=403)
+    assert first.get("gnomad") is not None
+    assert second.get("gnomad") is None
+
+
+@pytest.mark.parametrize(
+    "timeouts",
+    [
+        (0, 1),
+        (-1, 1),
+        (1, 0),
+        (1, 301),
+        (True, 1),
+    ],
+)
+def test_timeout_contract_rejects_unbounded_values(
+    timeouts: tuple[object, object],
+) -> None:
+    with pytest.raises(ProviderContractError):
+        ProviderTimeouts(connect=timeouts[0], read=timeouts[1])
+
+
+def test_retry_policy_is_bounded_to_three_attempts() -> None:
+    with pytest.raises(ProviderContractError):
+        ProviderRetryPolicy(max_attempts=4)
+
+
+def test_policy_logging_is_bounded_and_provenance_aware() -> None:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("clinical_variant_app.provider_resilience")
+    logger.addHandler(handler)
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        call_provider_with_policy(
+            provider="gnomad",
+            operation_name="lookup_variant",
+            operation=lambda _timeout, _attempt: FakeResponse(403),
+            timeouts=ProviderTimeouts(connect=1, read=2),
+        )
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    contents = stream.getvalue()
+    assert "provider=gnomad" in contents
+    assert "attempt=1" in contents
+    assert "status=forbidden" in contents
+    assert "circuit_state=CLOSED" in contents
+    assert "fallback_transition=eligible" in contents
