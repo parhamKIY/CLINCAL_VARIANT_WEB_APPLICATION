@@ -64,7 +64,7 @@ its original input order.
 - Stage 61 live provider and canonical-link validation is implemented and verified.
 - Stage 62 documentation and demonstration preparation is complete; external
   professor feedback remains pending.
-- Stages 63-79 provider resilience, free fallbacks, unified capability results,
+- Stages 63-78 provider resilience, free fallbacks, unified capability results,
   reviewer-facing fallback transparency, and deterministic failure injection are
   implemented, documented, and offline-verified; the multi-variant resilience gate
   and manual reachability utility are available.
@@ -75,15 +75,15 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **935 passed, 4 skipped; 85.81% Stage 59 coverage**.
+- Current verified suite: **938 passed, 4 skipped; 85.83% Stage 59 coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
 guide, and limitations are maintained in
 [`docs/PROJECT_DECLARATION.md`](docs/PROJECT_DECLARATION.md).
 
-The authoritative redesign contract and implemented-versus-planned boundary are in
-[`docs/STAGE45_ARCHITECTURE_CONTRACT.md`](docs/STAGE45_ARCHITECTURE_CONTRACT.md).
+The authoritative redesign contract and implemented-versus-planned boundary are also
+recorded in the unified project declaration.
 
 ## Accepted target architecture
 
@@ -311,11 +311,10 @@ explicit unavailable-link fallback instead of a misleading hyperlink.
 
 ### Stage 62 documentation and professor-review handoff
 
-The project declaration, README, architecture contract, schemas, verification
-baseline, and user workflow now describe V3 as the active architecture. The
-[Stage 62 Demo and Professor Review Guide](docs/STAGE62_DEMO_AND_REVIEW.md) provides
-the exact demonstration sequence, expected checkpoints, provider-failure fallback,
-and professor feedback checklist. Its multi-sheet public demo workbook is
+The project declaration, README, schemas, verification baseline, and user workflow
+now describe V3 as the active architecture. The unified declaration provides the
+exact demonstration sequence, expected checkpoints, provider-failure fallback, and
+professor feedback checklist. Its multi-sheet public demo workbook is
 `data/samples/stage62_demo_variants.xlsx`; worksheet 2 contains a conspicuous marker
 that must never enter application artifacts.
 
@@ -457,8 +456,8 @@ Phen2Gene/local direct HPO-gene overlap, gnomAD/Ensembl Variation, and
 LitVar2/Europe PMC/PubMed.
 
 Configuration, the complete capability matrix, architecture, pre-demo checks, and
-troubleshooting are in the
-[Provider Resilience Runbook](docs/PROVIDER_RESILIENCE_RUNBOOK.md).
+troubleshooting are in the unified
+[Project Declaration](docs/PROJECT_DECLARATION.md).
 
 ## Human review and outputs
 
@@ -616,11 +615,10 @@ phenotype evidence contract.
 
 ## Demonstration and professor review
 
-Use the reproducible multi-sheet workbook and complete checklist in the
-[Stage 62 Demo and Professor Review Guide](docs/STAGE62_DEMO_AND_REVIEW.md). The
-repository preparation is complete; the guide intentionally records professor
-review date, outcome, required changes, and sign-off as pending until that external
-checkpoint occurs.
+Use the reproducible multi-sheet workbook and complete checklist in the unified
+[Project Declaration](docs/PROJECT_DECLARATION.md). Repository preparation is
+complete; professor review date, outcome, required changes, and sign-off remain
+pending until that external checkpoint occurs.
 
 ## Verification
 
@@ -802,10 +800,7 @@ clinical_variant_app/
 │   └── samples/
 │       └── stage62_demo_variants.xlsx
 ├── docs/
-│   ├── PROVIDER_RESILIENCE_RUNBOOK.md
-│   ├── PROJECT_DECLARATION.md
-│   ├── STAGE45_ARCHITECTURE_CONTRACT.md
-│   └── STAGE62_DEMO_AND_REVIEW.md
+│   └── PROJECT_DECLARATION.md
 ├── storage/
 ├── tests/
 │   ├── conftest.py
@@ -857,7 +852,5 @@ for:
 - the demonstration runbook;
 - current limitations and the professor-review checkpoint.
 
-Use the
-[Provider Resilience Runbook](docs/PROVIDER_RESILIENCE_RUNBOOK.md)
-for the fallback matrix, configuration contract, operational checks, and degraded-
-mode troubleshooting.
+The same declaration contains the implemented fallback matrix, configuration
+contract, operational checks, and degraded-mode troubleshooting.
