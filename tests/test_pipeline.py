@@ -1214,6 +1214,7 @@ class FakeSession:
         clingen_responses: list[object] | None = None,
         cspec_responses: list[object] | None = None,
         variantvalidator_responses: list[object] | None = None,
+        ensembl_variation_responses: list[object] | None = None,
     ) -> None:
         self.responses = list(responses)
         self.genebe_responses = list(genebe_responses or [])
@@ -1224,6 +1225,9 @@ class FakeSession:
         self.variantvalidator_responses = list(
             variantvalidator_responses or []
         )
+        self.ensembl_variation_responses = list(
+            ensembl_variation_responses or []
+        )
         self.calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
         self.genebe_post_calls: list[dict[str, object]] = []
@@ -1233,6 +1237,7 @@ class FakeSession:
         self.clingen_get_calls: list[dict[str, object]] = []
         self.cspec_get_calls: list[dict[str, object]] = []
         self.variantvalidator_get_calls: list[dict[str, object]] = []
+        self.ensembl_variation_get_calls: list[dict[str, object]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
@@ -1289,10 +1294,18 @@ class FakeSession:
         is_variantvalidator = url.startswith(
             f"{settings.VARIANTVALIDATOR_BASE_URL}/"
         )
+        is_ensembl_variation = "/overlap/region/human/" in url
         is_clinvar = url.endswith(
             ("/esearch.fcgi", "/esummary.fcgi")
         )
-        if is_variantvalidator:
+        if is_ensembl_variation:
+            self.ensembl_variation_get_calls.append(call)
+            response = (
+                self.ensembl_variation_responses.pop(0)
+                if self.ensembl_variation_responses
+                else FakeResponse(404, {"error": "not found"})
+            )
+        elif is_variantvalidator:
             self.variantvalidator_get_calls.append(call)
             response = (
                 self.variantvalidator_responses.pop(0)
@@ -4022,6 +4035,30 @@ class TestAnnotation:
         }
 
     @staticmethod
+    def _ensembl_variation_overlap_response(
+        *,
+        position: int = 100,
+        reference: str = "A",
+        alternate: str = "G",
+        assembly: str = "GRCh38",
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "assembly_name": assembly,
+                "id": "rs123",
+                "seq_region_name": "1",
+                "source": "dbSNP",
+                "start": position,
+                "end": position + len(reference) - 1,
+                "alleles": [reference, alternate],
+                "strand": 1,
+                "clinical_significance": ["pathogenic"],
+                "feature_type": "variation",
+                "consequence_type": "missense_variant",
+            }
+        ]
+
+    @staticmethod
     def _myvariant_clinvar_response() -> dict[str, object]:
         payload = TestAnnotation._myvariant_response()
         payload["clinvar"] = {
@@ -4577,6 +4614,14 @@ class TestAnnotation:
         assert myvariant == {
             "status": "success",
             "provider": "MyVariant.info",
+            "provider_role": "primary",
+            "fallback_used": False,
+            "primary_provider": "MyVariant.info",
+            "primary_failure": None,
+            "fallback_provider": "Ensembl REST Variation",
+            "fallback_status": "not_triggered",
+            "fallback_failure": None,
+            "source_type": "direct",
             "provider_version": "v1",
             "upstream_sources": ["ExAC", "dbSNP", "gnomAD"],
             "variant_id": "chr1:g.100A>G",
@@ -4590,6 +4635,7 @@ class TestAnnotation:
                 "dbsnp_gnomad": 0.003,
             },
             "max_population_frequency": 0.004,
+            "ensembl_variation": None,
         }
         assert annotation["population_frequency"] == 0.004
         assert "dbsnp" not in myvariant
@@ -6343,6 +6389,138 @@ class TestAnnotation:
         assert vep["normalized_variant"]["pos"] == 100
         assert annotation["consequence"] is None
 
+    def test_stage_71_myvariant_outage_uses_overlap_context_fallback(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(503, {"error": "unavailable"})],
+            ensembl_variation_responses=[
+                FakeResponse(200, self._ensembl_variation_overlap_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        source = annotation["sources"]["myvariant"]
+        assert len(session.ensembl_variation_get_calls) == 1
+        assert source["status"] == "partial"
+        assert source["provider"] == "Ensembl REST Variation"
+        assert source["provider_role"] == "fallback"
+        assert source["fallback_used"] is True
+        assert source["fallback_for"] == "myvariant"
+        assert source["primary_provider"] == "MyVariant.info"
+        assert source["primary_failure"] == "server_error"
+        assert source["fallback_status"] == "success"
+        assert source["source_type"] == (
+            "overlapping_variant_context_fallback"
+        )
+        assert source["variant_id"] is None
+        assert source["rsid"] is None
+        assert source["gene"] is None
+        assert source["population_frequencies"] == {}
+        assert source["max_population_frequency"] is None
+        assert annotation["population_frequency"] is None
+        assert source["ensembl_variation"] == {
+            "id": "rs123",
+            "source": "dbSNP",
+            "assembly": "GRCh38",
+            "chrom": "1",
+            "start": 100,
+            "end": 100,
+            "alleles": ["A", "G"],
+            "consequence_type": "missense_variant",
+            "clinical_significance": ["pathogenic"],
+        }
+
+    def test_stage_71_fallback_rejects_non_exact_allele(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(500, {"error": "unavailable"})],
+            ensembl_variation_responses=[
+                FakeResponse(
+                    200,
+                    self._ensembl_variation_overlap_response(alternate="T"),
+                )
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        source = annotation["sources"]["myvariant"]
+        assert source["status"] == "error"
+        assert source["fallback_status"] == "no_match"
+        assert source["fallback_used"] is False
+        assert source["ensembl_variation"] is None
+
+    def test_stage_71_valid_myvariant_no_match_does_not_use_fallback(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(404, {"error": "not found"})],
+            ensembl_variation_responses=[
+                FakeResponse(200, self._ensembl_variation_overlap_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        source = annotation["sources"]["myvariant"]
+        assert source["status"] == "not_found"
+        assert source["fallback_status"] == "not_triggered"
+        assert session.ensembl_variation_get_calls == []
+
+    def test_stage_71_fallback_outage_uses_one_analysis_circuit(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [self._vep_response("cv_0"), self._vep_response("cv_1")],
+                )
+            ],
+            get_responses=[
+                FakeResponse(503, {"error": "unavailable"}),
+                FakeResponse(503, {"error": "unavailable"}),
+            ],
+            ensembl_variation_responses=[
+                requests.Timeout("fallback timeout")
+            ],
+        )
+
+        annotations = annotate_variants(
+            [self._variant(100), self._variant(200)],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )
+
+        assert len(session.ensembl_variation_get_calls) == 1
+        assert [
+            item["sources"]["myvariant"]["status"] for item in annotations
+        ] == ["error", "error"]
+        assert [
+            item["sources"]["myvariant"]["fallback_status"]
+            for item in annotations
+        ] == ["timeout", "timeout"]
+        assert all(
+            item["sources"]["vep"]["status"] == "success"
+            for item in annotations
+        )
+
     def test_multiple_candidates_use_one_batch_request(self) -> None:
         session = FakeSession(
             [
@@ -7989,6 +8167,7 @@ class TestEvidenceObject:
         assert stored["fallback_used"] is True
         assert lineage["provider"] == "Ensembl REST Variation"
         assert lineage["upstream_sources"] == ["dbSNP"]
+        assert lineage["derivation"] == "direct"
         assert section["source"] == (
             "Population evidence — Ensembl Variation"
         )
@@ -8720,6 +8899,70 @@ class TestEvidenceObject:
         )
         assert lineage["provider"] == "VariantValidator"
         assert lineage["upstream_sources"] == ["VariantValidator"]
+
+    def test_stage_71_myvariant_fallback_context_persists_in_evidence(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        overlap = {
+            "id": "rs123",
+            "source": "dbSNP",
+            "assembly": "GRCh38",
+            "chrom": "2",
+            "start": 166848215,
+            "end": 166848215,
+            "alleles": ["C", "T"],
+            "consequence_type": "missense_variant",
+            "clinical_significance": ["pathogenic"],
+        }
+        myvariant.update(
+            {
+                "status": "partial",
+                "provider": "Ensembl REST Variation",
+                "provider_role": "fallback",
+                "fallback_used": True,
+                "fallback_for": "myvariant",
+                "primary_provider": "MyVariant.info",
+                "primary_failure": "server_error",
+                "fallback_provider": "Ensembl REST Variation",
+                "fallback_status": "success",
+                "fallback_failure": None,
+                "source_type": "overlapping_variant_context_fallback",
+                "upstream_sources": ["dbSNP"],
+                "variant_id": None,
+                "rsid": None,
+                "gene": None,
+                "population_frequencies": {},
+                "max_population_frequency": None,
+                "ensembl_variation": overlap,
+            }
+        )
+
+        evidence = build_evidence_object(candidate)
+        stored = evidence["annotations"]["population"]
+        assert stored["provider"] == "Ensembl REST Variation"
+        assert stored["provider_role"] == "fallback"
+        assert stored["primary_failure"] == "server_error"
+        assert stored["ensembl_variation"] == overlap
+        assert stored["population_frequencies"] == {}
+        provider = next(
+            item
+            for item in evidence["provenance"]["providers"]
+            if item["source"] == "myvariant"
+        )
+        assert provider["provider"] == "Ensembl REST Variation"
+        assert provider["provider_role"] == "fallback"
+        lineage = next(
+            item
+            for item in evidence["provenance"]["lineage"]
+            if item["evidence_path"] == "annotations.population.myvariant"
+        )
+        assert lineage["provider"] == "Ensembl REST Variation"
+        assert lineage["upstream_sources"] == ["dbSNP"]
 
     def test_stage_38_feature_flags_skip_configured_enrichment(
         self,

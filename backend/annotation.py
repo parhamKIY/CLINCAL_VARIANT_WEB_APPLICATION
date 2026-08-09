@@ -54,6 +54,7 @@ VARIANTVALIDATOR_SELECT_TRANSCRIPTS = "mane"
 GENEBE_PROVIDER_NAME = "GeneBe"
 MYVARIANT_PROVIDER_NAME = "MyVariant.info"
 MYVARIANT_API_VERSION = "v1"
+ENSEMBL_VARIATION_PROVIDER_NAME = "Ensembl REST Variation"
 GENEBE_GENOMES = {
     "GRCh37": "hg19",
     "GRCh38": "hg38",
@@ -215,6 +216,18 @@ class GeneBeResponseError(AnnotationServiceError):
 
 class VepOperationalError(AnnotationServiceError):
     """Carry one normalized VEP operational failure."""
+
+    def __init__(
+        self,
+        message: str,
+        provider_status: ProviderStatus,
+    ) -> None:
+        super().__init__(message)
+        self.provider_status = provider_status
+
+
+class MyVariantOperationalError(AnnotationServiceError):
+    """Carry one normalized MyVariant.info operational failure."""
 
     def __init__(
         self,
@@ -867,9 +880,10 @@ def _get_myvariant(
                 exception=exc,
             )
             if attempt >= max_retries:
-                raise AnnotationServiceError(
+                raise MyVariantOperationalError(
                     "MyVariant.info request failed because the service "
-                    "was unavailable."
+                    "was unavailable.",
+                    classify_request_exception(exc),
                 ) from exc
 
             delay = _retry_delay(attempt)
@@ -911,21 +925,24 @@ def _get_myvariant(
                 continue
 
         if not 200 <= response.status_code < 300:
-            raise AnnotationServiceError(
+            raise MyVariantOperationalError(
                 "MyVariant.info returned HTTP "
-                f"{response.status_code}."
+                f"{response.status_code}.",
+                classify_http_status(response.status_code),
             )
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise AnnotationServiceError(
-                "MyVariant.info returned invalid JSON."
+            raise MyVariantOperationalError(
+                "MyVariant.info returned invalid JSON.",
+                "invalid_response",
             ) from exc
 
         if not isinstance(payload, dict):
-            raise AnnotationServiceError(
-                "MyVariant.info returned an unexpected response structure."
+            raise MyVariantOperationalError(
+                "MyVariant.info returned an unexpected response structure.",
+                "invalid_response",
             )
 
         response_id = payload.get("_id")
@@ -933,16 +950,18 @@ def _get_myvariant(
             not isinstance(response_id, str)
             or response_id.upper() != variant_id.upper()
         ):
-            raise AnnotationServiceError(
+            raise MyVariantOperationalError(
                 "MyVariant.info returned a record that does not exactly "
                 "match the requested assembly, chromosome, position, "
-                "REF, and ALT."
+                "REF, and ALT.",
+                "invalid_response",
             )
 
         return payload, variant_id, None
 
-    raise AnnotationServiceError(
-        "MyVariant.info retry loop ended unexpectedly."
+    raise MyVariantOperationalError(
+        "MyVariant.info retry loop ended unexpectedly.",
+        "unavailable",
     )
 
 
@@ -1872,6 +1891,14 @@ def _base_annotation(
             "myvariant": {
                 "status": "pending",
                 "provider": MYVARIANT_PROVIDER_NAME,
+                "provider_role": "primary",
+                "fallback_used": False,
+                "primary_provider": MYVARIANT_PROVIDER_NAME,
+                "primary_failure": None,
+                "fallback_provider": ENSEMBL_VARIATION_PROVIDER_NAME,
+                "fallback_status": "not_triggered",
+                "fallback_failure": None,
+                "source_type": "direct",
                 "provider_version": MYVARIANT_API_VERSION,
                 "retrieved_at": None,
                 "upstream_sources": [],
@@ -1880,6 +1907,7 @@ def _base_annotation(
                 "gene": None,
                 "population_frequencies": {},
                 "max_population_frequency": None,
+                "ensembl_variation": None,
             },
             "clinvar": {
                 "status": "pending",
@@ -2792,6 +2820,11 @@ def _annotate_with_myvariant(
             type(exc).__name__,
         )
         annotation["sources"]["myvariant"]["status"] = "error"
+        annotation["sources"]["myvariant"]["primary_failure"] = (
+            exc.provider_status
+            if isinstance(exc, MyVariantOperationalError)
+            else "unavailable"
+        )
         annotation["warnings"].append(str(exc))
         return
 
@@ -4091,6 +4124,211 @@ def _fetch_variantvalidator_fallback(
     return ("success" if match is not None else "no_match"), match, url
 
 
+def _ensembl_variation_overlap_match(
+    payload: object,
+    variant: VariantData,
+) -> dict[str, Any] | None:
+    """Return one exact assembly, coordinate, and allele overlap record."""
+
+    if not isinstance(payload, list):
+        raise ProviderInvalidResponseError()
+    expected_chrom = _normalize_chromosome(variant["chrom"])
+    expected_pos = int(variant["pos"])
+    expected_ref = str(variant["ref"]).upper()
+    expected_alt = str(variant["alt"]).upper()
+    expected_end = expected_pos + len(expected_ref) - 1
+    matches: list[dict[str, Any]] = []
+    for record in payload:
+        if not isinstance(record, dict):
+            raise ProviderInvalidResponseError()
+        alleles = record.get("alleles")
+        normalized_alleles = (
+            [value.upper() for value in alleles if isinstance(value, str)]
+            if isinstance(alleles, list)
+            else []
+        )
+        try:
+            returned_chrom = _normalize_chromosome(
+                record.get("seq_region_name")
+            )
+        except AnnotationError:
+            continue
+        if (
+            record.get("assembly_name") == settings.GENOME_ASSEMBLY
+            and returned_chrom == expected_chrom
+            and record.get("start") == expected_pos
+            and record.get("end") == expected_end
+            and record.get("strand") == 1
+            and normalized_alleles
+            and normalized_alleles[0] == expected_ref
+            and expected_alt in normalized_alleles[1:]
+        ):
+            matches.append(record)
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: str(item.get("id", "")))
+    selected = matches[0]
+    identifier = _optional_text(selected.get("id"))
+    if identifier is None:
+        raise ProviderInvalidResponseError()
+    return {
+        "id": identifier,
+        "source": _optional_text(selected.get("source")),
+        "assembly": settings.GENOME_ASSEMBLY,
+        "chrom": expected_chrom,
+        "start": expected_pos,
+        "end": expected_end,
+        "alleles": [expected_ref, expected_alt],
+        "consequence_type": _optional_text(
+            selected.get("consequence_type")
+        ),
+        "clinical_significance": _bounded_string_list(
+            selected.get("clinical_significance"),
+            10,
+        ),
+    }
+
+
+def _ensembl_variation_base_url() -> str:
+    base_url = settings.ENSEMBL_VARIATION_BASE_URL.rstrip("/")
+    if (
+        settings.GENOME_ASSEMBLY == "GRCh37"
+        and base_url == "https://rest.ensembl.org"
+    ):
+        return "https://grch37.rest.ensembl.org"
+    return base_url
+
+
+def _fetch_ensembl_variation_fallback(
+    session: requests.Session,
+    variant: VariantData,
+    circuit_state: ProviderCircuitState,
+) -> tuple[ProviderStatus, dict[str, Any] | None, str]:
+    """Fetch bounded overlapping variant context for one normalized allele."""
+
+    chrom = _normalize_chromosome(variant["chrom"])
+    pos = int(variant["pos"])
+    url = (
+        f"{_ensembl_variation_base_url()}/overlap/region/human/"
+        f"{quote(f'{chrom}:{pos}-{pos}', safe=':-')}"
+    )
+
+    def request(
+        timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
+        response = session.get(
+            url,
+            headers={"Accept": "application/json"},
+            params={"feature": "variation"},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return response
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as error:
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
+            ) from error
+        if not isinstance(payload, list):
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
+            )
+        return payload
+
+    result = call_provider_with_policy(
+        provider="ensembl_variation",
+        operation_name="overlap_variant",
+        operation=request,
+        timeouts=ProviderTimeouts(
+            connect=min(float(settings.ENSEMBL_VARIATION_TIMEOUT), 5.0),
+            read=float(settings.ENSEMBL_VARIATION_TIMEOUT),
+        ),
+        retry_policy=ProviderRetryPolicy(max_attempts=1),
+        circuit_state=circuit_state,
+    )
+    if result.status != "success":
+        return result.status, None, url
+    try:
+        match = _ensembl_variation_overlap_match(result.value, variant)
+    except ProviderInvalidResponseError:
+        circuit_state.open("ensembl_variation", "invalid_response")
+        return "invalid_response", None, url
+    return ("success" if match is not None else "no_match"), match, url
+
+
+def _apply_myvariant_fallback(
+    annotation: AnnotationData,
+    session: requests.Session,
+    circuit_state: ProviderCircuitState,
+) -> None:
+    """Preserve Ensembl overlap context after MyVariant operational failure."""
+
+    source = annotation["sources"]["myvariant"]
+    primary_failure = source.get("primary_failure")
+    if not isinstance(primary_failure, str) or not should_trigger_fallback(
+        primary_failure
+    ):
+        source["fallback_status"] = "not_eligible"
+        return
+
+    status, match, source_url = _fetch_ensembl_variation_fallback(
+        session,
+        annotation["variant"],
+        circuit_state,
+    )
+    source["fallback_status"] = status
+    source["fallback_source_url"] = source_url
+    if status != "success" or match is None:
+        source["fallback_failure"] = (
+            status if should_trigger_fallback(status) else None
+        )
+        annotation["warnings"].append(
+            (
+                "Ensembl Variation returned no exact assembly, coordinate, "
+                "and allele overlap; MyVariant.info fields remain unavailable."
+                if status == "no_match"
+                else "Ensembl Variation fallback was unavailable; "
+                "MyVariant.info fields remain unavailable."
+            )
+        )
+        return
+
+    provenance = build_provider_provenance(
+        capability="variant_context",
+        provider="ensembl_variation",
+        provider_role="fallback",
+        primary_provider="myvariant",
+        primary_failure=primary_failure,
+    )
+    source.update(
+        {
+            "status": "partial",
+            "provider": ENSEMBL_VARIATION_PROVIDER_NAME,
+            "provider_role": provenance["provider_role"],
+            "fallback_used": provenance["fallback_used"],
+            "fallback_for": "myvariant",
+            "fallback_failure": None,
+            "source_type": "overlapping_variant_context_fallback",
+            "provider_version": None,
+            "retrieved_at": _retrieval_timestamp(),
+            "upstream_sources": [match["source"]] if match["source"] else [],
+            "ensembl_variation": match,
+        }
+    )
+    annotation["references"].append(
+        {"source": ENSEMBL_VARIATION_PROVIDER_NAME, "url": source_url}
+    )
+    annotation["warnings"].append(
+        "MyVariant.info was operationally unavailable; Ensembl Variation "
+        "preserved exact overlapping variant context only. MyVariant.info "
+        "aggregated gene, population, and ClinVar-derived fields remain "
+        "unavailable."
+    )
+
+
 def _apply_vep_fallback(
     annotation: AnnotationData,
     session: requests.Session,
@@ -4455,6 +4693,14 @@ def annotate_variants(
             ),
             progress_callback=progress_callback,
         )
+        ensembl_variation_circuit = ProviderCircuitState()
+        for annotation in annotations:
+            if _source_failed(annotation, "myvariant"):
+                _apply_myvariant_fallback(
+                    annotation,
+                    active_session,
+                    ensembl_variation_circuit,
+                )
         myvariant_status, myvariant_message = _source_progress_summary(
             annotations,
             "myvariant",

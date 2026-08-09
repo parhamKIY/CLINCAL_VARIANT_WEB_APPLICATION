@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 70 VEP fallback hardening complete
+**Implementation status:** Stage 71 MyVariant fallback hardening complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 71 MyVariant fallback hardening
+**Next checkpoint:** Stage 72 CSpec last-known-good cache
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -30,8 +30,8 @@ model-selection, interpretation-before-review, reviewed-report, selection, refer
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
 bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
-contracts. Stages 66-70 apply those contracts to population, ClinVar, literature,
-MyDisease, and VEP-dependent annotation evidence.
+contracts. Stages 66-71 apply those contracts to population, ClinVar, literature,
+MyDisease, VEP-dependent annotation evidence, and MyVariant degraded operation.
 The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
@@ -288,12 +288,13 @@ flowchart LR
     AE --> AF["Stage 68: literature resilience"]
     AF --> AG["Stage 69: MyDisease degraded mode"]
     AG --> AH["Stage 70: VEP fallback hardening"]
-    AH --> AI["Stage 71: MyVariant fallback - pending"]
+    AH --> AI["Stage 71: MyVariant fallback hardening"]
+    AI --> AJ["Stage 72: CSpec LKG cache - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH done
-    class AI review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI done
+    class AJ review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -377,6 +378,7 @@ their original order.
 | 68 | Hardened literature retrieval with operational-only LitVar2-to-Europe PMC-to-PubMed fallback, Europe-PMC-first general searches, persisted search/fallback provenance, identifier-priority deduplication, bounded article results, and exact canonical links. | Complete |
 | 69 | Bounded MyDisease connect/read latency, limited retries to one transient connection retry, retained exact primary-failure provenance, and added a bounded local HPO disease-annotation context that never claims a gene-disease association. | Complete |
 | 70 | Kept Ensembl VEP primary and added one-call VariantValidator validation/HGVS fallback after operational failure, preserving exact normalized identity and provenance while leaving unavailable VEP consequence/plugin fields explicitly missing. | Complete |
+| 71 | Kept MyVariant.info primary and added a one-call Ensembl Variation overlap fallback after operational failure, accepting only exact assembly/coordinate/allele records and retaining provider-specific context without fabricating MyVariant aggregation fields. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -414,7 +416,7 @@ report each variant independently.
 | Ensembl VEP REST | `https://rest.ensembl.org/vep/homo_sapiens/region` | Submit bounded, assembly-explicit alleles. | Consequence, transcript, gene, identifiers, and available colocated evidence. Exact allele/coordinate validation is enforced in `backend/annotation.py`. |
 | VariantValidator REST | `https://rest.variantvalidator.org/VariantValidator/variantvalidator` | Validate one normalized pseudo-VCF allele only after operational VEP failure. | Exact assembly/allele validation and bounded HGVS/gene/transcript mapping with explicit fallback provenance; it never supplies or guesses VEP consequence/plugin fields. |
 | GeneBe API | `https://api.genebe.net/cloud/api-public/v1/variants` | Batch-query normalized variants; optional account credentials are supported. | Independent automated ACMG criteria, classifications, scores, identifiers, and provenance. It is evidence, not the application's final classification. |
-| MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier once for normal annotations and any later ClinVar fallback candidate. | Aggregated identifiers and population frequencies plus a bounded ClinVar-derived subset. Exact identity is required; ClinVar-derived fields become fallback evidence only after operational direct ClinVar failure and are never independent ClinVar evidence. |
+| MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier once for normal annotations and any later ClinVar fallback candidate. | Aggregated identifiers and population frequencies plus a bounded ClinVar-derived subset. Exact identity is required; an operational outage may activate only the separate Ensembl Variation overlap-context fallback, while a valid no-match remains terminal. |
 | NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize the primary direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. A valid no-record result is missingness, not negative evidence and not a fallback trigger. |
 | UCSC Genome Browser API, GenCC track | `https://genome-euro.ucsc.edu/cgi-bin/hubApi/getData/track` | Query the assembly-specific locus and retain exact gene claims submitted by ClinGen. | Gene-disease validity context, submitter, classification, disease identifiers, and report links. It does not classify the variant. |
 | ClinGen CSpec Registry | `https://cspec.clinicalgenome.org/cspec/{entity}/id/{identifier}` | Resolve matching VCEP/disease/specification entities. | Released specification names, versions, VCEP metadata, and URLs. The app records availability/context only and never executes CSpec rules. |
@@ -422,7 +424,7 @@ report each variant independently.
 | MyDisease.info | `https://mydisease.info/v1/query` | Search bounded disease records by normalized gene symbol. | MONDO/DOID/OMIM/MedGen context, names, synonyms, HPO terms, pathways, and references. Primary records require an exact MONDO material-basis HGNC relation. |
 | Monarch API | `https://api-v3.monarchinitiative.org/v3/api` | Retained as centralized configuration/compatibility metadata. | It is not called by the active Stage 28 path; MyDisease.info supplies the bounded Monarch-derived disease context. |
 | gnomAD GraphQL | `https://gnomad.broadinstitute.org/api` | Conflict-triggered exact-allele lookup using an assembly-specific dataset (`gnomad_r2_1` or `gnomad_r4`). | Global and population allele-frequency evidence, release/dataset provenance, and explicit no-match/unavailable states. |
-| Ensembl Variation REST | `https://rest.ensembl.org` | Conditional population-evidence fallback after an operational gnomAD failure when an rsID is available; a valid gnomAD no-match is terminal. | Bounded population-frequency context with exact assembly/coordinate/allele validation and separate provider provenance; it does not masquerade as gnomAD evidence. |
+| Ensembl Variation REST | `https://rest.ensembl.org` | Conditional population fallback after operational gnomAD failure, or one exact-region overlap lookup after operational MyVariant failure. | Provider-specific population or overlap context with exact assembly/coordinate/allele validation and separate provenance; it never masquerades as gnomAD or MyVariant evidence. |
 | NCBI LitVar2 | `https://www.ncbi.nlm.nih.gov/research/litvar2-api` | Resolve a variant and collect related publication identifiers. | Variant-linked PMID/PMCID references used only in bounded conditional literature enrichment. |
 | Europe PMC | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | Search bounded variant/gene literature and normalize metadata. | Titles, identifiers, dates, journals, and source metadata; article count is capped. |
 | PubMed E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Search and summarize bounded variant/gene literature. | PMID-linked article metadata. PubMed is independent of the direct ClinVar use of the same NCBI interface. |
@@ -776,6 +778,31 @@ provider summaries, and lineage retain the fallback provider instead of relabell
 it as VEP. Ensembl Variation remains an independent exact-record source and is not
 used here to imitate VEP semantics.
 
+### Stage 71 MyVariant fallback hardening
+
+`backend/annotation.py` keeps MyVariant.info as the primary aggregation provider and
+normalizes its terminal network, timeout, HTTP, malformed-response, and identity-
+mismatch failures. Only an operational failure remaining after the existing bounded
+retry path activates Ensembl Variation. A valid MyVariant success, valid no-result,
+or unsupported allele remains terminal. An analysis-scoped circuit suppresses later
+fallback calls when Ensembl Variation itself is operationally unavailable.
+
+The fallback performs one assembly-specific Ensembl overlap lookup at the normalized
+variant position and accepts a record only when assembly, chromosome, start, end,
+strand, reference, and alternate allele match exactly. It retains only bounded
+provider-native overlap context: stable variation identifier, source, exact mapping,
+alleles, consequence type, and clinical-significance labels. GRCh37 requests use the
+Ensembl GRCh37 REST host when the default service configuration is active.
+
+Successful degraded evidence is labelled provider `Ensembl REST Variation`, role
+`fallback`, source type `overlapping_variant_context_fallback`, and target
+`myvariant`, while retaining the normalized MyVariant primary failure. MyVariant
+`variant_id`, `rsid`, gene, aggregated population frequencies, maximum frequency, and
+ClinVar-derived fields remain empty rather than being fabricated or relabelled.
+Compact evidence, provider summaries, direct-source lineage, and references preserve
+the Ensembl identity. A fallback no-match or outage leaves MyVariant explicitly failed
+and does not stop the rest of the annotation pipeline.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -863,8 +890,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **895 passed, 4 skipped**,
-with **85.94% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **900 passed, 4 skipped**,
+with **85.93% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -954,6 +981,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Excel first-worksheet adapter | `backend/excel_processing.py`, `frontend/execution.py` |
 | Core annotation providers | `backend/annotation.py` |
 | VEP-to-VariantValidator validation/mapping fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
+| MyVariant-to-Ensembl overlapping-context fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
 | HPO and Phen2Gene | `backend/phenotype.py` |
 | Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
 | Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
@@ -987,8 +1015,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-70 are implemented and documented. MyVariant fallback hardening begins
-   in Stage 71; professor feedback and sign-off remain external pending checkpoints.
+1. Stages 46-71 are implemented and documented. The CSpec last-known-good cache begins
+   in Stage 72; professor feedback and sign-off remain external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1045,10 +1073,10 @@ Actions. Stage 61 revalidated every production provider client and both task-spe
 LLM contracts, probed representative exact links, and removed non-navigable VEP and
 GeneBe POST endpoints from report hyperlinks. Stage 62 reconciled the V3 documents,
 added and verified the multi-sheet demo workbook, corrected stale UI wording, and
-prepared the exact demo and professor-feedback checklist. Stages 63-70 added the
+prepared the exact demo and professor-feedback checklist. Stages 63-71 added the
 shared provider-resilience contract, bounded request policy, local HPO-gene and
 population fallback paths, ClinVar-derived fallback, and the provenance-preserving
 literature resilience chain, followed by bounded MyDisease latency and local
-context-only degraded mode plus a limited VEP-to-VariantValidator validation and
-HGVS-mapping fallback. Stage 71 is the next implementation checkpoint;
+context-only degraded mode plus limited VEP-to-VariantValidator validation/HGVS
+mapping and MyVariant-to-Ensembl exact-overlap context fallbacks. Stage 72 is the next implementation checkpoint;
 professor review and sign-off remain external.

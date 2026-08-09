@@ -3566,7 +3566,12 @@ def _build_evidence_lineage(
                 myvariant,
                 default_provider="MyVariant.info",
                 default_upstream_sources=("MyVariant.info",),
-                derivation="aggregated",
+                derivation=(
+                    "direct"
+                    if myvariant.get("source_type")
+                    == "overlapping_variant_context_fallback"
+                    else "aggregated"
+                ),
             )
         )
     if clinvar:
@@ -4059,9 +4064,23 @@ def _build_v2_sections(
                     (
                         "status",
                         "provider",
+                        "provider_role",
+                        "fallback_used",
+                        "fallback_for",
+                        "primary_provider",
+                        "primary_failure",
+                        "fallback_provider",
+                        "fallback_status",
+                        "fallback_failure",
+                        "source_type",
                         "provider_version",
                         "retrieved_at",
                         "variant_id",
+                        "rsid",
+                        "gene",
+                        "population_frequencies",
+                        "max_population_frequency",
+                        "ensembl_variation",
                     ),
                 ),
                 "genebe": deepcopy(
