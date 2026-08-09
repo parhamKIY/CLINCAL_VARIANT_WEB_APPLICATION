@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_59_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_60_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-786_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.57%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-787_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.58%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -32,7 +32,7 @@ its original input order.
 
 ### Current status
 
-- The implemented roadmap has passed the Stage 44 offline acceptance gate.
+- The implemented roadmap has passed the Stage 60 V3 release gate.
 - Stage 45 has frozen the post-professor-review architecture; it is a documentation
   milestone and does not claim the redesign is implemented.
 - Stage 46 input expansion is implemented and offline-verified.
@@ -58,7 +58,9 @@ its original input order.
   offline-verified.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
-- Stage 60 End-to-End Acceptance Gate V3 is the next bounded milestone.
+- Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
+  active in GitHub Actions.
+- Stage 61 live provider and link validation is the next bounded milestone.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
@@ -66,7 +68,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **786 passed, 4 skipped; 85.57% coverage**.
+- Current verified suite: **787 passed, 4 skipped; 85.58% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -79,10 +81,11 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-59 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-60 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline through Final Clinical Report delivery,
-persistence, privacy reverification, and Testing V3; release gates remain planned:
+persistence, privacy reverification, Testing V3, and the V3 release gate; live
+validation and final documentation remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -268,6 +271,21 @@ coverage also proves that ignored Excel worksheets are removed before downstream
 pipeline, log, database, model, and export boundaries. Detection remains defense in
 depth: linguistically ambiguous, unlabelled identifiers cannot be guaranteed and users
 must supply de-identified text.
+
+### Stages 59–60 deterministic verification and V3 release gate
+
+`tests/run_stage59_testing_v3.py` registers and verifies eight non-empty requirement
+groups, blocks unmocked HTTP suite-wide, runs the complete offline marker, and
+enforces at least 80% coverage. `tests/run_stage60_acceptance.py` adds compilation,
+dependency consistency, secret auditing, and one deterministic ten-variant redesigned
+workflow before invoking Testing V3.
+
+The Stage 60 scenario proves first-worksheet-only Excel processing, Persian phenotype
+extraction and corrected HPO acceptance, independent task models, shared
+interpretation-model use across conflict states, isolated failures, report editing,
+four-of-ten selection, durable excluded-variant recovery, canonical references,
+confirmed-state exports, and absence of ignored-sheet content. This is the active
+offline GitHub Actions release gate; live-provider checks remain separate.
 
 ## Current implemented workflow
 
@@ -564,39 +582,32 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-786 passed, 4 skipped
+787 passed, 4 skipped
 ```
 
-Run the complete Testing V3 gate:
+Run the active V3 release gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage60_acceptance.py
+```
+
+The gate performs compilation, dependency consistency, repository secret auditing,
+the deterministic ten-variant Stage 60 scenario, all eight Testing V3 groups, the
+complete offline suite, and the minimum 80% coverage requirement.
+
+Run Testing V3 alone when the end-to-end release scenario does not need repetition:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_stage59_testing_v3.py
 ```
 
-The gate verifies that all eight required V3 test groups collect non-empty suites,
-then runs the complete `stage59_testing_v3` marker with external HTTP blocked and the
-minimum 80% coverage requirement.
+The historical Stage 44 runner remains available for legacy regression checks but is
+no longer the active release gate.
 
-The retained Stage 44 acceptance gate remains available until Stage 60 replaces it:
+Current measured coverage is **85.58%**.
 
-```powershell
-.\.venv\Scripts\python.exe tests\run_stage44_acceptance.py
-```
-
-The retained gate performs:
-
-- Python compilation;
-- installed dependency consistency checks;
-- repository and Git-history secret scanning;
-- the deterministic five-variant Stage 44 workflow;
-- the complete Testing V2 regression suite;
-- the minimum 80% coverage requirement.
-
-Current measured coverage is **85.57%**.
-
-The Stage 44 gate still runs automatically on every push and pull request through
-the read-only GitHub Actions workflow in `.github/workflows/verify.yml`; Stage 60
-will replace it with the V3 end-to-end release gate.
+The Stage 60 gate runs automatically on every push and pull request through the
+read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
 
 Automated tests mock or block external HTTP traffic. Run the bounded live
 contract gate separately; it checks every active annotation, phenotype,
@@ -721,6 +732,7 @@ clinical_variant_app/
 │   ├── test_pipeline.py
 │   ├── test_mydisease.py
 │   ├── run_stage59_testing_v3.py
+│   ├── run_stage60_acceptance.py
 │   ├── run_live_provider_validation.py
 │   ├── run_stage44_acceptance.py
 │   └── manual_*.py
@@ -732,7 +744,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-59 are implemented; Stage 60 owns the End-to-End Acceptance Gate V3.
+- Stages 46-60 are implemented; Stage 61 owns live provider and canonical-link
+  validation.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -758,4 +771,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 60 handoff.
+- current limitations and the Stage 61 handoff.

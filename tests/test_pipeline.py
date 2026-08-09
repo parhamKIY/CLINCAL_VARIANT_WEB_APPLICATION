@@ -13649,6 +13649,369 @@ class TestStage44EndToEndAcceptance:
         validate_pipeline_result(completed)
 
 
+@pytest.mark.stage60_acceptance
+class TestStage60EndToEndAcceptanceV3:
+    """Prove the complete redesigned ten-variant professor-review workflow."""
+
+    def test_ten_variant_excel_to_selected_final_report(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ignored_secret = "IGNORED_STAGE60_PATIENT_IDENTIFIER"
+        ignored_persian_secret = "داده محرمانه شیت دوم"
+        workbook_bytes = _xlsx_bytes(
+            [
+                ("1", 100 + index, "C", "T", 99.0, "PASS")
+                for index in range(10)
+            ],
+            later_sheet_rows=[
+                ("patient_name", ignored_secret),
+                ("clinical_text_fa", ignored_persian_secret),
+            ],
+        )
+        normalized_variants = parse_excel_variants(workbook_bytes)
+        assert [item["pos"] for item in normalized_variants] == list(
+            range(100, 110)
+        )
+        assert ignored_secret not in json.dumps(normalized_variants)
+
+        ontology_path = TestPhenotype._write_hpo_fixture(tmp_path)
+        associations_path = TestPhenotype._write_hpo_gene_fixture(
+            tmp_path
+        )
+        phenotype_adapter = FakeLLMAdapter(
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "hpo_id": "HP:0001275",
+                                "label": "Seizure alias",
+                                "source_phrase_fa": "حملات تشنج",
+                            },
+                            {
+                                "hpo_id": "HP:9999999",
+                                "label": "Unverified suggestion",
+                                "source_phrase_fa": "تاخیر تکاملی",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                model="stage60-phenotype-model",
+                finish_reason="stop",
+            )
+        )
+        phenotype_result = extract_hpo_candidates(
+            "کودک دچار حملات تشنج و تاخیر تکاملی است.",
+            client=LLMClient(phenotype_adapter),
+        )
+        initial_validation = validate_hpo_candidates(
+            phenotype_result["candidates"],
+            ontology_path=ontology_path,
+        )
+        assert initial_validation["validated_candidates"][0][
+            "hpo_id"
+        ] == "HP:0001250"
+        assert initial_validation["rejected_candidates"] == [
+            {"hpo_id": "HP:9999999", "reason": "not_found"}
+        ]
+        corrected_candidates = [
+            initial_validation["validated_candidates"][0],
+            {
+                "hpo_id": "HP:0001263",
+                "label": "Global developmental delay",
+                "source_phrase_fa": "تاخیر تکاملی",
+            },
+        ]
+        accepted_terms = accept_hpo_candidates(
+            corrected_candidates,
+            ontology_path=ontology_path,
+        )
+        accepted_hpo_ids = [item["id"] for item in accepted_terms]
+        assert accepted_hpo_ids == ["HP:0001250", "HP:0001263"]
+
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for index, normalized in enumerate(variants):  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._pipeline_candidate()
+                candidate["variant"] = dict(normalized)
+                sources = candidate["sources"]
+                sources["genebe"] = {
+                    "status": "success",
+                    "provider": "GeneBe",
+                    "transcript": candidate["transcript"],
+                    "automated_acmg_classification": (
+                        "Benign" if index % 2 else "Pathogenic"
+                    ),
+                    "automated_acmg_criteria": ["PS3", "PM2"],
+                }
+                sources["cspec"] = {
+                    "status": "success",
+                    "provider": "ClinGen CSpec Registry",
+                    "specifications": [
+                        {
+                            "specification_id": "SCN1A-EP",
+                            "title": "SCN1A VCEP specification",
+                            "version": "1.0",
+                            "status": "Released",
+                            "matched_disease_ids": ["MONDO:0100062"],
+                            "scope_match": "gene_and_disease",
+                        }
+                    ],
+                }
+                if index == 9:
+                    sources["cspec"] = {
+                        "status": "error",
+                        "provider": "ClinGen CSpec Registry",
+                        "specifications": [],
+                        "warning": "Provider unavailable in acceptance fixture.",
+                    }
+                annotations.append(candidate)
+            return annotations
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        monkeypatch.setattr(
+            settings,
+            "VARIANT_INTERPRETATION_MODEL",
+            "stage60-interpretation-model",
+        )
+        monkeypatch.setattr(settings, "ENABLE_GNOMAD_DEEP_LOOKUP", False)
+        monkeypatch.setattr(settings, "ENABLE_LITERATURE_ENRICHMENT", False)
+        interpretation_adapter = SequenceLLMAdapter(
+            [
+                (
+                    LLMTimeoutError("isolated stage60 interpretation timeout")
+                    if index == 7
+                    else _variant_interpretation_response(
+                        model="stage60-provider-response-model",
+                        conflict_assessment=(
+                            "The supplied classifications disagree and remain "
+                            "unresolved."
+                            if index % 2
+                            else "No meaningful conflict is present."
+                        ),
+                    )
+                )
+                for index in range(10)
+            ]
+        )
+        database_path = tmp_path / "stage60.sqlite3"
+        provenance = {
+            "schema_version": phenotype_result["schema_version"],
+            "task": phenotype_result["task"],
+            "prompt_version": phenotype_result["prompt_version"],
+            "model": phenotype_result["model"],
+            "candidate_hpo_ids": [
+                candidate["hpo_id"]
+                for candidate in phenotype_result["candidates"]
+            ],
+        }
+        analysis = run_analysis(
+            vcf_path=None,
+            manual_variants=normalized_variants,
+            phenotypes=accepted_hpo_ids,
+            input_type="excel",
+            phenotype_extraction_model=phenotype_result["model"],
+            phenotype_extraction_provenance=provenance,
+            ontology_path=ontology_path,
+            associations_path=associations_path,
+            phen2gene_max_retries=0,
+            phen2gene_session=_successful_phen2gene_session(),
+            phen2gene_use_cache=False,
+            llm_client=LLMClient(interpretation_adapter),
+            database_path=database_path,
+        )
+
+        assert analysis["variant_count"] == 10
+        assert [variant["pos"] for variant in analysis["variants"]] == list(
+            range(100, 110)
+        )
+        assert analysis["analysis_context"] == {
+            "input_type": "excel",
+            "accepted_hpo_terms": accepted_hpo_ids,
+            "phenotype_extraction_model": "stage60-phenotype-model",
+            "variant_interpretation_model": (
+                "stage60-interpretation-model"
+            ),
+            "phenotype_extraction_provenance": provenance,
+        }
+        assert all(
+            evidence["hpo_terms"] == accepted_hpo_ids
+            for evidence in analysis["evidence_objects"]
+        )
+        interpretations = analysis["variant_interpretation_results"]
+        assert {item["configured_model"] for item in interpretations} == {
+            "stage60-interpretation-model"
+        }
+        assert "stage60-phenotype-model" not in {
+            item["configured_model"] for item in interpretations
+        }
+        assert {item["prompt_mode"] for item in interpretations} == {
+            "standard",
+            "conflict_aware",
+        }
+        assert any(
+            item["conflict_assessment"] is not None
+            and "unresolved" in item["conflict_assessment"]
+            for item in interpretations
+        )
+        assert interpretations[7]["status"] == "failed"
+        assert interpretations[7]["error_type"] == "LLMTimeoutError"
+        assert interpretations[9]["status"] == "success"
+        assert len(interpretation_adapter.requests) == 10
+        assert next(
+            provider
+            for provider in analysis["evidence_objects"][9]["provenance"][
+                "providers"
+            ]
+            if provider["source"] == "cspec"
+        )["status"] == "error"
+        assert len(analysis["draft_variant_reports"]) == 10
+        assert all(
+            report["machine_original_report"]["variant_interpretation"][
+                "status"
+            ]
+            == interpretation["status"]
+            for report, interpretation in zip(
+                analysis["draft_variant_reports"],
+                interpretations,
+                strict=True,
+            )
+        )
+        assert analysis["draft_variant_reports"][7][
+            "machine_original_report"
+        ]["variant_interpretation"]["status"] == "failed"
+
+        reports = analysis["draft_variant_reports"]
+        base_time = datetime.fromisoformat(
+            reports[0]["created_at"].replace("Z", "+00:00")
+        )
+
+        def stage_time(minutes: int) -> str:
+            return (
+                (base_time + timedelta(minutes=minutes))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+
+        edited = save_draft_variant_report(
+            reports[0],
+            reviewer_summary="Stage 60 reviewer-approved summary.",
+            interpretation_narrative=reports[0]["reviewed_report"][
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=reports[0]["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=["Reviewed for the V3 acceptance gate."],
+            timestamp=stage_time(1),
+        )
+        reviewed = update_draft_variant_report(analysis, edited)
+        selected_indexes = {0, 2, 5, 9}
+        for index, report in enumerate(reviewed["draft_variant_reports"]):
+            if index in selected_indexes:
+                continue
+            excluded = set_draft_variant_report_inclusion(
+                report,
+                False,
+                timestamp=stage_time(2 + index),
+                reviewer_context="stage60-acceptance",
+            )
+            reviewed = update_draft_variant_report(reviewed, excluded)
+        save_pipeline_state(reviewed, database_path=database_path)
+
+        confirmed = confirm_reviewed_evidence(
+            reviewed,
+            reviewed["evidence_review_reports"],
+            timestamp=stage_time(20),
+        )
+        save_pipeline_state(confirmed, database_path=database_path)
+        completed = finalize_reviewed_analysis(
+            confirmed,
+            timestamp=stage_time(21),
+        )
+        save_pipeline_state(completed, database_path=database_path)
+        restored = load_pipeline_state(
+            completed["analysis_id"],
+            database_path=database_path,
+        )
+        final_report = restored["final_clinical_report"]
+        assert final_report is not None
+
+        assert final_report["metadata"]["selected_variant_indexes"] == [
+            0,
+            2,
+            5,
+            9,
+        ]
+        assert len(restored["draft_variant_reports"]) == 10
+        assert [
+            report["variant_index"]
+            for report in restored["draft_variant_reports"]
+            if report["include_in_final_report"]
+        ] == [0, 2, 5, 9]
+        assert restored["draft_variant_reports"][0]["edit_history"]
+        assert restored["draft_variant_reports"][0]["reviewed_report"][
+            "reviewer_summary"
+        ] == "Stage 60 reviewer-approved summary."
+        assert [
+            section["reviewed_report"]
+            for section in final_report["variant_sections"]
+        ] == [
+            restored["draft_variant_reports"][index]["reviewed_report"]
+            for index in (0, 2, 5, 9)
+        ]
+        references = [
+            reference
+            for report in restored["draft_variant_reports"]
+            for reference in report["reviewed_report"]["references"]
+        ]
+        assert references
+        assert len({reference["source"] for reference in references}) >= 2
+        for reference in references:
+            validate_canonical_reference(reference)
+
+        markdown = render_final_clinical_report_markdown(final_report)
+        pdf_data = render_report_pdf(markdown)
+        docx_data = render_report_docx(markdown)
+        assert "Stage 60 reviewer-approved summary." in markdown
+        assert pdf_data.startswith(b"%PDF-")
+        assert docx_data.startswith(b"PK")
+        for index in set(range(10)) - selected_indexes:
+            assert f"GRCh38 1:{100 + index} C>T" not in markdown
+
+        serialized_artifacts = json.dumps(
+            restored,
+            ensure_ascii=False,
+        )
+        model_requests = "\n".join(
+            message.content
+            for adapter in (phenotype_adapter, interpretation_adapter)
+            for request in adapter.requests
+            for message in request.messages
+        )
+        connection = connect_database(database_path)
+        try:
+            database_dump = "\n".join(connection.iterdump())
+        finally:
+            connection.close()
+        for secret in (ignored_secret, ignored_persian_secret):
+            assert secret not in serialized_artifacts
+            assert secret not in model_requests
+            assert secret not in database_dump
+            assert secret not in markdown
+            assert secret.encode() not in pdf_data + docx_data
+        validate_pipeline_result(restored)
+
+
 @pytest.mark.testing_v3_final_report
 class TestStage56FinalClinicalReport:
     """Verify deterministic composition from the approved subset."""

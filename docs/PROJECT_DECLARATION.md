@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 59 Testing V3 implemented
-**Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 60 End-to-End Acceptance Gate V3
+**Implementation status:** Stage 60 End-to-End Acceptance Gate V3 implemented
+**Current release gate:** Stage 60 V3 acceptance passed
+**Next implementation milestone:** Stage 61 live provider and link validation
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,9 +24,9 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-59 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-60 now implement its input, phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
-Final Clinical Report, persistence, recovery, privacy, and Testing V3 portions. The
+Final Clinical Report, persistence, recovery, privacy, testing, and V3 release gate. The
 authoritative target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
@@ -271,12 +271,13 @@ flowchart LR
     T --> U["Stage 57: persistence schema V3 and recovery migration"]
     U --> V["Stage 58: privacy and safety reverification"]
     V --> W["Stage 59: Testing V3"]
-    W --> X["Stages 60-62: acceptance and release - pending"]
+    W --> X["Stage 60: End-to-End Acceptance Gate V3"]
+    X --> Y["Stages 61-62: live validation and final review - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W done
-    class X review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X done
+    class Y review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -349,7 +350,8 @@ their original order.
 | 57 | Added SQLite schema V3 normalized lifecycle projections, pipeline schema `2.9` analysis context, bounded Stage 56 migration, explicit legacy Output A/B rejection, and persisted-draft refresh/restart recovery without repeated interpretation. | Complete |
 | 58 | Added exact task-specific LLM minimum-data validators, Persian identifier/mobile redaction, ignored-worksheet downstream leakage proof, and report-content privacy enforcement with explicit detection limitations. | Complete |
 | 59 | Registered the deterministic offline Testing V3 suite, eight required test-group markers with collection checks, suite-wide live-HTTP blocking, and an 80%-coverage runner. | Complete |
-| 60–62 | Implement the V3 acceptance gate, live validation, and final documentation. | Planned |
+| 60 | Added the deterministic ten-variant redesigned acceptance scenario, release runner, and GitHub Actions V3 gate covering all professor-review assertions plus Testing V3. | Complete |
+| 61–62 | Perform live provider/link validation and final documentation/re-review. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -523,8 +525,25 @@ Interpretation, Draft Report, Selection, Canonical References, Final Report, and
 Recovery/Retry. `tests/run_stage59_testing_v3.py` first proves every group collects
 tests, then runs the entire V3 suite with coverage enforcement. A shared autouse
 fixture blocks unmocked HTTP across every offline test module. The retained Stage 44
-runner remains a compatibility gate until Stage 60 introduces and activates the V3
+runner is now historical compatibility coverage; Stage 60 activates the V3
 end-to-end acceptance scenario.
+
+### Stage 60 End-to-End Acceptance Gate V3
+
+`tests/run_stage60_acceptance.py` is the active offline release gate. It performs
+compilation, installed-dependency consistency, repository/Git-history secret audit,
+the dedicated Stage 60 scenario, and the complete coverage-enforced Testing V3 gate.
+`.github/workflows/verify.yml` runs it on every push and pull request.
+
+The scenario begins with ten ordered variants on worksheet 1 and sensitive-looking
+decoy content on a later worksheet. It exercises Persian phenotype extraction,
+invalid-suggestion correction, multiple accepted HPO terms, separate phenotype and
+interpretation models, conflict and no-conflict interpretation through the same
+selected model, unresolved conflict, isolated model/provider failure, Draft Report
+editing, four-of-ten inclusion, confirmation, SQLite recovery, deterministic Final
+Clinical Report generation, canonical references, and text/PDF/Word exports. It
+asserts that ignored-sheet content is absent from model requests, pipeline/database
+state, reports, and exports.
 
 ## 8. Pipeline, persistence, and refresh recovery
 
@@ -613,8 +632,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **786 passed, 4 skipped**,
-with **85.57% coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **787 passed, 4 skipped**,
+with **85.58% coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -622,13 +641,13 @@ Recovery/Retry groups before running the complete V3 marker and enforcing at lea
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe tests\run_stage59_testing_v3.py
-.\.venv\Scripts\python.exe tests\run_stage44_acceptance.py
+.\.venv\Scripts\python.exe tests\run_stage60_acceptance.py
 ```
 
 `requirements.txt` contains runtime dependencies only. `requirements-dev.txt` adds
-the pinned test toolchain. The retained Stage 44 gate still executes for every push
-and pull request without live-provider traffic; Stage 60 will replace it with the V3
-end-to-end release gate.
+the pinned test toolchain. The Stage 60 gate executes for every push and pull request
+without live-provider traffic. The Stage 44 runner remains available only for legacy
+regression compatibility.
 
 Live-provider connectivity is intentionally a separate manual activity. A passing
 offline suite proves application contracts and failure handling; it does not prove
@@ -674,7 +693,7 @@ Streamlit automatically.
 
 Before a demonstration, confirm that `.env` contains the intended assembly and LLM
 provider settings, that the coordinated HPO files exist, and that the automated
-suite and Stage 44 gate pass. Start the application with `run_app.bat` or the
+suite and Stage 60 gate pass. Start the application with `run_app.bat` or the
 Streamlit command above.
 
 The primary demonstration uses `data/samples/mvp_demo.vcf`, a public one-row GRCh38
@@ -732,11 +751,12 @@ the non-diagnostic disclaimer.
 | Privacy, logging, and safe errors | `backend/privacy.py`, `backend/logging_config.py`, `backend/error_handling.py` |
 | Background jobs and refresh recovery | `frontend/execution.py`, `frontend/ui.py` |
 | Report rendering/export | `backend/report_exports.py`, `frontend/report_viewer.py` |
-| Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage59_testing_v3.py`, `tests/run_stage44_acceptance.py`, `tests/run_live_provider_validation.py`, `tests/manual_*.py` |
+| Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage59_testing_v3.py`, `tests/run_stage60_acceptance.py`, `tests/run_live_provider_validation.py`, `tests/manual_*.py` |
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-59 are implemented. Stage 60 owns the End-to-End Acceptance Gate V3.
+1. Stages 46-60 are implemented. Stage 61 owns live provider and canonical-link
+   validation.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -755,7 +775,7 @@ the non-diagnostic disclaimer.
 
 ## 16. Completion statement
 
-The implemented project has passed its Stage 44 offline acceptance gate and provides
+The implemented project has passed its Stage 60 offline V3 acceptance gate and provides
 a coherent evidence-collection, single-model interpretation-before-review, and human
 confirmation workflow with explicit safety boundaries. Stage 45 incorporated the professor review
 into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel input
@@ -785,5 +805,8 @@ payload validators, Persian identifier/mobile redaction, end-to-end ignored-shee
 leakage verification, and report-content privacy rejection while documenting the
 limits of free-text detection. Stage 59 registered eight explicit V3 test groups,
 suite-wide offline HTTP blocking, group-collection checks, and the deterministic
-coverage-enforced Testing V3 runner. The correct next action is Stage 60: implement
-the redesigned ten-variant End-to-End Acceptance Gate V3.
+coverage-enforced Testing V3 runner. Stage 60 added the deterministic redesigned
+ten-variant Excel-to-final-report acceptance scenario, wrapped it with compilation,
+dependency, secret, and Testing V3 checks, and activated the new gate in GitHub
+Actions. The correct next action is Stage 61: perform bounded live provider and
+canonical-link validation.

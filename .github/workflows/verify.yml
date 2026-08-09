@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  stage-44:
+  stage-60:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -36,5 +36,5 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 
-      - name: Run final acceptance gate
-        run: python tests/run_stage44_acceptance.py
+      - name: Run V3 acceptance gate
+        run: python tests/run_stage60_acceptance.py

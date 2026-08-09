@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-59 complete; Stage 60 is next
+**Implementation progress:** Stages 46-60 complete; Stage 61 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 59. Features assigned to
-Stages 60–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 60. Features assigned to
+Stages 61–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -321,12 +321,30 @@ separate reviewed copy with append-only history.
   the full V3 marker with an 80% minimum coverage threshold.
 - A shared autouse fixture blocks unmocked HTTP across all offline test modules;
   live-provider diagnostics remain explicitly separate.
-- The verified baseline is 786 passed, 4 skipped, with 85.57% coverage. The retained
-  Stage 44 acceptance runner also remains green.
-- Stage 60 is the next bounded increment and will create the V3 end-to-end release
-  gate that replaces Stage 44 assumptions in GitHub Actions.
+- The verified baseline is 787 passed, 4 skipped, with 85.58% coverage. The retained
+  Stage 44 acceptance runner is historical compatibility coverage; Stage 60 is the
+  active release gate.
+- Stage 60 wraps Testing V3 in the redesigned end-to-end acceptance gate used by
+  GitHub Actions.
 
-## 19. Stage 45 acceptance record
+## 19. Stage 60 implementation record
+
+- A deterministic ten-variant scenario exercises first-worksheet-only Excel input,
+  Persian phenotype extraction, invalid HPO correction, multiple accepted HPO terms,
+  one interpretation model across conflict states, unresolved conflict, isolated
+  model/provider failures, reviewer editing, and exact four-of-ten selection.
+- The scenario confirms SQLite recovery, selected-only Final Clinical Report content,
+  canonical references, and text/PDF/Word exports while proving that ignored later-
+  worksheet content appears nowhere downstream.
+- `tests/run_stage60_acceptance.py` performs compilation, dependency consistency,
+  repository/Git-history secret audit, the Stage 60 scenario, and the complete
+  coverage-enforced Testing V3 runner.
+- `.github/workflows/verify.yml` uses the Stage 60 runner for every push and pull
+  request. The verified baseline is 787 passed, 4 skipped, with 85.58% coverage.
+- Stage 61 is the next bounded increment for live provider and canonical-link
+  validation.
+
+## 20. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.
