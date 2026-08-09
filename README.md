@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_55_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_56_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-771_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.60%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-776_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.58%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -52,14 +52,18 @@ its original input order.
   offline-verified.
 - Stage 55 canonical reference and link hardening is implemented and
   offline-verified.
-- Stage 56 Final Clinical Report composition is the next bounded milestone.
-- Pipeline schema: `2.7`.
+- Stage 56 Final Clinical Report composition and text/PDF/Word delivery is
+  implemented and offline-verified.
+- Stage 57 persistence schema V3 and recovery migration is the next bounded
+  milestone.
+- Pipeline schema: `2.8`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
+- Final Clinical Report schema: `2.0`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **771 passed, 4 skipped; 85.60% coverage**.
+- Current verified suite: **776 passed, 4 skipped; 85.58% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -72,10 +76,10 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-55 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-56 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
-interpretation-before-review pipeline plus Draft Variant Report V2; later report
-lifecycle items remain planned:
+interpretation-before-review pipeline through Final Clinical Report delivery; later
+persistence and verification items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -198,8 +202,7 @@ edits, provenance, conflicts, and selection history. The selected-report project
 contains only included reports and preserves original input order. Any selection
 change invalidates prior final confirmation. Editing an included report also
 invalidates confirmation; editing an already excluded report retains the current
-confirmation because it cannot change selected Final Report content. Stage 56 still
-owns Final Clinical Report composition.
+confirmation because it cannot change selected Final Report content.
 
 ### Stage 55 canonical references and link hardening
 
@@ -214,8 +217,23 @@ The Variant Interpretation Model receives the bounded reference catalog without
 URLs and may cite only supplied bracket IDs such as `[R1]`. Fabricated, malformed,
 or evidence-absent IDs are rejected. Draft Variant Report schema `2.1` maps those
 IDs to canonical objects, Streamlit renders validated links and explicit fallbacks,
-and generic Word/PDF exports preserve allowlisted hyperlinks. Final Clinical Report
-composition remains Stage 56.
+and generic Word/PDF exports preserve allowlisted hyperlinks.
+
+### Stage 56 Final Clinical Report composer
+
+`backend/final_clinical_report.py` deterministically composes schema `2.0` from the
+confirmed reports whose audited `include_in_final_report` value is true. It preserves
+the exact reviewer-edited report state in original variant order, groups each
+variant's local citation namespace with its canonical references, and includes
+de-identified phenotype context, main findings, detailed findings, methods,
+limitations, disclaimer, and bounded audit/provenance metadata.
+
+Finalization requires confirmation coverage for every reviewed variant and creates
+the report without an LLM call. Excluded reports remain in pipeline state but do not
+appear in final findings or references. Streamlit displays the completed report and
+offers in-memory text, PDF, and Word downloads with numbered clickable canonical
+references. Pipeline schema `2.8` integrity-checks the report against the current
+reviewed state so stale or untracked final content fails closed.
 
 ## Current implemented workflow
 
@@ -232,7 +250,7 @@ flowchart TD
     CE --> VI["One Variant Interpretation Model for every variant"]
     VI --> D["Evidence and interpretation ready for review"]
     D --> H["Human edit and final confirmation"]
-    H --> F["Finalize reviewed analysis without another LLM call"]
+    H --> F["Compose Final Clinical Report from selected reviewed reports"]
     E --> DB["SQLite Draft snapshot"]
     D --> DB
     F --> DB
@@ -245,8 +263,9 @@ The pipeline has three lifecycle steps:
 2. **Review:** inspect evidence and interpretation, edit bounded report fields,
    compare with the immutable original and append-only history, and confirm every
    variant.
-3. **Finalization:** validate the confirmed review state and persist completion
-   without a new model request.
+3. **Finalization:** validate the confirmed review state, compose the selected-only
+   Final Clinical Report, and provide text/PDF/Word exports without a new model
+   request.
 
 ## Inputs
 
@@ -378,7 +397,8 @@ the selected model names.
 
 Draft Variant Report V2 combines these records into one coherent reviewer-facing
 view with safe audited editing and reporting-only inclusion decisions. Canonical
-Final Clinical Report composition remains assigned to Stage 56.
+Final Clinical Report schema `2.0` is composed from the confirmed selected subset
+and exported without interpretation regeneration.
 
 ## Requirements
 
@@ -510,7 +530,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-771 passed, 4 skipped
+776 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -528,7 +548,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.60%**.
+Current measured coverage is **85.58%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -659,8 +679,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-55 are implemented; Stage 56 still owns Final Clinical Report
-  composition from the confirmed selected subset.
+- Stages 46-56 are implemented; Stage 57 owns persistence schema V3 and recovery
+  migration for the redesigned lifecycle.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -685,4 +705,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 56 handoff.
+- current limitations and the Stage 57 handoff.

@@ -28,7 +28,7 @@ from reportlab.platypus import (
 from backend.references import validated_reference_url
 
 
-MAX_REPORT_EXPORT_INPUT_BYTES = 256 * 1024
+MAX_REPORT_EXPORT_INPUT_BYTES = 4 * 1024 * 1024
 MAX_REPORT_EXPORT_OUTPUT_BYTES = 5 * 1024 * 1024
 DEFAULT_REPORT_TITLE = "Clinical Variant Interpretation Report"
 

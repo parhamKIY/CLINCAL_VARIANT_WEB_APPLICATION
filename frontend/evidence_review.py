@@ -29,6 +29,7 @@ from backend.variant_report import (
     save_draft_variant_report,
     set_draft_variant_report_inclusion,
 )
+from frontend.report_viewer import render_final_clinical_report_viewer
 
 
 REVIEW_DRAFTS_KEY = "evidence_review_drafts"
@@ -117,6 +118,7 @@ def _invalidate_confirmation(
         if item.get("variant_index") != variant_index
     ]
     result["final_interpretation_report"] = None
+    result["final_clinical_report"] = None
     result["workflow_state"] = (
         "awaiting_final_review"
         if result.get("variant_interpretation_results")
@@ -966,6 +968,8 @@ def render_evidence_review(
     with confirm_tab:
         _render_confirmation(drafts[selected], result)
     _render_finalization_action(result)
+    if result.get("workflow_state") == "completed":
+        render_final_clinical_report_viewer(result)
 
 
 __all__ = [

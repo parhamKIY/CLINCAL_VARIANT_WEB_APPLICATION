@@ -45,6 +45,11 @@ from backend.final_interpretation_report import (
     build_final_interpretation_report,
     validate_final_interpretation_report,
 )
+from backend.final_clinical_report import (
+    FinalClinicalReportError,
+    compose_final_clinical_report,
+    validate_final_clinical_report,
+)
 from backend.llm import LLMClient
 from backend.llm_routing import (
     RoutingProgressCallback,
@@ -91,7 +96,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "2.7"
+PIPELINE_SCHEMA_VERSION = "2.8"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -247,6 +252,7 @@ class PipelineResult(TypedDict):
     reviewed_evidence_packages: list[dict[str, object]]
     llm_routing_results: list[dict[str, object]]
     final_interpretation_report: dict[str, object] | None
+    final_clinical_report: dict[str, object] | None
     report_path: str | None
     analysis_id: str | None
     warnings: list[str]
@@ -468,6 +474,7 @@ def create_pipeline_result() -> PipelineResult:
         "reviewed_evidence_packages": [],
         "llm_routing_results": [],
         "final_interpretation_report": None,
+        "final_clinical_report": None,
         "report_path": None,
         "analysis_id": None,
         "warnings": [],
@@ -719,6 +726,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "reviewed_evidence_packages",
                     "llm_routing_results",
                     "final_interpretation_report",
+                    "final_clinical_report",
                 )
             },
             context="Pipeline result",
@@ -933,6 +941,43 @@ def validate_pipeline_result(value: object) -> PipelineResult:
     if final_report is not None and workflow_state != "completed":
         raise PipelineResultError(
             "pipeline Output B requires the completed workflow state."
+        )
+    final_clinical_report = value["final_clinical_report"]
+    if final_clinical_report is not None:
+        try:
+            validated_clinical_report = validate_final_clinical_report(
+                final_clinical_report
+            )
+            expected_clinical_report = compose_final_clinical_report(
+                value,
+                timestamp=validated_clinical_report["generated_at"],
+            )
+        except FinalClinicalReportError as exc:
+            raise PipelineResultError(
+                "pipeline.final_clinical_report is invalid."
+            ) from exc
+        if validated_clinical_report != expected_clinical_report:
+            raise PipelineResultError(
+                "pipeline.final_clinical_report does not match the "
+                "reviewer-approved state."
+            )
+        if workflow_state != "completed":
+            raise PipelineResultError(
+                "pipeline.final_clinical_report requires the completed "
+                "workflow state."
+            )
+    active_final_review = bool(
+        interpretation_results or draft_variant_reports
+    )
+    if workflow_state == "completed" and active_final_review and (
+        len(interpretation_results) != variant_count
+        or len(draft_variant_reports) != variant_count
+        or len(validated_packages) != variant_count
+        or final_clinical_report is None
+    ):
+        raise PipelineResultError(
+            "pipeline.completed final review requires a Final Clinical "
+            "Report composed from every confirmed reviewer decision."
         )
     if value["report_path"] is not None:
         _required_text(
@@ -1178,6 +1223,7 @@ def _finish_failed_stage(
             "reviewed_evidence_packages",
             "llm_routing_results",
             "final_interpretation_report",
+            "final_clinical_report",
         )
     )
     result["status"] = (
@@ -2441,6 +2487,7 @@ def confirm_reviewed_evidence(
     ]
     if updated_indexes:
         working["final_interpretation_report"] = None
+        working["final_clinical_report"] = None
         working["workflow_state"] = (
             "awaiting_final_review"
             if working["variant_interpretation_results"]
@@ -2501,6 +2548,7 @@ def finalize_reviewed_analysis(
 
     working["llm_routing_results"] = []
     working["final_interpretation_report"] = None
+    working["final_clinical_report"] = None
     failed = sum(
         item["status"] == "failed"
         for item in working["variant_interpretation_results"]
@@ -2537,6 +2585,18 @@ def finalize_reviewed_analysis(
     working["workflow_state"] = "completed"
     working["current_stage"] = "completed"
     working["progress_percent"] = 100
+    try:
+        working["final_clinical_report"] = dict(
+            compose_final_clinical_report(
+                working,
+                timestamp=timestamp,
+            )
+        )
+    except FinalClinicalReportError as exc:
+        raise PipelineError(
+            "Final Clinical Report could not be composed from the "
+            "reviewer-approved state."
+        ) from exc
     validated = validate_pipeline_result(working)
     _notify_progress(validated, progress_callback)
     return validated
@@ -2609,6 +2669,7 @@ def update_draft_variant_report(
             if item["variant_index"] != index
         ]
         working["final_interpretation_report"] = None
+        working["final_clinical_report"] = None
         working["workflow_state"] = "awaiting_final_review"
         working["current_stage"] = "completed"
         working["progress_percent"] = 100
@@ -2674,6 +2735,7 @@ def generate_confirmed_interpretations(
         dict(item) for item in routing_results
     ]
     working["final_interpretation_report"] = None
+    working["final_clinical_report"] = None
     failed = sum(item["status"] == "failed" for item in routing_results)
     model_warnings = sum(
         len(item["warnings"])
@@ -2865,6 +2927,7 @@ def retry_failed_interpretations(
     if remaining:
         _append_warning(working, message)
     working["final_interpretation_report"] = None
+    working["final_clinical_report"] = None
     working["workflow_state"] = "phase_b_running"
     return generate_final_interpretation_report(working)
 

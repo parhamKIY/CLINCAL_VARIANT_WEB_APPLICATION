@@ -8,6 +8,11 @@ from pathlib import Path
 import streamlit as st
 
 from backend.pipeline import PipelineResult
+from backend.final_clinical_report import (
+    FinalClinicalReportError,
+    render_final_clinical_report_markdown,
+    validate_final_clinical_report,
+)
 from backend.report import MAX_CLINICAL_REPORT_TEXT_BYTES
 from backend.report_exports import (
     ReportExportError,
@@ -174,9 +179,88 @@ def render_report_viewer(result: PipelineResult) -> None:
         )
 
 
+def render_final_clinical_report_viewer(result: PipelineResult) -> None:
+    """Render the approved Stage 56 report with in-memory exports."""
+
+    report_value = result.get("final_clinical_report")
+    if report_value is None:
+        return
+    st.subheader("Final Clinical Report")
+    try:
+        report = validate_final_clinical_report(report_value)
+        report_text = render_final_clinical_report_markdown(report)
+    except FinalClinicalReportError as exc:
+        st.error(f"The Final Clinical Report is invalid: {exc}")
+        return
+    filename_stem = str(result.get("analysis_id") or report["report_id"])
+    filename_stem = f"{filename_stem}-final-clinical-report"
+    with st.container(border=True):
+        st.caption(
+            "Reviewer-approved content only. Finalization did not regenerate "
+            "the interpretation or make another LLM call."
+        )
+        try:
+            pdf_data = render_report_pdf(
+                report_text,
+                title="Final Clinical Report",
+            )
+            docx_data = render_report_docx(
+                report_text,
+                title="Final Clinical Report",
+            )
+        except ReportExportError:
+            pdf_data = None
+            docx_data = None
+            st.warning(
+                "PDF and Word exports are temporarily unavailable. "
+                "The text report remains available."
+            )
+        with st.container(
+            horizontal=True,
+            horizontal_alignment="left",
+            gap="small",
+        ):
+            st.download_button(
+                "Download final report text",
+                data=report_text.encode("utf-8"),
+                file_name=f"{filename_stem}.txt",
+                mime="text/plain",
+                key="download_final_clinical_report_text",
+                icon=":material/download:",
+                on_click="ignore",
+            )
+            if pdf_data is not None:
+                st.download_button(
+                    "Download final report PDF",
+                    data=pdf_data,
+                    file_name=f"{filename_stem}.pdf",
+                    mime="application/pdf",
+                    key="download_final_clinical_report_pdf",
+                    icon=":material/picture_as_pdf:",
+                    type="primary",
+                    on_click="ignore",
+                )
+            if docx_data is not None:
+                st.download_button(
+                    "Download final report Word",
+                    data=docx_data,
+                    file_name=f"{filename_stem}.docx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "wordprocessingml.document"
+                    ),
+                    key="download_final_clinical_report_docx",
+                    icon=":material/description:",
+                    on_click="ignore",
+                )
+        st.divider()
+        st.markdown(report_text)
+
+
 __all__ = [
     "ReportDocument",
     "ReportViewerError",
     "load_report_document",
+    "render_final_clinical_report_viewer",
     "render_report_viewer",
 ]

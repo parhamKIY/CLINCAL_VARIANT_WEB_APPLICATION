@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-55 complete; Stage 56 is next
+**Implementation progress:** Stages 46-56 complete; Stage 57 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 55. Features assigned to
-Stages 56–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 56. Features assigned to
+Stages 57–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -232,8 +232,8 @@ separate reviewed copy with append-only history.
 - Any selection change invalidates final confirmation. An included-report edit also
   invalidates it; an edit to an already excluded report retains confirmation because
   selected report content is unchanged.
-- Pipeline schema `2.6` persists the Stage 54 state. Stage 56 remains responsible
-  for composing the Final Clinical Report.
+- Pipeline schema `2.6` persisted the Stage 54 state. Stage 56 now composes the
+  Final Clinical Report after complete confirmation.
 
 ## 14. Stage 55 implementation record
 
@@ -253,10 +253,27 @@ separate reviewed copy with append-only history.
   state.
 - Streamlit, legacy Markdown, and generic Word/PDF rendering expose allowlisted
   canonical links. Text fallback retains the canonical URL as readable text.
-- Stage 56 remains responsible for composing one Final Clinical Report from the
-  confirmed selected subset.
+- Stage 56 composes one Final Clinical Report from the confirmed selected subset.
 
-## 15. Stage 45 acceptance record
+## 15. Stage 56 implementation record
+
+- Final Clinical Report schema `2.0` is composed deterministically from Draft Variant
+  Reports whose audited `include_in_final_report` state is true after confirmation
+  coverage is valid for every variant.
+- Selected reports retain original input order and the exact reviewer-edited content.
+  Excluded reports remain in pipeline state but are absent from final findings,
+  detailed sections, and references.
+- The artifact includes report metadata, de-identified phenotype context, main and
+  detailed findings, grouped canonical references, method/source notes, limitations,
+  a fixed non-diagnostic disclaimer, and bounded audit/provenance metadata.
+- Finalization makes no new LLM request. Pipeline schema `2.8` recomposes the artifact
+  during validation so stale, tampered, reordered, or unconfirmed content fails closed.
+- Streamlit displays the completed report and provides in-memory text, PDF, and Word
+  exports with numbered clickable allowlisted references.
+- Stage 57 remains responsible for SQLite schema V3, artifact metadata persistence,
+  migration behavior, and restart recovery of the redesigned lifecycle.
+
+## 16. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

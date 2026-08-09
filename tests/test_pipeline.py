@@ -92,6 +92,13 @@ from backend.final_interpretation_report import (
     render_final_interpretation_report_text,
     validate_final_interpretation_report,
 )
+from backend.final_clinical_report import (
+    FINAL_CLINICAL_REPORT_SCHEMA_VERSION,
+    FinalClinicalReportError,
+    compose_final_clinical_report,
+    render_final_clinical_report_markdown,
+    validate_final_clinical_report,
+)
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -13648,6 +13655,175 @@ class TestStage44EndToEndAcceptance:
         assert len(completed["evidence_review_reports"]) == 5
         assert completed["reviewed_evidence_packages"] == packages
         validate_pipeline_result(completed)
+
+
+class TestStage56FinalClinicalReport:
+    """Verify deterministic composition from the approved subset."""
+
+    @staticmethod
+    def _completed_result() -> PipelineResult:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        report = result["draft_variant_reports"][0]
+        edited = save_draft_variant_report(
+            report,
+            reviewer_summary="Reviewer-approved final summary.",
+            interpretation_narrative=(
+                "Reviewer-approved interpretation retained exactly."
+            ),
+            conflict_assessment=report["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=["Reviewed for final inclusion."],
+        )
+        result = update_draft_variant_report(result, edited)
+        confirmed = confirm_reviewed_evidence(
+            result,
+            result["evidence_review_reports"],
+        )
+        return finalize_reviewed_analysis(confirmed)
+
+    def test_finalization_composes_exact_reviewer_approved_content(
+        self,
+    ) -> None:
+        completed = self._completed_result()
+        report = completed["final_clinical_report"]
+
+        assert report is not None
+        assert report["schema_version"] == FINAL_CLINICAL_REPORT_SCHEMA_VERSION
+        assert report["metadata"]["selected_variant_indexes"] == [0]
+        assert report["variant_sections"][0]["reviewed_report"] == (
+            completed["draft_variant_reports"][0]["reviewed_report"]
+        )
+        markdown = render_final_clinical_report_markdown(report)
+        assert "Reviewer-approved final summary." in markdown
+        assert "Reviewer-approved interpretation retained exactly." in markdown
+        assert render_report_pdf(markdown).startswith(b"%PDF-")
+        docx_data = render_report_docx(markdown)
+        assert docx_data.startswith(b"PK")
+        if report["references"][0]["items"]:
+            assert "1. [" in markdown
+            with zipfile.ZipFile(BytesIO(docx_data)) as archive:
+                relationships = archive.read(
+                    "word/_rels/document.xml.rels"
+                ).decode("utf-8")
+            assert "hyperlink" in relationships.casefold()
+
+    def test_excluded_content_is_absent_and_zero_selection_is_explicit(
+        self,
+    ) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        report = set_draft_variant_report_inclusion(
+            result["draft_variant_reports"][0],
+            False,
+        )
+        result = update_draft_variant_report(result, report)
+        report = save_draft_variant_report(
+            result["draft_variant_reports"][0],
+            reviewer_summary="EXCLUDED PRIVATE REVIEW TEXT",
+            interpretation_narrative=report["reviewed_report"][
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=report["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=[],
+        )
+        result = update_draft_variant_report(result, report)
+        confirmed = confirm_reviewed_evidence(
+            result,
+            result["evidence_review_reports"],
+        )
+        completed = finalize_reviewed_analysis(confirmed)
+        final_report = completed["final_clinical_report"]
+
+        assert final_report is not None
+        assert final_report["main_findings"] == []
+        assert final_report["variant_sections"] == []
+        markdown = render_final_clinical_report_markdown(final_report)
+        assert "EXCLUDED PRIVATE REVIEW TEXT" not in markdown
+        assert "No variants were selected" in markdown
+
+    def test_report_integrity_and_privacy_tampering_are_rejected(self) -> None:
+        completed = self._completed_result()
+        report = deepcopy(completed["final_clinical_report"])
+        assert report is not None
+        report["variant_sections"][0]["reviewed_report"][
+            "patient_name"
+        ] = "Example Person"
+
+        with pytest.raises(FinalClinicalReportError):
+            validate_final_clinical_report(report)
+
+    def test_ui_renders_three_final_downloads(self) -> None:
+        completed = self._completed_result()
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = completed
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert any(
+            heading.value == "Final Clinical Report"
+            for heading in app.subheader
+        )
+        labels = {button.label for button in app.get("download_button")}
+        assert {
+            "Download final report text",
+            "Download final report PDF",
+            "Download final report Word",
+        }.issubset(labels)
+
+    def test_composer_keeps_three_of_ten_reports_in_input_order(self) -> None:
+        base_evidence, _ = TestStage52DraftVariantReportV2._success_inputs()
+        evidence_objects: list[dict[str, object]] = []
+        interpretations: list[dict[str, object]] = []
+        for index in range(10):
+            evidence = deepcopy(base_evidence)
+            position = 166848215 + index
+            evidence["variant"]["pos"] = position
+            evidence["variant_context"]["input"]["pos"] = position
+            evidence["variant_context"]["normalized"]["pos"] = position
+            evidence_objects.append(evidence)
+            interpretations.append(
+                dict(
+                    interpret_variant(
+                        evidence,
+                        variant_index=index,
+                        client=LLMClient(
+                            FakeLLMAdapter(_variant_interpretation_response())
+                        ),
+                    )
+                )
+            )
+        reports = build_draft_variant_reports(evidence_objects, interpretations)
+        for index, report in enumerate(reports):
+            if index not in {1, 4, 8}:
+                reports[index] = set_draft_variant_report_inclusion(
+                    report,
+                    False,
+                )
+        packages = [
+            {
+                "variant_index": index,
+                "package_id": f"reviewed-package-{'a' * 24}",
+                "confirmed_at": "2026-08-09T00:00:00Z",
+            }
+            for index in range(10)
+        ]
+        final_report = compose_final_clinical_report(
+            {
+                "schema_version": PIPELINE_SCHEMA_VERSION,
+                "analysis_id": None,
+                "variant_count": 10,
+                "draft_variant_reports": reports,
+                "reviewed_evidence_packages": packages,
+            }
+        )
+
+        assert final_report["metadata"]["selected_variant_indexes"] == [1, 4, 8]
+        assert [
+            section["variant_index"]
+            for section in final_report["variant_sections"]
+        ] == [1, 4, 8]
 
 
 class TestClinicalInterpretationValidation:
