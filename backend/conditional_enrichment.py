@@ -9,6 +9,7 @@ import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, TypedDict
@@ -17,6 +18,16 @@ from urllib.parse import quote, urlencode
 import requests
 
 from backend.logging_config import get_logger
+from backend.provider_resilience import (
+    ProviderCircuitState,
+    ProviderInvalidResponseError,
+    ProviderRetryPolicy,
+    ProviderStatus,
+    ProviderTimeouts,
+    build_provider_provenance,
+    call_provider_with_policy,
+    should_trigger_fallback,
+)
 from config import settings
 
 
@@ -70,6 +81,13 @@ class ProviderResponseError(ConditionalEnrichmentError):
         super().__init__(reason)
         self.reason = reason
         self.http_status = http_status
+
+
+@dataclass(frozen=True)
+class _ParsedGraphQLResponse:
+    status_code: int
+    headers: Mapping[str, object]
+    payload: Mapping[str, object]
 
 
 class ConditionalEnrichmentResult(TypedDict):
@@ -240,59 +258,94 @@ def _request_graphql(
     query: str,
     variables: dict[str, str],
     timeout: int,
-) -> tuple[object, int, int]:
+    circuit_state: ProviderCircuitState,
+) -> tuple[
+    object | None,
+    int | None,
+    int,
+    ProviderStatus,
+    bool,
+]:
     """Return one bounded gnomAD GraphQL response with retry metadata."""
 
-    max_retries = settings.CONDITIONAL_ENRICHMENT_MAX_RETRIES
-    for attempt in range(max_retries + 1):
+    def request(
+        request_timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
         _wait_for_gnomad_slot(session)
-        try:
-            response = session.post(
-                url,
-                json={"query": query, "variables": variables},
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "User-Agent": "ClinicalVariantInterpretation/0.1",
-                },
-                timeout=timeout,
-                verify=True,
-            )
-        except requests.RequestException:
-            if attempt >= max_retries:
-                raise
-            time.sleep(_retry_delay(attempt))
-            continue
-        if (
-            response.status_code in TRANSIENT_HTTP_STATUSES
-            and attempt < max_retries
-        ):
-            time.sleep(_retry_delay(attempt, response))
-            continue
+        response = session.post(
+            url,
+            json={"query": query, "variables": variables},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "ClinicalVariantInterpretation/0.1",
+            },
+            timeout=request_timeout,
+            verify=True,
+        )
         if not 200 <= response.status_code < 300:
-            raise requests.HTTPError(
-                f"HTTP {response.status_code}",
-                response=response,
-            )
+            return response
         try:
             payload = response.json()
         except ValueError as exc:
-            raise ProviderResponseError(
-                "invalid_json",
+            raise ProviderInvalidResponseError(
                 http_status=response.status_code,
             ) from exc
         if not isinstance(payload, dict):
-            raise ProviderResponseError(
-                "invalid_schema",
+            raise ProviderInvalidResponseError(
                 http_status=response.status_code,
             )
         if payload.get("errors"):
-            raise ProviderResponseError(
-                "graphql_error",
+            raise ProviderInvalidResponseError(
                 http_status=response.status_code,
             )
-        return payload, response.status_code, attempt + 1
-    raise RuntimeError("gnomAD request retry loop ended unexpectedly.")
+        headers = getattr(response, "headers", {})
+        return _ParsedGraphQLResponse(
+            status_code=response.status_code,
+            headers=headers if isinstance(headers, Mapping) else {},
+            payload=payload,
+        )
+
+    timeout_seconds = float(timeout)
+    result = call_provider_with_policy(
+        provider="gnomad",
+        operation_name="lookup_variant",
+        operation=request,
+        timeouts=ProviderTimeouts(
+            connect=min(timeout_seconds, 5.0),
+            read=timeout_seconds,
+        ),
+        retry_policy=ProviderRetryPolicy(
+            max_attempts=min(
+                settings.CONDITIONAL_ENRICHMENT_MAX_RETRIES + 1,
+                2,
+            ),
+            backoff_base_seconds=1.0,
+            backoff_max_seconds=5.0,
+            max_retry_after_seconds=5.0,
+        ),
+        circuit_state=circuit_state,
+        sleep=time.sleep,
+    )
+    if result.status == "success" and isinstance(
+        result.value,
+        _ParsedGraphQLResponse,
+    ):
+        return (
+            result.value.payload,
+            result.value.status_code,
+            result.attempts,
+            result.status,
+            result.circuit_open,
+        )
+    return (
+        None,
+        result.http_status,
+        result.attempts,
+        result.status,
+        result.circuit_open,
+    )
 
 
 def _parse_litvar_body(value: object) -> list[dict[str, Any]]:
@@ -551,6 +604,18 @@ def fetch_ensembl_population_evidence(
         candidate=candidate,
         provider="Ensembl REST Variation",
     )
+    provenance = build_provider_provenance(
+        capability="population_frequency",
+        provider="ensembl_variation",
+        provider_role="primary",
+        primary_provider="ensembl_variation",
+    )
+    evidence.update(
+        {key: value for key, value in provenance.items() if key != "provider"}
+    )
+    evidence["operational_provider"] = provenance["provider"]
+    evidence["source"] = "ensembl_variation"
+    evidence["fallback_for"] = None
     rsid = evidence["query_identifier"]
     if rsid is None:
         evidence["status"] = "missing_identifier"
@@ -674,6 +739,7 @@ def fetch_ensembl_population_evidence(
             "populations": populations,
         }
     )
+    evidence["population_frequency"] = evidence["global_maf"]
     if not populations:
         evidence["status"] = (
             "invalid_response" if invalid else "no_match"
@@ -698,6 +764,7 @@ def fetch_gnomad_evidence(
     candidate: Mapping[str, object],
     *,
     session: requests.Session | None = None,
+    circuit_state: ProviderCircuitState | None = None,
 ) -> dict[str, Any]:
     """Fetch exact-allele population evidence from gnomAD GraphQL."""
 
@@ -743,7 +810,21 @@ def fetch_gnomad_evidence(
         "populations": [],
         "warnings": [],
         "failure_reason": None,
+        "source": "gnomad",
+        "fallback_for": None,
+        "request_attempts": 0,
+        "circuit_open": False,
     }
+    provenance = build_provider_provenance(
+        capability="population_frequency",
+        provider="gnomad",
+        provider_role="primary",
+        primary_provider="gnomad",
+    )
+    evidence.update(
+        {key: value for key, value in provenance.items() if key != "provider"}
+    )
+    evidence["operational_provider"] = provenance["provider"]
     if identity is None:
         evidence["status"] = "invalid_response"
         evidence["response_status"] = "invalid_response"
@@ -757,38 +838,42 @@ def fetch_gnomad_evidence(
 
     owns_session = session is None
     client = session or requests.Session()
+    analysis_circuit = circuit_state or ProviderCircuitState()
     try:
-        try:
-            payload, http_status, _ = _request_graphql(
-                client,
-                settings.GNOMAD_BASE_URL,
-                query=GNOMAD_VARIANT_QUERY,
-                variables={
-                    "variantId": variant_id,
-                    "dataset": dataset,
-                },
-                timeout=settings.GNOMAD_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            response = getattr(exc, "response", None)
-            evidence["http_status"] = getattr(
-                response,
-                "status_code",
-                None,
-            )
-            evidence["failure_reason"] = _request_failure_reason(exc)
-            return evidence
-        except ProviderResponseError as exc:
-            evidence["status"] = "invalid_response"
-            evidence["response_status"] = "invalid_response"
-            evidence["http_status"] = exc.http_status
-            evidence["failure_reason"] = exc.reason
-            return evidence
+        (
+            payload,
+            http_status,
+            attempts,
+            provider_status,
+            circuit_open,
+        ) = _request_graphql(
+            client,
+            settings.GNOMAD_BASE_URL,
+            query=GNOMAD_VARIANT_QUERY,
+            variables={
+                "variantId": variant_id,
+                "dataset": dataset,
+            },
+            timeout=settings.GNOMAD_TIMEOUT,
+            circuit_state=analysis_circuit,
+        )
     finally:
         if owns_session:
             client.close()
 
     evidence["http_status"] = http_status
+    evidence["request_attempts"] = attempts
+    evidence["circuit_open"] = circuit_open
+    if provider_status != "success":
+        evidence["status"] = (
+            "invalid_response"
+            if provider_status == "invalid_response"
+            else "unavailable"
+        )
+        evidence["response_status"] = evidence["status"]
+        evidence["failure_reason"] = provider_status
+        evidence["primary_failure"] = provider_status
+        return evidence
     data = _mapping(_mapping(payload).get("data"))
     variant = data.get("variant")
     if variant is None:
@@ -904,6 +989,58 @@ def fetch_gnomad_evidence(
         evidence["status"] = "available"
         evidence["response_status"] = "available"
     return evidence
+
+
+def fetch_population_evidence_with_fallback(
+    candidate: Mapping[str, object],
+    *,
+    session: requests.Session | None = None,
+    circuit_state: ProviderCircuitState | None = None,
+) -> dict[str, Any]:
+    """Use Ensembl only after an operational gnomAD failure."""
+
+    primary = fetch_gnomad_evidence(
+        candidate,
+        session=session,
+        circuit_state=circuit_state,
+    )
+    primary_failure = primary.get("primary_failure")
+    if primary_failure is None or not should_trigger_fallback(
+        primary_failure
+    ):
+        return primary
+
+    fallback = fetch_ensembl_population_evidence(
+        candidate,
+        session=session,
+    )
+    provenance = build_provider_provenance(
+        capability="population_frequency",
+        provider="ensembl_variation",
+        provider_role="fallback",
+        primary_provider="gnomad",
+        primary_failure=primary_failure,
+    )
+    fallback.update(
+        {
+            **{
+                key: value
+                for key, value in provenance.items()
+                if key != "provider"
+            },
+            "operational_provider": provenance["provider"],
+            "source": "ensembl_variation",
+            "fallback_for": "gnomad",
+            "primary_http_status": primary.get("http_status"),
+            "primary_request_attempts": primary.get("request_attempts"),
+            "primary_circuit_open": primary.get("circuit_open"),
+        }
+    )
+    fallback.setdefault("warnings", []).insert(
+        0,
+        "gnomAD was unavailable; Ensembl Variation fallback was used.",
+    )
+    return fallback
 
 
 def _candidate_identifiers(
@@ -2020,10 +2157,8 @@ def _myvariant_fallback(
         population_needed
         and population_status
         in {
-            "no_match",
             "unavailable",
             "invalid_response",
-            "missing_identifier",
         }
         and usable
     )
@@ -2100,6 +2235,7 @@ def enrich_conditionally(
     europe_pmc_statuses: list[str] = []
     pubmed_statuses: list[str] = []
     total_steps = max(1, len(candidate_items) * 4)
+    population_circuit = ProviderCircuitState()
     for index, (candidate, evidence) in enumerate(
         zip(candidate_items, evidence_items, strict=True)
     ):
@@ -2199,9 +2335,10 @@ def enrich_conditionally(
                     "population evidence",
                     "running",
                 )
-            population = fetch_gnomad_evidence(
+            population = fetch_population_evidence_with_fallback(
                 item,
                 session=population_session,
+                circuit_state=population_circuit,
             )
         else:
             population = _empty_population_evidence(
@@ -2329,5 +2466,6 @@ __all__ = [
     "enrich_conditionally",
     "fetch_ensembl_population_evidence",
     "fetch_gnomad_evidence",
+    "fetch_population_evidence_with_fallback",
     "fetch_literature_evidence",
 ]

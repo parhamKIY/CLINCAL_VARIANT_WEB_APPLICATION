@@ -66,7 +66,9 @@ from backend.conditional_enrichment import (
     fetch_ensembl_population_evidence,
     fetch_gnomad_evidence,
     fetch_literature_evidence,
+    fetch_population_evidence_with_fallback,
 )
+from backend.provider_resilience import ProviderCircuitState
 from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
@@ -179,6 +181,7 @@ from backend.variant_interpretation import (
 from backend.variant_report import (
     DRAFT_VARIANT_REPORT_SCHEMA_VERSION,
     DraftVariantReportError,
+    _evidence_sections,
     build_draft_variant_report,
     build_draft_variant_reports,
     save_draft_variant_report,
@@ -7424,7 +7427,10 @@ class TestEvidenceObject:
             }
         ]
         assert len(session.post_calls) == 1
-        assert session.post_calls[0]["timeout"] == settings.GNOMAD_TIMEOUT
+        assert session.post_calls[0]["timeout"] == (
+            min(float(settings.GNOMAD_TIMEOUT), 5.0),
+            float(settings.GNOMAD_TIMEOUT),
+        )
 
     def test_stage_32_gnomad_rejects_a_different_allele(self) -> None:
         session = FakeConditionalSession(
@@ -7447,6 +7453,226 @@ class TestEvidenceObject:
         assert result["status"] == "invalid_response"
         assert result["failure_reason"] == "variant_identity_mismatch"
         assert result["populations"] == []
+
+    @staticmethod
+    def _ensembl_population_payload() -> dict[str, object]:
+        return {
+            "name": "rs121913529",
+            "source": "dbSNP",
+            "release": 156,
+            "MAF": "0.001",
+            "mappings": [
+                {
+                    "assembly_name": "GRCh38",
+                    "seq_region_name": "2",
+                    "start": 166848215,
+                    "allele_string": "C/T",
+                }
+            ],
+            "populations": [
+                {
+                    "population": "1000GENOMES:phase_3:EUR",
+                    "allele": "T",
+                    "frequency": 0.002,
+                }
+            ],
+        }
+
+    def test_stage_66_gnomad_success_avoids_fallback(self) -> None:
+        session = FakeConditionalSession(
+            post_responses=[FakeResponse(200, self._gnomad_payload())]
+        )
+
+        result = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["provider"] == "gnomAD"
+        assert result["fallback_used"] is False
+        assert result["provider_role"] == "primary"
+        assert session.get_calls == []
+
+    def test_stage_66_forbidden_uses_distinct_ensembl_fallback(
+        self,
+    ) -> None:
+        session = FakeConditionalSession(
+            post_responses=[FakeResponse(403, {})],
+            get_responses=[
+                FakeResponse(200, self._ensembl_population_payload())
+            ],
+        )
+
+        result = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "available"
+        assert result["provider"] == "Ensembl REST Variation"
+        assert result["source"] == "ensembl_variation"
+        assert result["population_frequency"] == 0.001
+        assert result["operational_provider"] == "ensembl_variation"
+        assert result["fallback_used"] is True
+        assert result["primary_failure"] == "forbidden"
+        assert result["fallback_for"] == "gnomad"
+        assert len(session.post_calls) == 1
+        assert len(session.get_calls) == 1
+
+    def test_stage_66_timeout_retries_once_then_falls_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.conditional_enrichment.time.sleep",
+            lambda _seconds: None,
+        )
+        session = FakeConditionalSession(
+            post_responses=[
+                requests.Timeout("first"),
+                requests.Timeout("second"),
+            ],
+            get_responses=[
+                FakeResponse(200, self._ensembl_population_payload())
+            ],
+        )
+
+        result = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["provider"] == "Ensembl REST Variation"
+        assert result["primary_failure"] == "timeout"
+        assert result["primary_request_attempts"] == 2
+        assert len(session.post_calls) == 2
+        assert len(session.get_calls) == 1
+
+    def test_stage_66_valid_gnomad_no_match_is_terminal(self) -> None:
+        session = FakeConditionalSession(
+            post_responses=[
+                FakeResponse(200, {"data": {"variant": None}})
+            ]
+        )
+
+        result = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "no_match"
+        assert result["provider"] == "gnomAD"
+        assert result["fallback_used"] is False
+        assert result["primary_failure"] is None
+        assert session.get_calls == []
+
+    def test_stage_66_fallback_failure_is_explicit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+            0,
+        )
+        session = FakeConditionalSession(
+            post_responses=[FakeResponse(403, {})],
+            get_responses=[requests.Timeout("ensembl unavailable")],
+        )
+
+        result = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "unavailable"
+        assert result["provider"] == "Ensembl REST Variation"
+        assert result["fallback_used"] is True
+        assert result["primary_failure"] == "forbidden"
+        assert result["failure_reason"] == "timeout"
+
+    def test_stage_66_forbidden_opens_analysis_circuit(self) -> None:
+        session = FakeConditionalSession(
+            post_responses=[FakeResponse(403, {})],
+            get_responses=[
+                FakeResponse(200, self._ensembl_population_payload()),
+                FakeResponse(200, self._ensembl_population_payload()),
+            ],
+        )
+        circuit = ProviderCircuitState()
+
+        first = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+            circuit_state=circuit,
+        )
+        second = fetch_population_evidence_with_fallback(
+            self._candidate_with_rsid(),
+            session=session,  # type: ignore[arg-type]
+            circuit_state=circuit,
+        )
+
+        assert first["primary_circuit_open"] is True
+        assert second["primary_circuit_open"] is True
+        assert second["primary_request_attempts"] == 0
+        assert len(session.post_calls) == 1
+        assert len(session.get_calls) == 2
+
+    def test_stage_66_ensembl_source_survives_report_boundary(self) -> None:
+        candidate = self._candidate_with_rsid()
+        population = fetch_population_evidence_with_fallback(
+            candidate,
+            session=FakeConditionalSession(  # type: ignore[arg-type]
+                post_responses=[FakeResponse(403, {})],
+                get_responses=[
+                    FakeResponse(
+                        200,
+                        self._ensembl_population_payload(),
+                    )
+                ],
+            ),
+        )
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["vus"],
+            "population_frequency": population,
+            "literature": {
+                "status": "not_triggered",
+                "providers": {},
+                "articles": [],
+            },
+            "myvariant_fallback": {
+                "used": False,
+                "status": "not_needed",
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+
+        evidence = build_evidence_object(candidate)
+        stored = evidence["conditional_enrichment"][
+            "population_frequency"
+        ]
+        lineage = next(
+            item
+            for item in evidence["provenance"]["lineage"]
+            if item["evidence_path"]
+            == "conditional_enrichment.population_frequency"
+        )
+        section = next(
+            item
+            for item in _evidence_sections(evidence)
+            if item["source"].startswith("Population evidence")
+        )
+
+        assert stored["source"] == "ensembl_variation"
+        assert stored["fallback_used"] is True
+        assert lineage["provider"] == "Ensembl REST Variation"
+        assert lineage["upstream_sources"] == ["dbSNP"]
+        assert section["source"] == (
+            "Population evidence — Ensembl Variation"
+        )
+        assert "gnomAD" not in section["source"]
 
     def test_stage_32_litvar_publication_success_avoids_fallback(
         self,
@@ -8023,7 +8249,10 @@ class TestEvidenceObject:
         second_variant["pos"] = 166848216
         preliminary = build_evidence_objects([first, second])
         population_session = FakeConditionalSession(
-            post_responses=[requests.Timeout("private timeout")]
+            post_responses=[requests.Timeout("private timeout")],
+            get_responses=[
+                FakeResponse(200, self._ensembl_population_payload())
+            ],
         )
         literature_session = FakeConditionalSession(
             get_responses=[
@@ -8049,7 +8278,13 @@ class TestEvidenceObject:
         second_enrichment = result["variants"][1][
             "conditional_enrichment"
         ]
-        assert first_enrichment["myvariant_fallback"]["used"] is True
+        assert first_enrichment["population_frequency"][
+            "provider"
+        ] == "Ensembl REST Variation"
+        assert first_enrichment["population_frequency"][
+            "fallback_used"
+        ] is True
+        assert first_enrichment["myvariant_fallback"]["used"] is False
         assert first_enrichment["myvariant_fallback"][
             "independent_evidence"
         ] is False
@@ -8109,10 +8344,11 @@ class TestEvidenceObject:
             phenotypes=[],
             population_session=(  # type: ignore[arg-type]
                 FakeConditionalSession(
-                    post_responses=[
-                        requests.Timeout("first"),
-                        requests.Timeout("second"),
-                    ]
+                    post_responses=[requests.Timeout("first")],
+                    get_responses=[
+                        requests.Timeout("ensembl first"),
+                        requests.Timeout("ensembl second"),
+                    ],
                 )
             ),
             literature_session=(  # type: ignore[arg-type]
@@ -8127,7 +8363,7 @@ class TestEvidenceObject:
             persist_analysis=False,
         )
 
-        assert result["status"] == "success"
+        assert result["status"] == "partial"
         assert [variant["alt"] for variant in result["variants"]] == [
             "T",
             "G",

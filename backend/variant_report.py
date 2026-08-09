@@ -380,12 +380,23 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": "gnomAD / population enrichment",
+            "source": (
+                "Population evidence — Ensembl Variation"
+                if population.get("source") == "ensembl_variation"
+                else "Population evidence — gnomAD"
+            ),
             "status": _status(population.get("status"), "not_triggered"),
             "items": _items(
                 _item("Provider", population.get("provider")),
-                _item("Allele frequency", population.get("allele_frequency")),
+                _item(
+                    "Allele frequency",
+                    population.get("population_frequency")
+                    if population.get("population_frequency") is not None
+                    else population.get("global_maf"),
+                ),
                 _item("Dataset", population.get("dataset")),
+                _item("Fallback used", population.get("fallback_used")),
+                _item("Primary failure", population.get("primary_failure")),
             ),
         },
         {

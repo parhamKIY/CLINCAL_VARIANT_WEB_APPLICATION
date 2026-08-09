@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 65 local HPO-gene fallback complete
+**Implementation status:** Stage 66 gnomAD-to-Ensembl population fallback complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 66 gnomAD to Ensembl Variation fallback
+**Next checkpoint:** Stage 67 ClinVar resilience
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -28,9 +28,9 @@ The professor review on 2026-08-08 changed the accepted target architecture. Sta
 phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. Stages 63-65 begin the separate provider-resilience roadmap
+bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
-contracts. The authoritative
+contracts. Stage 66 applies those contracts to population evidence. The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
@@ -281,12 +281,13 @@ flowchart LR
     Z --> AA["Stage 63: provider-resilience contract"]
     AA --> AB["Stage 64: shared request policy"]
     AB --> AC["Stage 65: local HPO-gene fallback"]
-    AC --> AD["Stage 66: population fallback - pending"]
+    AC --> AD["Stage 66: population fallback"]
+    AD --> AE["Stage 67: ClinVar resilience - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC done
-    class AD review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD done
+    class AE review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -365,6 +366,7 @@ their original order.
 | 63 | Added one strict provider operational-status taxonomy, centralized retry/fallback decisions, request/HTTP classification, and validated primary/fallback provenance while preserving `no_match` as a non-failure. | Complete |
 | 64 | Added one bounded provider-call wrapper with separate connect/read deadlines, centralized retry/backoff and practical `Retry-After` handling, analysis-scoped circuits, safe transition logging, and initial MyDisease adoption. | Complete |
 | 65 | Added a deterministic direct HPO-to-gene overlap fallback for operational Phen2Gene failures, with exact source/method/dataset provenance and distinct report/UI wording. | Complete |
+| 66 | Kept gnomAD as the exact-allele primary population source and added Ensembl Variation fallback only for operational failures, with retry-once behavior, analysis-scoped circuit suppression, exact mapping checks, and distinct report provenance. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -376,7 +378,7 @@ flowchart TD
     P --> E["Evidence Object V2 + lineage"]
     E --> C1["Deterministic pre-review conflict audit"]
     C1 --> CE{"Conditional enrichment needed?"}
-    CE -- Yes --> X["gnomAD and bounded literature services"]
+    CE -- Yes --> X["gnomAD with Ensembl fallback and bounded literature services"]
     CE -- No --> VI
     X --> VI["One Variant Interpretation Model per variant"]
     VI --> D["Evidence and interpretation review state"]
@@ -409,7 +411,7 @@ report each variant independently.
 | MyDisease.info | `https://mydisease.info/v1/query` | Search bounded disease records by normalized gene symbol. | MONDO/DOID/OMIM/MedGen context, names, synonyms, HPO terms, pathways, and references. Primary records require an exact MONDO material-basis HGNC relation. |
 | Monarch API | `https://api-v3.monarchinitiative.org/v3/api` | Retained as centralized configuration/compatibility metadata. | It is not called by the active Stage 28 path; MyDisease.info supplies the bounded Monarch-derived disease context. |
 | gnomAD GraphQL | `https://gnomad.broadinstitute.org/api` | Conflict-triggered exact-allele lookup using an assembly-specific dataset (`gnomad_r2_1` or `gnomad_r4`). | Global and population allele-frequency evidence, release/dataset provenance, and explicit no-match/unavailable states. |
-| Ensembl Variation REST | `https://rest.ensembl.org` | Conditional population-evidence fallback when exact usable gnomAD evidence is unavailable and an rsID is available. | Bounded population-frequency context with separate provider provenance; it does not masquerade as gnomAD evidence. |
+| Ensembl Variation REST | `https://rest.ensembl.org` | Conditional population-evidence fallback after an operational gnomAD failure when an rsID is available; a valid gnomAD no-match is terminal. | Bounded population-frequency context with exact assembly/coordinate/allele validation and separate provider provenance; it does not masquerade as gnomAD evidence. |
 | NCBI LitVar2 | `https://www.ncbi.nlm.nih.gov/research/litvar2-api` | Resolve a variant and collect related publication identifiers. | Variant-linked PMID/PMCID references used only in bounded conditional literature enrichment. |
 | Europe PMC | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | Search bounded variant/gene literature and normalize metadata. | Titles, identifiers, dates, journals, and source metadata; article count is capped. |
 | PubMed E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Search and summarize bounded variant/gene literature. | PMID-linked article metadata. PubMed is independent of the direct ClinVar use of the same NCBI interface. |
@@ -648,6 +650,28 @@ fallback scores and methods; they never call them Phen2Gene scores. Fallback use
 recoverable degraded-mode warning and does not reorder variants or affect
 pathogenicity.
 
+### Stage 66 gnomAD to Ensembl Variation population fallback
+
+`backend/conditional_enrichment.py` keeps gnomAD GraphQL as the primary direct
+population-frequency source and queries its assembly-specific dataset with the exact
+chromosome, position, reference, and alternate allele. A successful response or a
+valid `no_match` is terminal and never calls Ensembl. Timeout, connection, `403`,
+`408`, `429`, `5xx`, and centrally classified invalid-response failures can activate
+the fallback after at most one gnomAD retry.
+
+The fallback queries Ensembl Variation only by a stable rsID and accepts population
+rows only after the returned rsID, assembly, coordinate, reference, alternate, and
+row allele match the candidate. It records `Ensembl REST Variation` as the evidence
+provider, `ensembl_variation` as the operational source, the original normalized
+gnomAD failure, and explicit fallback role. Reports and evidence lineage preserve
+that source instead of relabeling Ensembl frequencies as gnomAD.
+
+One `ProviderCircuitState` is shared by population lookups within an analysis. A
+persistent gnomAD operational failure opens that circuit, so later triggered
+variants skip repeated gnomAD calls and proceed to the separately labelled Ensembl
+fallback. If Ensembl also fails, the final state remains explicitly unavailable;
+neither provider failure is converted into negative clinical evidence.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -735,8 +759,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **870 passed, 4 skipped**,
-with **85.55% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **877 passed, 4 skipped**,
+with **85.73% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -839,6 +863,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Conditional enrichment | `backend/conditional_enrichment.py` |
 | Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
+| gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
 | LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
@@ -854,9 +879,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-65 are implemented and documented. Population fallback implementation
-   begins in Stage 66; professor feedback and sign-off remain external pending
-   checkpoints.
+1. Stages 46-66 are implemented and documented. ClinVar resilience begins in Stage
+   67; professor feedback and sign-off remain external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should

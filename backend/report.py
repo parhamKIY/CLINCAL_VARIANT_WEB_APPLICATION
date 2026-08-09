@@ -3144,11 +3144,25 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             "most_severe_consequence",
             "minor_allele",
             "global_maf",
+            "population_frequency",
             "joint",
             "exome",
             "genome",
             "warnings",
             "failure_reason",
+            "capability",
+            "operational_provider",
+            "source",
+            "provider_role",
+            "fallback_used",
+            "primary_provider",
+            "primary_failure",
+            "fallback_for",
+            "request_attempts",
+            "circuit_open",
+            "primary_http_status",
+            "primary_request_attempts",
+            "primary_circuit_open",
         ),
     )
     populations = population_source.get("populations")
@@ -3653,12 +3667,24 @@ def _build_evidence_lineage(
         population
         and population.get("status") != "not_triggered"
     ):
+        population_is_ensembl = (
+            population.get("source") == "ensembl_variation"
+            or population.get("provider") == "Ensembl REST Variation"
+        )
         records.append(
             _lineage_record(
                 "conditional_enrichment.population_frequency",
                 population,
-                default_provider="gnomAD",
-                default_upstream_sources=("gnomAD",),
+                default_provider=(
+                    "Ensembl REST Variation"
+                    if population_is_ensembl
+                    else "gnomAD"
+                ),
+                default_upstream_sources=(
+                    ("Ensembl",)
+                    if population_is_ensembl
+                    else ("gnomAD",)
+                ),
                 derivation="direct",
                 evidence_present=(
                     population.get("status")
