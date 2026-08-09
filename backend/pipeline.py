@@ -1703,6 +1703,7 @@ def _annotate_and_match(
                     phenotype_results,
                     request["phenotypes"],
                     ontology_path=ontology_path,
+                    associations_path=associations_path,
                     max_retries=phen2gene_max_retries,
                     session=phen2gene_session,
                     use_cache=phen2gene_use_cache,
@@ -1741,7 +1742,20 @@ def _annotate_and_match(
                 phen2gene_availability = phen2gene_result[
                     "availability"
                 ]
-                if phen2gene_availability == "available":
+                if phen2gene_result["fallback_used"]:
+                    api_status = "warning"
+                    phenotype_status = "warning"
+                    _record_issue(
+                        result,
+                        stage="phenotype",
+                        code="phen2gene_fallback_used",
+                        message=(
+                            "Phen2Gene was unavailable; Local HPO-Gene "
+                            "fallback provided direct-overlap context."
+                        ),
+                        recoverable=True,
+                    )
+                elif phen2gene_availability == "available":
                     api_status: PipelineAPIStatus = "success"
                     phenotype_status = "success"
                 elif (
@@ -1775,9 +1789,13 @@ def _annotate_and_match(
                 )
                 phen2gene_api_status = api_status
                 phenotype_message = (
-                    "Attached local and Phen2Gene phenotype evidence "
-                    f"to {len(phenotype_results)} variants."
-                )
+                    (
+                        "Attached local HPO-Gene fallback context with "
+                        "explicit degraded-mode provenance to "
+                    )
+                    if phen2gene_result["fallback_used"]
+                    else "Attached local and Phen2Gene phenotype evidence to "
+                ) + f"{len(phenotype_results)} variants."
 
             public_phenotype_results = [
                 dict(variant)

@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 64 shared provider-call policy complete
+**Implementation status:** Stage 65 local HPO-gene fallback complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 65 simple local HPO-gene fallback
+**Next checkpoint:** Stage 66 gnomAD to Ensembl Variation fallback
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -28,7 +28,7 @@ The professor review on 2026-08-08 changed the accepted target architecture. Sta
 phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. Stages 63-64 begin the separate provider-resilience roadmap
+bounded live validation. Stages 63-65 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
 contracts. The authoritative
 V3 target is defined in
@@ -280,12 +280,13 @@ flowchart LR
     Y --> Z["Stage 62: documentation and demo handoff"]
     Z --> AA["Stage 63: provider-resilience contract"]
     AA --> AB["Stage 64: shared request policy"]
-    AB --> AC["Stage 65: local HPO-gene fallback - pending"]
+    AB --> AC["Stage 65: local HPO-gene fallback"]
+    AC --> AD["Stage 66: population fallback - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB done
-    class AC review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC done
+    class AD review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -363,6 +364,7 @@ their original order.
 | 62 | Reconciled V3 documentation, added a reproducible multi-sheet Excel demo, corrected stale UI wording, and prepared the exact demonstration and professor-feedback checklist. | Complete; external professor feedback pending |
 | 63 | Added one strict provider operational-status taxonomy, centralized retry/fallback decisions, request/HTTP classification, and validated primary/fallback provenance while preserving `no_match` as a non-failure. | Complete |
 | 64 | Added one bounded provider-call wrapper with separate connect/read deadlines, centralized retry/backoff and practical `Retry-After` handling, analysis-scoped circuits, safe transition logging, and initial MyDisease adoption. | Complete |
+| 65 | Added a deterministic direct HPO-to-gene overlap fallback for operational Phen2Gene failures, with exact source/method/dataset provenance and distinct report/UI wording. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -622,6 +624,30 @@ MyDisease metadata and gene-query operations now use the shared policy. Repeated
 MyDisease calls in one analysis therefore reuse strict deadlines, retry decisions,
 and one analysis-scoped circuit without implementing Stage 65 fallback behavior.
 
+### Stage 65 simple local HPO-gene fallback
+
+`backend/local_hpo_gene_fallback.py` implements only direct accepted-HPO-to-gene
+association overlap. A gene score is the number of distinct matched accepted HPO
+terms divided by the total distinct accepted HPO count. Results sort by score
+descending and gene symbol ascending. Duplicate HPO terms and associations collapse
+deterministically. No ontology traversal, ancestor propagation, semantic similarity,
+information-content weighting, graph database, machine learning, or disease
+propagation is used.
+
+The fallback reuses the validated official `data/hpo/phenotype_to_genes.txt` loader
+and records provider `local_hpo_gene_fallback`, method
+`direct_hpo_gene_overlap`, method version, accepted HPO set, companion HPO release,
+release date, primary provider, and normalized primary failure. It activates only
+after a retry-bounded operational Phen2Gene failure. A successful Phen2Gene response
+with no matching gene remains a valid primary no-match state and does not trigger the
+fallback.
+
+Evidence lineage identifies HPO as the fallback upstream source rather than
+Phen2Gene. The pipeline, reviewer report, and phenotype table explicitly label local
+fallback scores and methods; they never call them Phen2Gene scores. Fallback use is a
+recoverable degraded-mode warning and does not reorder variants or affect
+pathogenicity.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -709,8 +735,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **858 passed, 4 skipped**,
-with **85.34% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **870 passed, 4 skipped**,
+with **85.55% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -812,6 +838,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Conflict audit | `backend/conflict_auditor.py` |
 | Conditional enrichment | `backend/conditional_enrichment.py` |
 | Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
+| Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
 | LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
@@ -827,9 +854,9 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-64 are implemented and documented. Capability-specific fallback
-   implementation begins in Stage 65; professor feedback and sign-off remain external
-   pending checkpoints.
+1. Stages 46-65 are implemented and documented. Population fallback implementation
+   begins in Stage 66; professor feedback and sign-off remain external pending
+   checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should

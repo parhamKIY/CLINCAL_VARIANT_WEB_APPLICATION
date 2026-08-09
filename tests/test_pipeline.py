@@ -3667,7 +3667,10 @@ class TestPhenotype:
             "HPO_list": "HP:0001250;HP:0001263",
             "weight_model": "sk",
         }
-        assert session.calls[0]["timeout"] == settings.PHEN2GENE_TIMEOUT
+        assert session.calls[0]["timeout"] == (
+            5.0,
+            float(settings.PHEN2GENE_TIMEOUT),
+        )
         assert [
             variant["variant"]["pos"]  # type: ignore[index]
             for variant in result["variants"]
@@ -3687,6 +3690,15 @@ class TestPhenotype:
             "retrieved_at": first["retrieved_at"],  # type: ignore[index]
             "cache_hit": False,
             "warnings": [],
+            "provider_role": "primary",
+            "fallback_used": False,
+            "primary_provider": "phen2gene",
+            "primary_failure": None,
+            "method": "phen2gene_sk",
+            "method_version": None,
+            "matched_hpos": [],
+            "dataset_version": None,
+            "dataset_date": None,
         }
         assert result["availability"] == "available"
         assert result["request_attempts"] == 1
@@ -3722,6 +3734,7 @@ class TestPhenotype:
         assert evidence["score"] is None  # type: ignore[index]
         assert "does not mean" in evidence["warnings"][0]  # type: ignore[index]
         assert result["availability"] == "partial"
+        assert result["fallback_used"] is False
 
     def test_phen2gene_retries_transient_failure(
         self,
@@ -3731,7 +3744,7 @@ class TestPhenotype:
         ontology_path = self._write_hpo_fixture(tmp_path)
         delays: list[float] = []
         monkeypatch.setattr(
-            "backend.phenotype.time.sleep",
+            "backend.provider_resilience.time.sleep",
             delays.append,
         )
         session = FakePhen2GeneSession(
@@ -3761,30 +3774,37 @@ class TestPhenotype:
         assert result["availability"] == "available"
         assert "private timeout detail" not in json.dumps(result)
 
-    def test_phen2gene_failure_retains_explicit_missingness(
+    def test_phen2gene_failure_uses_local_direct_overlap_fallback(
         self,
         tmp_path: Path,
     ) -> None:
         ontology_path = self._write_hpo_fixture(tmp_path)
+        associations_path = self._write_hpo_gene_fixture(tmp_path)
         session = FakePhen2GeneSession(
-            [requests.ConnectionError("private host detail")]
+            [requests.Timeout("private timeout detail")]
         )
 
         result = enrich_with_phen2gene(
             [{"variant": {"pos": 100}, "gene": "SCN1A"}],
             ["HP:0001250"],
             ontology_path=ontology_path,
+            associations_path=associations_path,
             max_retries=0,
             session=session,  # type: ignore[arg-type]
             use_cache=False,
         )
 
-        assert result["availability"] == "unavailable"
+        assert result["availability"] == "available"
+        assert result["fallback_used"] is True
+        assert result["primary_failure"] == "timeout"
         assert result["variants"][0]["variant"] == {"pos": 100}
         evidence = result["variants"][0]["phen2gene"]
-        assert evidence["availability"] == "unavailable"  # type: ignore[index]
-        assert "negative" in evidence["warnings"][0]  # type: ignore[index]
-        assert "private host detail" not in json.dumps(result)
+        assert evidence["availability"] == "available"  # type: ignore[index]
+        assert evidence["provider"] == "local_hpo_gene_fallback"  # type: ignore[index]
+        assert evidence["method"] == "direct_hpo_gene_overlap"  # type: ignore[index]
+        assert evidence["score"] == 1.0  # type: ignore[index]
+        assert evidence["matched_hpos"] == ["HP:0001250"]  # type: ignore[index]
+        assert "private timeout detail" not in json.dumps(result)
 
     def test_phen2gene_reuses_normalized_cache(
         self,
@@ -8624,6 +8644,38 @@ class TestEvidenceObject:
         assert evidence["gene"] == "SCN1A"
         assert evidence["phenotype_score"] == 0.5
         assert evidence["matched_hpo_terms"] == ["HP:0001250"]
+
+    def test_local_hpo_gene_fallback_lineage_preserves_hpo_source(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        candidate["phen2gene"] = {
+            "availability": "available",
+            "provider": "local_hpo_gene_fallback",
+            "provider_role": "fallback",
+            "fallback_used": True,
+            "primary_provider": "phen2gene",
+            "primary_failure": "timeout",
+            "method": "direct_hpo_gene_overlap",
+            "method_version": "1.0",
+            "dataset_version": "hp/releases/2026-07-13",
+            "dataset_date": "2026-07-13",
+            "status": "direct_match",
+            "rank": 1,
+            "score": 1.0,
+            "matched_hpos": ["HP:0001250"],
+        }
+
+        evidence = build_evidence_object(candidate)
+        lineage = next(
+            item
+            for item in evidence["provenance"]["lineage"]
+            if item["evidence_path"]
+            == "phenotype_relationship.phen2gene"
+        )
+        assert lineage["provider"] == "local_hpo_gene_fallback"
+        assert lineage["upstream_sources"] == ["HPO"]
+        assert lineage["source_release"] == "hp/releases/2026-07-13"
         assert evidence["clinvar_significance"] == "Pathogenic"
         assert evidence["clingen_curations"][0][
             "classification"
@@ -10716,6 +10768,39 @@ class TestStage52DraftVariantReportV2:
             evidence=evidence,
             interpretation=interpretation,
         )
+
+    def test_report_labels_local_hpo_gene_fallback_distinctly(self) -> None:
+        evidence, interpretation = self._success_inputs()
+        phenotype = evidence["phenotype_relationship"]
+        phenotype["phen2gene"] = {
+            "availability": "available",
+            "provider": "local_hpo_gene_fallback",
+            "provider_role": "fallback",
+            "fallback_used": True,
+            "primary_provider": "phen2gene",
+            "primary_failure": "timeout",
+            "method": "direct_hpo_gene_overlap",
+            "method_version": "1.0",
+            "status": "direct_match",
+            "rank": 1,
+            "score": 0.5,
+            "matched_hpos": ["HP:0001250"],
+            "dataset_version": "hp/releases/2026-07-13",
+            "dataset_date": "2026-07-13",
+        }
+
+        report = build_draft_variant_report(
+            evidence,
+            interpretation,
+            variant_index=0,
+        )
+        summary = report["machine_original_report"][
+            "phenotype_context"
+        ]["phenotype_to_gene_summary"]
+        assert "Local HPO-Gene fallback score: 0.5" in summary
+        assert "Phenotype-gene method: direct_hpo_gene_overlap" in summary
+        assert "Primary provider failure: timeout" in summary
+        assert not any(item.startswith("Phen2Gene score") for item in summary)
 
     def test_failed_interpretation_remains_a_coherent_report(self) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()
@@ -16203,19 +16288,22 @@ class TestPipelineAnnotationAndPhenotype:
         ] == 1.0
         assert result["phenotype_results"][0]["phen2gene"][  # type: ignore[index]
             "availability"
-        ] == "unavailable"
+        ] == "available"
+        assert result["phenotype_results"][0]["phen2gene"][  # type: ignore[index]
+            "provider"
+        ] == "local_hpo_gene_fallback"
         assert next(
             record["status"]
             for record in result["api_statuses"]
             if record["source"] == "phen2gene"
-        ) == "error"
+        ) == "warning"
         assert result["errors"] == [
             {
                 "stage": "phenotype",
-                "code": "phen2gene_unavailable",
+                "code": "phen2gene_fallback_used",
                 "message": (
-                    "Phen2Gene was unavailable; local HPO matching "
-                    "and all annotation evidence were retained."
+                    "Phen2Gene was unavailable; Local HPO-Gene "
+                    "fallback provided direct-overlap context."
                 ),
                 "recoverable": True,
             }
@@ -18541,13 +18629,11 @@ class TestFrontendResults:
         assert annotation_rows[0]["CSpec specifications"] == 0
         assert phenotype_rows[0]["Phenotype score"] == 0.5
         assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"
-        assert phenotype_rows[0]["Phen2Gene availability"] == (
+        assert phenotype_rows[0]["Phenotype-gene availability"] == (
             "available"
         )
-        assert phenotype_rows[0]["Phen2Gene score"] == 0.81
-        assert phenotype_rows[0][
-            "Phen2Gene rank (service metadata)"
-        ] == 12
+        assert phenotype_rows[0]["Phenotype-gene score"] == 0.81
+        assert phenotype_rows[0]["Phenotype-gene rank"] == 12
         assert phenotype_rows[0]["MyDisease result"] == "available"
         assert phenotype_rows[0]["MyDisease HTTP status"] == 200
         assert phenotype_rows[0]["MyDisease provider total"] == 2

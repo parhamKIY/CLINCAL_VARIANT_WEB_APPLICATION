@@ -11,6 +11,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +21,23 @@ from typing import Any, Literal, TypedDict
 import requests
 
 from backend.logging_config import get_logger
+from backend.local_hpo_gene_fallback import (
+    LOCAL_HPO_GENE_METHOD,
+    LOCAL_HPO_GENE_METHOD_VERSION,
+    LOCAL_HPO_GENE_PROVIDER,
+    LocalHPOGeneFallbackError,
+    rank_genes,
+)
+from backend.provider_resilience import (
+    ProviderCircuitState,
+    ProviderInvalidResponseError,
+    ProviderRetryPolicy,
+    ProviderStatus,
+    ProviderTimeouts,
+    build_provider_provenance,
+    call_provider_with_policy,
+    should_trigger_fallback,
+)
 from config import settings
 
 
@@ -69,14 +87,6 @@ PHEN2GENE_CACHE_TTL_SECONDS = 60 * 60
 PHEN2GENE_CACHE_MAX_ENTRIES = 32
 PHEN2GENE_MAX_RESULTS = 50_000
 PHEN2GENE_MAX_PROVIDER_WARNINGS = 10
-PHEN2GENE_TRANSIENT_HTTP_STATUSES = {
-    408,
-    429,
-    500,
-    502,
-    503,
-    504,
-}
 LOGGER = get_logger("phenotype")
 _HPO_UPDATE_LOCK = Lock()
 _PHEN2GENE_CACHE_LOCK = Lock()
@@ -94,9 +104,16 @@ class HPODataError(RuntimeError):
 class Phen2GeneError(RuntimeError):
     """Raised when Phen2Gene input or provider output is invalid."""
 
-    def __init__(self, message: str, *, attempts: int = 0) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int = 0,
+        provider_status: ProviderStatus | None = None,
+    ) -> None:
         super().__init__(message)
         self.attempts = attempts
+        self.provider_status = provider_status
 
 
 class HPOTerm(TypedDict):
@@ -167,6 +184,15 @@ class Phen2GeneEvidence(TypedDict):
     retrieved_at: str | None
     cache_hit: bool
     warnings: list[str]
+    provider_role: Literal["primary", "fallback"]
+    fallback_used: bool
+    primary_provider: str
+    primary_failure: ProviderStatus | None
+    method: str
+    method_version: str | None
+    matched_hpos: list[str]
+    dataset_version: str | None
+    dataset_date: str | None
 
 
 class Phen2GeneEnrichmentResult(TypedDict):
@@ -177,6 +203,10 @@ class Phen2GeneEnrichmentResult(TypedDict):
     message: str
     request_attempts: int
     cache_hit: bool
+    provider: str
+    fallback_used: bool
+    primary_failure: ProviderStatus | None
+    method: str
 
 
 class HPODisease(TypedDict):
@@ -1104,42 +1134,12 @@ def _normalize_phen2gene_payload(
     return normalized_results, provider_warning_count
 
 
-def _phen2gene_retry_delay(
-    attempt: int,
-    response: requests.Response | None = None,
-) -> float:
-    """Return one bounded retry delay."""
-
-    if response is not None:
-        retry_after = response.headers.get(
-            "Retry-After",
-            "",
-        ).strip()
-        if retry_after.isdigit():
-            return min(float(retry_after), 10.0)
-    return min(float(2**attempt), 4.0)
-
-
-def _log_phen2gene_attempt(
-    *,
-    attempt: int,
-    outcome: str,
-    started_at: float,
-    status_code: int | None,
-    timeout: int,
-) -> None:
-    """Log bounded provider telemetry without HPO or gene values."""
-
-    LOGGER.info(
-        "event=external_api_request service=phen2gene "
-        "operation=prioritize_genes attempt=%d outcome=%s "
-        "duration_ms=%d http_status=%s timeout_seconds=%d",
-        attempt + 1,
-        outcome,
-        int((time.perf_counter() - started_at) * 1000),
-        status_code,
-        timeout,
-    )
+@dataclass(frozen=True)
+class _ParsedPhen2GeneResponse:
+    status_code: int
+    headers: Mapping[str, object]
+    gene_results: dict[str, dict[str, object]]
+    warning_count: int
 
 
 def _fetch_phen2gene_results(
@@ -1159,131 +1159,82 @@ def _fetch_phen2gene_results(
 
     owns_session = session is None
     client = requests.Session() if session is None else session
-    last_error: Phen2GeneError | None = None
+
+    def request(
+        request_timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
+        response = client.get(
+            settings.PHEN2GENE_BASE_URL,
+            params={
+                "HPO_list": ";".join(hpo_ids),
+                "weight_model": PHEN2GENE_WEIGHT_MODEL,
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=request_timeout,
+        )
+        if not 200 <= response.status_code < 300:
+            return response
+        try:
+            payload = response.json()
+            gene_results, warning_count = _normalize_phen2gene_payload(
+                payload,
+                target_genes,
+            )
+        except (ValueError, Phen2GeneError) as exc:
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
+            ) from exc
+        headers = getattr(response, "headers", {})
+        return _ParsedPhen2GeneResponse(
+            status_code=response.status_code,
+            headers=headers if isinstance(headers, Mapping) else {},
+            gene_results=gene_results,
+            warning_count=warning_count,
+        )
 
     try:
-        for attempt in range(max_retries + 1):
-            started_at = time.perf_counter()
-            response: requests.Response | None = None
-            try:
-                response = client.get(
-                    settings.PHEN2GENE_BASE_URL,
-                    params={
-                        "HPO_list": ";".join(hpo_ids),
-                        "weight_model": PHEN2GENE_WEIGHT_MODEL,
-                    },
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=timeout,
-                )
-            except requests.RequestException as exc:
-                _log_phen2gene_attempt(
-                    attempt=attempt,
-                    outcome="request_error",
-                    started_at=started_at,
-                    status_code=None,
-                    timeout=timeout,
-                )
-                last_error = Phen2GeneError(
-                    "Phen2Gene request failed.",
-                    attempts=attempt + 1,
-                )
-                if attempt < max_retries:
-                    time.sleep(
-                        _phen2gene_retry_delay(attempt)
-                    )
-                    continue
-                raise last_error from exc
-
-            if (
-                response.status_code
-                in PHEN2GENE_TRANSIENT_HTTP_STATUSES
-            ):
-                _log_phen2gene_attempt(
-                    attempt=attempt,
-                    outcome="transient_http_error",
-                    started_at=started_at,
-                    status_code=response.status_code,
-                    timeout=timeout,
-                )
-                last_error = Phen2GeneError(
-                    "Phen2Gene was temporarily unavailable.",
-                    attempts=attempt + 1,
-                )
-                if attempt < max_retries:
-                    time.sleep(
-                        _phen2gene_retry_delay(
-                            attempt,
-                            response,
-                        )
-                    )
-                    continue
-                raise last_error
-
-            if not 200 <= response.status_code < 300:
-                _log_phen2gene_attempt(
-                    attempt=attempt,
-                    outcome="http_error",
-                    started_at=started_at,
-                    status_code=response.status_code,
-                    timeout=timeout,
-                )
-                raise Phen2GeneError(
-                    "Phen2Gene returned an unsuccessful response.",
-                    attempts=attempt + 1,
-                )
-
-            try:
-                payload = response.json()
-                gene_results, warning_count = (
-                    _normalize_phen2gene_payload(
-                        payload,
-                        target_genes,
-                    )
-                )
-            except (ValueError, Phen2GeneError) as exc:
-                _log_phen2gene_attempt(
-                    attempt=attempt,
-                    outcome="invalid_response",
-                    started_at=started_at,
-                    status_code=response.status_code,
-                    timeout=timeout,
-                )
-                last_error = Phen2GeneError(
-                    "Phen2Gene returned an invalid response.",
-                    attempts=attempt + 1,
-                )
-                if attempt < max_retries:
-                    time.sleep(
-                        _phen2gene_retry_delay(attempt)
-                    )
-                    continue
-                raise last_error from exc
-
-            _log_phen2gene_attempt(
-                attempt=attempt,
-                outcome="success",
-                started_at=started_at,
-                status_code=response.status_code,
-                timeout=timeout,
-            )
-            retrieved_at = datetime.now(
-                timezone.utc
-            ).isoformat().replace("+00:00", "Z")
-            return (
-                gene_results,
-                warning_count,
-                retrieved_at,
-                attempt + 1,
-            )
+        result = call_provider_with_policy(
+            provider="phen2gene",
+            operation_name="prioritize_genes",
+            operation=request,
+            timeouts=ProviderTimeouts(
+                connect=min(float(timeout), 5.0),
+                read=float(timeout),
+            ),
+            retry_policy=ProviderRetryPolicy(
+                max_attempts=min(max_retries + 1, 2),
+                backoff_base_seconds=1.0,
+                backoff_max_seconds=4.0,
+                max_retry_after_seconds=5.0,
+            ),
+            circuit_state=ProviderCircuitState(),
+        )
     finally:
         if owns_session:
             client.close()
 
-    raise last_error or Phen2GeneError(
-        "Phen2Gene request ended unexpectedly."
+    if result.status == "success" and isinstance(
+        result.value,
+        _ParsedPhen2GeneResponse,
+    ):
+        retrieved_at = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00",
+            "Z",
+        )
+        return (
+            result.value.gene_results,
+            result.value.warning_count,
+            retrieved_at,
+            result.attempts,
+        )
+    raise Phen2GeneError(
+        "Phen2Gene was unavailable after bounded provider attempts.",
+        attempts=result.attempts,
+        provider_status=result.status,
     )
 
 
@@ -1296,27 +1247,45 @@ def _phen2gene_evidence(
     provider_warning_count: int,
     retrieved_at: str | None,
     cache_hit: bool,
+    fallback_used: bool,
+    primary_failure: ProviderStatus | None,
+    method: str,
+    method_version: str | None,
+    dataset_version: str | None,
+    dataset_date: str | None,
 ) -> Phen2GeneEvidence:
-    """Build one explicit Phen2Gene evidence or missingness object."""
+    """Build one explicit primary or local phenotype-gene result."""
 
     warnings: list[str] = []
+    provider = (
+        LOCAL_HPO_GENE_PROVIDER
+        if fallback_used
+        else PHEN2GENE_PROVIDER_NAME
+    )
     if gene is None:
         availability: Phen2GeneAvailability = "unavailable"
         warnings.append(
-            "Phen2Gene could not be evaluated because annotation "
-            "provided no gene."
+            "Phenotype-gene context could not be evaluated because "
+            "annotation provided no gene."
         )
     elif not provider_available:
         availability = "unavailable"
         warnings.append(
-            "Phen2Gene evidence is unavailable; absence must not be "
-            "treated as a negative phenotype relationship."
+            "Phenotype-gene evidence is unavailable; absence must not "
+            "be treated as a negative phenotype relationship."
         )
     elif result is None:
         availability = "partial"
         warnings.append(
-            "Phen2Gene returned no result for the annotated gene; "
-            "this does not mean the phenotype is unrelated."
+            (
+                "The local direct HPO-gene dataset contained no match "
+                "for the annotated gene; this is not negative evidence."
+            )
+            if fallback_used
+            else (
+                "Phen2Gene returned no result for the annotated gene; "
+                "this does not mean the phenotype is unrelated."
+            )
         )
     elif provider_warning_count:
         availability = "partial"
@@ -1356,12 +1325,30 @@ def _phen2gene_evidence(
             else None
         ),
         "hpo_terms": list(hpo_ids),
-        "weight_model": PHEN2GENE_WEIGHT_MODEL,
-        "provider": PHEN2GENE_PROVIDER_NAME,
+        "weight_model": (
+            "not_applicable"
+            if fallback_used
+            else PHEN2GENE_WEIGHT_MODEL
+        ),
+        "provider": provider,
         "provider_version": None,
         "retrieved_at": retrieved_at,
         "cache_hit": cache_hit,
         "warnings": warnings,
+        "provider_role": "fallback" if fallback_used else "primary",
+        "fallback_used": fallback_used,
+        "primary_provider": "phen2gene",
+        "primary_failure": primary_failure,
+        "method": method,
+        "method_version": method_version,
+        "matched_hpos": (
+            list(result.get("matched_hpos", []))
+            if result is not None
+            and isinstance(result.get("matched_hpos"), list)
+            else []
+        ),
+        "dataset_version": dataset_version,
+        "dataset_date": dataset_date,
     }
 
 
@@ -1370,6 +1357,7 @@ def enrich_with_phen2gene(
     hpo_ids: list[str] | tuple[str, ...],
     *,
     ontology_path: str | Path | None = None,
+    associations_path: str | Path | None = None,
     timeout: int | None = None,
     max_retries: int | None = None,
     session: requests.Session | None = None,
@@ -1462,6 +1450,12 @@ def enrich_with_phen2gene(
                 provider_warning_count=0,
                 retrieved_at=None,
                 cache_hit=False,
+                fallback_used=False,
+                primary_failure=None,
+                method="phen2gene_sk",
+                method_version=None,
+                dataset_version=None,
+                dataset_date=None,
             )
             variants.append(enriched)
         return {
@@ -1473,6 +1467,10 @@ def enrich_with_phen2gene(
             ),
             "request_attempts": 0,
             "cache_hit": False,
+            "provider": PHEN2GENE_PROVIDER_NAME,
+            "fallback_used": False,
+            "primary_failure": None,
+            "method": "phen2gene_sk",
         }
 
     cache_key = _phen2gene_cache_key(
@@ -1487,6 +1485,12 @@ def enrich_with_phen2gene(
     cache_hit = cached is not None
     provider_available = True
     request_attempts = 0
+    fallback_used = False
+    primary_failure: ProviderStatus | None = None
+    method = "phen2gene_sk"
+    method_version: str | None = None
+    dataset_version: str | None = None
+    dataset_date: str | None = None
     if cached is not None:
         gene_results = cached.get("gene_results")
         provider_warning_count = cached.get(
@@ -1518,11 +1522,82 @@ def enrich_with_phen2gene(
                 session=session,
             )
         except Phen2GeneError as exc:
+            request_attempts = exc.attempts
+            primary_failure = exc.provider_status
             gene_results = {}
             provider_warning_count = 0
             retrieved_at = None
             provider_available = False
-            request_attempts = exc.attempts
+            if (
+                primary_failure is not None
+                and should_trigger_fallback(primary_failure)
+            ):
+                resolved_associations_path = (
+                    Path(associations_path)
+                    if associations_path is not None
+                    else (
+                        settings.HPO_DATA_DIR
+                        / HPO_GENE_ASSOCIATIONS_FILENAME
+                    )
+                ).resolve()
+                resolved_ontology_path = (
+                    Path(ontology_path)
+                    if ontology_path is not None
+                    else (
+                        settings.HPO_DATA_DIR
+                        / HPO_ONTOLOGY_FILENAME
+                    )
+                ).resolve()
+                try:
+                    release, release_date = _read_hpo_release(
+                        resolved_ontology_path,
+                        required=False,
+                    )
+                    local_result = rank_genes(
+                        canonical_hpo_ids,
+                        _load_hpo_gene_index(
+                            resolved_associations_path
+                        ),
+                        dataset_version=release,
+                        dataset_date=(
+                            release_date.isoformat()
+                            if release_date is not None
+                            else None
+                        ),
+                    )
+                    provenance = build_provider_provenance(
+                        capability="phenotype_gene",
+                        provider=LOCAL_HPO_GENE_PROVIDER,
+                        provider_role="fallback",
+                        primary_provider="phen2gene",
+                        primary_failure=primary_failure,
+                    )
+                except (
+                    HPODataError,
+                    LocalHPOGeneFallbackError,
+                ):
+                    pass
+                else:
+                    fallback_used = provenance["fallback_used"]
+                    provider_available = True
+                    method = local_result["method"]
+                    method_version = local_result["method_version"]
+                    dataset_version = local_result["dataset_version"]
+                    dataset_date = local_result["dataset_date"]
+                    retrieved_at = datetime.now(
+                        timezone.utc
+                    ).isoformat().replace("+00:00", "Z")
+                    gene_results = {
+                        item["gene"].casefold(): {
+                            "gene": item["gene"],
+                            "gene_id": None,
+                            "rank": item["rank"],
+                            "score": item["score"],
+                            "status": "direct_match",
+                            "matched_hpos": item["matched_hpos"],
+                        }
+                        for item in local_result["rankings"]
+                    }
         else:
             if use_cache:
                 _store_cached_phen2gene_result(
@@ -1551,6 +1626,12 @@ def enrich_with_phen2gene(
             provider_warning_count=provider_warning_count,
             retrieved_at=retrieved_at,
             cache_hit=cache_hit,
+            fallback_used=fallback_used,
+            primary_failure=primary_failure,
+            method=method,
+            method_version=method_version,
+            dataset_version=dataset_version,
+            dataset_date=dataset_date,
         )
         enriched = dict(annotation)
         enriched["phen2gene"] = evidence
@@ -1566,6 +1647,19 @@ def enrich_with_phen2gene(
         message = (
             "Phen2Gene was unavailable after bounded automatic "
             "attempts; variants retained explicit missingness."
+        )
+    elif fallback_used:
+        overall_availability = (
+            "available"
+            if all(
+                availability == "available"
+                for availability in availability_values
+            )
+            else "partial"
+        )
+        message = (
+            "Phen2Gene was unavailable; Local HPO-Gene fallback "
+            "used direct association overlap with explicit provenance."
         )
     elif all(
         availability == "available"
@@ -1593,6 +1687,14 @@ def enrich_with_phen2gene(
         "message": message,
         "request_attempts": request_attempts,
         "cache_hit": cache_hit,
+        "provider": (
+            LOCAL_HPO_GENE_PROVIDER
+            if fallback_used
+            else PHEN2GENE_PROVIDER_NAME
+        ),
+        "fallback_used": fallback_used,
+        "primary_failure": primary_failure,
+        "method": method,
     }
 
 

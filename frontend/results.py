@@ -201,14 +201,18 @@ def build_phenotype_rows(
                 "Submitted HPO": _joined_text(
                     result.get("hpo_terms")
                 ),
-                "Phen2Gene availability": phen2gene.get(
+                "Phenotype-gene provider": phen2gene.get("provider"),
+                "Phenotype-gene availability": phen2gene.get(
                     "availability"
                 ),
-                "Phen2Gene score": phen2gene.get("score"),
-                "Phen2Gene rank (service metadata)": (
-                    phen2gene.get("rank")
+                "Phenotype-gene score": phen2gene.get("score"),
+                "Phenotype-gene rank": phen2gene.get("rank"),
+                "Phenotype-gene method": phen2gene.get("method"),
+                "Phenotype-gene status": phen2gene.get("status"),
+                "Fallback used": phen2gene.get("fallback_used", False),
+                "Primary provider failure": phen2gene.get(
+                    "primary_failure"
                 ),
-                "Phen2Gene gene status": phen2gene.get("status"),
                 "MyDisease result": mydisease.get("status"),
                 "MyDisease HTTP status": mydisease.get("http_status"),
                 "MyDisease provider total": mydisease.get(
@@ -451,10 +455,14 @@ def _render_phenotype_table(result: PipelineResult) -> None:
             "Matched terms",
             "Matched HPO",
             "Submitted HPO",
-            "Phen2Gene availability",
-            "Phen2Gene score",
-            "Phen2Gene rank (service metadata)",
-            "Phen2Gene gene status",
+            "Phenotype-gene provider",
+            "Phenotype-gene availability",
+            "Phenotype-gene score",
+            "Phenotype-gene rank",
+            "Phenotype-gene method",
+            "Phenotype-gene status",
+            "Fallback used",
+            "Primary provider failure",
             "MyDisease result",
             "MyDisease HTTP status",
             "MyDisease provider total",
@@ -468,10 +476,10 @@ def _render_phenotype_table(result: PipelineResult) -> None:
                 format="percent"
             ),
             "Matched terms": st.column_config.NumberColumn(format="%d"),
-            "Phen2Gene score": st.column_config.NumberColumn(
+            "Phenotype-gene score": st.column_config.NumberColumn(
                 format="%.6f"
             ),
-            "Phen2Gene rank (service metadata)": (
+            "Phenotype-gene rank": (
                 st.column_config.NumberColumn(format="%d")
             ),
             "MyDisease diseases": st.column_config.NumberColumn(
@@ -495,8 +503,9 @@ def _render_phenotype_table(result: PipelineResult) -> None:
         },
     )
     st.caption(
-        "Phen2Gene rank is provider metadata for the annotated gene; "
-        "it does not reorder variants or change pathogenicity."
+        "Phenotype-gene rank is source-specific context. Local fallback "
+        "uses direct HPO-gene overlap only; it does not reproduce the "
+        "Phen2Gene algorithm, reorder variants, or change pathogenicity."
     )
     mydisease_rows = build_mydisease_rows(
         result["phenotype_results"]

@@ -265,12 +265,33 @@ def _phen2gene_summary(evidence: EvidenceObject) -> list[str]:
     phen2gene = _mapping(
         evidence["phenotype_relationship"].get("phen2gene")
     )
+    is_local_fallback = (
+        phen2gene.get("provider") == "local_hpo_gene_fallback"
+    )
+    prefix = (
+        "Local HPO-Gene fallback"
+        if is_local_fallback
+        else "Phen2Gene"
+    )
     return [
         f"{item['label']}: {item['value']}"
         for item in _items(
-            _item("Phen2Gene status", phen2gene.get("status")),
-            _item("Phen2Gene rank", phen2gene.get("rank")),
-            _item("Phen2Gene score", phen2gene.get("score")),
+            _item(f"{prefix} status", phen2gene.get("status")),
+            _item(f"{prefix} rank", phen2gene.get("rank")),
+            _item(f"{prefix} score", phen2gene.get("score")),
+            _item("Phenotype-gene method", phen2gene.get("method")),
+            _item(
+                "Primary provider failure",
+                phen2gene.get("primary_failure"),
+            ),
+            _item(
+                "Local dataset version",
+                phen2gene.get("dataset_version"),
+            ),
+            _item(
+                "Local dataset date",
+                phen2gene.get("dataset_date"),
+            ),
         )
     ]
 

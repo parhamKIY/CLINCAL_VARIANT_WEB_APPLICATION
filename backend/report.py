@@ -3562,13 +3562,29 @@ def _build_evidence_lineage(
             )
         )
     if phen2gene:
+        local_hpo_fallback = (
+            phen2gene.get("provider") == "local_hpo_gene_fallback"
+        )
         records.append(
             _lineage_record(
                 "phenotype_relationship.phen2gene",
                 phen2gene,
-                default_provider="Phen2Gene",
-                default_upstream_sources=("Phen2Gene",),
+                default_provider=(
+                    "local_hpo_gene_fallback"
+                    if local_hpo_fallback
+                    else "Phen2Gene"
+                ),
+                default_upstream_sources=(
+                    ("HPO",)
+                    if local_hpo_fallback
+                    else ("Phen2Gene",)
+                ),
                 derivation="computed",
+                source_release=(
+                    _lineage_text(phen2gene.get("dataset_version"))
+                    if local_hpo_fallback
+                    else None
+                ),
             )
         )
     if mydisease:
