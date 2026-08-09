@@ -517,6 +517,11 @@ class TestConfiguration:
                 "must be a secure HTTPS URL",
             ),
             (
+                "VARIANTVALIDATOR_BASE_URL",
+                "not-a-url",
+                "must be a secure HTTPS URL",
+            ),
+            (
                 "HPO_ONTOLOGY_URL",
                 "http://example.test/hp.obo",
                 "must be a secure HTTPS URL",
@@ -567,6 +572,11 @@ class TestConfiguration:
                 "VEP_TIMEOUT",
                 121,
                 "VEP_TIMEOUT cannot exceed",
+            ),
+            (
+                "VARIANTVALIDATOR_TIMEOUT",
+                121,
+                "VARIANTVALIDATOR_TIMEOUT cannot exceed",
             ),
             (
                 "LLM_MAX_RETRIES",
@@ -1203,6 +1213,7 @@ class FakeSession:
         clinvar_responses: list[object] | None = None,
         clingen_responses: list[object] | None = None,
         cspec_responses: list[object] | None = None,
+        variantvalidator_responses: list[object] | None = None,
     ) -> None:
         self.responses = list(responses)
         self.genebe_responses = list(genebe_responses or [])
@@ -1210,6 +1221,9 @@ class FakeSession:
         self.clinvar_responses = list(clinvar_responses or [])
         self.clingen_responses = list(clingen_responses or [])
         self.cspec_responses = list(cspec_responses or [])
+        self.variantvalidator_responses = list(
+            variantvalidator_responses or []
+        )
         self.calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
         self.genebe_post_calls: list[dict[str, object]] = []
@@ -1218,6 +1232,7 @@ class FakeSession:
         self.clinvar_get_calls: list[dict[str, object]] = []
         self.clingen_get_calls: list[dict[str, object]] = []
         self.cspec_get_calls: list[dict[str, object]] = []
+        self.variantvalidator_get_calls: list[dict[str, object]] = []
         self.closed = False
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
@@ -1271,10 +1286,20 @@ class FakeSession:
             f"{settings.CLINGEN_BASE_URL}/getData/track"
         )
         is_cspec = url.startswith(f"{settings.CSPEC_BASE_URL}/")
+        is_variantvalidator = url.startswith(
+            f"{settings.VARIANTVALIDATOR_BASE_URL}/"
+        )
         is_clinvar = url.endswith(
             ("/esearch.fcgi", "/esummary.fcgi")
         )
-        if is_clingen:
+        if is_variantvalidator:
+            self.variantvalidator_get_calls.append(call)
+            response = (
+                self.variantvalidator_responses.pop(0)
+                if self.variantvalidator_responses
+                else FakeResponse(503, {"error": "unavailable"})
+            )
+        elif is_clingen:
             self.clingen_get_calls.append(call)
             if not self.clingen_responses:
                 params = kwargs.get("params", {})
@@ -3925,6 +3950,49 @@ class TestAnnotation:
         }
 
     @staticmethod
+    def _variantvalidator_response(
+        *,
+        position: int = 100,
+        assembly: str = "GRCh38",
+    ) -> dict[str, object]:
+        """Build one exact VariantValidator mapping fallback."""
+
+        assembly_key = assembly.casefold()
+        return {
+            "NM_000001.2:c.100A>G": {
+                "annotations": {"mane_select": True},
+                "gene_ids": {
+                    "ensembl_gene_id": "ENSG000001",
+                    "hgnc_id": "HGNC:1",
+                },
+                "gene_symbol": "GENE1",
+                "hgvs_transcript_variant": "NM_000001.2:c.100A>G",
+                "hgvs_predicted_protein_consequence": {
+                    "tlr": "NP_000001.1:p.(Lys34Arg)"
+                },
+                "primary_assembly_loci": {
+                    assembly_key: {
+                        "hgvs_genomic_description": (
+                            f"NC_000001.11:g.{position}A>G"
+                        ),
+                        "vcf": {
+                            "chr": "1",
+                            "pos": str(position),
+                            "ref": "A",
+                            "alt": "G",
+                        },
+                    }
+                },
+                "selected_assembly": assembly,
+                "validation_warnings": [],
+            },
+            "flag": "gene_variant",
+            "metadata": {
+                "variantvalidator_version": "4.0.1-test"
+            },
+        }
+
+    @staticmethod
     def _myvariant_response(
         variant_id: str = "chr1:g.100A>G",
     ) -> dict[str, object]:
@@ -4317,6 +4385,8 @@ class TestAnnotation:
         assert vep["provider"] == "Ensembl VEP"
         assert vep["provider_version"] is None
         assert vep["assembly"] == "GRCh38"
+        assert vep["fallback_used"] is False
+        assert session.variantvalidator_get_calls == []
         assert re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
             vep["retrieved_at"],
@@ -6202,6 +6272,77 @@ class TestAnnotation:
             for warning in annotation["warnings"]
         )
 
+    def test_stage_70_vep_outage_uses_validation_mapping_fallback(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(503, {"error": "unavailable"})],
+            variantvalidator_responses=[
+                FakeResponse(200, self._variantvalidator_response())
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        vep = annotation["sources"]["vep"]
+        assert len(session.variantvalidator_get_calls) == 1
+        assert vep["status"] == "partial"
+        assert vep["provider"] == "VariantValidator"
+        assert vep["provider_role"] == "fallback"
+        assert vep["fallback_used"] is True
+        assert vep["fallback_for"] == "ensembl_vep"
+        assert vep["primary_provider"] == "Ensembl VEP"
+        assert vep["primary_failure"] == "server_error"
+        assert vep["fallback_status"] == "success"
+        assert vep["normalized_variant"] == {
+            "assembly": "GRCh38",
+            "chrom": "1",
+            "pos": 100,
+            "ref": "A",
+            "alt": "G",
+        }
+        assert vep["validated_genomic_hgvs"] == (
+            "NC_000001.11:g.100A>G"
+        )
+        assert annotation["gene"] == "GENE1"
+        assert annotation["transcript"] == "NM_000001.2"
+        assert annotation["hgvsc"] == "NM_000001.2:c.100A>G"
+        assert annotation["hgvsp"] == "NP_000001.1:p.(Lys34Arg)"
+        assert annotation["consequence"] is None
+        assert annotation["impact"] is None
+        assert vep["most_severe_consequence"] is None
+        assert vep["transcript_consequences"] == []
+        assert vep["consequence_available"] is False
+
+    def test_stage_70_failed_fallback_preserves_normalized_identity(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [requests.Timeout("vep timeout")],
+            variantvalidator_responses=[
+                requests.Timeout("fallback timeout")
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        vep = annotation["sources"]["vep"]
+        assert vep["status"] == "error"
+        assert vep["primary_failure"] == "timeout"
+        assert vep["fallback_status"] == "timeout"
+        assert vep["fallback_failure"] == "timeout"
+        assert vep["fallback_used"] is False
+        assert vep["normalized_variant"]["pos"] == 100
+        assert annotation["consequence"] is None
+
     def test_multiple_candidates_use_one_batch_request(self) -> None:
         session = FakeSession(
             [
@@ -6316,6 +6457,7 @@ class TestAnnotation:
 
         assert annotations[0]["sources"]["vep"]["status"] == "success"
         assert len(session.post_calls) == 2
+        assert session.variantvalidator_get_calls == []
         assert delays == [1.0]
 
     def test_exhausted_timeout_returns_structured_error(
@@ -6406,6 +6548,7 @@ class TestAnnotation:
 
         assert annotations[0]["sources"]["vep"]["status"] == "not_found"
         assert annotations[0]["gene"] is None
+        assert session.variantvalidator_get_calls == []
 
     def test_assembly_mismatch_is_rejected(self) -> None:
         session = FakeSession(
@@ -8504,6 +8647,79 @@ class TestEvidenceObject:
         )
 
         assert len(articles) == 2
+
+    def test_stage_70_vep_fallback_provenance_persists_without_consequence(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        candidate["consequence"] = None
+        candidate["impact"] = None
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        vep = sources["vep"]
+        assert isinstance(vep, dict)
+        vep.update(
+            {
+                "status": "partial",
+                "provider": "VariantValidator",
+                "provider_role": "fallback",
+                "fallback_used": True,
+                "fallback_for": "ensembl_vep",
+                "primary_provider": "Ensembl VEP",
+                "primary_failure": "timeout",
+                "fallback_provider": "VariantValidator",
+                "fallback_status": "success",
+                "fallback_failure": None,
+                "source_type": "validation_mapping_fallback",
+                "upstream_sources": ["VariantValidator"],
+                "normalized_variant": {
+                    "assembly": "GRCh38",
+                    "chrom": "2",
+                    "pos": 166848215,
+                    "ref": "C",
+                    "alt": "T",
+                },
+                "validated_genomic_hgvs": (
+                    "NC_000002.12:g.166848215C>T"
+                ),
+                "validated_transcript_hgvs": (
+                    "NM_001165963.4:c.3877G>A"
+                ),
+                "validated_protein_hgvs": (
+                    "NP_001159435.1:p.(Val1293Ile)"
+                ),
+                "consequence_available": False,
+                "validation_warnings": [],
+                "most_severe_consequence": None,
+                "transcript_consequences": [],
+            }
+        )
+
+        evidence = build_evidence_object(candidate)
+        stored = evidence["annotations"]["vep"]
+        assert stored["provider"] == "VariantValidator"
+        assert stored["provider_role"] == "fallback"
+        assert stored["primary_failure"] == "timeout"
+        assert stored["normalized_variant"] == vep[
+            "normalized_variant"
+        ]
+        assert stored["consequence"] is None
+        assert stored["impact"] is None
+        provider = next(
+            item
+            for item in evidence["provenance"]["providers"]
+            if item["source"] == "vep"
+        )
+        assert provider["provider"] == "VariantValidator"
+        assert provider["provider_role"] == "fallback"
+        assert provider["primary_failure"] == "timeout"
+        lineage = next(
+            item
+            for item in evidence["provenance"]["lineage"]
+            if item["evidence_path"] == "annotations.vep"
+        )
+        assert lineage["provider"] == "VariantValidator"
+        assert lineage["upstream_sources"] == ["VariantValidator"]
 
     def test_stage_38_feature_flags_skip_configured_enrichment(
         self,

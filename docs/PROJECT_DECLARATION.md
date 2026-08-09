@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 69 MyDisease latency guard complete
+**Implementation status:** Stage 70 VEP fallback hardening complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 70 VEP and annotation fallback hardening
+**Next checkpoint:** Stage 71 MyVariant fallback hardening
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -30,8 +30,8 @@ model-selection, interpretation-before-review, reviewed-report, selection, refer
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
 bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
-contracts. Stages 66-69 apply those contracts to population, ClinVar, literature,
-and MyDisease evidence.
+contracts. Stages 66-70 apply those contracts to population, ClinVar, literature,
+MyDisease, and VEP-dependent annotation evidence.
 The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
@@ -287,12 +287,13 @@ flowchart LR
     AD --> AE["Stage 67: ClinVar resilience"]
     AE --> AF["Stage 68: literature resilience"]
     AF --> AG["Stage 69: MyDisease degraded mode"]
-    AG --> AH["Stage 70: VEP fallback hardening - pending"]
+    AG --> AH["Stage 70: VEP fallback hardening"]
+    AH --> AI["Stage 71: MyVariant fallback - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG done
-    class AH review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH done
+    class AI review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -375,6 +376,7 @@ their original order.
 | 67 | Added a non-independent MyVariant.info path for ClinVar-derived fields after operational direct NCBI ClinVar failure, while preserving direct success/no-match behavior, exact allele identity, fallback provenance, and single-vote lineage. | Complete |
 | 68 | Hardened literature retrieval with operational-only LitVar2-to-Europe PMC-to-PubMed fallback, Europe-PMC-first general searches, persisted search/fallback provenance, identifier-priority deduplication, bounded article results, and exact canonical links. | Complete |
 | 69 | Bounded MyDisease connect/read latency, limited retries to one transient connection retry, retained exact primary-failure provenance, and added a bounded local HPO disease-annotation context that never claims a gene-disease association. | Complete |
+| 70 | Kept Ensembl VEP primary and added one-call VariantValidator validation/HGVS fallback after operational failure, preserving exact normalized identity and provenance while leaving unavailable VEP consequence/plugin fields explicitly missing. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -410,6 +412,7 @@ report each variant independently.
 | Provider or resource | Default interface | Request purpose | Evidence returned and implementation responsibility |
 |---|---|---|---|
 | Ensembl VEP REST | `https://rest.ensembl.org/vep/homo_sapiens/region` | Submit bounded, assembly-explicit alleles. | Consequence, transcript, gene, identifiers, and available colocated evidence. Exact allele/coordinate validation is enforced in `backend/annotation.py`. |
+| VariantValidator REST | `https://rest.variantvalidator.org/VariantValidator/variantvalidator` | Validate one normalized pseudo-VCF allele only after operational VEP failure. | Exact assembly/allele validation and bounded HGVS/gene/transcript mapping with explicit fallback provenance; it never supplies or guesses VEP consequence/plugin fields. |
 | GeneBe API | `https://api.genebe.net/cloud/api-public/v1/variants` | Batch-query normalized variants; optional account credentials are supported. | Independent automated ACMG criteria, classifications, scores, identifiers, and provenance. It is evidence, not the application's final classification. |
 | MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier once for normal annotations and any later ClinVar fallback candidate. | Aggregated identifiers and population frequencies plus a bounded ClinVar-derived subset. Exact identity is required; ClinVar-derived fields become fallback evidence only after operational direct ClinVar failure and are never independent ClinVar evidence. |
 | NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize the primary direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. A valid no-record result is missingness, not negative evidence and not a fallback trigger. |
@@ -748,6 +751,31 @@ local HPO, Phen2Gene, and all other collected evidence. Pipeline warnings, compa
 evidence persistence, and lineage retain the distinction between direct MyDisease
 evidence and the local context-only degraded path.
 
+### Stage 70 VEP and annotation fallback hardening
+
+`backend/annotation.py` keeps Ensembl VEP as the primary annotation provider and now
+normalizes its terminal timeout, network, HTTP, assembly-mismatch, and malformed
+response failures. Only an operational primary failure activates the bounded
+VariantValidator path; a valid VEP success or valid no-result remains terminal. One
+analysis-scoped fallback circuit prevents a VariantValidator outage from causing
+repeated calls for later variants.
+
+The fallback submits the already-normalized assembly, chromosome, position,
+reference, and alternate allele to the public VariantValidator API and accepts a
+mapping only after the returned assembly-specific VCF identity matches all four
+allele coordinates exactly. It may retain a validated genomic HGVS, transcript HGVS,
+protein HGVS, gene, and transcript. The original normalized variant remains stored
+unchanged whether the fallback succeeds, has no exact match, or fails.
+
+Fallback evidence is explicitly labelled provider `VariantValidator`, role
+`fallback`, source type `validation_mapping_fallback`, and target `ensembl_vep`, with
+the normalized VEP primary failure retained. It does not invent a consequence,
+impact, transcript-consequence list, predictor result, or VEP plugin annotation;
+those fields remain empty with `consequence_available = false`. Evidence persistence,
+provider summaries, and lineage retain the fallback provider instead of relabelling
+it as VEP. Ensembl Variation remains an independent exact-record source and is not
+used here to imitate VEP semantics.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -835,7 +863,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **890 passed, 4 skipped**,
+consume external API quotas. The current recorded baseline is **895 passed, 4 skipped**,
 with **85.94% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
@@ -925,6 +953,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | VCF/manual input processing | `backend/vcf_processing.py`, `backend/pipeline.py`, `frontend/ui.py` |
 | Excel first-worksheet adapter | `backend/excel_processing.py`, `frontend/execution.py` |
 | Core annotation providers | `backend/annotation.py` |
+| VEP-to-VariantValidator validation/mapping fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
 | HPO and Phen2Gene | `backend/phenotype.py` |
 | Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
 | Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
@@ -958,9 +987,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-69 are implemented and documented. VEP and annotation fallback
-   hardening begin in Stage 70; professor feedback and sign-off remain external
-   pending checkpoints.
+1. Stages 46-70 are implemented and documented. MyVariant fallback hardening begins
+   in Stage 71; professor feedback and sign-off remain external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1017,9 +1045,10 @@ Actions. Stage 61 revalidated every production provider client and both task-spe
 LLM contracts, probed representative exact links, and removed non-navigable VEP and
 GeneBe POST endpoints from report hyperlinks. Stage 62 reconciled the V3 documents,
 added and verified the multi-sheet demo workbook, corrected stale UI wording, and
-prepared the exact demo and professor-feedback checklist. Stages 63-69 added the
+prepared the exact demo and professor-feedback checklist. Stages 63-70 added the
 shared provider-resilience contract, bounded request policy, local HPO-gene and
 population fallback paths, ClinVar-derived fallback, and the provenance-preserving
 literature resilience chain, followed by bounded MyDisease latency and local
-context-only degraded mode. Stage 70 is the next implementation checkpoint;
+context-only degraded mode plus a limited VEP-to-VariantValidator validation and
+HGVS-mapping fallback. Stage 71 is the next implementation checkpoint;
 professor review and sign-off remain external.

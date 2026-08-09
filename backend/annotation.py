@@ -15,8 +15,13 @@ import requests
 
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
+    ProviderCircuitState,
+    ProviderInvalidResponseError,
+    ProviderRetryPolicy,
     ProviderStatus,
+    ProviderTimeouts,
     build_provider_provenance,
+    call_provider_with_policy,
     classify_http_status,
     classify_request_exception,
     should_trigger_fallback,
@@ -44,6 +49,8 @@ CLINVAR_REQUEST_INTERVAL = 0.34
 TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 REQUIRED_VARIANT_FIELDS = {"chrom", "pos", "ref", "alt"}
 VEP_PROVIDER_NAME = "Ensembl VEP"
+VARIANTVALIDATOR_PROVIDER_NAME = "VariantValidator"
+VARIANTVALIDATOR_SELECT_TRANSCRIPTS = "mane"
 GENEBE_PROVIDER_NAME = "GeneBe"
 MYVARIANT_PROVIDER_NAME = "MyVariant.info"
 MYVARIANT_API_VERSION = "v1"
@@ -204,6 +211,18 @@ class AnnotationServiceError(RuntimeError):
 
 class GeneBeResponseError(AnnotationServiceError):
     """Raised when GeneBe returns an invalid successful response."""
+
+
+class VepOperationalError(AnnotationServiceError):
+    """Carry one normalized VEP operational failure."""
+
+    def __init__(
+        self,
+        message: str,
+        provider_status: ProviderStatus,
+    ) -> None:
+        super().__init__(message)
+        self.provider_status = provider_status
 
 
 class ClinVarResponseError(AnnotationServiceError):
@@ -484,9 +503,10 @@ def _post_vep_batch(
                 exception=exc,
             )
             if attempt >= max_retries:
-                raise AnnotationServiceError(
+                raise VepOperationalError(
                     "Ensembl VEP request failed because the service "
-                    "was unavailable."
+                    "was unavailable.",
+                    classify_request_exception(exc),
                 ) from exc
 
             delay = _retry_delay(attempt)
@@ -525,30 +545,34 @@ def _post_vep_batch(
                 continue
 
         if not 200 <= response.status_code < 300:
-            raise AnnotationServiceError(
+            raise VepOperationalError(
                 "Ensembl VEP returned HTTP "
-                f"{response.status_code}."
+                f"{response.status_code}.",
+                classify_http_status(response.status_code),
             )
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise AnnotationServiceError(
-                "Ensembl VEP returned invalid JSON."
+            raise VepOperationalError(
+                "Ensembl VEP returned invalid JSON.",
+                "invalid_response",
             ) from exc
 
         if not isinstance(payload, list) or any(
             not isinstance(item, dict)
             for item in payload
         ):
-            raise AnnotationServiceError(
-                "Ensembl VEP returned an unexpected response structure."
+            raise VepOperationalError(
+                "Ensembl VEP returned an unexpected response structure.",
+                "invalid_response",
             )
 
         return payload
 
-    raise AnnotationServiceError(
-        "Ensembl VEP retry loop ended unexpectedly."
+    raise VepOperationalError(
+        "Ensembl VEP retry loop ended unexpectedly.",
+        "unavailable",
     )
 
 
@@ -1765,6 +1789,7 @@ def _base_annotation(
     status: str,
     warning: str | None = None,
     retrieved_at: str | None = None,
+    vep_failure: ProviderStatus | None = None,
 ) -> AnnotationData:
     """Build a stable annotation object for success or failure states."""
     warnings_list = [warning] if warning else []
@@ -1789,6 +1814,14 @@ def _base_annotation(
             "vep": {
                 "status": status,
                 "provider": VEP_PROVIDER_NAME,
+                "provider_role": "primary",
+                "fallback_used": False,
+                "primary_provider": VEP_PROVIDER_NAME,
+                "primary_failure": vep_failure,
+                "fallback_provider": VARIANTVALIDATOR_PROVIDER_NAME,
+                "fallback_status": "not_triggered",
+                "fallback_failure": None,
+                "source_type": "direct",
                 "provider_version": None,
                 "retrieved_at": retrieved_at or _retrieval_timestamp(),
                 "assembly": settings.GENOME_ASSEMBLY,
@@ -1796,6 +1829,17 @@ def _base_annotation(
                 "transcript_consequences": [],
                 "total_transcript_consequences": 0,
                 "transcripts_truncated": False,
+                "normalized_variant": {
+                    "assembly": settings.GENOME_ASSEMBLY,
+                    "chrom": _normalize_chromosome(variant["chrom"]),
+                    "pos": int(variant["pos"]),
+                    "ref": str(variant["ref"]).upper(),
+                    "alt": str(variant["alt"]).upper(),
+                },
+                "validated_genomic_hgvs": None,
+                "validated_transcript_hgvs": None,
+                "validated_protein_hgvs": None,
+                "consequence_available": False,
             },
             "genebe": {
                 "status": "pending",
@@ -1933,6 +1977,9 @@ def _standardize_vep_response(
             f"{response_assembly or 'unknown'}."
         )
         annotation["sources"]["vep"]["status"] = "error"
+        annotation["sources"]["vep"][
+            "primary_failure"
+        ] = "invalid_response"
         annotation["warnings"].append(message)
         return annotation
 
@@ -1973,6 +2020,7 @@ def _standardize_vep_response(
                 len(stored_transcripts)
                 < len(cleaned_transcripts)
             ),
+            "consequence_available": most_severe is not None,
         }
     )
 
@@ -3707,6 +3755,7 @@ def _source_progress_summary(
     )
     unsupported = statuses.count("unsupported")
     not_found = statuses.count("not_found")
+    partial = statuses.count("partial")
 
     retry_suffix = (
         f" after {retry_rounds} automatic "
@@ -3741,12 +3790,14 @@ def _source_progress_summary(
         )
     if unsupported:
         details.append(f"{unsupported} unsupported")
+    if partial:
+        details.append(f"{partial} using validation/mapping fallback")
     if not_found:
         details.append(f"{not_found} with no exact record")
 
     if details:
         return (
-            "warning" if failed or unsupported else "success",
+            "warning" if failed or unsupported or partial else "success",
             f"Completed {total} variants{retry_suffix}; "
             f"{', '.join(details)}.",
         )
@@ -3855,6 +3906,11 @@ def _annotate_vep_variant_once(
             variant,
             status="error",
             warning=str(exc),
+            vep_failure=(
+                exc.provider_status
+                if isinstance(exc, VepOperationalError)
+                else "unavailable"
+            ),
         )
 
     response = next(
@@ -3872,6 +3928,240 @@ def _annotate_vep_variant_once(
             warning="Ensembl VEP returned no result for this variant.",
         )
     return _standardize_vep_response(variant, response)
+
+
+def _variantvalidator_match(
+    payload: object,
+    variant: VariantData,
+) -> dict[str, Any] | None:
+    """Return one exact assembly/allele VariantValidator mapping."""
+
+    if not isinstance(payload, dict):
+        raise ProviderInvalidResponseError()
+    metadata = payload.get("metadata")
+    flag = payload.get("flag")
+    if not isinstance(metadata, dict) or not isinstance(flag, str):
+        raise ProviderInvalidResponseError()
+
+    assembly_key = settings.GENOME_ASSEMBLY.casefold()
+    expected = {
+        "chrom": _normalize_chromosome(variant["chrom"]),
+        "pos": int(variant["pos"]),
+        "ref": str(variant["ref"]).upper(),
+        "alt": str(variant["alt"]).upper(),
+    }
+    matches: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for key, value in payload.items():
+        if key in {"flag", "metadata"} or not isinstance(value, dict):
+            continue
+        loci = value.get("primary_assembly_loci")
+        if not isinstance(loci, dict):
+            continue
+        locus = loci.get(assembly_key)
+        if not isinstance(locus, dict):
+            continue
+        vcf = locus.get("vcf")
+        if not isinstance(vcf, dict):
+            continue
+        try:
+            returned = {
+                "chrom": _normalize_chromosome(vcf.get("chr")),
+                "pos": int(vcf.get("pos")),
+                "ref": str(vcf.get("ref")).upper(),
+                "alt": str(vcf.get("alt")).upper(),
+            }
+        except (TypeError, ValueError):
+            continue
+        if returned == expected:
+            matches.append((key, value, locus))
+
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda item: (
+            not bool(
+                isinstance(item[1].get("annotations"), dict)
+                and item[1]["annotations"].get("mane_select") is True
+            ),
+            item[0],
+        )
+    )
+    key, record, locus = matches[0]
+    gene_ids = record.get("gene_ids")
+    gene_ids = gene_ids if isinstance(gene_ids, dict) else {}
+    predicted = record.get("hgvs_predicted_protein_consequence")
+    predicted = predicted if isinstance(predicted, dict) else {}
+    transcript_hgvs = _optional_text(
+        record.get("hgvs_transcript_variant")
+    )
+    validation_warnings = _bounded_string_list(
+        record.get("validation_warnings"),
+        10,
+    )
+    return {
+        "provider_version": _optional_text(
+            metadata.get("variantvalidator_version")
+        ),
+        "selected_record": key,
+        "gene": _optional_text(record.get("gene_symbol")),
+        "gene_id": (
+            _optional_text(gene_ids.get("ensembl_gene_id"))
+            or _optional_text(gene_ids.get("hgnc_id"))
+        ),
+        "transcript": (
+            transcript_hgvs.split(":", 1)[0]
+            if transcript_hgvs and ":" in transcript_hgvs
+            else None
+        ),
+        "genomic_hgvs": _optional_text(
+            locus.get("hgvs_genomic_description")
+        ),
+        "transcript_hgvs": transcript_hgvs,
+        "protein_hgvs": (
+            _optional_text(predicted.get("tlr"))
+            or _optional_text(predicted.get("slr"))
+        ),
+        "validation_warnings": validation_warnings,
+    }
+
+
+def _fetch_variantvalidator_fallback(
+    session: requests.Session,
+    variant: VariantData,
+    circuit_state: ProviderCircuitState,
+) -> tuple[ProviderStatus, dict[str, Any] | None, str]:
+    """Validate one normalized allele with one bounded fallback call."""
+
+    description = (
+        f"{_normalize_chromosome(variant['chrom'])}:"
+        f"{int(variant['pos'])}:"
+        f"{str(variant['ref']).upper()}:"
+        f"{str(variant['alt']).upper()}"
+    )
+    url = (
+        f"{settings.VARIANTVALIDATOR_BASE_URL}"
+        "/VariantValidator/variantvalidator/"
+        f"{settings.GENOME_ASSEMBLY}/"
+        f"{quote(description, safe='')}/"
+        f"{VARIANTVALIDATOR_SELECT_TRANSCRIPTS}"
+    )
+
+    def request(
+        timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
+        response = session.get(
+            url,
+            headers={"Accept": "application/json"},
+            params={"content-type": "application/json"},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return response
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as error:
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
+            ) from error
+        if not isinstance(payload, dict):
+            raise ProviderInvalidResponseError(
+                http_status=response.status_code
+            )
+        return payload
+
+    result = call_provider_with_policy(
+        provider="variantvalidator",
+        operation_name="validate_variant",
+        operation=request,
+        timeouts=ProviderTimeouts(
+            connect=min(float(settings.VARIANTVALIDATOR_TIMEOUT), 5.0),
+            read=float(settings.VARIANTVALIDATOR_TIMEOUT),
+        ),
+        retry_policy=ProviderRetryPolicy(max_attempts=1),
+        circuit_state=circuit_state,
+    )
+    if result.status != "success":
+        return result.status, None, url
+    try:
+        match = _variantvalidator_match(result.value, variant)
+    except ProviderInvalidResponseError:
+        circuit_state.open("variantvalidator", "invalid_response")
+        return "invalid_response", None, url
+    return ("success" if match is not None else "no_match"), match, url
+
+
+def _apply_vep_fallback(
+    annotation: AnnotationData,
+    session: requests.Session,
+    circuit_state: ProviderCircuitState,
+) -> None:
+    """Preserve validation/mapping only after operational VEP failure."""
+
+    source = annotation["sources"]["vep"]
+    primary_failure = source.get("primary_failure")
+    if not isinstance(primary_failure, str) or not should_trigger_fallback(
+        primary_failure
+    ):
+        source["fallback_status"] = "not_eligible"
+        return
+
+    status, match, source_url = _fetch_variantvalidator_fallback(
+        session,
+        annotation["variant"],
+        circuit_state,
+    )
+    source["fallback_status"] = status
+    source["fallback_source_url"] = source_url
+    if status != "success" or match is None:
+        source["fallback_failure"] = (
+            status if should_trigger_fallback(status) else None
+        )
+        annotation["warnings"].append(
+            (
+                "VariantValidator returned no exact assembly and allele "
+                "mapping; normalized input identity was retained."
+                if status == "no_match"
+                else "VariantValidator fallback was unavailable; "
+                "normalized input identity was retained."
+            )
+        )
+        return
+
+    source.update(
+        {
+            "status": "partial",
+            "provider": VARIANTVALIDATOR_PROVIDER_NAME,
+            "provider_role": "fallback",
+            "fallback_used": True,
+            "fallback_for": "ensembl_vep",
+            "fallback_failure": None,
+            "source_type": "validation_mapping_fallback",
+            "provider_version": match["provider_version"],
+            "retrieved_at": _retrieval_timestamp(),
+            "validated_genomic_hgvs": match["genomic_hgvs"],
+            "validated_transcript_hgvs": match["transcript_hgvs"],
+            "validated_protein_hgvs": match["protein_hgvs"],
+            "selected_record": match["selected_record"],
+            "validation_warnings": match["validation_warnings"],
+            "consequence_available": False,
+            "upstream_sources": [VARIANTVALIDATOR_PROVIDER_NAME],
+        }
+    )
+    for field in ("gene", "gene_id", "transcript"):
+        if annotation.get(field) is None and match.get(field) is not None:
+            annotation[field] = match[field]
+    if annotation.get("hgvsc") is None:
+        annotation["hgvsc"] = match["transcript_hgvs"]
+    if annotation.get("hgvsp") is None:
+        annotation["hgvsp"] = match["protein_hgvs"]
+        annotation["protein_change"] = match["protein_hgvs"]
+    annotation["warnings"].append(
+        "Ensembl VEP was operationally unavailable; VariantValidator "
+        "preserved exact allele validation and HGVS mapping only. "
+        "Consequence, impact, transcript-consequence, and VEP plugin "
+        "fields remain unavailable."
+    )
 
 
 def _retry_annotation_copy(
@@ -3892,6 +4182,7 @@ def _annotation_cache_key(
 
     provider_context = (
         settings.VEP_BASE_URL,
+        settings.VARIANTVALIDATOR_BASE_URL,
         settings.GENEBE_BASE_URL,
         settings.MYVARIANT_BASE_URL,
         MYVARIANT_API_VERSION,
@@ -4031,6 +4322,11 @@ def annotate_variants(
                         variant,
                         status="error",
                         warning=str(exc),
+                        vep_failure=(
+                            exc.provider_status
+                            if isinstance(exc, VepOperationalError)
+                            else "unavailable"
+                        ),
                     )
                     for _, variant in batch
                 )
@@ -4075,6 +4371,14 @@ def annotate_variants(
             ),
             progress_callback=progress_callback,
         )
+        variantvalidator_circuit = ProviderCircuitState()
+        for annotation in annotations:
+            if _source_failed(annotation, "vep"):
+                _apply_vep_fallback(
+                    annotation,
+                    active_session,
+                    variantvalidator_circuit,
+                )
         vep_status, vep_message = _source_progress_summary(
             annotations,
             "vep",

@@ -224,6 +224,11 @@ class Settings:
         "https://rest.ensembl.org",
     ).strip().rstrip("/")
 
+    VARIANTVALIDATOR_BASE_URL: str = os.getenv(
+        "VARIANTVALIDATOR_BASE_URL",
+        "https://rest.variantvalidator.org",
+    ).strip().rstrip("/")
+
     GENEBE_BASE_URL: str = os.getenv(
         "GENEBE_BASE_URL",
         "https://api.genebe.net/cloud",
@@ -265,6 +270,11 @@ class Settings:
     VEP_TIMEOUT: int = _get_positive_int(
         "VEP_TIMEOUT",
         REQUEST_TIMEOUT,
+    )
+
+    VARIANTVALIDATOR_TIMEOUT: int = _get_positive_int(
+        "VARIANTVALIDATOR_TIMEOUT",
+        15,
     )
 
     GENEBE_TIMEOUT: int = _get_positive_int(
@@ -574,6 +584,9 @@ class Settings:
         url_settings = {
             "LLM_BASE_URL": cls.LLM_BASE_URL,
             "VEP_BASE_URL": cls.VEP_BASE_URL,
+            "VARIANTVALIDATOR_BASE_URL": (
+                cls.VARIANTVALIDATOR_BASE_URL
+            ),
             "GENEBE_BASE_URL": cls.GENEBE_BASE_URL,
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
@@ -681,6 +694,9 @@ class Settings:
 
         provider_timeouts = {
             "VEP_TIMEOUT": cls.VEP_TIMEOUT,
+            "VARIANTVALIDATOR_TIMEOUT": (
+                cls.VARIANTVALIDATOR_TIMEOUT
+            ),
             "GENEBE_TIMEOUT": cls.GENEBE_TIMEOUT,
             "MYVARIANT_TIMEOUT": cls.MYVARIANT_TIMEOUT,
             "CLINVAR_TIMEOUT": cls.CLINVAR_TIMEOUT,
