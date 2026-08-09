@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 75 deterministic failure-injection suite complete
+**Implementation status:** Stage 76 reachability regression utility complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 76 reachability regression utility
+**Next checkpoint:** Stage 77 documentation and configuration
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -294,12 +294,13 @@ flowchart LR
     AJ --> AK["Stage 73: unified capability schema"]
     AK --> AL["Stage 74: UI/report transparency"]
     AL --> AM["Stage 75: failure injection"]
-    AM --> AN["Stage 76: reachability regression - pending"]
+    AM --> AN["Stage 76: reachability regression"]
+    AN --> AO["Stage 77: documentation/configuration - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM done
-    class AN review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN done
+    class AO review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -885,6 +886,22 @@ successful fallback status rather than false `no_match`, single-counted evidence
 absence of fabricated unsupported fields, continued report composition, and an
 explicit degraded-source entry in the final report.
 
+### Stage 76 reachability regression utility
+
+`tools/provider_reachability.py` provides a bounded manual checker for every
+configured bioinformatics provider used by the application. Each check performs DNS
+resolution followed by one non-mutating HTTP `HEAD` request and reports the provider,
+DNS status, HTTP status, latency, and a safe normalized failure category. Operators
+may select individual providers and optionally save the results as JSON and CSV.
+
+```powershell
+.\.venv\Scripts\python.exe tools\provider_reachability.py
+.\.venv\Scripts\python.exe tools\provider_reachability.py --provider gnomad --json output\provider-reachability.json
+```
+
+The checker is intentionally network-dependent and remains outside deterministic CI;
+its classification and export behavior are covered by offline unit tests.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -972,7 +989,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **922 passed, 4 skipped**,
+consume external API quotas. The current recorded baseline is **933 passed, 4 skipped**,
 with **85.81% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
@@ -1082,6 +1099,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Unified primary/fallback capability results | `backend/provider_resilience.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_provider_resilience.py`, `tests/test_pipeline.py` |
 | Fallback UI and report transparency | `backend/fallback_transparency.py`, `backend/variant_report.py`, `frontend/results.py`, `frontend/evidence_review.py`, `tests/test_fallback_transparency.py` |
 | Deterministic provider failure injection | `tests/test_failure_injection.py` |
+| Manual provider reachability regression | `tools/provider_reachability.py`, `tests/test_provider_reachability.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1101,8 +1119,9 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-75 are implemented and documented. The reachability regression utility
-   remains for Stage 76; professor feedback and sign-off remain external.
+1. Stages 46-76 are implemented and documented. Consolidated resilience
+   documentation and configuration remain for Stage 77; professor feedback and
+   sign-off remain external.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1169,6 +1188,8 @@ last-known-good metadata cache, and a unified source-preserving capability resul
 contract consumed generically by draft report statuses, followed by concise UI and
 report provenance notices that disclose every affected fallback capability. Stage 75
 added deterministic outage injection for all required fallback chains and verified
-degraded-source provenance through final report composition. Stage 76 is the next
+degraded-source provenance through final report composition. Stage 76 added a bounded
+manual DNS/HTTP reachability checker with safe failure categories and optional JSON
+and CSV exports. Stage 77 is the next
 implementation checkpoint;
 professor review and sign-off remain external.
