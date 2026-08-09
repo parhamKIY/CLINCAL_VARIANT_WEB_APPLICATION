@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_52_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_53_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-746_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.65%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-751_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.61%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -46,12 +46,14 @@ its original input order.
 - Stage 51 interpretation-before-final-review pipeline refactor is implemented and
   offline-verified.
 - Stage 52 Draft Variant Report V2 is implemented and offline-verified.
-- Stage 53 safe report editing and audit history is the next bounded milestone.
+- Stage 53 safe report editing and audit history is implemented and
+  offline-verified.
+- Stage 54 per-variant include/exclude review is the next bounded milestone.
 - Pipeline schema: `2.5`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **746 passed, 4 skipped; 85.65% coverage**.
+- Current verified suite: **751 passed, 4 skipped; 85.61% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -64,7 +66,7 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-52 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-53 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline plus Draft Variant Report V2; later report
 lifecycle items remain planned:
@@ -161,8 +163,22 @@ The machine original and separate reviewed copy begin identical. Pipeline valida
 reconstructs the expected report from its Evidence Object and interpretation result,
 so an untracked edit, identity mismatch, reordered report, or untrusted non-HTTPS link
 fails closed. The Streamlit review opens on the coherent report; raw evidence JSON is
-not required to understand the analyzed variant. Stage 53 owns bounded editing of the
-new report and its append-only audit history.
+not required to understand the analyzed variant.
+
+### Stage 53 human report editing and audit history
+
+Reviewers can edit only the reviewer summary, interpretation narrative, conflict
+assessment wording, and reviewer notes. Normalized identity, provider evidence,
+conflict facts, references, provenance, model metadata, and the machine original are
+immutable. Every changed field appends a bounded record containing sequence, path,
+old value, new value, timestamp, and available local reviewer context.
+
+Validation replays the complete history from the integrity-checked machine original
+and requires the replayed result to equal the current reviewed report. Resetting
+editable fields appends reverse changes instead of deleting history. PHI checks apply
+before persistence, and any report edit after confirmation invalidates that variant's
+confirmation. The Streamlit comparison view displays field history and side-by-side
+machine/current report states.
 
 ## Current implemented workflow
 
@@ -189,8 +205,9 @@ The pipeline has three lifecycle steps:
 
 1. **Analysis:** validate input, collect evidence, audit conflicts, conditionally
    enrich, interpret each variant, and prepare the review state.
-2. **Review:** inspect evidence and interpretation, edit bounded evidence fields,
-   compare with the immutable original, and confirm every variant.
+2. **Review:** inspect evidence and interpretation, edit bounded report fields,
+   compare with the immutable original and append-only history, and confirm every
+   variant.
 3. **Finalization:** validate the confirmed review state and persist completion
    without a new model request.
 
@@ -323,8 +340,8 @@ Compatible services are configured through `LLM_BASE_URL`, `LLM_API_KEY`, and
 the selected model names.
 
 Draft Variant Report V2 combines these records into one coherent reviewer-facing
-view. Safe editing remains assigned to Stage 53 and Final Clinical Report composition
-to Stage 56.
+view with safe audited editing. Per-variant selection remains assigned to Stage 54
+and Final Clinical Report composition to Stage 56.
 
 ## Requirements
 
@@ -456,7 +473,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-746 passed, 4 skipped
+751 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -474,7 +491,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.65%**.
+Current measured coverage is **85.61%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -605,8 +622,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-52 are implemented; Stage 53 still owns safe Draft Variant Report
-  editing and audit history.
+- Stages 46-53 are implemented; Stage 54 still owns the reviewer-controlled
+  per-variant include/exclude decision.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -631,4 +648,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 53 handoff.
+- current limitations and the Stage 54 handoff.

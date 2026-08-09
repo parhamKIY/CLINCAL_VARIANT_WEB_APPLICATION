@@ -21,6 +21,12 @@ from backend.pipeline import (
     PipelineResult,
     confirm_reviewed_evidence,
     finalize_reviewed_analysis,
+    update_draft_variant_report,
+)
+from backend.variant_report import (
+    DraftVariantReport,
+    DraftVariantReportError,
+    save_draft_variant_report,
 )
 
 
@@ -348,6 +354,8 @@ def _render_draft_variant_report(
     content = report["reviewed_report"]
     summary = content["variant_summary"]
     st.markdown(f"### {summary['display_label']}")
+    if content["reviewer_summary"]:
+        st.info(content["reviewer_summary"])
     summary_rows = [
         {"Field": "Gene", "Value": summary.get("gene") or "Not available"},
         {"Field": "Transcript", "Value": summary.get("transcript") or "Not available"},
@@ -420,6 +428,9 @@ def _render_draft_variant_report(
             "Collected evidence remains available for review and the "
             "variant has not been removed."
         )
+        if interpretation["narrative"]:
+            st.markdown("**Reviewer-authored narrative**")
+            st.write(interpretation["narrative"])
     else:
         st.write(interpretation["narrative"])
         st.markdown("**Conflict assessment**")
@@ -430,6 +441,11 @@ def _render_draft_variant_report(
         f"Model: {interpretation['model']} · "
         f"Prompt: {interpretation['prompt_version']}"
     )
+
+    if content["reviewer_notes"]:
+        st.markdown("#### Reviewer notes")
+        for note in content["reviewer_notes"]:
+            st.write(f"- {note}")
 
     st.markdown("#### References")
     if not content["references"]:
@@ -458,6 +474,156 @@ def _render_draft_variant_report(
         )
         for limitation in content["limitations"]:
             st.write(f"- {limitation}")
+
+
+def _render_report_editor(
+    report: DraftVariantReport,
+    result: PipelineResult,
+) -> None:
+    content = report["reviewed_report"]
+    interpretation = content["variant_interpretation"]
+    with st.form(f"{_REVIEW_WIDGET_PREFIX}report_form_{report['report_id']}"):
+        reviewer_summary = st.text_area(
+            "Reviewer summary",
+            value=content["reviewer_summary"] or "",
+            height=100,
+            help=(
+                "Optional reviewer-authored finding summary. Do not enter "
+                "protected health information."
+            ),
+        )
+        narrative = st.text_area(
+            "Variant interpretation narrative",
+            value=interpretation["narrative"] or "",
+            height=240,
+        )
+        conflict_assessment = st.text_area(
+            "Conflict assessment wording",
+            value=interpretation["conflict_assessment"] or "",
+            height=140,
+        )
+        notes_text = st.text_area(
+            "Reviewer notes (one note per line)",
+            value="\n".join(content["reviewer_notes"]),
+            height=120,
+        )
+        with st.container(horizontal=True):
+            save = st.form_submit_button(
+                "Save report edits",
+                type="primary",
+                icon=":material/save:",
+            )
+            reset = st.form_submit_button(
+                "Reset editable fields",
+                icon=":material/restart_alt:",
+            )
+    if not save and not reset:
+        return
+    original = report["machine_original_report"]
+    try:
+        updated_report = save_draft_variant_report(
+            report,
+            reviewer_summary=(
+                original["reviewer_summary"]
+                if reset
+                else reviewer_summary
+            ),
+            interpretation_narrative=(
+                original["variant_interpretation"]["narrative"]
+                if reset
+                else narrative
+            ),
+            conflict_assessment=(
+                original["variant_interpretation"][
+                    "conflict_assessment"
+                ]
+                if reset
+                else conflict_assessment
+            ),
+            reviewer_notes=(
+                original["reviewer_notes"]
+                if reset
+                else [
+                    line.strip()
+                    for line in notes_text.splitlines()
+                    if line.strip()
+                ]
+            ),
+            reviewer_context="local_streamlit_session",
+        )
+        updated_result = update_draft_variant_report(
+            result,
+            updated_report,
+        )
+    except (DraftVariantReportError, PipelineError) as exc:
+        st.error(f"Draft Variant Report was not saved: {exc}")
+        return
+    result.clear()
+    result.update(updated_result)
+    evidence_report = next(
+        (
+            item
+            for item in result["evidence_review_reports"]
+            if item["variant_index"] == report["variant_index"]
+        ),
+        None,
+    )
+    if evidence_report is not None:
+        packages = cast(
+            dict[str, ReviewedEvidencePackage],
+            st.session_state.setdefault(REVIEW_PACKAGES_KEY, {}),
+        )
+        _invalidate_confirmation(
+            result,
+            evidence_report["report_id"],
+            report["variant_index"],
+            packages,
+        )
+    st.session_state["pipeline_result"] = result
+    persisted = _persist_review_state(result)
+    action = "reset" if reset else "saved"
+    if persisted:
+        _set_notice("success", f"Draft Variant Report {action}.")
+    else:
+        _set_notice(
+            "warning",
+            f"Report {action} in this session, but persistence failed.",
+        )
+    st.rerun()
+
+
+def _render_report_comparison(report: DraftVariantReport) -> None:
+    history = report["edit_history"]
+    if not history:
+        st.info("The reviewed report still matches the machine original.")
+    else:
+        st.dataframe(
+            [
+                {
+                    "Sequence": edit["sequence"],
+                    "Field": edit["field_path"],
+                    "Old value": json.dumps(
+                        edit["old_value"],
+                        ensure_ascii=False,
+                    ),
+                    "New value": json.dumps(
+                        edit["new_value"],
+                        ensure_ascii=False,
+                    ),
+                    "Timestamp": edit["timestamp"],
+                    "Context": edit["reviewer_context"],
+                }
+                for edit in history
+            ],
+            hide_index=True,
+        )
+    original_column, reviewed_column = st.columns(2)
+    with original_column:
+        st.markdown("**Machine original**")
+        st.json(report["machine_original_report"], expanded=False)
+    with reviewed_column:
+        st.markdown("**Current reviewed report**")
+        st.json(report["reviewed_report"], expanded=False)
 
 
 def _render_confirmation(
@@ -614,28 +780,73 @@ def render_evidence_review(
         key=REVIEW_VARIANT_KEY,
     )
     report = drafts[selected]
-    _render_conflict_status(report)
-    st.caption(
-        "Every reviewed JSON field can be edited, added, or deleted. "
-        "The immutable evidence and pre-review interpretation remain "
-        "available for comparison."
+    draft_variant_report = next(
+        (
+            item
+            for item in result.get("draft_variant_reports", [])
+            if item["variant_index"] == report["variant_index"]
+        ),
+        None,
     )
-    report_tab, editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
+    _render_conflict_status(report)
+    if draft_variant_report is None:
+        st.info(
+            "Draft Variant Report V2 is unavailable for this legacy "
+            "analysis state. Evidence remains readable."
+        )
+        evidence_editor_tab, original_evidence_tab, history_tab = st.tabs(
+            [
+                "Edit evidence draft",
+                "Original evidence",
+                "Evidence edit history",
+            ]
+        )
+        with evidence_editor_tab:
+            _render_editor(report, selected, drafts, result)
+        with original_evidence_tab:
+            st.json(report["original_machine_report"], expanded=2)
+        with history_tab:
+            _render_history(report)
+        return
+    draft_variant_report = cast(
+        DraftVariantReport,
+        draft_variant_report,
+    )
+    st.caption(
+        "Narrative fields and reviewer notes are editable with an "
+        "append-only audit trail. Variant identity, provider evidence, "
+        "provenance, and the machine original remain immutable."
+    )
+    (
+        report_tab,
+        report_editor_tab,
+        compare_tab,
+        evidence_editor_tab,
+        original_evidence_tab,
+        evidence_history_tab,
+        confirm_tab,
+    ) = st.tabs(
         [
             "Draft Variant Report",
+            "Edit report",
+            "Compare report",
             "Edit evidence draft",
             "Original evidence",
-            "Edit history",
+            "Evidence edit history",
             "Final confirmation",
         ]
     )
     with report_tab:
         _render_draft_variant_report(result, report["variant_index"])
-    with editor_tab:
+    with report_editor_tab:
+        _render_report_editor(draft_variant_report, result)
+    with compare_tab:
+        _render_report_comparison(draft_variant_report)
+    with evidence_editor_tab:
         _render_editor(report, selected, drafts, result)
-    with original_tab:
+    with original_evidence_tab:
         st.json(report["original_machine_report"], expanded=2)
-    with history_tab:
+    with evidence_history_tab:
         _render_history(report)
     with confirm_tab:
         _render_confirmation(drafts[selected], result)

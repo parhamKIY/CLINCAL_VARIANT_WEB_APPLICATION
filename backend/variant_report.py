@@ -6,10 +6,12 @@ import hashlib
 import json
 import math
 from copy import deepcopy
-from typing import TypedDict, cast
+from datetime import datetime, timezone
+from typing import Literal, TypedDict, cast
 
 from backend.privacy import (
     ClinicalDataPrivacyError,
+    validate_human_review_content,
     validate_no_prohibited_fields,
 )
 from backend.report import EvidenceObject, validate_evidence_object
@@ -27,6 +29,9 @@ MAX_REPORT_LIST_ITEMS = 50
 MAX_EVIDENCE_SECTIONS = 16
 MAX_EVIDENCE_ITEMS_PER_SECTION = 20
 MAX_REPORT_REFERENCES = 50
+MAX_REPORT_EDIT_HISTORY = 200
+MAX_REVIEWER_NOTES = 50
+MAX_REVIEWER_CONTEXT_CHARS = 200
 
 
 class DraftVariantReportError(ValueError):
@@ -126,22 +131,37 @@ class VariantReportContent(TypedDict):
     evidence_sections: list[EvidenceSection]
     conflict_summary: ConflictSummary
     variant_interpretation: InterpretationSection
+    reviewer_summary: str | None
+    reviewer_notes: list[str]
     references: list[ReportReference]
     provenance: ReportProvenance
     limitations: list[str]
 
 
+class ReportEditRecord(TypedDict):
+    """One bounded append-only change to an explicitly editable field."""
+
+    sequence: int
+    field_path: str
+    change_type: Literal["modified"]
+    old_value: str | list[str] | None
+    new_value: str | list[str] | None
+    timestamp: str
+    reviewer_context: str | None
+
+
 class DraftVariantReport(TypedDict):
-    """Immutable machine original plus separate future-editable draft layer."""
+    """Immutable machine original plus a traceable reviewer-edited layer."""
 
     schema_version: str
     report_id: str
     variant_index: int
     machine_original_report: VariantReportContent
     reviewed_report: VariantReportContent
-    edit_history: list[dict[str, object]]
+    edit_history: list[ReportEditRecord]
     review_status: str
     created_at: str
+    updated_at: str
 
 
 _REPORT_FIELDS = frozenset(DraftVariantReport.__required_keys__)
@@ -154,6 +174,13 @@ _CONFLICT_FIELDS = frozenset(ConflictSummary.__required_keys__)
 _INTERPRETATION_FIELDS = frozenset(InterpretationSection.__required_keys__)
 _REFERENCE_FIELDS = frozenset(ReportReference.__required_keys__)
 _PROVENANCE_FIELDS = frozenset(ReportProvenance.__required_keys__)
+_EDIT_RECORD_FIELDS = frozenset(ReportEditRecord.__required_keys__)
+_EDITABLE_PATHS = (
+    "/reviewer_summary",
+    "/variant_interpretation/narrative",
+    "/variant_interpretation/conflict_assessment",
+    "/reviewer_notes",
+)
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -495,6 +522,8 @@ def _content(
             "generated_at": interpretation["generated_at"],
             "failure_type": interpretation["error_type"],
         },
+        "reviewer_summary": None,
+        "reviewer_notes": [],
         "references": _references(evidence),
         "provenance": _provenance(evidence, interpretation),
         "limitations": limitations[:MAX_REPORT_LIST_ITEMS],
@@ -550,6 +579,7 @@ def build_draft_variant_report(
         "edit_history": [],
         "review_status": "draft",
         "created_at": interpretation["generated_at"],
+        "updated_at": interpretation["generated_at"],
     }
     return validate_draft_variant_report(
         report,
@@ -578,6 +608,103 @@ def build_draft_variant_reports(
     ]
 
 
+def save_draft_variant_report(
+    report: object,
+    *,
+    reviewer_summary: object,
+    interpretation_narrative: object,
+    conflict_assessment: object,
+    reviewer_notes: object,
+    timestamp: str | None = None,
+    reviewer_context: str | None = None,
+) -> DraftVariantReport:
+    """Save allowed report edits with append-only field-level history."""
+
+    working = validate_draft_variant_report(deepcopy(report))
+    desired: dict[str, str | list[str] | None] = {
+        "/reviewer_summary": _normalize_optional_review_text(
+            reviewer_summary,
+            field="reviewer_summary",
+        ),
+        "/variant_interpretation/narrative": (
+            _normalize_optional_review_text(
+                interpretation_narrative,
+                field="interpretation_narrative",
+            )
+        ),
+        "/variant_interpretation/conflict_assessment": (
+            _normalize_optional_review_text(
+                conflict_assessment,
+                field="conflict_assessment",
+            )
+        ),
+        "/reviewer_notes": _normalize_reviewer_notes(reviewer_notes),
+    }
+    if (
+        working["reviewed_report"]["variant_interpretation"]["status"]
+        == "success"
+        and desired["/variant_interpretation/narrative"] is None
+    ):
+        raise DraftVariantReportError(
+            "A successful interpretation narrative cannot be empty."
+        )
+    normalized_context = _normalize_optional_review_text(
+        reviewer_context,
+        field="reviewer_context",
+    )
+    if (
+        normalized_context is not None
+        and len(normalized_context) > MAX_REVIEWER_CONTEXT_CHARS
+    ):
+        raise DraftVariantReportError(
+            "reviewer_context exceeds the supported length."
+        )
+    changed_paths = [
+        field_path
+        for field_path in _EDITABLE_PATHS
+        if _editable_value(
+            working["reviewed_report"],
+            field_path,
+        )
+        != desired[field_path]
+    ]
+    if not changed_paths:
+        return working
+    if (
+        len(working["edit_history"]) + len(changed_paths)
+        > MAX_REPORT_EDIT_HISTORY
+    ):
+        raise DraftVariantReportError(
+            "Draft report edit history limit would be exceeded."
+        )
+    normalized_timestamp = _timestamp(timestamp)
+    for field_path in changed_paths:
+        old_value = _editable_value(
+            working["reviewed_report"],
+            field_path,
+        )
+        new_value = desired[field_path]
+        working["edit_history"].append(
+            {
+                "sequence": len(working["edit_history"]) + 1,
+                "field_path": field_path,
+                "change_type": "modified",
+                "old_value": deepcopy(old_value),
+                "new_value": deepcopy(new_value),
+                "timestamp": normalized_timestamp,
+                "reviewer_context": normalized_context,
+            }
+        )
+        _set_editable_value(
+            working["reviewed_report"],
+            field_path,
+            new_value,
+        )
+    working["review_status"] = "reviewed"
+    working["updated_at"] = normalized_timestamp
+    return validate_draft_variant_report(working)
+
+
 def _require_fields(
     value: object,
     fields: frozenset[str],
@@ -604,6 +731,135 @@ def _require_text_list(value: object, path: str) -> None:
         raise DraftVariantReportError(f"{path} must be a bounded list.")
     for index, item in enumerate(value):
         _require_text(item, f"{path}[{index}]")
+
+
+def _timestamp(value: str | None = None) -> str:
+    if value is None:
+        return (
+            datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    if not isinstance(value, str) or not value.strip():
+        raise DraftVariantReportError(
+            "Report edit timestamp must be non-empty."
+        )
+    normalized = value.strip()
+    try:
+        parsed = datetime.fromisoformat(
+            normalized.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise DraftVariantReportError(
+            "Report edit timestamp must use ISO 8601."
+        ) from exc
+    if parsed.tzinfo is None:
+        raise DraftVariantReportError(
+            "Report edit timestamp must include a timezone."
+        )
+    return parsed.astimezone(timezone.utc).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+
+
+def _timestamp_value(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _normalize_optional_review_text(
+    value: object,
+    *,
+    field: str,
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise DraftVariantReportError(f"{field} must be text or null.")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    _require_text(normalized, field)
+    return normalized
+
+
+def _normalize_reviewer_notes(value: object) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_REVIEWER_NOTES:
+        raise DraftVariantReportError(
+            "reviewer_notes must be a bounded list."
+        )
+    notes: list[str] = []
+    for index, note in enumerate(value):
+        normalized = _normalize_optional_review_text(
+            note,
+            field=f"reviewer_notes[{index}]",
+        )
+        if normalized is None:
+            raise DraftVariantReportError(
+                "reviewer_notes cannot contain empty entries."
+            )
+        notes.append(normalized)
+    return notes
+
+
+def _editable_value(
+    content: VariantReportContent,
+    field_path: str,
+) -> str | list[str] | None:
+    if field_path == "/reviewer_summary":
+        return content["reviewer_summary"]
+    if field_path == "/variant_interpretation/narrative":
+        return content["variant_interpretation"]["narrative"]
+    if field_path == "/variant_interpretation/conflict_assessment":
+        return content["variant_interpretation"]["conflict_assessment"]
+    if field_path == "/reviewer_notes":
+        return list(content["reviewer_notes"])
+    raise DraftVariantReportError(
+        "Report edit history contains a non-editable field."
+    )
+
+
+def _set_editable_value(
+    content: VariantReportContent,
+    field_path: str,
+    value: str | list[str] | None,
+) -> None:
+    if field_path == "/reviewer_summary":
+        content["reviewer_summary"] = cast(str | None, deepcopy(value))
+        return
+    if field_path == "/variant_interpretation/narrative":
+        content["variant_interpretation"]["narrative"] = cast(
+            str | None,
+            deepcopy(value),
+        )
+        return
+    if field_path == "/variant_interpretation/conflict_assessment":
+        content["variant_interpretation"]["conflict_assessment"] = cast(
+            str | None,
+            deepcopy(value),
+        )
+        return
+    if field_path == "/reviewer_notes":
+        content["reviewer_notes"] = cast(
+            list[str],
+            deepcopy(value),
+        )
+        return
+    raise DraftVariantReportError(
+        "Report edit history contains a non-editable field."
+    )
+
+
+def _validate_edit_value(
+    field_path: str,
+    value: object,
+) -> str | list[str] | None:
+    if field_path == "/reviewer_notes":
+        return _normalize_reviewer_notes(value)
+    return _normalize_optional_review_text(
+        value,
+        field=field_path,
+    )
 
 
 def _validate_content(value: object, path: str) -> VariantReportContent:
@@ -726,6 +982,20 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
             f"{path}.variant_interpretation requires failure provenance."
         )
 
+    reviewer_summary = _normalize_optional_review_text(
+        content["reviewer_summary"],
+        field=f"{path}.reviewer_summary",
+    )
+    if reviewer_summary != content["reviewer_summary"]:
+        raise DraftVariantReportError(
+            f"{path}.reviewer_summary is not normalized."
+        )
+    reviewer_notes = _normalize_reviewer_notes(content["reviewer_notes"])
+    if reviewer_notes != content["reviewer_notes"]:
+        raise DraftVariantReportError(
+            f"{path}.reviewer_notes is not normalized."
+        )
+
     references = content["references"]
     if not isinstance(references, list) or len(references) > MAX_REPORT_REFERENCES:
         raise DraftVariantReportError(f"{path}.references is invalid.")
@@ -800,19 +1070,116 @@ def validate_draft_variant_report(
             "Draft report machine original failed its integrity check."
         )
     history = report["edit_history"]
-    if not isinstance(history, list) or history:
+    if (
+        not isinstance(history, list)
+        or len(history) > MAX_REPORT_EDIT_HISTORY
+    ):
         raise DraftVariantReportError(
-            "Stage 52 draft reports require an empty edit history."
+            "Draft report edit_history must be a bounded list."
         )
-    if report["review_status"] != "draft":
+    created_at = _timestamp(cast(str, report["created_at"]))
+    if created_at != report["created_at"]:
         raise DraftVariantReportError(
-            "Stage 52 draft report review_status must be draft."
+            "Draft report created_at is not normalized."
         )
-    if reviewed != original:
+    replayed = deepcopy(original)
+    previous_timestamp = _timestamp_value(created_at)
+    for history_index, record_value in enumerate(history):
+        path = f"draft_variant_report.edit_history[{history_index}]"
+        record = _require_fields(
+            record_value,
+            _EDIT_RECORD_FIELDS,
+            path,
+        )
+        if record["sequence"] != history_index + 1:
+            raise DraftVariantReportError(
+                "Draft report edit sequence is invalid."
+            )
+        field_path = record["field_path"]
+        if field_path not in _EDITABLE_PATHS:
+            raise DraftVariantReportError(
+                "Draft report edit history contains a non-editable field."
+            )
+        if record["change_type"] != "modified":
+            raise DraftVariantReportError(
+                "Draft report edit change_type is invalid."
+            )
+        old_value = _validate_edit_value(
+            cast(str, field_path),
+            record["old_value"],
+        )
+        new_value = _validate_edit_value(
+            cast(str, field_path),
+            record["new_value"],
+        )
+        if old_value != record["old_value"] or new_value != record[
+            "new_value"
+        ]:
+            raise DraftVariantReportError(
+                "Draft report edit values are not normalized."
+            )
+        if old_value != _editable_value(
+            replayed,
+            cast(str, field_path),
+        ):
+            raise DraftVariantReportError(
+                "Draft report edit history is not append-only."
+            )
+        if old_value == new_value:
+            raise DraftVariantReportError(
+                "Draft report edit history contains a no-op change."
+            )
+        timestamp = _timestamp(cast(str, record["timestamp"]))
+        if timestamp != record["timestamp"]:
+            raise DraftVariantReportError(
+                "Draft report edit timestamp is not normalized."
+            )
+        timestamp_value = _timestamp_value(timestamp)
+        if timestamp_value < previous_timestamp:
+            raise DraftVariantReportError(
+                "Draft report edit timestamps are out of order."
+            )
+        previous_timestamp = timestamp_value
+        context = record["reviewer_context"]
+        if context is not None:
+            normalized_context = _normalize_optional_review_text(
+                context,
+                field=f"{path}.reviewer_context",
+            )
+            if (
+                normalized_context != context
+                or len(cast(str, context)) > MAX_REVIEWER_CONTEXT_CHARS
+            ):
+                raise DraftVariantReportError(
+                    "Draft report reviewer context is invalid."
+                )
+        _set_editable_value(
+            replayed,
+            cast(str, field_path),
+            new_value,
+        )
+    if replayed != reviewed:
         raise DraftVariantReportError(
-            "Stage 52 reviewed report must match its immutable original."
+            "Draft report reviewed content is not explained by edit history."
         )
-    _require_text(report["created_at"], "draft_variant_report.created_at")
+    expected_status = "reviewed" if history else "draft"
+    if report["review_status"] != expected_status:
+        raise DraftVariantReportError(
+            "Draft report review_status does not match its edit history."
+        )
+    updated_at = _timestamp(cast(str, report["updated_at"]))
+    expected_updated_at = (
+        cast(str, history[-1]["timestamp"])
+        if history
+        else created_at
+    )
+    if (
+        updated_at != report["updated_at"]
+        or updated_at != expected_updated_at
+    ):
+        raise DraftVariantReportError(
+            "Draft report updated_at does not match its edit history."
+        )
     if evidence is not None:
         try:
             validated_evidence = validate_evidence_object(deepcopy(evidence))
@@ -856,6 +1223,11 @@ def validate_draft_variant_report(
                     "Draft report content does not match its machine inputs."
                 )
     try:
+        validate_human_review_content(
+            report["reviewed_report"],
+            reviewed["reviewer_notes"],
+            history,
+        )
         validate_no_prohibited_fields(
             report,
             context="Draft Variant Report V2",
@@ -879,8 +1251,10 @@ __all__ = [
     "DRAFT_VARIANT_REPORT_SCHEMA_VERSION",
     "DraftVariantReport",
     "DraftVariantReportError",
+    "ReportEditRecord",
     "VariantReportContent",
     "build_draft_variant_report",
     "build_draft_variant_reports",
+    "save_draft_variant_report",
     "validate_draft_variant_report",
 ]

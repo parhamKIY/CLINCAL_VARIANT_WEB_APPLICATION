@@ -2532,6 +2532,57 @@ def finalize_reviewed_analysis(
     return validated
 
 
+def update_draft_variant_report(
+    result: PipelineResult,
+    report: Mapping[str, object],
+) -> PipelineResult:
+    """Persist one validated report edit and invalidate final confirmation."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if not isinstance(report, Mapping):
+        raise PipelineError("Draft Variant Report must be a mapping.")
+    index = report.get("variant_index")
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or index >= working["variant_count"]
+    ):
+        raise PipelineError("Draft Variant Report index is invalid.")
+    try:
+        validated_report = validate_draft_variant_report(
+            dict(report),
+            evidence=working["evidence_objects"][index],
+            interpretation=working["variant_interpretation_results"][
+                index
+            ],
+        )
+    except DraftVariantReportError as exc:
+        raise PipelineError(str(exc)) from exc
+    working["draft_variant_reports"][index] = dict(validated_report)
+    working["reviewed_evidence_packages"] = [
+        package
+        for package in working["reviewed_evidence_packages"]
+        if package["variant_index"] != index
+    ]
+    working["llm_routing_results"] = [
+        item
+        for item in working["llm_routing_results"]
+        if item["variant_index"] != index
+    ]
+    working["final_interpretation_report"] = None
+    working["workflow_state"] = "awaiting_final_review"
+    working["current_stage"] = "completed"
+    working["progress_percent"] = 100
+    LOGGER.info(
+        "event=draft_variant_report_updated variant_index=%d "
+        "edit_count=%d confirmation_invalidated=true",
+        index,
+        len(validated_report["edit_history"]),
+    )
+    return validate_pipeline_result(working)
+
+
 def generate_confirmed_interpretations(
     result: PipelineResult,
     *,
@@ -2915,6 +2966,7 @@ __all__ = [
     "resume_saved_analysis",
     "create_pipeline_result",
     "run_analysis",
+    "update_draft_variant_report",
     "run_annotation_and_phenotype",
     "run_variant_processing",
     "validate_analysis_input",

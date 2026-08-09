@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-52 complete; Stage 53 is next
+**Implementation progress:** Stages 46-53 complete; Stage 54 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 52. Features assigned to
-Stages 53–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 53. Features assigned to
+Stages 54–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -185,9 +185,9 @@ Stage 51 replaced the active Stage 44 two-phase execution path for new analyses:
 - persisted pipeline payloads now use schema `2.4`; older schema-2 payloads receive
   an explicit unsupported-legacy-resume error instead of silent reinterpretation.
 
-Stage 52 now combines those ordered records into a coherent Draft Variant Report V2.
-Its machine original and separate reviewed copy are identical and immutable at this
-stage. Stage 53 owns safe editing and append-only report audit history.
+Stage 52 combines those ordered records into a coherent Draft Variant Report V2.
+Stage 53 preserves its immutable machine original while allowing bounded edits to a
+separate reviewed copy with append-only history.
 
 ## 11. Stage 52 implementation record
 
@@ -203,7 +203,22 @@ stage. Stage 53 owns safe editing and append-only report audit history.
 - Stage 52 does not implement report editing, include/exclude state, canonical link
   expansion, or Final Clinical Report composition; those remain Stages 53–56.
 
-## 12. Stage 45 acceptance record
+## 12. Stage 53 implementation record
+
+- Only reviewer summary, interpretation narrative, conflict-assessment wording, and
+  reviewer notes are editable.
+- Identity, provider evidence, conflict facts, references, provenance, model metadata,
+  and machine originals remain immutable.
+- Every changed field records sequence, path, old/new values, UTC timestamp, and
+  available bounded reviewer context.
+- Validation deterministically replays append-only history; resets add reverse changes
+  instead of deleting audit records.
+- PHI defenses run before report state is persisted, and any edit invalidates prior
+  confirmation for that variant.
+- Stage 54 owns `include_in_final_report`; Stages 55–56 own canonical references and
+  Final Clinical Report composition.
+
+## 13. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

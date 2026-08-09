@@ -174,6 +174,7 @@ from backend.variant_report import (
     DraftVariantReportError,
     build_draft_variant_report,
     build_draft_variant_reports,
+    save_draft_variant_report,
     validate_draft_variant_report,
 )
 from backend.pipeline import (
@@ -196,6 +197,7 @@ from backend.pipeline import (
     run_analysis,
     run_annotation_and_phenotype,
     run_variant_processing,
+    update_draft_variant_report,
     validate_analysis_input,
     validate_pipeline_result,
 )
@@ -10725,7 +10727,7 @@ class TestStage52DraftVariantReportV2:
 
         with pytest.raises(
             DraftVariantReportError,
-            match="must match its immutable original",
+            match="not explained by edit history",
         ):
             validate_draft_variant_report(report)
 
@@ -10772,6 +10774,182 @@ class TestStage52DraftVariantReportV2:
             report["machine_original_report"]["variant_summary"]["pos"]
             for report in reports
         ] == [166848215, 166848216]
+
+
+class TestStage53HumanReportEditing:
+    """Verify bounded report edits, audit replay, and invalidation."""
+
+    @staticmethod
+    def _report() -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+    ]:
+        evidence, interpretation = (
+            TestStage52DraftVariantReportV2._success_inputs()
+        )
+        report = dict(
+            build_draft_variant_report(
+                evidence,
+                interpretation,
+                variant_index=0,
+            )
+        )
+        return evidence, interpretation, report
+
+    def test_allowed_edits_are_separate_and_fully_audited(self) -> None:
+        evidence, interpretation, report = self._report()
+        original = deepcopy(report["machine_original_report"])
+
+        edited = save_draft_variant_report(
+            report,
+            reviewer_summary="Reviewer finding summary.",
+            interpretation_narrative=(
+                "Reviewer-adjusted evidence-grounded interpretation."
+            ),
+            conflict_assessment="Conflict wording reviewed.",
+            reviewer_notes=["Reviewed against the supplied evidence."],
+            timestamp="2026-08-09T09:00:00Z",
+            reviewer_context="test-review-session",
+        )
+
+        assert edited["machine_original_report"] == original
+        assert edited["review_status"] == "reviewed"
+        assert edited["updated_at"] == "2026-08-09T09:00:00Z"
+        assert [
+            item["field_path"] for item in edited["edit_history"]
+        ] == [
+            "/reviewer_summary",
+            "/variant_interpretation/narrative",
+            "/variant_interpretation/conflict_assessment",
+            "/reviewer_notes",
+        ]
+        assert [
+            item["sequence"] for item in edited["edit_history"]
+        ] == [1, 2, 3, 4]
+        assert all(
+            item["reviewer_context"] == "test-review-session"
+            for item in edited["edit_history"]
+        )
+        validate_draft_variant_report(
+            edited,
+            evidence=evidence,
+            interpretation=interpretation,
+        )
+
+    def test_reset_is_appended_instead_of_erasing_history(self) -> None:
+        evidence, interpretation, report = self._report()
+        first = save_draft_variant_report(
+            report,
+            reviewer_summary="Temporary summary.",
+            interpretation_narrative="Temporary reviewed narrative.",
+            conflict_assessment=(
+                report["reviewed_report"]["variant_interpretation"][
+                    "conflict_assessment"
+                ]
+            ),
+            reviewer_notes=["Temporary note."],
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        original = first["machine_original_report"]
+
+        reset = save_draft_variant_report(
+            first,
+            reviewer_summary=original["reviewer_summary"],
+            interpretation_narrative=original[
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=original[
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=original["reviewer_notes"],
+            timestamp="2026-08-09T09:05:00Z",
+        )
+
+        assert reset["reviewed_report"] == original
+        assert len(reset["edit_history"]) == 6
+        assert [
+            item["sequence"] for item in reset["edit_history"]
+        ] == list(range(1, 7))
+        assert reset["review_status"] == "reviewed"
+        validate_draft_variant_report(
+            reset,
+            evidence=evidence,
+            interpretation=interpretation,
+        )
+
+    def test_tampering_and_phi_are_rejected(self) -> None:
+        _, _, report = self._report()
+        with pytest.raises(DraftVariantReportError):
+            save_draft_variant_report(
+                report,
+                reviewer_summary=None,
+                interpretation_narrative=report["reviewed_report"][
+                    "variant_interpretation"
+                ]["narrative"],
+                conflict_assessment=report["reviewed_report"][
+                    "variant_interpretation"
+                ]["conflict_assessment"],
+                reviewer_notes=["Contact identified@example.test"],
+                timestamp="2026-08-09T09:00:00Z",
+            )
+
+        edited = save_draft_variant_report(
+            report,
+            reviewer_summary="Reviewed.",
+            interpretation_narrative=report["reviewed_report"][
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=report["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=[],
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        edited["edit_history"][0]["old_value"] = "forged"
+        with pytest.raises(
+            DraftVariantReportError,
+            match="not append-only",
+        ):
+            validate_draft_variant_report(edited)
+
+        machine_tampered = deepcopy(report)
+        machine_tampered["machine_original_report"]["variant_summary"][
+            "gene"
+        ] = "OTHER"
+        with pytest.raises(
+            DraftVariantReportError,
+            match="integrity check",
+        ):
+            validate_draft_variant_report(machine_tampered)
+
+    def test_pipeline_update_invalidates_prior_confirmation(self) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        confirmed = confirm_reviewed_evidence(
+            result,
+            result["evidence_review_reports"],
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        assert confirmed["reviewed_evidence_packages"]
+        report = confirmed["draft_variant_reports"][0]
+        edited = save_draft_variant_report(
+            report,
+            reviewer_summary="Reviewed finding.",
+            interpretation_narrative=report["reviewed_report"][
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=report["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=[],
+            timestamp="2026-08-09T09:05:00Z",
+        )
+
+        updated = update_draft_variant_report(confirmed, edited)
+
+        assert updated["workflow_state"] == "awaiting_final_review"
+        assert updated["reviewed_evidence_packages"] == []
+        assert updated["draft_variant_reports"][0] == edited
 
 
 class TestClinicalReportContract:
@@ -12369,6 +12547,60 @@ class TestStage40FrontendReviewWorkflow:
             button.label == "Retry failed interpretations"
             for button in app.button
         )
+
+    def test_report_edit_is_audited_and_invalidates_confirmation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        saved: list[PipelineResult] = []
+        monkeypatch.setattr(
+            "frontend.evidence_review.save_pipeline_state",
+            lambda result: saved.append(deepcopy(result)) or result,
+        )
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(
+            timeout=10
+        )
+        app.session_state["pipeline_result"] = self._draft_result()
+        app.run(timeout=10)
+        next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.label.startswith(
+                "I confirm that this reviewed evidence contains no names"
+            )
+        ).set_value(True).run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "Confirm evidence"
+        ).click().run(timeout=10)
+        assert app.session_state["pipeline_result"][
+            "reviewed_evidence_packages"
+        ]
+
+        next(
+            area
+            for area in app.text_area
+            if area.label == "Reviewer summary"
+        ).set_value("Reviewer-approved finding summary.")
+        next(
+            button
+            for button in app.button
+            if button.label == "Save report edits"
+        ).click().run(timeout=10)
+
+        result = app.session_state["pipeline_result"]
+        report = result["draft_variant_reports"][0]
+        assert report["reviewed_report"]["reviewer_summary"] == (
+            "Reviewer-approved finding summary."
+        )
+        assert report["edit_history"][0]["field_path"] == (
+            "/reviewer_summary"
+        )
+        assert result["reviewed_evidence_packages"] == []
+        assert result["workflow_state"] == "awaiting_final_review"
+        assert saved[-1]["draft_variant_reports"][0] == report
+        assert app.dataframe
 
 
 @pytest.mark.stage15_security
