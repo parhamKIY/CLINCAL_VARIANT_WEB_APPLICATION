@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 74 UI and report transparency complete
+**Implementation status:** Stage 75 deterministic failure-injection suite complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 75 failure-injection test suite
+**Next checkpoint:** Stage 76 reachability regression utility
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -293,12 +293,13 @@ flowchart LR
     AI --> AJ["Stage 72: CSpec LKG cache"]
     AJ --> AK["Stage 73: unified capability schema"]
     AK --> AL["Stage 74: UI/report transparency"]
-    AL --> AM["Stage 75: failure injection - pending"]
+    AL --> AM["Stage 75: failure injection"]
+    AM --> AN["Stage 76: reachability regression - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL done
-    class AM review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM done
+    class AN review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -868,6 +869,22 @@ provenance carries every fallback notice, including the exact retrieval method, 
 reviewer can determine which source supplied every degraded-mode result without
 mistaking it for primary-provider evidence.
 
+### Stage 75 deterministic failure injection
+
+`tests/test_failure_injection.py` injects provider failures without external network
+traffic and verifies the complete degraded-mode path through capability results,
+reviewer notices, and final-report provenance. The seven acceptance cases cover
+Phen2Gene timeout and retry to local HPO-gene overlap; gnomAD 403 circuit opening and
+Ensembl fallback for subsequent variants; ClinVar connection failure to derived
+MyVariant evidence; LitVar2 5xx retry to Europe PMC; Europe PMC timeout to PubMed;
+CSpec network failure to an exact local last-known-good cache entry; and VEP 503 to
+the limited VariantValidator validation/HGVS mapping path.
+
+Each case asserts the preserved primary failure and exact fallback provenance,
+successful fallback status rather than false `no_match`, single-counted evidence,
+absence of fabricated unsupported fields, continued report composition, and an
+explicit degraded-source entry in the final report.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -955,7 +972,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **915 passed, 4 skipped**,
+consume external API quotas. The current recorded baseline is **922 passed, 4 skipped**,
 with **85.81% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
@@ -1064,6 +1081,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
 | Unified primary/fallback capability results | `backend/provider_resilience.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_provider_resilience.py`, `tests/test_pipeline.py` |
 | Fallback UI and report transparency | `backend/fallback_transparency.py`, `backend/variant_report.py`, `frontend/results.py`, `frontend/evidence_review.py`, `tests/test_fallback_transparency.py` |
+| Deterministic provider failure injection | `tests/test_failure_injection.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1083,8 +1101,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-74 are implemented and documented. Deterministic failure-injection
-   coverage continues in Stage 75; professor feedback and sign-off remain external.
+1. Stages 46-75 are implemented and documented. The reachability regression utility
+   remains for Stage 76; professor feedback and sign-off remain external.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1150,6 +1168,7 @@ MyVariant-to-Ensembl exact-overlap context fallback, an explicit-freshness CSpec
 last-known-good metadata cache, and a unified source-preserving capability result
 contract consumed generically by draft report statuses, followed by concise UI and
 report provenance notices that disclose every affected fallback capability. Stage 75
-is the next
+added deterministic outage injection for all required fallback chains and verified
+degraded-source provenance through final report composition. Stage 76 is the next
 implementation checkpoint;
 professor review and sign-off remain external.

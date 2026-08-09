@@ -8,8 +8,8 @@ redesign contract.
 [![Status](https://img.shields.io/badge/status-Stage_62_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-789_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.59%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-922_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.81%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -64,8 +64,9 @@ its original input order.
 - Stage 61 live provider and canonical-link validation is implemented and verified.
 - Stage 62 documentation and demonstration preparation is complete; external
   professor feedback remains pending.
-- Stages 63-74 provider resilience, free fallbacks, unified capability results,
-  and reviewer-facing fallback transparency are implemented and offline-verified.
+- Stages 63-75 provider resilience, free fallbacks, unified capability results,
+  reviewer-facing fallback transparency, and deterministic failure injection are
+  implemented and offline-verified.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
@@ -73,7 +74,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **915 passed, 4 skipped; 85.81% Stage 59 coverage**.
+- Current verified suite: **922 passed, 4 skipped; 85.81% Stage 59 coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
