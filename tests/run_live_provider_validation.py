@@ -23,10 +23,26 @@ from backend.conditional_enrichment import (
     fetch_gnomad_evidence,
     fetch_literature_evidence,
 )
-from backend.llm import call_llm
+from backend.llm import (
+    LLMAuthenticationError,
+    LLMConfigurationError,
+    LLMError,
+    LLMRateLimitError,
+    LLMRequestError,
+    LLMResponseError,
+    LLMTimeoutError,
+    LLMValidationError,
+)
 from backend.mydisease import clear_mydisease_cache, enrich_with_mydisease
 from backend.phenotype import clear_phen2gene_cache, enrich_with_phen2gene
+from backend.phenotype_llm import extract_hpo_candidates
+from backend.references import (
+    build_canonical_references,
+    validate_canonical_reference,
+)
+from backend.report import build_evidence_object
 from backend.vcf_processing import parse_manual_variants
+from backend.variant_interpretation import interpret_variant
 from config import settings
 
 
@@ -34,8 +50,26 @@ DEFAULT_OUTPUT = PROJECT_ROOT / "output" / "live-provider-validation.json"
 DEFAULT_VARIANT = "1:941284:G:A"
 DEFAULT_HPO = ["HP:0001250"]
 ACCEPTED_NO_MATCH = {"success", "not_found"}
-ACCEPTED_POPULATION = {"available", "partial", "no_match"}
-ACCEPTED_LITERATURE = {"available", "partial", "no_match"}
+ACCEPTED_POPULATION = {
+    "available",
+    "partial",
+    "no_match",
+    "unavailable",
+}
+ACCEPTED_LITERATURE = {
+    "available",
+    "partial",
+    "no_match",
+    "unavailable",
+}
+SAFE_FAILURE_REASONS = {
+    "forbidden",
+    "http_error",
+    "network_error",
+    "rate_limited",
+    "timeout",
+    "upstream_error",
+}
 
 
 class SelectiveFailureSession(requests.Session):
@@ -68,6 +102,26 @@ def _require_status(
             f"{provider} returned unacceptable status "
             f"{status!r}; expected one of {sorted(allowed)}."
         )
+    return status
+
+
+def _require_safe_provider_state(
+    provider: str,
+    payload: object,
+    allowed: set[str],
+) -> str:
+    """Accept usable data, valid missingness, or classified unavailability."""
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{provider} returned no normalized evidence.")
+    status = _require_status(provider, payload.get("status"), allowed)
+    if status == "unavailable":
+        reason = payload.get("failure_reason")
+        if reason not in SAFE_FAILURE_REASONS:
+            raise RuntimeError(
+                f"{provider} returned unavailable without a safe "
+                f"failure classification: {reason!r}."
+            )
     return status
 
 
@@ -108,23 +162,24 @@ def _annotation_checks(
 
     checks: list[dict[str, object]] = []
     requirements = {
-        "vep": {"success"},
-        "genebe": ACCEPTED_NO_MATCH,
+        "vep": {"success", "unavailable"},
+        "genebe": ACCEPTED_NO_MATCH | {"unavailable"},
         "myvariant": ACCEPTED_NO_MATCH,
-        "clinvar": ACCEPTED_NO_MATCH,
+        "clinvar": ACCEPTED_NO_MATCH | {"unavailable"},
         "clingen": ACCEPTED_NO_MATCH,
-        "cspec": ACCEPTED_NO_MATCH,
+        "cspec": ACCEPTED_NO_MATCH | {"unavailable"},
     }
     for name, allowed in requirements.items():
         source = sources.get(name)
         if not isinstance(source, dict):
             raise RuntimeError(f"{name} returned no normalized evidence.")
-        status = _require_status(name, source.get("status"), allowed)
+        status = _require_safe_provider_state(name, source, allowed)
         checks.append(
             {
                 "provider": name,
                 "status": status,
                 "provider_version": source.get("provider_version"),
+                "failure_reason": source.get("failure_reason"),
             }
         )
     return candidate, checks
@@ -199,12 +254,13 @@ def _conditional_checks(
     checks.append(
         {
             "provider": "gnomad",
-            "status": _require_status(
+            "status": _require_safe_provider_state(
                 "gnomad",
-                gnomad.get("status"),
+                gnomad,
                 ACCEPTED_POPULATION,
             ),
             "http_status": gnomad.get("http_status"),
+            "failure_reason": gnomad.get("failure_reason"),
         }
     )
 
@@ -212,12 +268,13 @@ def _conditional_checks(
     checks.append(
         {
             "provider": "ensembl_variation",
-            "status": _require_status(
+            "status": _require_safe_provider_state(
                 "ensembl_variation",
-                ensembl.get("status"),
+                ensembl,
                 ACCEPTED_POPULATION,
             ),
             "http_status": ensembl.get("http_status"),
+            "failure_reason": ensembl.get("failure_reason"),
         }
     )
 
@@ -226,12 +283,13 @@ def _conditional_checks(
     checks.append(
         {
             "provider": "litvar",
-            "status": _require_status(
+            "status": _require_safe_provider_state(
                 "litvar",
-                litvar.get("status"),
+                litvar,
                 ACCEPTED_LITERATURE,
             ),
             "http_status": litvar.get("http_status"),
+            "failure_reason": litvar.get("failure_reason"),
         }
     )
 
@@ -246,12 +304,13 @@ def _conditional_checks(
     checks.append(
         {
             "provider": "europe_pmc",
-            "status": _require_status(
+            "status": _require_safe_provider_state(
                 "europe_pmc",
-                europe.get("status"),
+                europe,
                 ACCEPTED_LITERATURE,
             ),
             "http_status": europe.get("http_status"),
+            "failure_reason": europe.get("failure_reason"),
         }
     )
 
@@ -269,40 +328,192 @@ def _conditional_checks(
     checks.append(
         {
             "provider": "pubmed",
-            "status": _require_status(
+            "status": _require_safe_provider_state(
                 "pubmed",
-                pubmed.get("status"),
+                pubmed,
                 ACCEPTED_LITERATURE,
             ),
             "http_status": pubmed.get("http_status"),
+            "failure_reason": pubmed.get("failure_reason"),
         }
     )
     return checks
 
 
-def _llm_checks() -> list[dict[str, object]]:
-    checks: list[dict[str, object]] = []
-    model_checks = [("llm_light", settings.LLM_MODEL_LIGHT)]
-    if settings.LLM_MODEL_STRONG == settings.LLM_MODEL_LIGHT:
-        model_checks[0] = ("llm_shared", settings.LLM_MODEL_LIGHT)
-    else:
-        model_checks.append(("llm_strong", settings.LLM_MODEL_STRONG))
-    for role, model in model_checks:
-        response = call_llm(
-            "Return only the requested validation token.",
-            "Reply with exactly LIVE_PROVIDER_OK.",
-            max_tokens=16,
-            temperature=0.0,
-            model=model,
+def _canonical_link_checks(
+    candidate: dict[str, object],
+) -> list[dict[str, object]]:
+    """Validate and probe a bounded set of exact report reference links."""
+
+    evidence = build_evidence_object(candidate)
+    references = build_canonical_references(evidence)
+    linked = [
+        validate_canonical_reference(reference)
+        for reference in references
+        if reference["canonical_url"] is not None
+    ]
+    if not linked:
+        raise RuntimeError(
+            "The live evidence produced no validated canonical links."
         )
-        if not response.content.strip():
-            raise RuntimeError(f"{role} returned empty content.")
+
+    checks: list[dict[str, object]] = []
+    seen_sources: set[str] = set()
+    with requests.Session() as session:
+        session.headers.update(
+            {"User-Agent": "clinical-variant-stage61-validation/1.0"}
+        )
+        for reference in linked:
+            source = reference["source"]
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
+            url = reference["canonical_url"]
+            assert url is not None
+            try:
+                response = session.get(
+                    url,
+                    allow_redirects=False,
+                    stream=True,
+                    timeout=settings.REQUEST_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                checks.append(
+                    {
+                        "provider": f"canonical_link:{source}",
+                        "status": "unavailable",
+                        "identifier": reference["identifier"],
+                        "http_status": None,
+                        "failure_reason": (
+                            "timeout"
+                            if isinstance(exc, requests.Timeout)
+                            else "network_error"
+                        ),
+                    }
+                )
+            else:
+                try:
+                    status_code = response.status_code
+                finally:
+                    response.close()
+                checks.append(
+                    {
+                        "provider": f"canonical_link:{source}",
+                        "status": (
+                            "reachable"
+                            if 200 <= status_code < 400
+                            else "unavailable"
+                        ),
+                        "identifier": reference["identifier"],
+                        "http_status": status_code,
+                        "failure_reason": (
+                            None
+                            if 200 <= status_code < 400
+                            else (
+                                "forbidden"
+                                if status_code == 403
+                                else "http_error"
+                            )
+                        ),
+                    }
+                )
+            if len(checks) >= 5:
+                break
+    if not any(check["status"] == "reachable" for check in checks):
+        raise RuntimeError(
+            "No representative canonical reference link was reachable."
+        )
+    return checks
+
+
+def _llm_checks(
+    candidate: dict[str, object],
+) -> list[dict[str, object]]:
+    """Probe the two configured model roles through their V3 contracts."""
+
+    def unavailable(
+        provider: str,
+        model: str,
+        error: LLMError,
+    ) -> dict[str, object]:
+        if isinstance(
+            error,
+            (
+                LLMAuthenticationError,
+                LLMConfigurationError,
+                LLMResponseError,
+                LLMValidationError,
+            ),
+        ):
+            raise error
+        if isinstance(error, LLMTimeoutError):
+            reason = "timeout"
+        elif isinstance(error, LLMRateLimitError):
+            reason = "rate_limited"
+        elif isinstance(error, LLMRequestError):
+            reason = "network_error"
+        else:
+            raise error
+        return {
+            "provider": provider,
+            "status": "unavailable",
+            "configured_model": model,
+            "response_model": None,
+            "failure_reason": reason,
+            "error_type": type(error).__name__,
+        }
+
+    checks: list[dict[str, object]] = []
+    try:
+        phenotype = extract_hpo_candidates(
+            "بیمار دچار تشنج است.",
+            model=settings.PHENOTYPE_EXTRACTION_MODEL,
+            max_retries=0,
+        )
+    except LLMError as exc:
+        checks.append(
+            unavailable(
+                "phenotype_extraction_llm",
+                settings.PHENOTYPE_EXTRACTION_MODEL,
+                exc,
+            )
+        )
+    else:
         checks.append(
             {
-                "provider": role,
+                "provider": "phenotype_extraction_llm",
                 "status": "success",
-                "configured_model": model,
-                "response_model": response.model,
+                "configured_model": settings.PHENOTYPE_EXTRACTION_MODEL,
+                "response_model": phenotype["model"],
+                "candidate_count": len(phenotype["candidates"]),
+                "failure_reason": None,
+            }
+        )
+
+    evidence = build_evidence_object(candidate)
+    try:
+        interpretation = interpret_variant(
+            evidence,
+            model=settings.VARIANT_INTERPRETATION_MODEL,
+            max_retries=0,
+        )
+    except LLMError as exc:
+        checks.append(
+            unavailable(
+                "variant_interpretation_llm",
+                settings.VARIANT_INTERPRETATION_MODEL,
+                exc,
+            )
+        )
+    else:
+        checks.append(
+            {
+                "provider": "variant_interpretation_llm",
+                "status": interpretation["status"],
+                "configured_model": settings.VARIANT_INTERPRETATION_MODEL,
+                "response_model": interpretation["response_model"],
+                "prompt_mode": interpretation["prompt_mode"],
+                "failure_reason": None,
             }
         )
     return checks
@@ -354,8 +565,9 @@ def main() -> int:
         candidate, phenotype_checks = _phenotype_checks(candidate)
         summary["checks"].extend(phenotype_checks)
         summary["checks"].extend(_conditional_checks(candidate))
+        summary["checks"].extend(_canonical_link_checks(candidate))
         if not arguments.skip_llm:
-            summary["checks"].extend(_llm_checks())
+            summary["checks"].extend(_llm_checks(candidate))
     except Exception as exc:
         summary["status"] = "failed"
         summary["failure"] = str(exc)

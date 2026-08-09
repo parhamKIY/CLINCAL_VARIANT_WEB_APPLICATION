@@ -124,6 +124,27 @@ def validated_reference_url(value: object) -> str | None:
     return _trusted_url(value)
 
 
+def _navigable_provider_url(
+    source: str,
+    value: str | None,
+) -> str | None:
+    """Reject provider write/query endpoints that are not browser records."""
+
+    if value is None:
+        return None
+    path = urlsplit(value).path.casefold().rstrip("/")
+    source_key = source.casefold()
+    if "ensembl vep" in source_key and path.endswith(
+        "/vep/homo_sapiens/region"
+    ):
+        return None
+    if "genebe" in source_key and path.endswith(
+        "/api-public/v1/variants"
+    ):
+        return None
+    return value
+
+
 def _identifier(
     source: str,
     value: object,
@@ -200,7 +221,10 @@ def canonicalize_reference(
         normalized_source,
         identifier,
     )
-    supplied_url = _trusted_url(url)
+    supplied_url = _navigable_provider_url(
+        normalized_source,
+        _trusted_url(url),
+    )
     if (
         identifier_type == "CSpec record"
         and normalized_identifier is not None

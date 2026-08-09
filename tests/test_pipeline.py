@@ -11302,6 +11302,27 @@ class TestStage55CanonicalReferences:
         ):
             validate_canonical_reference(tampered)
 
+    def test_non_navigable_provider_endpoints_use_safe_fallback(self) -> None:
+        endpoints = (
+            (
+                "Ensembl VEP",
+                "https://rest.ensembl.org/vep/homo_sapiens/region",
+            ),
+            (
+                "GeneBe automated annotation",
+                "https://api.genebe.net/cloud/api-public/v1/variants",
+            ),
+        )
+
+        for source, endpoint in endpoints:
+            reference = canonicalize_reference(
+                source=source,
+                url=endpoint,
+            )
+            assert reference["canonical_url"] is None
+            assert reference["url_status"] == "unavailable"
+            assert validate_canonical_reference(reference) == reference
+
     def test_evidence_catalog_is_deduplicated_and_stably_numbered(
         self,
     ) -> None:

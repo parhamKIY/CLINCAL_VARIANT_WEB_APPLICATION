@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_60_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_61_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-787_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.58%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-788_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.59%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -32,7 +32,8 @@ its original input order.
 
 ### Current status
 
-- The implemented roadmap has passed the Stage 60 V3 release gate.
+- The implemented roadmap has passed the Stage 60 V3 release gate and Stage 61
+  point-in-time live validation.
 - Stage 45 has frozen the post-professor-review architecture; it is a documentation
   milestone and does not claim the redesign is implemented.
 - Stage 46 input expansion is implemented and offline-verified.
@@ -60,7 +61,8 @@ its original input order.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
   active in GitHub Actions.
-- Stage 61 live provider and link validation is the next bounded milestone.
+- Stage 61 live provider and canonical-link validation is implemented and verified.
+- Stage 62 documentation, demonstration, and professor re-review is next.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
@@ -68,7 +70,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **787 passed, 4 skipped; 85.58% coverage**.
+- Current verified suite: **788 passed, 4 skipped; 85.59% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -78,14 +80,14 @@ guide, and limitations are maintained in
 The authoritative redesign contract and implemented-versus-planned boundary are in
 [`docs/STAGE45_ARCHITECTURE_CONTRACT.md`](docs/STAGE45_ARCHITECTURE_CONTRACT.md).
 
-## Accepted target architecture (partially implemented)
+## Accepted target architecture
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-60 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-61 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline through Final Clinical Report delivery,
-persistence, privacy reverification, Testing V3, and the V3 release gate; live
-validation and final documentation remain planned:
+persistence, privacy reverification, Testing V3, the V3 release gate, and bounded
+live validation; final documentation and professor re-review remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -286,6 +288,20 @@ interpretation-model use across conflict states, isolated failures, report editi
 four-of-ten selection, durable excluded-variant recovery, canonical references,
 confirmed-state exports, and absence of ignored-sheet content. This is the active
 offline GitHub Actions release gate; live-provider checks remain separate.
+
+### Stage 61 live provider and canonical-link validation
+
+`tests/run_live_provider_validation.py` now probes the production clients for VEP,
+GeneBe, MyVariant, ClinVar, ClinGen/GenCC, CSpec, Phen2Gene, MyDisease, gnomAD,
+Ensembl Variation, LitVar2, Europe PMC, PubMed, and both task-specific LLM roles. It
+accepts usable normalized data, valid no-match states, or explicitly classified
+transient unavailability; malformed schemas, unsafe states, and model configuration,
+authentication, or response-contract failures still fail the gate.
+
+The runner also builds the report's canonical-reference catalog and performs bounded
+live GET probes against representative exact links. Stage 61 removed non-navigable
+Ensembl VEP and GeneBe POST endpoints from report links, so they now render the
+explicit unavailable-link fallback instead of a misleading hyperlink.
 
 ## Current implemented workflow
 
@@ -582,7 +598,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-787 passed, 4 skipped
+788 passed, 4 skipped
 ```
 
 Run the active V3 release gate:
@@ -604,7 +620,7 @@ Run Testing V3 alone when the end-to-end release scenario does not need repetiti
 The historical Stage 44 runner remains available for legacy regression checks but is
 no longer the active release gate.
 
-Current measured coverage is **85.58%**.
+Current measured coverage is **85.59%**.
 
 The Stage 60 gate runs automatically on every push and pull request through the
 read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -621,11 +637,12 @@ Use `--skip-llm` when only biomedical providers should be checked. The gate
 writes a non-clinical, ignored summary to
 `output/live-provider-validation.json`. It may consume provider quotas.
 
-The complete live gate passed on **2026-08-08**. VEP, GeneBe, MyVariant,
-ClinVar, Phen2Gene, MyDisease, gnomAD, Ensembl Variation, and the configured LLM
-returned usable responses. GenCC, CSpec, LitVar2, Europe PMC, and PubMed returned
-valid no-match responses for the public probe, which is acceptable missingness.
-This is a point-in-time result, not a future availability guarantee.
+The complete Stage 61 live gate passed on **2026-08-09**. VEP, GeneBe, MyVariant,
+ClinVar, Phen2Gene, MyDisease, gnomAD, Ensembl Variation, both configured task-model
+contracts, and representative ClinVar/MyVariant links returned usable responses.
+GenCC, CSpec, LitVar2, Europe PMC, and PubMed returned valid no-match responses for
+the public probe, which is acceptable missingness. This is a point-in-time result,
+not a future availability guarantee.
 
 Component-specific diagnostics remain available:
 
@@ -744,8 +761,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-60 are implemented; Stage 61 owns live provider and canonical-link
-  validation.
+- Stages 46-61 are implemented; Stage 62 owns final documentation, demonstration,
+  and professor re-review.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -771,4 +788,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 61 handoff.
+- current limitations and the Stage 62 handoff.

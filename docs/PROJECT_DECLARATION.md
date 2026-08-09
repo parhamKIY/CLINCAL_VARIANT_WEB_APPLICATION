@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 60 End-to-End Acceptance Gate V3 implemented
-**Current release gate:** Stage 60 V3 acceptance passed
-**Next implementation milestone:** Stage 61 live provider and link validation
+**Implementation status:** Stage 61 live provider and link validation complete
+**Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
+**Next implementation milestone:** Stage 62 documentation and professor re-review
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,10 +24,10 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-60 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-61 now implement its input, phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
-Final Clinical Report, persistence, recovery, privacy, testing, and V3 release gate. The
-authoritative target is defined in
+Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
+bounded live validation. The authoritative target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
 they are not part of the active workflow for new analyses.
@@ -272,12 +272,13 @@ flowchart LR
     U --> V["Stage 58: privacy and safety reverification"]
     V --> W["Stage 59: Testing V3"]
     W --> X["Stage 60: End-to-End Acceptance Gate V3"]
-    X --> Y["Stages 61-62: live validation and final review - pending"]
+    X --> Y["Stage 61: live provider and link validation"]
+    Y --> Z["Stage 62: documentation and professor re-review - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X done
-    class Y review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y done
+    class Z review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -351,7 +352,8 @@ their original order.
 | 58 | Added exact task-specific LLM minimum-data validators, Persian identifier/mobile redaction, ignored-worksheet downstream leakage proof, and report-content privacy enforcement with explicit detection limitations. | Complete |
 | 59 | Registered the deterministic offline Testing V3 suite, eight required test-group markers with collection checks, suite-wide live-HTTP blocking, and an 80%-coverage runner. | Complete |
 | 60 | Added the deterministic ten-variant redesigned acceptance scenario, release runner, and GitHub Actions V3 gate covering all professor-review assertions plus Testing V3. | Complete |
-| 61–62 | Perform live provider/link validation and final documentation/re-review. | Planned |
+| 61 | Revalidated every configured biomedical provider and both task-specific LLM contracts, live-probed representative report links, and removed non-navigable provider POST endpoints from canonical hyperlinks. | Complete |
+| 62 | Finalize documentation, demonstration materials, and professor re-review. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -545,6 +547,21 @@ Clinical Report generation, canonical references, and text/PDF/Word exports. It
 asserts that ignored-sheet content is absent from model requests, pipeline/database
 state, reports, and exports.
 
+### Stage 61 live provider and canonical-link validation
+
+`tests/run_live_provider_validation.py` now exercises the current production clients
+for VEP, GeneBe, MyVariant, ClinVar, ClinGen/GenCC, CSpec, Phen2Gene, MyDisease,
+gnomAD, Ensembl Variation, LitVar2, Europe PMC, PubMed, phenotype extraction, and
+variant interpretation. It distinguishes usable evidence, valid no-match states,
+and safely classified transient unavailability while failing malformed or unsafe
+provider/model states.
+
+The same bounded run constructs canonical references and probes representative exact
+report links. Live validation showed that the Ensembl VEP and GeneBe batch POST
+endpoints are source endpoints rather than browser-navigable records; Stage 61 now
+maps them to the explicit unavailable-link fallback. Representative ClinVar and
+MyVariant exact links returned reachable responses.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -632,8 +649,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **787 passed, 4 skipped**,
-with **85.58% coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **788 passed, 4 skipped**,
+with **85.59% coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -661,11 +678,12 @@ population, literature, and configured LLM endpoint:
 .\.venv\Scripts\python.exe tests\run_live_provider_validation.py
 ```
 
-The complete gate passed on **2026-08-08**. GenCC, CSpec, LitVar2, Europe PMC, and
-PubMed returned valid no-match responses for the public probe; all other checked
-providers returned usable evidence or model responses. The ignored JSON summary is
-written to `output/live-provider-validation.json`. This remains a point-in-time
-connectivity/schema result, not a future availability guarantee.
+The complete Stage 61 gate passed on **2026-08-09**. GenCC, CSpec, LitVar2, Europe
+PMC, and PubMed returned valid no-match responses for the public probe. Every other
+biomedical client and both configured task-specific model contracts returned usable
+responses. Representative ClinVar and MyVariant links were reachable. The ignored
+JSON summary is written to `output/live-provider-validation.json`. This remains a
+point-in-time connectivity/schema result, not a future availability guarantee.
 
 ## 12. Configuration and execution
 
@@ -755,8 +773,8 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-60 are implemented. Stage 61 owns live provider and canonical-link
-   validation.
+1. Stages 46-61 are implemented. Stage 62 owns final documentation,
+   demonstration preparation, and professor re-review.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -775,7 +793,8 @@ the non-diagnostic disclaimer.
 
 ## 16. Completion statement
 
-The implemented project has passed its Stage 60 offline V3 acceptance gate and provides
+The implemented project has passed its Stage 60 offline V3 acceptance gate and Stage
+61 point-in-time live gate and provides
 a coherent evidence-collection, single-model interpretation-before-review, and human
 confirmation workflow with explicit safety boundaries. Stage 45 incorporated the professor review
 into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel input
@@ -808,5 +827,7 @@ suite-wide offline HTTP blocking, group-collection checks, and the deterministic
 coverage-enforced Testing V3 runner. Stage 60 added the deterministic redesigned
 ten-variant Excel-to-final-report acceptance scenario, wrapped it with compilation,
 dependency, secret, and Testing V3 checks, and activated the new gate in GitHub
-Actions. The correct next action is Stage 61: perform bounded live provider and
-canonical-link validation.
+Actions. Stage 61 revalidated every production provider client and both task-specific
+LLM contracts, probed representative exact links, and removed non-navigable VEP and
+GeneBe POST endpoints from report hyperlinks. The correct next action is Stage 62:
+finalize documentation, demonstration materials, and professor re-review.

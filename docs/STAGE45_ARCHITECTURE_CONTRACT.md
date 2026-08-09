@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-60 complete; Stage 61 is next
+**Implementation progress:** Stages 46-61 complete; Stage 62 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,9 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 60. Features assigned to
-Stages 61–62 remain targets and are not implemented merely because Stage 45 is
-complete.
+The repository implements the redesign through Stage 61. Stage 62 remains a target
+and is not implemented merely because Stage 45 is complete.
 
 ## 2. Accepted product contract
 
@@ -321,7 +320,7 @@ separate reviewed copy with append-only history.
   the full V3 marker with an 80% minimum coverage threshold.
 - A shared autouse fixture blocks unmocked HTTP across all offline test modules;
   live-provider diagnostics remain explicitly separate.
-- The verified baseline is 787 passed, 4 skipped, with 85.58% coverage. The retained
+- The verified baseline is 788 passed, 4 skipped, with 85.59% coverage. The retained
   Stage 44 acceptance runner is historical compatibility coverage; Stage 60 is the
   active release gate.
 - Stage 60 wraps Testing V3 in the redesigned end-to-end acceptance gate used by
@@ -340,11 +339,27 @@ separate reviewed copy with append-only history.
   repository/Git-history secret audit, the Stage 60 scenario, and the complete
   coverage-enforced Testing V3 runner.
 - `.github/workflows/verify.yml` uses the Stage 60 runner for every push and pull
-  request. The verified baseline is 787 passed, 4 skipped, with 85.58% coverage.
-- Stage 61 is the next bounded increment for live provider and canonical-link
-  validation.
+  request. The verified baseline is 788 passed, 4 skipped, with 85.59% coverage.
+- Stage 61 performs separate bounded live provider and canonical-link validation.
 
-## 20. Stage 45 acceptance record
+## 20. Stage 61 implementation record
+
+- The bounded live runner exercises VEP, GeneBe, MyVariant, ClinVar, ClinGen/GenCC,
+  CSpec, Phen2Gene, MyDisease, gnomAD, Ensembl Variation, LitVar2, Europe PMC,
+  PubMed, and both task-specific model contracts through production clients.
+- Usable normalized evidence, valid no-match states, and safely classified transient
+  unavailability are accepted. Invalid schemas, unsafe states, and model
+  configuration, authentication, or response-contract failures remain failures.
+- The 2026-08-09 run returned usable responses from every biomedical client except
+  valid no-match results from GenCC, CSpec, LitVar2, Europe PMC, and PubMed. Both
+  configured task-model contracts returned usable responses.
+- Representative ClinVar and MyVariant report links were reachable. Non-navigable
+  Ensembl VEP and GeneBe batch POST endpoints now produce the explicit unavailable-
+  link fallback instead of a clickable canonical URL.
+- The live JSON result remains ignored and point-in-time. Stage 62 is the next
+  bounded increment for documentation, demonstration, and professor re-review.
+
+## 21. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.
