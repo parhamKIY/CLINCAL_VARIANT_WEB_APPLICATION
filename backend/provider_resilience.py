@@ -649,6 +649,11 @@ def build_capability_result(
     _validate_identifier(method, "method")
     if not isinstance(status, str) or status not in CAPABILITY_STATUSES:
         raise ProviderContractError("Unsupported capability status.")
+    if provider_role == "fallback" and status not in {"success", "no_match"}:
+        raise ProviderContractError(
+            "Fallback-used capability results require retained evidence or "
+            "a valid no-match response."
+        )
     primary_provider = provider if provider_role == "primary" else fallback_for
     provider_provenance = build_provider_provenance(
         capability=capability,

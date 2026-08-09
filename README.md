@@ -64,7 +64,7 @@ its original input order.
 - Stage 61 live provider and canonical-link validation is implemented and verified.
 - Stage 62 documentation and demonstration preparation is complete; external
   professor feedback remains pending.
-- Stages 63-78 provider resilience, free fallbacks, unified capability results,
+- Stages 63-79 provider resilience, free fallbacks, unified capability results,
   reviewer-facing fallback transparency, and deterministic failure injection are
   implemented, documented, and offline-verified; the multi-variant resilience gate
   and manual reachability utility are available.

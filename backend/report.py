@@ -3272,6 +3272,11 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             "primary_http_status",
             "primary_request_attempts",
             "primary_circuit_open",
+            "fallback_attempted",
+            "fallback_provider",
+            "fallback_status",
+            "fallback_http_status",
+            "fallback_failure_reason",
         ),
     )
     populations = population_source.get("populations")

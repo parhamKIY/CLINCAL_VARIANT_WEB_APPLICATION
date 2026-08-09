@@ -1185,7 +1185,7 @@ def enrich_with_mydisease(
                 provider_version,
                 metadata_attempts,
                 metadata_warning,
-            ) = _metadata(client, circuit_state)
+            ) = _metadata(client, ProviderCircuitState())
             attempts += metadata_attempts
         for gene in target_genes:
             gene_id = identifiers.get(gene.casefold())

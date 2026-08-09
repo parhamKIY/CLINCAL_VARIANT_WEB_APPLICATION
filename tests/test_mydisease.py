@@ -258,6 +258,24 @@ def test_contract_query_and_complete_normalization() -> None:
     assert params["size"] <= 100
 
 
+def test_metadata_failure_does_not_open_gene_query_circuit() -> None:
+    result, session = run(
+        [
+            FakeResponse(503, {"error": "metadata unavailable"}),
+            query_response(direct_hit()),
+        ]
+    )
+
+    evidence = result["variants"][0]["mydisease"]
+    assert [call["url"] for call in session.calls] == [
+        "https://mydisease.info/v1/metadata",
+        "https://mydisease.info/v1/query",
+    ]
+    assert evidence["status"] == "available"
+    assert evidence["provider_version"] is None
+    assert "MyDisease build metadata was unavailable." in evidence["warnings"]
+
+
 def test_partial_and_no_exact_hpo_matching_across_diseases() -> None:
     second = direct_hit(
         "MONDO:0011461",

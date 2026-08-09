@@ -1014,6 +1014,25 @@ def fetch_population_evidence_with_fallback(
         candidate,
         session=session,
     )
+    if fallback.get("status") in {
+        "unavailable",
+        "invalid_response",
+    }:
+        primary.update(
+            {
+                "fallback_attempted": True,
+                "fallback_provider": "ensembl_variation",
+                "fallback_status": fallback.get("status"),
+                "fallback_http_status": fallback.get("http_status"),
+                "fallback_failure_reason": fallback.get("failure_reason"),
+            }
+        )
+        primary.setdefault("warnings", []).insert(
+            0,
+            "gnomAD was unavailable; Ensembl Variation fallback was "
+            "attempted but returned no usable evidence.",
+        )
+        return primary
     provenance = build_provider_provenance(
         capability="population_frequency",
         provider="ensembl_variation",

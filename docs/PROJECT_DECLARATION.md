@@ -1,8 +1,8 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 78 provider-resilience roadmap complete
-**Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
+**Implementation status:** Stage 79 provider-resilience corrections complete
+**Current release gate:** Stage 60 V3, Stage 61 live, and Stage 79 resilience gates passed
 **Next checkpoint:** Separate full web-application acceptance plan
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
@@ -393,6 +393,7 @@ their original order.
 | 76 | Added a bounded manual DNS/HTTP reachability checker with normalized failure categories and optional JSON/CSV output outside deterministic CI. | Complete |
 | 77 | Consolidated the fallback matrix, architecture, actual configuration controls, pre-demo operations, and troubleshooting in the resilience runbook and synchronized public documentation. | Complete |
 | 78 | Added and passed a deterministic persisted two-variant degraded-mode gate covering Phen2Gene timeout, gnomAD 403 circuit reuse, LitVar2 5xx fallback, successful ClinVar/CSpec primaries, Draft Reports, and exact provenance. | Complete |
+| 79 | Isolated optional MyDisease metadata failures from gene-query circuits, prevented failed population fallbacks from being reported as used, and treated HTTP 404/405 as successful host reachability while retaining the status code. | Complete |
 
 ## 5. Current implemented architecture
 

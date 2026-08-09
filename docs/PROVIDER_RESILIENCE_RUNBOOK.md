@@ -1,6 +1,6 @@
 # Provider Resilience Configuration and Operations Runbook
 
-**Scope:** Stages 63-78 provider resilience layer
+**Scope:** Stages 63-79 provider resilience layer
 
 **Last verified:** 2026-08-09
 
@@ -140,6 +140,9 @@ path or `HEAD` method is not a production data operation. Use the live productio
 client gate when endpoint schema behavior must be validated. A `403`, timeout, DNS,
 TLS, connection, rate-limit, or `5xx` result predicts degraded-mode behavior but does
 not prove that a fallback has matching evidence for the selected variant.
+
+The checker therefore retains `404`/`405` in `http_status` but reports no reachability
+failure and exits successfully for those responses.
 
 ## 7. Troubleshooting
 

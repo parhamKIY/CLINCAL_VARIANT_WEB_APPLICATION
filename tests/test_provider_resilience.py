@@ -78,6 +78,19 @@ def test_capability_result_rejects_inconsistent_fallback() -> None:
         )
 
 
+def test_capability_result_rejects_failed_fallback_as_used() -> None:
+    with pytest.raises(ProviderContractError):
+        build_capability_result(
+            capability="population_frequency",
+            status="unavailable",
+            provider="ensembl_variation",
+            provider_role="fallback",
+            fallback_for="gnomad",
+            primary_failure="forbidden",
+            method="exact_mapping_population_lookup",
+        )
+
+
 def test_capability_result_rejects_unbounded_context() -> None:
     with pytest.raises(ProviderContractError):
         build_capability_result(

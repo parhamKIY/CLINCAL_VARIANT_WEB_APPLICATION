@@ -85,6 +85,8 @@ def configured_targets() -> tuple[ProviderTarget, ...]:
 
 
 def _http_failure_category(status_code: int) -> str:
+    if status_code in {404, 405}:
+        return "none"
     if status_code == 403:
         return "forbidden"
     if status_code == 429:

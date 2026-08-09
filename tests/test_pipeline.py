@@ -8220,10 +8220,38 @@ class TestEvidenceObject:
         )
 
         assert result["status"] == "unavailable"
-        assert result["provider"] == "Ensembl REST Variation"
-        assert result["fallback_used"] is True
+        assert result["provider"] == "gnomAD"
+        assert result["fallback_used"] is False
         assert result["primary_failure"] == "forbidden"
-        assert result["failure_reason"] == "timeout"
+        assert result["fallback_attempted"] is True
+        assert result["fallback_provider"] == "ensembl_variation"
+        assert result["fallback_status"] == "unavailable"
+        assert result["fallback_failure_reason"] == "timeout"
+
+        candidate = self._candidate_with_rsid()
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["vus"],
+            "population_frequency": result,
+            "literature": {
+                "status": "not_triggered",
+                "providers": {},
+                "articles": [],
+            },
+            "myvariant_fallback": {
+                "used": False,
+                "status": "unavailable",
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+        evidence = build_evidence_object(candidate)
+        capability = evidence["capability_results"]["population_frequency"]
+        stored = evidence["conditional_enrichment"]["population_frequency"]
+        assert capability["fallback_used"] is False
+        assert capability["provider"] == "gnomad"
+        assert stored["fallback_attempted"] is True
+        assert stored["fallback_status"] == "unavailable"
 
     def test_stage_66_forbidden_opens_analysis_circuit(self) -> None:
         session = FakeConditionalSession(
