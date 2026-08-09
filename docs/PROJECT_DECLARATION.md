@@ -1,10 +1,10 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 53 human report editing and audit history implemented
+**Implementation status:** Stage 54 audited Final Report selection implemented
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 54 per-variant include/exclude review
-**Document date:** 2026-08-08  
+**Next implementation milestone:** Stage 55 canonical reference expansion
+**Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
@@ -24,7 +24,7 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-53 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-54 now implement its input, phenotype,
 model-selection, interpretation-before-review, draft-report, and audited-editing
 portions. The
 authoritative target is defined in
@@ -195,6 +195,23 @@ Human-review privacy validation runs before persistence. `backend/pipeline.py`
 invalidates any prior confirmation for the edited variant, and the Streamlit review
 provides bounded field editors plus machine/current comparison and history views.
 
+### Stage 54 per-variant Final Report selection
+
+Every Draft Variant Report now carries an `include_in_final_report` boolean and a
+bounded append-only `selection_history`. The choice defaults to included and is a
+human reporting decision only; it does not rank, prioritize, or delete variants.
+Each change records sequence, old/new values, UTC timestamp, and optional bounded
+reviewer/session context, and validation replays the decision history from the
+default state.
+
+Excluded reports retain their complete evidence, interpretation, edits, provenance,
+conflict state, and exclusion decision. The selected-report projection filters only
+at reporting time and preserves original input order. Any selection change
+invalidates final confirmation. Editing an included report also invalidates it;
+editing an already excluded report does not alter the confirmed selected content.
+Pipeline schema is now `2.6`. Stage 55 owns canonical reference expansion, while
+Stage 56 owns Final Clinical Report composition.
+
 ## 3. Progress schematic
 
 ```mermaid
@@ -215,12 +232,13 @@ flowchart LR
     N --> O["Stage 51: interpretation-before-review pipeline"]
     O --> P["Stage 52: Draft Variant Report V2"]
     P --> Q["Stage 53: audited human report editing"]
-    Q --> R["Stages 54-62: remaining V3 redesign - pending"]
+    Q --> R["Stage 54: audited Final Report selection"]
+    R --> S["Stages 55-62: remaining V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q done
-    class R review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R done
+    class S review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -287,7 +305,8 @@ their original order.
 | 51 | Moved interpretation into the analysis phase before final review, exposed evidence and interpretation together, isolated per-variant failures, retired active Output A/B routing, and made finalization model-free. | Complete |
 | 52 | Added Draft Variant Report V2 with coherent identity, phenotype, evidence, conflict, interpretation, reference, provenance, and limitation sections plus immutable machine-original validation and professional Streamlit rendering. | Complete |
 | 53 | Added whitelisted report editing, PHI-safe reviewer text, append-only field history with deterministic replay, comparison/reset controls, and confirmation invalidation after edits. | Complete |
-| 54–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 54 | Added audited `include_in_final_report` decisions, full excluded-report retention, ordered selected-report projection, UI controls, and confirmation invalidation after selection changes. | Complete |
+| 55–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -303,7 +322,7 @@ flowchart TD
     CE -- No --> VI
     X --> VI["One Variant Interpretation Model per variant"]
     VI --> D["Evidence and interpretation review state"]
-    D --> H["Human edit, compare, and final confirmation"]
+    D --> H["Human edit, compare, include/exclude, and final confirmation"]
     H --> F["Model-free finalization"]
     E --> DB["SQLite draft snapshot"]
     D --> DB
@@ -404,9 +423,13 @@ original and reviewed copies begin identical. Only reviewer-owned narrative fiel
 can differ, and every difference must be reproduced by the append-only edit history.
 Stage 55 expands deterministic canonical reference mapping.
 
+Each report also retains an audited `include_in_final_report` decision. Excluded
+reports remain fully recoverable, while the selected projection preserves original
+input order and contains only included reports.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `2.5`.
+- Active pipeline schema: `2.6`.
 - SQLite schema: `2`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
@@ -482,7 +505,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **751 passed, 4 skipped**, with **85.61% coverage**. The retained Stage 44
+baseline is **758 passed, 4 skipped**, with **85.57% coverage**. The retained Stage 44
 acceptance runner now exercises the current five-variant, multi-HPO path through
 analysis-phase interpretation, review edits, confirmation, model-free finalization,
 per-variant failure isolation, provenance, and ordering. Stage 59 will replace this
@@ -601,8 +624,8 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-53 are implemented. Stage 54 still owns reviewer-controlled
-   `include_in_final_report` state and confirmation invalidation after selection.
+1. Stages 46-54 are implemented. Stage 55 still owns deterministic canonical
+   reference expansion.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -635,5 +658,7 @@ review, preserved failed variants as reviewable evidence, and removed active
 Output A/B routing from the UI. Stage 52 added the coherent, immutable-machine-original
 Draft Variant Report V2 and its professional Streamlit presentation. Stage 53 added
 whitelisted report editing, append-only replayable history, comparison/reset controls,
-and confirmation invalidation. The correct next action is Stage 54: implement
-per-variant include/exclude review.
+and confirmation invalidation. Stage 54 added audited reporting-only inclusion
+decisions, complete excluded-report retention, ordered selection projection, and
+selection-change confirmation invalidation. The correct next action is Stage 55:
+expand deterministic canonical references.

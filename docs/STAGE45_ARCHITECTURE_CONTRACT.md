@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-53 complete; Stage 54 is next
+**Implementation progress:** Stages 46-54 complete; Stage 55 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 53. Features assigned to
-Stages 54–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 54. Features assigned to
+Stages 55–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -215,10 +215,28 @@ separate reviewed copy with append-only history.
   instead of deleting audit records.
 - PHI defenses run before report state is persisted, and any edit invalidates prior
   confirmation for that variant.
-- Stage 54 owns `include_in_final_report`; Stages 55–56 own canonical references and
-  Final Clinical Report composition.
+- Stages 55–56 own canonical references and Final Clinical Report composition.
 
-## 13. Stage 45 acceptance record
+## 13. Stage 54 implementation record
+
+- Every Draft Variant Report carries `include_in_final_report`, defaulting to true,
+  as a reviewer reporting choice rather than an algorithmic rank or priority.
+- Each inclusion change appends a bounded record containing sequence, old/new boolean
+  values, UTC timestamp, and optional reviewer/session context.
+- Validation replays selection history from the default state and rejects untracked,
+  reordered, malformed, or contradictory decisions.
+- Excluded reports remain fully recoverable with evidence, interpretation, edits,
+  provenance, conflict state, and exclusion history.
+- The selected-report projection preserves original variant order; the ten-variant
+  acceptance case selects exactly three reports without deleting the other seven.
+- Any selection change invalidates final confirmation. An included-report edit also
+  invalidates it; an edit to an already excluded report retains confirmation because
+  selected report content is unchanged.
+- Pipeline schema `2.6` persists the new state. Stage 55 remains responsible for
+  canonical reference expansion, and Stage 56 remains responsible for composing the
+  Final Clinical Report.
+
+## 14. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

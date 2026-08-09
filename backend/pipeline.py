@@ -82,6 +82,7 @@ from backend.variant_interpretation import (
 from backend.variant_report import (
     DraftVariantReportError,
     build_draft_variant_reports,
+    select_included_draft_variant_reports,
     validate_draft_variant_report,
 )
 from backend.vcf_processing import (
@@ -90,7 +91,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "2.5"
+PIPELINE_SCHEMA_VERSION = "2.6"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -2504,11 +2505,20 @@ def finalize_reviewed_analysis(
         item["status"] == "failed"
         for item in working["variant_interpretation_results"]
     )
+    selected_count = len(
+        select_included_draft_variant_reports(
+            list(working["draft_variant_reports"])
+        )
+    )
     message = (
         "Final review confirmed with "
         f"{failed} explicit interpretation failure(s)."
         if failed
         else "Final review confirmed without an additional LLM call."
+    )
+    message += (
+        f" Final Report selection: {selected_count} of "
+        f"{working['variant_count']} in original input order."
     )
     _set_stage(
         working,
@@ -2536,7 +2546,7 @@ def update_draft_variant_report(
     result: PipelineResult,
     report: Mapping[str, object],
 ) -> PipelineResult:
-    """Persist one validated report edit and invalidate final confirmation."""
+    """Persist one report decision and invalidate confirmation when required."""
 
     working = validate_pipeline_result(deepcopy(result))
     if not isinstance(report, Mapping):
@@ -2559,28 +2569,73 @@ def update_draft_variant_report(
         )
     except DraftVariantReportError as exc:
         raise PipelineError(str(exc)) from exc
+    previous_report = working["draft_variant_reports"][index]
+    previous_edits = previous_report["edit_history"]
+    previous_selections = previous_report["selection_history"]
+    if (
+        validated_report["edit_history"][: len(previous_edits)]
+        != previous_edits
+        or validated_report["selection_history"][: len(previous_selections)]
+        != previous_selections
+    ):
+        raise PipelineError(
+            "Draft Variant Report history must remain append-only."
+        )
+    selection_changed = (
+        previous_report["include_in_final_report"]
+        != validated_report["include_in_final_report"]
+        or previous_selections != validated_report["selection_history"]
+    )
+    reviewed_content_changed = (
+        previous_report["reviewed_report"]
+        != validated_report["reviewed_report"]
+        or previous_report["edit_history"]
+        != validated_report["edit_history"]
+    )
+    confirmation_invalidated = selection_changed or (
+        validated_report["include_in_final_report"]
+        and reviewed_content_changed
+    )
     working["draft_variant_reports"][index] = dict(validated_report)
-    working["reviewed_evidence_packages"] = [
-        package
-        for package in working["reviewed_evidence_packages"]
-        if package["variant_index"] != index
-    ]
-    working["llm_routing_results"] = [
-        item
-        for item in working["llm_routing_results"]
-        if item["variant_index"] != index
-    ]
-    working["final_interpretation_report"] = None
-    working["workflow_state"] = "awaiting_final_review"
-    working["current_stage"] = "completed"
-    working["progress_percent"] = 100
+    if confirmation_invalidated:
+        working["reviewed_evidence_packages"] = [
+            package
+            for package in working["reviewed_evidence_packages"]
+            if package["variant_index"] != index
+        ]
+        working["llm_routing_results"] = [
+            item
+            for item in working["llm_routing_results"]
+            if item["variant_index"] != index
+        ]
+        working["final_interpretation_report"] = None
+        working["workflow_state"] = "awaiting_final_review"
+        working["current_stage"] = "completed"
+        working["progress_percent"] = 100
     LOGGER.info(
         "event=draft_variant_report_updated variant_index=%d "
-        "edit_count=%d confirmation_invalidated=true",
+        "edit_count=%d selection_count=%d confirmation_invalidated=%s",
         index,
         len(validated_report["edit_history"]),
+        len(validated_report["selection_history"]),
+        str(confirmation_invalidated).lower(),
     )
     return validate_pipeline_result(working)
+
+
+def get_selected_draft_variant_reports(
+    result: PipelineResult,
+) -> list[dict[str, object]]:
+    """Project included reports in immutable original variant order."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    try:
+        selected = select_included_draft_variant_reports(
+            list(working["draft_variant_reports"])
+        )
+    except DraftVariantReportError as exc:
+        raise PipelineError(str(exc)) from exc
+    return [dict(report) for report in selected]
 
 
 def generate_confirmed_interpretations(
@@ -2962,6 +3017,7 @@ __all__ = [
     "finalize_reviewed_analysis",
     "generate_confirmed_interpretations",
     "generate_final_interpretation_report",
+    "get_selected_draft_variant_reports",
     "resume_confirmed_analysis",
     "resume_saved_analysis",
     "create_pipeline_result",

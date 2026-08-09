@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_53_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_54_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-751_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.61%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-758_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.57%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -48,12 +48,14 @@ its original input order.
 - Stage 52 Draft Variant Report V2 is implemented and offline-verified.
 - Stage 53 safe report editing and audit history is implemented and
   offline-verified.
-- Stage 54 per-variant include/exclude review is the next bounded milestone.
-- Pipeline schema: `2.5`.
+- Stage 54 audited per-variant Final Report selection is implemented and
+  offline-verified.
+- Stage 55 canonical reference expansion is the next bounded milestone.
+- Pipeline schema: `2.6`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **751 passed, 4 skipped; 85.61% coverage**.
+- Current verified suite: **758 passed, 4 skipped; 85.57% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -66,7 +68,7 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-53 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-54 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline plus Draft Variant Report V2; later report
 lifecycle items remain planned:
@@ -179,6 +181,21 @@ editable fields appends reverse changes instead of deleting history. PHI checks 
 before persistence, and any report edit after confirmation invalidates that variant's
 confirmation. The Streamlit comparison view displays field history and side-by-side
 machine/current report states.
+
+### Stage 54 per-variant Final Report selection
+
+Every Draft Variant Report carries an audited `include_in_final_report` boolean.
+The reviewer can include or exclude each report independently; this is a reporting
+choice only and never a rank, filter, or clinical-priority score. Selection changes
+append old/new values, timestamp, sequence, and bounded reviewer context.
+
+All reports remain persisted and recoverable with their evidence, interpretation,
+edits, provenance, conflicts, and selection history. The selected-report projection
+contains only included reports and preserves original input order. Any selection
+change invalidates prior final confirmation. Editing an included report also
+invalidates confirmation; editing an already excluded report retains the current
+confirmation because it cannot change selected Final Report content. Stage 56 still
+owns Final Clinical Report composition.
 
 ## Current implemented workflow
 
@@ -340,8 +357,9 @@ Compatible services are configured through `LLM_BASE_URL`, `LLM_API_KEY`, and
 the selected model names.
 
 Draft Variant Report V2 combines these records into one coherent reviewer-facing
-view with safe audited editing. Per-variant selection remains assigned to Stage 54
-and Final Clinical Report composition to Stage 56.
+view with safe audited editing and reporting-only inclusion decisions. Canonical
+reference expansion remains assigned to Stage 55 and Final Clinical Report
+composition to Stage 56.
 
 ## Requirements
 
@@ -473,7 +491,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-751 passed, 4 skipped
+758 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -491,7 +509,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.61%**.
+Current measured coverage is **85.57%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -622,8 +640,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-53 are implemented; Stage 54 still owns the reviewer-controlled
-  per-variant include/exclude decision.
+- Stages 46-54 are implemented; Stage 55 still owns deterministic canonical
+  reference expansion.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -648,4 +666,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 54 handoff.
+- current limitations and the Stage 55 handoff.

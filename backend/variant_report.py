@@ -30,6 +30,7 @@ MAX_EVIDENCE_SECTIONS = 16
 MAX_EVIDENCE_ITEMS_PER_SECTION = 20
 MAX_REPORT_REFERENCES = 50
 MAX_REPORT_EDIT_HISTORY = 200
+MAX_SELECTION_HISTORY = 200
 MAX_REVIEWER_NOTES = 50
 MAX_REVIEWER_CONTEXT_CHARS = 200
 
@@ -150,6 +151,16 @@ class ReportEditRecord(TypedDict):
     reviewer_context: str | None
 
 
+class SelectionRecord(TypedDict):
+    """One append-only human final-report inclusion decision."""
+
+    sequence: int
+    old_value: bool
+    new_value: bool
+    timestamp: str
+    reviewer_context: str | None
+
+
 class DraftVariantReport(TypedDict):
     """Immutable machine original plus a traceable reviewer-edited layer."""
 
@@ -159,6 +170,8 @@ class DraftVariantReport(TypedDict):
     machine_original_report: VariantReportContent
     reviewed_report: VariantReportContent
     edit_history: list[ReportEditRecord]
+    include_in_final_report: bool
+    selection_history: list[SelectionRecord]
     review_status: str
     created_at: str
     updated_at: str
@@ -175,6 +188,7 @@ _INTERPRETATION_FIELDS = frozenset(InterpretationSection.__required_keys__)
 _REFERENCE_FIELDS = frozenset(ReportReference.__required_keys__)
 _PROVENANCE_FIELDS = frozenset(ReportProvenance.__required_keys__)
 _EDIT_RECORD_FIELDS = frozenset(ReportEditRecord.__required_keys__)
+_SELECTION_RECORD_FIELDS = frozenset(SelectionRecord.__required_keys__)
 _EDITABLE_PATHS = (
     "/reviewer_summary",
     "/variant_interpretation/narrative",
@@ -577,6 +591,8 @@ def build_draft_variant_report(
         "machine_original_report": deepcopy(original),
         "reviewed_report": deepcopy(original),
         "edit_history": [],
+        "include_in_final_report": True,
+        "selection_history": [],
         "review_status": "draft",
         "created_at": interpretation["generated_at"],
         "updated_at": interpretation["generated_at"],
@@ -678,6 +694,12 @@ def save_draft_variant_report(
             "Draft report edit history limit would be exceeded."
         )
     normalized_timestamp = _timestamp(timestamp)
+    if _timestamp_value(normalized_timestamp) < _timestamp_value(
+        working["updated_at"]
+    ):
+        raise DraftVariantReportError(
+            "Draft report edit timestamp predates the latest report decision."
+        )
     for field_path in changed_paths:
         old_value = _editable_value(
             working["reviewed_report"],
@@ -703,6 +725,78 @@ def save_draft_variant_report(
     working["review_status"] = "reviewed"
     working["updated_at"] = normalized_timestamp
     return validate_draft_variant_report(working)
+
+
+def set_draft_variant_report_inclusion(
+    report: object,
+    include_in_final_report: bool,
+    *,
+    timestamp: str | None = None,
+    reviewer_context: str | None = None,
+) -> DraftVariantReport:
+    """Record a human reporting decision without ranking the variant."""
+
+    working = validate_draft_variant_report(deepcopy(report))
+    if not isinstance(include_in_final_report, bool):
+        raise DraftVariantReportError(
+            "include_in_final_report must be boolean."
+        )
+    if working["include_in_final_report"] == include_in_final_report:
+        return working
+    if len(working["selection_history"]) >= MAX_SELECTION_HISTORY:
+        raise DraftVariantReportError(
+            "Draft report selection history limit would be exceeded."
+        )
+    normalized_context = _normalize_optional_review_text(
+        reviewer_context,
+        field="reviewer_context",
+    )
+    if (
+        normalized_context is not None
+        and len(normalized_context) > MAX_REVIEWER_CONTEXT_CHARS
+    ):
+        raise DraftVariantReportError(
+            "reviewer_context exceeds the supported length."
+        )
+    normalized_timestamp = _timestamp(timestamp)
+    if _timestamp_value(normalized_timestamp) < _timestamp_value(
+        working["updated_at"]
+    ):
+        raise DraftVariantReportError(
+            "Draft report selection timestamp predates the latest report decision."
+        )
+    old_value = working["include_in_final_report"]
+    working["selection_history"].append(
+        {
+            "sequence": len(working["selection_history"]) + 1,
+            "old_value": old_value,
+            "new_value": include_in_final_report,
+            "timestamp": normalized_timestamp,
+            "reviewer_context": normalized_context,
+        }
+    )
+    working["include_in_final_report"] = include_in_final_report
+    working["review_status"] = "reviewed"
+    working["updated_at"] = normalized_timestamp
+    return validate_draft_variant_report(working)
+
+
+def select_included_draft_variant_reports(
+    reports: list[object],
+) -> list[DraftVariantReport]:
+    """Return included reports in their original input order."""
+
+    validated = [validate_draft_variant_report(report) for report in reports]
+    indexes = [report["variant_index"] for report in validated]
+    if indexes != sorted(indexes) or len(indexes) != len(set(indexes)):
+        raise DraftVariantReportError(
+            "Draft reports must retain unique original input order."
+        )
+    return [
+        report
+        for report in validated
+        if report["include_in_final_report"]
+    ]
 
 
 def _require_fields(
@@ -1162,23 +1256,85 @@ def validate_draft_variant_report(
         raise DraftVariantReportError(
             "Draft report reviewed content is not explained by edit history."
         )
-    expected_status = "reviewed" if history else "draft"
+    include_in_final_report = report["include_in_final_report"]
+    if not isinstance(include_in_final_report, bool):
+        raise DraftVariantReportError(
+            "Draft report include_in_final_report must be boolean."
+        )
+    selection_history = report["selection_history"]
+    if (
+        not isinstance(selection_history, list)
+        or len(selection_history) > MAX_SELECTION_HISTORY
+    ):
+        raise DraftVariantReportError(
+            "Draft report selection_history must be a bounded list."
+        )
+    replayed_selection = True
+    selection_timestamp = _timestamp_value(created_at)
+    for selection_index, record_value in enumerate(selection_history):
+        path = f"draft_variant_report.selection_history[{selection_index}]"
+        record = _require_fields(
+            record_value,
+            _SELECTION_RECORD_FIELDS,
+            path,
+        )
+        if record["sequence"] != selection_index + 1:
+            raise DraftVariantReportError(
+                "Draft report selection sequence is invalid."
+            )
+        old_value = record["old_value"]
+        new_value = record["new_value"]
+        if not isinstance(old_value, bool) or not isinstance(new_value, bool):
+            raise DraftVariantReportError(
+                "Draft report selection values must be boolean."
+            )
+        if old_value != replayed_selection or old_value == new_value:
+            raise DraftVariantReportError(
+                "Draft report selection history is not append-only."
+            )
+        timestamp = _timestamp(cast(str, record["timestamp"]))
+        if timestamp != record["timestamp"]:
+            raise DraftVariantReportError(
+                "Draft report selection timestamp is not normalized."
+            )
+        timestamp_value = _timestamp_value(timestamp)
+        if timestamp_value < selection_timestamp:
+            raise DraftVariantReportError(
+                "Draft report selection timestamps are out of order."
+            )
+        selection_timestamp = timestamp_value
+        context = record["reviewer_context"]
+        if context is not None:
+            normalized_context = _normalize_optional_review_text(
+                context,
+                field=f"{path}.reviewer_context",
+            )
+            if (
+                normalized_context != context
+                or len(cast(str, context)) > MAX_REVIEWER_CONTEXT_CHARS
+            ):
+                raise DraftVariantReportError(
+                    "Draft report selection reviewer context is invalid."
+                )
+        replayed_selection = new_value
+    if replayed_selection != include_in_final_report:
+        raise DraftVariantReportError(
+            "Draft report inclusion is not explained by selection history."
+        )
+    expected_status = "reviewed" if history or selection_history else "draft"
     if report["review_status"] != expected_status:
         raise DraftVariantReportError(
             "Draft report review_status does not match its edit history."
         )
     updated_at = _timestamp(cast(str, report["updated_at"]))
-    expected_updated_at = (
-        cast(str, history[-1]["timestamp"])
-        if history
-        else created_at
-    )
+    latest_timestamp = max(previous_timestamp, selection_timestamp)
+    expected_updated_at = latest_timestamp.isoformat().replace("+00:00", "Z")
     if (
         updated_at != report["updated_at"]
         or updated_at != expected_updated_at
     ):
         raise DraftVariantReportError(
-            "Draft report updated_at does not match its edit history."
+            "Draft report updated_at does not match its review history."
         )
     if evidence is not None:
         try:
@@ -1252,9 +1408,12 @@ __all__ = [
     "DraftVariantReport",
     "DraftVariantReportError",
     "ReportEditRecord",
+    "SelectionRecord",
     "VariantReportContent",
     "build_draft_variant_report",
     "build_draft_variant_reports",
     "save_draft_variant_report",
+    "select_included_draft_variant_reports",
+    "set_draft_variant_report_inclusion",
     "validate_draft_variant_report",
 ]

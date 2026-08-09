@@ -175,6 +175,8 @@ from backend.variant_report import (
     build_draft_variant_report,
     build_draft_variant_reports,
     save_draft_variant_report,
+    select_included_draft_variant_reports,
+    set_draft_variant_report_inclusion,
     validate_draft_variant_report,
 )
 from backend.pipeline import (
@@ -191,6 +193,7 @@ from backend.pipeline import (
     finalize_reviewed_analysis,
     generate_confirmed_interpretations,
     generate_final_interpretation_report,
+    get_selected_draft_variant_reports,
     retry_failed_interpretations,
     resume_confirmed_analysis,
     resume_saved_analysis,
@@ -10950,6 +10953,239 @@ class TestStage53HumanReportEditing:
         assert updated["workflow_state"] == "awaiting_final_review"
         assert updated["reviewed_evidence_packages"] == []
         assert updated["draft_variant_reports"][0] == edited
+
+
+class TestStage54FinalReportSelection:
+    """Verify audited reporting choices without discarding variants."""
+
+    def test_inclusion_choice_is_audited_and_machine_content_is_retained(
+        self,
+    ) -> None:
+        evidence, interpretation, report = (
+            TestStage53HumanReportEditing._report()
+        )
+        original = deepcopy(report)
+
+        excluded = set_draft_variant_report_inclusion(
+            report,
+            False,
+            timestamp="2026-08-09T09:00:00Z",
+            reviewer_context="test-review-session",
+        )
+
+        assert original["include_in_final_report"] is True
+        assert excluded["include_in_final_report"] is False
+        assert excluded["machine_original_report"] == original[
+            "machine_original_report"
+        ]
+        assert excluded["reviewed_report"] == original["reviewed_report"]
+        assert excluded["edit_history"] == original["edit_history"]
+        assert excluded["selection_history"] == [
+            {
+                "sequence": 1,
+                "old_value": True,
+                "new_value": False,
+                "timestamp": "2026-08-09T09:00:00Z",
+                "reviewer_context": "test-review-session",
+            }
+        ]
+        validate_draft_variant_report(
+            excluded,
+            evidence=evidence,
+            interpretation=interpretation,
+        )
+
+    def test_selection_replay_rejects_tampering(self) -> None:
+        _, _, report = TestStage53HumanReportEditing._report()
+        excluded = set_draft_variant_report_inclusion(
+            report,
+            False,
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        restored = set_draft_variant_report_inclusion(
+            excluded,
+            True,
+            timestamp="2026-08-09T09:05:00Z",
+        )
+        assert restored["include_in_final_report"] is True
+        assert [
+            record["new_value"]
+            for record in restored["selection_history"]
+        ] == [False, True]
+
+        tampered = deepcopy(restored)
+        tampered["selection_history"][1]["old_value"] = True
+        with pytest.raises(
+            DraftVariantReportError,
+            match="not append-only",
+        ):
+            validate_draft_variant_report(tampered)
+
+    def test_ten_reports_project_exactly_three_in_original_order(
+        self,
+    ) -> None:
+        base_evidence, _ = TestStage52DraftVariantReportV2._success_inputs()
+        evidence_objects: list[dict[str, object]] = []
+        interpretations: list[dict[str, object]] = []
+        for index in range(10):
+            evidence = deepcopy(base_evidence)
+            position = 166848215 + index
+            evidence["variant"]["pos"] = position
+            evidence["variant_context"]["input"]["pos"] = position
+            evidence["variant_context"]["normalized"]["pos"] = position
+            evidence_objects.append(evidence)
+            interpretations.append(
+                dict(
+                    interpret_variant(
+                        evidence,
+                        variant_index=index,
+                        client=LLMClient(
+                            FakeLLMAdapter(
+                                _variant_interpretation_response()
+                            )
+                        ),
+                    )
+                )
+            )
+        reports = build_draft_variant_reports(
+            evidence_objects,
+            interpretations,
+        )
+        selected_indexes = {1, 4, 8}
+        for index, report in enumerate(reports):
+            if index not in selected_indexes:
+                reports[index] = set_draft_variant_report_inclusion(
+                    report,
+                    False,
+                    timestamp="2026-08-09T09:00:00Z",
+                )
+
+        selected = select_included_draft_variant_reports(list(reports))
+
+        assert len(reports) == 10
+        assert [report["variant_index"] for report in selected] == [1, 4, 8]
+        assert all(
+            report["machine_original_report"]["evidence_sections"]
+            and "variant_interpretation" in report["reviewed_report"]
+            and "provenance" in report["reviewed_report"]
+            for report in reports
+        )
+
+    def test_selection_change_invalidates_final_confirmation(self) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        confirmed = confirm_reviewed_evidence(
+            result,
+            result["evidence_review_reports"],
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        excluded = set_draft_variant_report_inclusion(
+            confirmed["draft_variant_reports"][0],
+            False,
+            timestamp="2026-08-09T09:05:00Z",
+        )
+
+        updated = update_draft_variant_report(confirmed, excluded)
+
+        assert updated["reviewed_evidence_packages"] == []
+        assert updated["workflow_state"] == "awaiting_final_review"
+        assert get_selected_draft_variant_reports(updated) == []
+
+    def test_toggle_back_still_invalidates_confirmation(self) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        confirmed = confirm_reviewed_evidence(
+            result,
+            result["evidence_review_reports"],
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        excluded = set_draft_variant_report_inclusion(
+            confirmed["draft_variant_reports"][0],
+            False,
+            timestamp="2026-08-09T09:05:00Z",
+        )
+        restored = set_draft_variant_report_inclusion(
+            excluded,
+            True,
+            timestamp="2026-08-09T09:06:00Z",
+        )
+
+        updated = update_draft_variant_report(confirmed, restored)
+
+        assert updated["reviewed_evidence_packages"] == []
+        assert len(updated["draft_variant_reports"][0][
+            "selection_history"
+        ]) == 2
+
+    def test_editing_an_excluded_report_keeps_current_confirmation(self) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        excluded = set_draft_variant_report_inclusion(
+            result["draft_variant_reports"][0],
+            False,
+            timestamp="2026-08-09T09:00:00Z",
+        )
+        result = update_draft_variant_report(result, excluded)
+        confirmed = confirm_reviewed_evidence(
+            result,
+            result["evidence_review_reports"],
+            timestamp="2026-08-09T09:05:00Z",
+        )
+        finalized = finalize_reviewed_analysis(confirmed)
+        report = finalized["draft_variant_reports"][0]
+        edited = save_draft_variant_report(
+            report,
+            reviewer_summary="Retained excluded-variant note.",
+            interpretation_narrative=report["reviewed_report"][
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=report["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=[],
+            timestamp="2026-08-09T09:10:00Z",
+        )
+
+        updated = update_draft_variant_report(finalized, edited)
+
+        assert updated["workflow_state"] == "completed"
+        assert len(updated["reviewed_evidence_packages"]) == 1
+        assert updated["draft_variant_reports"][0][
+            "reviewed_report"
+        ]["reviewer_summary"] == "Retained excluded-variant note."
+
+    def test_ui_checkbox_persists_selection_and_explains_semantics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        saved: list[PipelineResult] = []
+        monkeypatch.setattr(
+            "frontend.evidence_review.save_pipeline_state",
+            lambda result: saved.append(deepcopy(result)) or result,
+        )
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = result
+        app.run(timeout=10)
+
+        include = next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.label == "Include this variant in Final Report"
+        )
+        assert include.value is True
+        include.set_value(False).run(timeout=10)
+
+        stored = app.session_state["pipeline_result"]
+        assert not app.exception
+        assert stored["draft_variant_reports"][0][
+            "include_in_final_report"
+        ] is False
+        assert stored["draft_variant_reports"][0]["selection_history"]
+        assert saved[-1]["draft_variant_reports"][0][
+            "include_in_final_report"
+        ] is False
+        assert any(
+            "reporting choice only" in caption.value
+            for caption in app.caption
+        )
 
 
 class TestClinicalReportContract:

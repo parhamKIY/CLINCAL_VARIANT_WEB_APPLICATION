@@ -27,6 +27,7 @@ from backend.variant_report import (
     DraftVariantReport,
     DraftVariantReportError,
     save_draft_variant_report,
+    set_draft_variant_report_inclusion,
 )
 
 
@@ -573,12 +574,17 @@ def _render_report_editor(
             dict[str, ReviewedEvidencePackage],
             st.session_state.setdefault(REVIEW_PACKAGES_KEY, {}),
         )
-        _invalidate_confirmation(
-            result,
-            evidence_report["report_id"],
-            report["variant_index"],
-            packages,
-        )
+        retained_indexes = {
+            package["variant_index"]
+            for package in result.get("reviewed_evidence_packages", [])
+        }
+        if report["variant_index"] not in retained_indexes:
+            packages.pop(evidence_report["report_id"], None)
+            st.session_state.pop(
+                f"{_REVIEW_WIDGET_PREFIX}privacy_"
+                f"{evidence_report['report_id']}",
+                None,
+            )
     st.session_state["pipeline_result"] = result
     persisted = _persist_review_state(result)
     action = "reset" if reset else "saved"
@@ -588,6 +594,77 @@ def _render_report_editor(
         _set_notice(
             "warning",
             f"Report {action} in this session, but persistence failed.",
+        )
+    st.rerun()
+
+
+def _render_inclusion_control(
+    report: DraftVariantReport,
+    result: PipelineResult,
+) -> None:
+    """Render and persist the Stage 54 reporting-only decision."""
+
+    include = st.checkbox(
+        "Include this variant in Final Report",
+        value=report["include_in_final_report"],
+        key=(
+            f"{_REVIEW_WIDGET_PREFIX}include_final_"
+            f"{report['report_id']}"
+        ),
+    )
+    st.caption(
+        "This is a reporting choice only; it does not rank or prioritize "
+        "variants. Excluded variants and their full audit history remain "
+        "recoverable."
+    )
+    if include == report["include_in_final_report"]:
+        return
+    try:
+        updated_report = set_draft_variant_report_inclusion(
+            report,
+            include,
+            reviewer_context="local_streamlit_session",
+        )
+        updated_result = update_draft_variant_report(
+            result,
+            updated_report,
+        )
+    except (DraftVariantReportError, PipelineError) as exc:
+        st.error(f"Final Report selection was not saved: {exc}")
+        return
+    result.clear()
+    result.update(updated_result)
+    evidence_report = next(
+        (
+            item
+            for item in result["evidence_review_reports"]
+            if item["variant_index"] == report["variant_index"]
+        ),
+        None,
+    )
+    if evidence_report is not None:
+        packages = cast(
+            dict[str, ReviewedEvidencePackage],
+            st.session_state.setdefault(REVIEW_PACKAGES_KEY, {}),
+        )
+        packages.pop(evidence_report["report_id"], None)
+        st.session_state.pop(
+            f"{_REVIEW_WIDGET_PREFIX}privacy_"
+            f"{evidence_report['report_id']}",
+            None,
+        )
+    st.session_state["pipeline_result"] = result
+    persisted = _persist_review_state(result)
+    decision = "included" if include else "excluded"
+    if persisted:
+        _set_notice(
+            "success",
+            f"Variant {decision} in the Final Report selection.",
+        )
+    else:
+        _set_notice(
+            "warning",
+            f"Variant {decision} in this session, but persistence failed.",
         )
     st.rerun()
 
@@ -617,6 +694,23 @@ def _render_report_comparison(report: DraftVariantReport) -> None:
             ],
             hide_index=True,
         )
+    st.markdown("**Final Report selection history**")
+    if report["selection_history"]:
+        st.dataframe(
+            [
+                {
+                    "Sequence": decision["sequence"],
+                    "Old value": decision["old_value"],
+                    "New value": decision["new_value"],
+                    "Timestamp": decision["timestamp"],
+                    "Context": decision["reviewer_context"],
+                }
+                for decision in report["selection_history"]
+            ],
+            hide_index=True,
+        )
+    else:
+        st.caption("No Final Report selection changes have been recorded.")
     original_column, reviewed_column = st.columns(2)
     with original_column:
         st.markdown("**Machine original**")
@@ -707,13 +801,19 @@ def _render_finalization_action(result: PipelineResult) -> None:
         item.get("status") == "failed"
         for item in result.get("variant_interpretation_results", [])
     )
+    included_count = sum(
+        bool(report.get("include_in_final_report"))
+        for report in result.get("draft_variant_reports", [])
+    )
 
     with st.container(border=True):
         st.markdown("**Finalize reviewed analysis**")
         st.caption(
             f"Confirmed variants: {len(confirmed_indexes)} of "
             f"{variant_count}. Finalization validates the persisted review "
-            "state and does not make another LLM call."
+            "state and does not make another LLM call. Final Report "
+            f"selection: {included_count} of {variant_count}, in original "
+            "input order."
         )
         if not fully_confirmed:
             st.info(
@@ -817,6 +917,15 @@ def render_evidence_review(
         "append-only audit trail. Variant identity, provider evidence, "
         "provenance, and the machine original remain immutable."
     )
+    selected_count = sum(
+        bool(item.get("include_in_final_report"))
+        for item in result.get("draft_variant_reports", [])
+    )
+    st.caption(
+        f"Final Report selection: {selected_count} of "
+        f"{result['variant_count']} variants."
+    )
+    _render_inclusion_control(draft_variant_report, result)
     (
         report_tab,
         report_editor_tab,
