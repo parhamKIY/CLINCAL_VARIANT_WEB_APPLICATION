@@ -1383,7 +1383,7 @@ def load_pipeline_state(
         ):
             raise DatabaseReadError(
                 "This legacy Stage 44 analysis cannot be resumed by the "
-                "Stage 51 review workflow."
+                "Stage 52 report workflow."
             )
         validated = validate_pipeline_result(raw)
     except DatabaseReadError:

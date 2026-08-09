@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_51_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_52_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-742_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.61%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-746_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.65%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -45,12 +45,13 @@ its original input order.
   implemented and offline-verified.
 - Stage 51 interpretation-before-final-review pipeline refactor is implemented and
   offline-verified.
-- Stage 52 Draft Variant Report V2 is the next bounded milestone.
-- Pipeline schema: `2.4`.
+- Stage 52 Draft Variant Report V2 is implemented and offline-verified.
+- Stage 53 safe report editing and audit history is the next bounded milestone.
+- Pipeline schema: `2.5`.
 - Evidence Object schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **742 passed, 4 skipped; 85.61% coverage**.
+- Current verified suite: **746 passed, 4 skipped; 85.65% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -63,9 +64,10 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-51 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-52 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
-interpretation-before-review pipeline; later report lifecycle items remain planned:
+interpretation-before-review pipeline plus Draft Variant Report V2; later report
+lifecycle items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -146,6 +148,21 @@ draft, and confirm all variants. Finalization validates that complete reviewed s
 without another LLM call. Legacy conflict routing and `Output B` generation are no
 longer part of the active UI. Recovery schema `2` retains the selected interpretation
 model and reruns the complete analysis phase after interruption.
+
+### Stage 52 Draft Variant Report V2
+
+`backend/variant_report.py` composes one schema-`2.0` Draft Variant Report for each
+ordered evidence/interpretation pair. Each report presents normalized variant and
+transcript identity, accepted HPO and disease context, source-aware evidence sections,
+deterministic conflict status, the model interpretation or explicit failure,
+references, compact provenance, and safety limitations.
+
+The machine original and separate reviewed copy begin identical. Pipeline validation
+reconstructs the expected report from its Evidence Object and interpretation result,
+so an untracked edit, identity mismatch, reordered report, or untrusted non-HTTPS link
+fails closed. The Streamlit review opens on the coherent report; raw evidence JSON is
+not required to understand the analyzed variant. Stage 53 owns bounded editing of the
+new report and its append-only audit history.
 
 ## Current implemented workflow
 
@@ -305,8 +322,9 @@ The only supported provider protocol is currently `openai_compatible`.
 Compatible services are configured through `LLM_BASE_URL`, `LLM_API_KEY`, and
 the selected model names.
 
-Stage 52 will replace these parallel ordered records with the coherent Draft Variant
-Report V2 schema. Final Clinical Report composition remains assigned to Stage 56.
+Draft Variant Report V2 combines these records into one coherent reviewer-facing
+view. Safe editing remains assigned to Stage 53 and Final Clinical Report composition
+to Stage 56.
 
 ## Requirements
 
@@ -438,7 +456,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-742 passed, 4 skipped
+746 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -456,7 +474,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.61%**.
+Current measured coverage is **85.65%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -556,7 +574,8 @@ clinical_variant_app/
 │   ├── privacy.py
 │   ├── report.py
 │   ├── report_exports.py
-│   └── variant_interpretation.py # Single-model interpretation contract
+│   ├── variant_interpretation.py # Single-model interpretation contract
+│   └── variant_report.py         # Draft Variant Report V2 composition
 ├── frontend/
 │   ├── evidence_review.py
 │   ├── execution.py              # Background jobs and refresh recovery
@@ -586,8 +605,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-51 are implemented; Stage 52 still owns the coherent Draft Variant
-  Report V2 schema.
+- Stages 46-52 are implemented; Stage 53 still owns safe Draft Variant Report
+  editing and audit history.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -612,4 +631,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 52 handoff.
+- current limitations and the Stage 53 handoff.

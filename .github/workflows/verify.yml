@@ -18,6 +18,9 @@ jobs:
       LLM_MODEL: offline-test-model
       LLM_MODEL_LIGHT: offline-light-model
       LLM_MODEL_STRONG: offline-strong-model
+      GENOME_ASSEMBLY: GRCh38
+      PHENOTYPE_EXTRACTION_MODEL: offline-phenotype-model
+      VARIANT_INTERPRETATION_MODEL: offline-interpretation-model
 
     steps:
       - uses: actions/checkout@v7

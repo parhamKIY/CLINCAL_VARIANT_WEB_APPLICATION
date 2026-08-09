@@ -330,45 +330,134 @@ def _render_package_summary(
         )
 
 
-def _render_interpretation_state(
+def _render_draft_variant_report(
     result: PipelineResult,
     variant_index: int,
 ) -> None:
-    interpretation = next(
+    report = next(
         (
             item
-            for item in result.get("variant_interpretation_results", [])
+            for item in result.get("draft_variant_reports", [])
             if item.get("variant_index") == variant_index
         ),
         None,
     )
-    if interpretation is None:
-        st.error("No pre-review interpretation result is available.")
+    if report is None:
+        st.error("No Draft Variant Report is available for this variant.")
         return
-    if interpretation.get("status") == "failed":
+    content = report["reviewed_report"]
+    summary = content["variant_summary"]
+    st.markdown(f"### {summary['display_label']}")
+    summary_rows = [
+        {"Field": "Gene", "Value": summary.get("gene") or "Not available"},
+        {"Field": "Transcript", "Value": summary.get("transcript") or "Not available"},
+        {"Field": "Coding HGVS", "Value": summary.get("hgvs_c") or "Not available"},
+        {"Field": "Protein HGVS", "Value": summary.get("hgvs_p") or "Not available"},
+        {
+            "Field": "Consequence",
+            "Value": summary.get("consequence") or "Not available",
+        },
+        {"Field": "rsID", "Value": summary.get("rsid") or "Not available"},
+    ]
+    st.table(summary_rows)
+
+    phenotype = content["phenotype_context"]
+    st.markdown("#### Phenotype context")
+    st.write(
+        "Accepted HPO terms: "
+        + (", ".join(phenotype["accepted_hpo_terms"]) or "None")
+    )
+    st.write(
+        "Matched HPO terms: "
+        + (", ".join(phenotype["matched_hpo_terms"]) or "None")
+    )
+    if phenotype["phenotype_score"] is not None:
+        st.caption(f"Phenotype score: {phenotype['phenotype_score']}")
+    for summary_item in phenotype["phenotype_to_gene_summary"]:
+        st.write(f"- {summary_item}")
+    for context in phenotype["disease_context"]:
+        st.write(f"- {context}")
+
+    st.markdown("#### Evidence")
+    for section in content["evidence_sections"]:
+        with st.expander(
+            f"{section['source']} — {section['status']}",
+            expanded=section["status"] == "success",
+        ):
+            if section["items"]:
+                st.table(
+                    [
+                        {
+                            "Finding": item["label"],
+                            "Value": item["value"],
+                        }
+                        for item in section["items"]
+                    ]
+                )
+            else:
+                st.caption("No source finding was available.")
+
+    conflict = content["conflict_summary"]
+    st.markdown("#### Conflict summary")
+    conflict_message = (
+        f"Status: {conflict['status']} · Severity: {conflict['severity']}"
+    )
+    if conflict["detected"]:
+        st.warning(conflict_message)
+    else:
+        st.success(conflict_message)
+    for finding in conflict["findings"]:
+        st.write(f"- {finding}")
+
+    interpretation = content["variant_interpretation"]
+    st.markdown("#### Variant interpretation")
+    if interpretation["status"] == "failed":
         st.error(
             "Interpretation is unavailable because the model request "
-            f"failed ({interpretation.get('error_type') or 'unknown error'})."
+            f"failed ({interpretation['failure_type'] or 'unknown error'})."
         )
         st.caption(
             "Collected evidence remains available for review and the "
             "variant has not been removed."
         )
-        return
-    st.markdown("**Variant interpretation**")
-    st.write(interpretation.get("interpretation"))
-    st.markdown("**Conflict assessment**")
-    st.write(interpretation.get("conflict_assessment"))
-    warnings = interpretation.get("warnings")
-    if isinstance(warnings, list):
-        for warning in warnings:
-            st.warning(str(warning))
+    else:
+        st.write(interpretation["narrative"])
+        st.markdown("**Conflict assessment**")
+        st.write(interpretation["conflict_assessment"])
+    for warning in interpretation["warnings"]:
+        st.warning(warning)
     st.caption(
-        f"Model: {interpretation.get('configured_model')} · "
-        f"Prompt: {interpretation.get('prompt_version')} · "
-        "Conflict severity supplied: "
-        f"{interpretation.get('conflict_severity')}"
+        f"Model: {interpretation['model']} · "
+        f"Prompt: {interpretation['prompt_version']}"
     )
+
+    st.markdown("#### References")
+    if not content["references"]:
+        st.caption("No trusted reference was available.")
+    for index, reference in enumerate(content["references"], start=1):
+        label = reference["source"]
+        if reference["identifier"]:
+            label += f" — {reference['identifier']}"
+        if reference["url"]:
+            st.link_button(f"[{index}] {label}", reference["url"])
+        else:
+            st.write(f"[{index}] {label}")
+
+    with st.expander("Provenance and limitations"):
+        provenance = content["provenance"]
+        st.write(
+            "Providers: "
+            + (", ".join(provenance["providers"]) or "None recorded")
+        )
+        st.write(
+            "Upstream sources: "
+            + (
+                ", ".join(provenance["upstream_sources"])
+                or "None recorded"
+            )
+        )
+        for limitation in content["limitations"]:
+            st.write(f"- {limitation}")
 
 
 def _render_confirmation(
@@ -531,17 +620,17 @@ def render_evidence_review(
         "The immutable evidence and pre-review interpretation remain "
         "available for comparison."
     )
-    interpretation_tab, editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
+    report_tab, editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
         [
-            "Interpretation",
+            "Draft Variant Report",
             "Edit evidence draft",
             "Original evidence",
             "Edit history",
             "Final confirmation",
         ]
     )
-    with interpretation_tab:
-        _render_interpretation_state(result, report["variant_index"])
+    with report_tab:
+        _render_draft_variant_report(result, report["variant_index"])
     with editor_tab:
         _render_editor(report, selected, drafts, result)
     with original_tab:

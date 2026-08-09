@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-51 complete; Stage 52 is next
+**Implementation progress:** Stages 46-52 complete; Stage 53 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 51. Features assigned to
-Stages 52–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 52. Features assigned to
+Stages 53–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -185,12 +185,25 @@ Stage 51 replaced the active Stage 44 two-phase execution path for new analyses:
 - persisted pipeline payloads now use schema `2.4`; older schema-2 payloads receive
   an explicit unsupported-legacy-resume error instead of silent reinterpretation.
 
-Stage 51 intentionally stores the existing evidence review report and the new
-interpretation result as separate, ordered per-variant records. Stage 52 owns the
-coherent Draft Variant Report V2 schema that combines them and adds the next report
-lifecycle fields.
+Stage 52 now combines those ordered records into a coherent Draft Variant Report V2.
+Its machine original and separate reviewed copy are identical and immutable at this
+stage. Stage 53 owns safe editing and append-only report audit history.
 
-## 11. Stage 45 acceptance record
+## 11. Stage 52 implementation record
+
+- Draft Variant Report schema `2.0` combines normalized identity, phenotype context,
+  source-aware evidence, deterministic conflict state, interpretation, references,
+  provenance, and limitations.
+- One report is built for every variant in original order, including an explicit
+  interpretation-unavailable section when a model task fails.
+- Pipeline schema `2.5` persists and validates each report against its originating
+  Evidence Object and Variant Interpretation Result.
+- The Streamlit review renders a professional report structure before exposing the
+  existing evidence-editor and audit controls.
+- Stage 52 does not implement report editing, include/exclude state, canonical link
+  expansion, or Final Clinical Report composition; those remain Stages 53–56.
+
+## 12. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

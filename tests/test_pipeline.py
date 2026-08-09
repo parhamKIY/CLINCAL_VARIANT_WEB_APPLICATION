@@ -169,6 +169,13 @@ from backend.variant_interpretation import (
     interpret_variants,
     validate_variant_interpretation_result,
 )
+from backend.variant_report import (
+    DRAFT_VARIANT_REPORT_SCHEMA_VERSION,
+    DraftVariantReportError,
+    build_draft_variant_report,
+    build_draft_variant_reports,
+    validate_draft_variant_report,
+)
 from backend.pipeline import (
     PIPELINE_API_ORDER,
     PIPELINE_SCHEMA_VERSION,
@@ -8086,6 +8093,18 @@ class TestEvidenceObject:
         ] == result["evidence_objects"]
         assert len(adapter.requests) == 2
         assert len(result["variant_interpretation_results"]) == 2
+        assert len(result["draft_variant_reports"]) == 2
+        assert [
+            report["variant_index"]
+            for report in result["draft_variant_reports"]
+        ] == [0, 1]
+        assert all(
+            report["machine_original_report"][
+                "variant_interpretation"
+            ]["status"]
+            == "success"
+            for report in result["draft_variant_reports"]
+        )
         assert result["api_statuses"][-1]["status"] == "success"
 
     def test_stage_32_enrichment_flows_into_bounded_evidence_lineage(
@@ -10598,6 +10617,163 @@ class TestStage50SingleModelInterpretation:
             validate_variant_interpretation_result(invalid)
 
 
+class TestStage52DraftVariantReportV2:
+    """Verify coherent evidence-and-interpretation report composition."""
+
+    @staticmethod
+    def _success_inputs() -> tuple[dict[str, object], dict[str, object]]:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        interpretation = dict(
+            interpret_variant(
+                evidence,
+                client=LLMClient(
+                    FakeLLMAdapter(_variant_interpretation_response())
+                ),
+            )
+        )
+        return evidence, interpretation
+
+    def test_report_combines_readable_sections_and_machine_provenance(
+        self,
+    ) -> None:
+        evidence, interpretation = self._success_inputs()
+
+        report = build_draft_variant_report(
+            evidence,
+            interpretation,
+            variant_index=0,
+        )
+        content = report["machine_original_report"]
+
+        assert report["schema_version"] == (
+            DRAFT_VARIANT_REPORT_SCHEMA_VERSION
+        )
+        assert content["variant_summary"]["gene"] == "SCN1A"
+        assert content["variant_summary"]["assembly"] == "GRCh38"
+        assert content["phenotype_context"][
+            "accepted_hpo_terms"
+        ] == ["HP:0001250", "HP:0001263"]
+        assert {
+            section["source"]
+            for section in content["evidence_sections"]
+        } >= {
+            "Ensembl VEP",
+            "GeneBe",
+            "NCBI ClinVar",
+            "ClinGen / GenCC",
+            "ClinGen CSpec",
+            "Literature enrichment",
+        }
+        assert content["variant_interpretation"]["narrative"] == (
+            interpretation["interpretation"]
+        )
+        assert content["references"][0]["url"].startswith("https://")
+        assert report["reviewed_report"] == content
+        assert report["reviewed_report"] is not content
+        validate_draft_variant_report(
+            report,
+            evidence=evidence,
+            interpretation=interpretation,
+        )
+
+    def test_failed_interpretation_remains_a_coherent_report(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        failed = dict(
+            interpret_variants(
+                [evidence],
+                client=LLMClient(
+                    FakeLLMAdapter(LLMTimeoutError("isolated timeout"))
+                ),
+            )[0]
+        )
+
+        report = build_draft_variant_report(
+            evidence,
+            failed,
+            variant_index=0,
+        )
+        content = report["machine_original_report"]
+
+        assert content["evidence_sections"]
+        assert content["variant_interpretation"] == {
+            "status": "failed",
+            "narrative": None,
+            "conflict_assessment": None,
+            "warnings": [],
+            "model": failed["configured_model"],
+            "prompt_version": failed["prompt_version"],
+            "generated_at": failed["generated_at"],
+            "failure_type": "LLMTimeoutError",
+        }
+        assert any(
+            "evidence remains reviewable" in limitation
+            for limitation in content["limitations"]
+        )
+
+    def test_untracked_edit_and_untrusted_reference_are_rejected(
+        self,
+    ) -> None:
+        evidence, interpretation = self._success_inputs()
+        report = build_draft_variant_report(
+            evidence,
+            interpretation,
+            variant_index=0,
+        )
+        report["reviewed_report"]["variant_interpretation"][
+            "narrative"
+        ] = "Untracked replacement."
+
+        with pytest.raises(
+            DraftVariantReportError,
+            match="must match its immutable original",
+        ):
+            validate_draft_variant_report(report)
+
+        unsafe = build_draft_variant_report(
+            evidence,
+            interpretation,
+            variant_index=0,
+        )
+        unsafe["machine_original_report"]["references"][0][
+            "url"
+        ] = "http://untrusted.example/reference"
+        unsafe["reviewed_report"] = deepcopy(
+            unsafe["machine_original_report"]
+        )
+        with pytest.raises(
+            DraftVariantReportError,
+            match="trusted HTTPS reference",
+        ):
+            validate_draft_variant_report(unsafe)
+
+    def test_batch_preserves_input_order(self) -> None:
+        first, first_interpretation = self._success_inputs()
+        second = deepcopy(first)
+        second["variant"]["pos"] = 166848216
+        second["variant_context"]["input"]["pos"] = 166848216
+        second["variant_context"]["normalized"]["pos"] = 166848216
+        second_interpretation = dict(
+            interpret_variant(
+                second,
+                variant_index=1,
+                client=LLMClient(
+                    FakeLLMAdapter(_variant_interpretation_response())
+                ),
+            )
+        )
+
+        reports = build_draft_variant_reports(
+            [first, second],
+            [first_interpretation, second_interpretation],
+        )
+
+        assert [report["variant_index"] for report in reports] == [0, 1]
+        assert [
+            report["machine_original_report"]["variant_summary"]["pos"]
+            for report in reports
+        ] == [166848215, 166848216]
+
+
 class TestClinicalReportContract:
     """Verify the render-ready Stage 9 report boundary."""
 
@@ -12008,6 +12184,15 @@ class TestStage40FrontendReviewWorkflow:
                 )
             )
         ]
+        result["draft_variant_reports"] = [
+            dict(
+                build_draft_variant_report(
+                    evidence,
+                    result["variant_interpretation_results"][0],
+                    variant_index=0,
+                )
+            )
+        ]
         result["workflow_state"] = "awaiting_final_review"
         result["reviewed_evidence_packages"] = []
         result["llm_routing_results"] = []
@@ -12029,6 +12214,12 @@ class TestStage40FrontendReviewWorkflow:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
+
+        assert any(
+            "SCN1A" in markdown.value
+            for markdown in app.markdown
+        )
+        assert len(app.table) >= 2
 
         reviewed = deepcopy(original)
         reviewed["manual_evidence"] = {
@@ -12150,6 +12341,15 @@ class TestStage40FrontendReviewWorkflow:
                         )
                     ),
                 )[0]
+            )
+        ]
+        result["draft_variant_reports"] = [
+            dict(
+                build_draft_variant_report(
+                    result["evidence_objects"][0],
+                    result["variant_interpretation_results"][0],
+                    variant_index=0,
+                )
             )
         ]
         result = validate_pipeline_result(result)
@@ -12598,6 +12798,17 @@ class TestStage44EndToEndAcceptance:
         ]
         assert interpretations[2]["interpretation"] is None
         assert interpretations[2]["error_type"] == "LLMTimeoutError"
+        draft_reports = analysis["draft_variant_reports"]
+        assert [report["variant_index"] for report in draft_reports] == [
+            0,
+            1,
+            2,
+            3,
+            4,
+        ]
+        assert draft_reports[2]["machine_original_report"][
+            "variant_interpretation"
+        ]["status"] == "failed"
 
         reports = deepcopy(analysis["evidence_review_reports"])
         base_time = datetime.fromisoformat(
@@ -15577,7 +15788,7 @@ class TestPipelineLifecycleLogging:
             "event=evidence_build_finished evidence_object_count=1"
         ) in contents
         assert (
-            "event=variant_review_drafts_prepared report_count=1"
+            "event=draft_variant_reports_prepared report_count=1"
             in contents
         )
         assert (

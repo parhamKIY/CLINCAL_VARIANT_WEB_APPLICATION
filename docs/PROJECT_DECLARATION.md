@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 51 interpretation-before-final-review pipeline implemented
+**Implementation status:** Stage 52 Draft Variant Report V2 implemented
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 52 Draft Variant Report V2
+**Next implementation milestone:** Stage 53 human report editing and audit history
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,8 +24,9 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-51 now implement its input, phenotype,
-model-selection, and interpretation-before-review portions. The authoritative target is defined in
+45 froze that architecture, and Stages 46-52 now implement its input, phenotype,
+model-selection, interpretation-before-review, and draft-report portions. The
+authoritative target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
 they are not part of the active workflow for new analyses.
@@ -164,8 +165,20 @@ confirmed package and one interpretation result per input variant, clears obsole
 routing/final-interpretation fields, and completes without another LLM call. Pipeline
 schema `2.4` and recovery-request schema `2` carry the new state; legacy pipeline
 payloads receive a clear unsupported-resume error rather than being reinterpreted.
-Stage 52 will combine the parallel evidence and interpretation records into Draft
-Variant Report V2.
+### Stage 52 Draft Variant Report V2
+
+`backend/variant_report.py` defines schema `2.0` and deterministically composes one
+professional reviewer-facing report for every evidence/interpretation pair. The
+report contains normalized allele and transcript identity, accepted HPO and supported
+disease context, source-aware evidence sections with missingness, deterministic
+conflict status, interpretation or explicit model failure, trusted current references,
+compact provenance, and safety limitations.
+
+Every report stores an immutable `machine_original_report` and a separate
+`reviewed_report` that begins as an identical deep copy. Stage 52 requires an empty
+edit history and rejects any untracked difference; Stage 53 owns safe editing. The
+pipeline preserves report order and validates each report by reconstructing it from
+its Evidence Object and Variant Interpretation Result. Pipeline schema is now `2.5`.
 
 ## 3. Progress schematic
 
@@ -185,11 +198,12 @@ flowchart LR
     L --> M["Stage 49: task-specific model UI"]
     M --> N["Stage 50: single-model interpretation contract"]
     N --> O["Stage 51: interpretation-before-review pipeline"]
-    O --> Q["Stages 52-62: remaining V3 redesign - pending"]
+    O --> P["Stage 52: Draft Variant Report V2"]
+    P --> Q["Stages 53-62: remaining V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O done
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P done
     class Q review
 ```
 
@@ -255,7 +269,8 @@ their original order.
 | 49 | Reordered the Streamlit input flow, added separate task-specific model selectors, connected phenotype extraction to its selected model, and removed conflict-based model choice from the UI. | Complete |
 | 50 | Added a strict single-model variant interpretation contract with conflict-aware prompt context, route-free provenance, bounded response validation, and per-variant failure isolation. | Complete |
 | 51 | Moved interpretation into the analysis phase before final review, exposed evidence and interpretation together, isolated per-variant failures, retired active Output A/B routing, and made finalization model-free. | Complete |
-| 52–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 52 | Added Draft Variant Report V2 with coherent identity, phenotype, evidence, conflict, interpretation, reference, provenance, and limitation sections plus immutable machine-original validation and professional Streamlit rendering. | Complete |
+| 53–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -364,20 +379,22 @@ invalidates that confirmation.
 - Prompts and responses are versioned, validated, bounded, and stored with model
   provenance.
 
-### Stage 52 boundary
+### Draft Variant Report V2
 
-Stage 51 keeps the evidence review report and interpretation result as separate,
-ordered records. Stage 52 owns Draft Variant Report V2, which will combine evidence,
-interpretation, conflict summary, and later reference/report-lifecycle fields into one
-coherent per-variant schema.
+Draft Variant Report schema `2.0` combines evidence, interpretation, conflict summary,
+references, provenance, and limitations in one coherent per-variant object. Machine
+original and reviewed copies begin identical, and untracked differences fail
+validation. Stage 53 adds bounded report editing and the append-only audit history;
+Stage 55 expands deterministic canonical reference mapping.
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `2.4`.
+- Active pipeline schema: `2.5`.
 - SQLite schema: `2`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.0`.
+- Draft Variant Report schema: `2.0`.
 - Recovery request schema: `2`.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
@@ -448,7 +465,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **742 passed, 4 skipped**, with **85.61% coverage**. The retained Stage 44
+baseline is **746 passed, 4 skipped**, with **85.65% coverage**. The retained Stage 44
 acceptance runner now exercises the current five-variant, multi-HPO path through
 analysis-phase interpretation, review edits, confirmation, model-free finalization,
 per-variant failure isolation, provenance, and ordering. Stage 59 will replace this
@@ -548,6 +565,7 @@ the non-diagnostic disclaimer.
 | Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
 | Single-model interpretation contract | `backend/variant_interpretation.py`, `backend/llm.py`, `backend/conflict_auditor.py`, `backend/privacy.py`, `config.py` |
 | Interpretation-before-review orchestration | `backend/pipeline.py`, `frontend/evidence_review.py`, `frontend/execution.py`, `backend/database.py` |
+| Draft Variant Report V2 | `backend/variant_report.py`, `backend/pipeline.py`, `frontend/evidence_review.py` |
 | MyDisease context | `backend/mydisease.py` |
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
@@ -565,9 +583,8 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-51 are implemented. Stage 52 still owns the coherent Draft Variant
-   Report V2 schema; Stage 51 uses parallel ordered evidence-review and interpretation
-   records during the transition.
+1. Stages 46-52 are implemented. Stage 53 still owns safe Draft Variant Report
+   editing and its append-only audit history.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -597,5 +614,6 @@ accepted input layout. Stage 50 added and verified the route-free, single Varian
 Interpretation Model contract while preserving conflict as prompt context. Stage 51
 integrated that contract into the analysis phase, moved interpretation before final
 review, preserved failed variants as reviewable evidence, and removed active
-Output A/B routing from the UI. The correct next action is Stage 52: implement Draft
-Variant Report V2.
+Output A/B routing from the UI. Stage 52 added the coherent, immutable-machine-original
+Draft Variant Report V2 and its professional Streamlit presentation. The correct next
+action is Stage 53: implement safe report editing and audit history.

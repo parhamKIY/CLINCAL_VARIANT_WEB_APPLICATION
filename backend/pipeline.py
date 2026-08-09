@@ -79,13 +79,18 @@ from backend.variant_interpretation import (
     interpret_variants,
     validate_variant_interpretation_result,
 )
+from backend.variant_report import (
+    DraftVariantReportError,
+    build_draft_variant_reports,
+    validate_draft_variant_report,
+)
 from backend.vcf_processing import (
     VCFProcessingError,
     parse_manual_variants,
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "2.4"
+PIPELINE_SCHEMA_VERSION = "2.5"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -236,6 +241,7 @@ class PipelineResult(TypedDict):
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
     variant_interpretation_results: list[dict[str, object]]
+    draft_variant_reports: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
     reviewed_evidence_packages: list[dict[str, object]]
     llm_routing_results: list[dict[str, object]]
@@ -456,6 +462,7 @@ def create_pipeline_result() -> PipelineResult:
         "phenotype_results": [],
         "evidence_objects": [],
         "variant_interpretation_results": [],
+        "draft_variant_reports": [],
         "evidence_review_reports": [],
         "reviewed_evidence_packages": [],
         "llm_routing_results": [],
@@ -684,6 +691,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "phenotype_results",
         "evidence_objects",
         "variant_interpretation_results",
+        "draft_variant_reports",
         "evidence_review_reports",
         "llm_routing_results",
     ):
@@ -705,6 +713,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "phenotype_results",
                     "evidence_objects",
                     "variant_interpretation_results",
+                    "draft_variant_reports",
                     "evidence_review_reports",
                     "reviewed_evidence_packages",
                     "llm_routing_results",
@@ -777,6 +786,29 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "pipeline.variant_interpretation_results is invalid."
                 ) from exc
             previous_index = index
+    draft_variant_reports = value["draft_variant_reports"]
+    if draft_variant_reports:
+        if len(draft_variant_reports) != len(value["evidence_objects"]):
+            raise PipelineResultError(
+                "pipeline.draft_variant_reports must match the Evidence "
+                "Object count."
+            )
+        for expected_index, report in enumerate(draft_variant_reports):
+            if report.get("variant_index") != expected_index:
+                raise PipelineResultError(
+                    "pipeline.draft_variant_reports must preserve variant "
+                    "order."
+                )
+            try:
+                validate_draft_variant_report(
+                    report,
+                    evidence=value["evidence_objects"][expected_index],
+                    interpretation=interpretation_results[expected_index],
+                )
+            except DraftVariantReportError as exc:
+                raise PipelineResultError(
+                    "pipeline.draft_variant_reports is invalid."
+                ) from exc
     packages = value["reviewed_evidence_packages"]
     if (
         not isinstance(packages, list)
@@ -879,16 +911,18 @@ def validate_pipeline_result(value: object) -> PipelineResult:
     if workflow_state == "awaiting_final_review" and (
         not review_reports
         or len(interpretation_results) != variant_count
+        or len(draft_variant_reports) != variant_count
     ):
         raise PipelineResultError(
-            "pipeline.awaiting_final_review requires evidence and one "
-            "interpretation result per variant."
+            "pipeline.awaiting_final_review requires evidence, "
+            "interpretation, and one Draft Variant Report per variant."
         )
     if (
         workflow_state == "completed"
         and final_report is None
         and (
             len(interpretation_results) != variant_count
+            or len(draft_variant_reports) != variant_count
             or len(validated_packages) != variant_count
         )
     ):
@@ -1138,6 +1172,7 @@ def _finish_failed_stage(
             "phenotype_results",
             "evidence_objects",
             "variant_interpretation_results",
+            "draft_variant_reports",
             "evidence_review_reports",
             "reviewed_evidence_packages",
             "llm_routing_results",
@@ -1926,14 +1961,22 @@ def _build_evidence_and_report(
         message="Preparing evidence-and-interpretation review drafts.",
     )
     _notify_progress(result, progress_callback)
+    draft_variant_reports = build_draft_variant_reports(
+        list(evidence_objects),
+        list(interpretation_results),
+    )
+    result["draft_variant_reports"] = [
+        dict(report)
+        for report in draft_variant_reports
+    ]
     review_reports = build_evidence_review_reports(evidence_objects)
     result["evidence_review_reports"] = [
         dict(report)
         for report in review_reports
     ]
     LOGGER.info(
-        "event=variant_review_drafts_prepared report_count=%d",
-        len(review_reports),
+        "event=draft_variant_reports_prepared report_count=%d",
+        len(draft_variant_reports),
     )
     _set_stage(
         result,
@@ -1941,8 +1984,8 @@ def _build_evidence_and_report(
         "success",
         progress_percent=100,
         message=(
-            f"Prepared {len(review_reports)} review draft(s) with "
-            "pre-review interpretation state."
+            f"Prepared {len(draft_variant_reports)} coherent Draft "
+            "Variant Report(s)."
         ),
     )
     result["status"] = (
@@ -2171,6 +2214,18 @@ def _run_analysis_unpersisted(
                 "Variant interpretation could not be completed safely."
             ),
             default_recoverable=True,
+            progress_callback=progress_callback,
+        )
+    except DraftVariantReportError as exc:
+        return _finish_exception(
+            result,
+            stage="report",
+            error=exc,
+            default_code="draft_variant_report_failed",
+            default_message=(
+                "Draft Variant Reports could not be composed safely."
+            ),
+            default_recoverable=False,
             progress_callback=progress_callback,
         )
     except (EvidenceObjectError, EvidenceReviewError) as exc:
