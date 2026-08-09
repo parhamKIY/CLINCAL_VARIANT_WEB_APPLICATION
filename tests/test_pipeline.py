@@ -10666,6 +10666,7 @@ class TestStage52DraftVariantReportV2:
                 client=LLMClient(
                     FakeLLMAdapter(_variant_interpretation_response())
                 ),
+                timestamp="2026-08-09T08:00:00Z",
             )
         )
         return evidence, interpretation
@@ -11081,6 +11082,7 @@ class TestStage54FinalReportSelection:
                                 _variant_interpretation_response()
                             )
                         ),
+                        timestamp="2026-08-09T08:00:00Z",
                     )
                 )
             )
@@ -12941,6 +12943,7 @@ class TestStage40FrontendReviewWorkflow:
                             _variant_interpretation_response()
                         )
                     ),
+                    timestamp="2026-08-09T08:00:00Z",
                 )
             )
         ]
