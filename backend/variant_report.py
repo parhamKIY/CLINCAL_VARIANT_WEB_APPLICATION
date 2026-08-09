@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Literal, TypedDict, cast
@@ -14,6 +15,13 @@ from backend.privacy import (
     validate_human_review_content,
     validate_no_prohibited_fields,
 )
+from backend.references import (
+    CanonicalReference,
+    CanonicalReferenceError,
+    build_canonical_references,
+    cited_reference_ids,
+    validate_canonical_reference,
+)
 from backend.report import EvidenceObject, validate_evidence_object
 from backend.variant_interpretation import (
     VariantInterpretationResult,
@@ -21,7 +29,7 @@ from backend.variant_interpretation import (
 )
 
 
-DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.0"
+DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.1"
 MAX_DRAFT_VARIANT_REPORT_BYTES = 128 * 1024
 MAX_REPORT_TEXT_CHARS = 20_000
 MAX_EVIDENCE_VALUE_CHARS = 4_000
@@ -105,14 +113,6 @@ class InterpretationSection(TypedDict):
     failure_type: str | None
 
 
-class ReportReference(TypedDict):
-    """Trusted source reference awaiting Stage 55 canonicalization."""
-
-    source: str
-    identifier: str | None
-    url: str | None
-
-
 class ReportProvenance(TypedDict):
     """Compact provenance kept accessible outside the main evidence table."""
 
@@ -134,7 +134,7 @@ class VariantReportContent(TypedDict):
     variant_interpretation: InterpretationSection
     reviewer_summary: str | None
     reviewer_notes: list[str]
-    references: list[ReportReference]
+    references: list[CanonicalReference]
     provenance: ReportProvenance
     limitations: list[str]
 
@@ -185,7 +185,6 @@ _EVIDENCE_SECTION_FIELDS = frozenset(EvidenceSection.__required_keys__)
 _EVIDENCE_ITEM_FIELDS = frozenset(EvidenceItem.__required_keys__)
 _CONFLICT_FIELDS = frozenset(ConflictSummary.__required_keys__)
 _INTERPRETATION_FIELDS = frozenset(InterpretationSection.__required_keys__)
-_REFERENCE_FIELDS = frozenset(ReportReference.__required_keys__)
 _PROVENANCE_FIELDS = frozenset(ReportProvenance.__required_keys__)
 _EDIT_RECORD_FIELDS = frozenset(ReportEditRecord.__required_keys__)
 _SELECTION_RECORD_FIELDS = frozenset(SelectionRecord.__required_keys__)
@@ -394,52 +393,8 @@ def _rsid(evidence: EvidenceObject) -> str | None:
     return None
 
 
-def _references(evidence: EvidenceObject) -> list[ReportReference]:
-    references: list[ReportReference] = []
-    seen: set[tuple[str, str | None, str | None]] = set()
-
-    def add(source: object, identifier: object, url: object) -> None:
-        normalized_source = _text(source)
-        normalized_identifier = _text(identifier)
-        normalized_url = _text(url)
-        if normalized_source is None:
-            return
-        key = (normalized_source, normalized_identifier, normalized_url)
-        if key in seen or len(references) >= MAX_REPORT_REFERENCES:
-            return
-        seen.add(key)
-        references.append(
-            {
-                "source": normalized_source,
-                "identifier": normalized_identifier,
-                "url": normalized_url,
-            }
-        )
-
-    for reference in evidence["references"]:
-        add(reference["source"], None, reference["url"])
-    for curation in evidence["clingen_curations"]:
-        add("ClinGen / GenCC", curation.get("disease_id"), curation.get("report_url"))
-        for pmid in curation.get("pmids", []):
-            add("PubMed", f"PMID:{pmid}", None)
-    literature = _mapping(
-        evidence["conditional_enrichment"].get("literature")
-    )
-    articles = literature.get("articles")
-    if isinstance(articles, list):
-        for article in articles:
-            record = _mapping(article)
-            source = _text(record.get("provider")) or _text(
-                record.get("source")
-            ) or "Literature"
-            identifier = (
-                _text(record.get("pmid"))
-                or _text(record.get("pmcid"))
-                or _text(record.get("doi"))
-                or _text(record.get("id"))
-            )
-            add(source, identifier, None)
-    return references
+def _references(evidence: EvidenceObject) -> list[CanonicalReference]:
+    return build_canonical_references(evidence)[:MAX_REPORT_REFERENCES]
 
 
 def _provenance(
@@ -1094,18 +1049,42 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
     if not isinstance(references, list) or len(references) > MAX_REPORT_REFERENCES:
         raise DraftVariantReportError(f"{path}.references is invalid.")
     for index, reference_value in enumerate(references):
-        ref_path = f"{path}.references[{index}]"
-        reference = _require_fields(reference_value, _REFERENCE_FIELDS, ref_path)
-        _require_text(reference["source"], f"{ref_path}.source")
-        _require_text(reference["identifier"], f"{ref_path}.identifier", optional=True)
-        _require_text(reference["url"], f"{ref_path}.url", optional=True)
-        if reference["url"] is not None and not cast(
-            str,
-            reference["url"],
-        ).startswith("https://"):
+        try:
+            reference = validate_canonical_reference(reference_value)
+        except CanonicalReferenceError as exc:
             raise DraftVariantReportError(
-                f"{ref_path}.url must be a trusted HTTPS reference."
+                f"{path}.references[{index}] is not canonical."
+            ) from exc
+        if reference["reference_id"] != f"R{index + 1}":
+            raise DraftVariantReportError(
+                f"{path}.references must preserve citation order."
             )
+    citation_texts: list[object] = [
+        interpretation["narrative"],
+        interpretation["conflict_assessment"],
+        *interpretation["warnings"],
+        content["reviewer_summary"],
+        *content["reviewer_notes"],
+    ]
+    citation_tokens = re.findall(
+        r"\[(R[^\]]*)\]",
+        "\n".join(item for item in citation_texts if isinstance(item, str)),
+    )
+    allowed_reference_ids = {
+        reference["reference_id"]
+        for reference in references
+        if isinstance(reference, dict)
+    }
+    if any(
+        re.fullmatch(r"R[1-9][0-9]*", item) is None
+        for item in citation_tokens
+    ) or any(
+        item not in allowed_reference_ids
+        for item in cited_reference_ids(*citation_texts)
+    ):
+        raise DraftVariantReportError(
+            f"{path} contains a citation absent from canonical references."
+        )
 
     provenance = _require_fields(
         content["provenance"],

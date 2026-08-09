@@ -12,6 +12,7 @@ from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.shared import Inches, Pt, RGBColor
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
@@ -24,6 +25,8 @@ from reportlab.platypus import (
     Spacer,
 )
 
+from backend.references import validated_reference_url
+
 
 MAX_REPORT_EXPORT_INPUT_BYTES = 256 * 1024
 MAX_REPORT_EXPORT_OUTPUT_BYTES = 5 * 1024 * 1024
@@ -34,6 +37,7 @@ _HEADING_UNDERLINE_PATTERN = re.compile(r"^([=\-~])\1{2,}$")
 _BULLET_PATTERN = re.compile(r"^\s*[-*+]\s+(.+?)\s*$")
 _CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MARKDOWN_ESCAPE_PATTERN = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>])")
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https://[^\s]+)\)")
 
 _NAVY = colors.HexColor("#17324D")
 _BLUE = colors.HexColor("#2E74B5")
@@ -52,6 +56,7 @@ class ReportBlock:
     kind: str
     text: str
     level: int = 0
+    raw_text: str | None = None
 
 
 def _normalize_report_text(report_text: str) -> str:
@@ -70,6 +75,7 @@ def _normalize_report_text(report_text: str) -> str:
 
 
 def _plain_text(value: str) -> str:
+    value = _MARKDOWN_LINK_PATTERN.sub(r"\1", value)
     value = _MARKDOWN_ESCAPE_PATTERN.sub(r"\1", value.strip())
     return (
         value.replace("\u00a0", " ")
@@ -89,6 +95,7 @@ def _parse_report_blocks(report_text: str) -> list[ReportBlock]:
                 ReportBlock(
                     kind="paragraph",
                     text=_plain_text(" ".join(paragraph_lines)),
+                    raw_text=" ".join(paragraph_lines),
                 )
             )
             paragraph_lines.clear()
@@ -116,6 +123,7 @@ def _parse_report_blocks(report_text: str) -> list[ReportBlock]:
                         kind="heading",
                         text=_plain_text(line),
                         level=level,
+                        raw_text=line,
                     )
                 )
                 line_index += 2
@@ -128,6 +136,7 @@ def _parse_report_blocks(report_text: str) -> list[ReportBlock]:
                     kind="heading",
                     text=_plain_text(heading.group(2)),
                     level=len(heading.group(1)),
+                    raw_text=heading.group(2),
                 )
             )
             line_index += 1
@@ -139,6 +148,7 @@ def _parse_report_blocks(report_text: str) -> list[ReportBlock]:
                 ReportBlock(
                     kind="bullet",
                     text=_plain_text(bullet.group(1)),
+                    raw_text=bullet.group(1),
                 )
             )
             line_index += 1
@@ -152,6 +162,28 @@ def _parse_report_blocks(report_text: str) -> list[ReportBlock]:
 
 def _pdf_text(value: str) -> str:
     return html.escape(value, quote=False)
+
+
+def _pdf_rich_text(value: str) -> str:
+    """Convert allowlisted Markdown links to ReportLab hyperlink markup."""
+
+    parts: list[str] = []
+    cursor = 0
+    for match in _MARKDOWN_LINK_PATTERN.finditer(value):
+        parts.append(html.escape(value[cursor:match.start()], quote=False))
+        label = _plain_text(match.group(1))
+        url = validated_reference_url(match.group(2))
+        if url is None:
+            parts.append(html.escape(label, quote=False))
+        else:
+            parts.append(
+                f'<link href="{html.escape(url, quote=True)}" '
+                'color="#2E74B5"><u>'
+                f"{html.escape(label, quote=False)}</u></link>"
+            )
+        cursor = match.end()
+    parts.append(html.escape(value[cursor:], quote=False))
+    return "".join(parts)
 
 
 def _pdf_footer(canvas: object, document: object) -> None:
@@ -276,7 +308,7 @@ def render_report_pdf(
             story.append(
                 Paragraph(
                     '<font color="#2E74B5">&#8226;</font>&nbsp;&nbsp;'
-                    f"{_pdf_text(block.text)}",
+                    f"{_pdf_rich_text(block.raw_text or block.text)}",
                     bullet_style,
                 )
             )
@@ -284,14 +316,18 @@ def render_report_pdf(
         if block.kind == "heading":
             previous_heading = block.text
             style = heading_styles.get(block.level, heading_styles[3])
-            story.append(Paragraph(_pdf_text(block.text), style))
+            story.append(
+                Paragraph(_pdf_rich_text(block.raw_text or block.text), style)
+            )
         else:
             style = (
                 notice_style
                 if previous_heading.casefold() == "medical disclaimer"
                 else body_style
             )
-            story.append(Paragraph(_pdf_text(block.text), style))
+            story.append(
+                Paragraph(_pdf_rich_text(block.raw_text or block.text), style)
+            )
 
     if not any(block.kind == "heading" and block.level == 1 for block in blocks):
         story.insert(0, Paragraph(_pdf_text(_plain_text(title)), title_style))
@@ -386,6 +422,46 @@ def _configure_docx(document: Document) -> None:
         run.font.color.rgb = RGBColor(91, 103, 112)
 
 
+def _add_docx_hyperlink(paragraph: object, label: str, url: str) -> None:
+    relationship_id = paragraph.part.relate_to(
+        url,
+        RELATIONSHIP_TYPE.HYPERLINK,
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "2E74B5")
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.extend((color, underline))
+    text = OxmlElement("w:t")
+    text.text = label
+    run.extend((properties, text))
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _add_docx_rich_text(paragraph: object, value: str) -> None:
+    cursor = 0
+    for match in _MARKDOWN_LINK_PATTERN.finditer(value):
+        prefix = _plain_text(value[cursor:match.start()])
+        if prefix:
+            paragraph.add_run(prefix)
+        label = _plain_text(match.group(1))
+        url = validated_reference_url(match.group(2))
+        if url is None:
+            paragraph.add_run(label)
+        else:
+            _add_docx_hyperlink(paragraph, label, url)
+        cursor = match.end()
+    suffix = _plain_text(value[cursor:])
+    if suffix:
+        paragraph.add_run(suffix)
+
+
 def render_report_docx(
     report_text: str,
     *,
@@ -424,14 +500,14 @@ def render_report_docx(
             paragraph.style = document.styles[
                 f"Heading {min(block.level, 3)}"
             ]
-            paragraph.add_run(block.text)
+            _add_docx_rich_text(paragraph, block.raw_text or block.text)
             continue
         if block.kind == "bullet":
             paragraph = document.add_paragraph(style="List Bullet")
-            paragraph.add_run(block.text)
+            _add_docx_rich_text(paragraph, block.raw_text or block.text)
             continue
         paragraph = document.add_paragraph()
-        paragraph.add_run(block.text)
+        _add_docx_rich_text(paragraph, block.raw_text or block.text)
         if previous_heading.casefold() == "medical disclaimer":
             paragraph.paragraph_format.left_indent = Inches(0.15)
             paragraph.paragraph_format.right_indent = Inches(0.15)

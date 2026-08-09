@@ -214,6 +214,13 @@ from backend.privacy import (
     validate_llm_payload,
     validate_no_prohibited_fields,
 )
+from backend.references import (
+    CanonicalReferenceError,
+    build_canonical_references,
+    canonicalize_reference,
+    render_canonical_reference_markdown,
+    validate_canonical_reference,
+)
 from backend.report import (
     CLINICAL_DECISION_SUPPORT_NOTICE,
     CLINICAL_INTERPRETATION_MAX_TOKENS,
@@ -10400,6 +10407,7 @@ class TestStage50SingleModelInterpretation:
             ),
             "conflict_assessment": "No meaningful conflict is present.",
             "warnings": ["Human review remains required."],
+            "cited_reference_ids": [],
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 40,
@@ -10672,7 +10680,10 @@ class TestStage52DraftVariantReportV2:
         assert content["variant_interpretation"]["narrative"] == (
             interpretation["interpretation"]
         )
-        assert content["references"][0]["url"].startswith("https://")
+        assert content["references"][0]["canonical_url"].startswith(
+            "https://"
+        )
+        assert content["references"][0]["url_status"] == "validated"
         assert report["reviewed_report"] == content
         assert report["reviewed_report"] is not content
         validate_draft_variant_report(
@@ -10740,14 +10751,14 @@ class TestStage52DraftVariantReportV2:
             variant_index=0,
         )
         unsafe["machine_original_report"]["references"][0][
-            "url"
+            "canonical_url"
         ] = "http://untrusted.example/reference"
         unsafe["reviewed_report"] = deepcopy(
             unsafe["machine_original_report"]
         )
         with pytest.raises(
             DraftVariantReportError,
-            match="trusted HTTPS reference",
+            match="not canonical",
         ):
             validate_draft_variant_report(unsafe)
 
@@ -11186,6 +11197,288 @@ class TestStage54FinalReportSelection:
             "reporting choice only" in caption.value
             for caption in app.caption
         )
+
+
+class TestStage55CanonicalReferences:
+    """Verify deterministic exact-record links and bounded LLM citations."""
+
+    @pytest.mark.parametrize(
+        ("source", "identifier", "expected_type", "expected_url"),
+        [
+            (
+                "PubMed",
+                "PMID:12345678",
+                "PMID",
+                "https://pubmed.ncbi.nlm.nih.gov/12345678/",
+            ),
+            (
+                "PubMed Central",
+                "PMC7654321",
+                "PMCID",
+                "https://pmc.ncbi.nlm.nih.gov/articles/PMC7654321/",
+            ),
+            (
+                "DOI",
+                "10.1000/example.1",
+                "DOI",
+                "https://doi.org/10.1000/example.1",
+            ),
+            (
+                "NCBI ClinVar",
+                "VCV000012345.1",
+                "ClinVar accession",
+                "https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/",
+            ),
+            (
+                "Europe PMC",
+                "12345678",
+                "Europe PMC identifier",
+                "https://europepmc.org/article/MED/12345678",
+            ),
+        ],
+    )
+    def test_known_identifiers_build_exact_canonical_urls(
+        self,
+        source: str,
+        identifier: str,
+        expected_type: str,
+        expected_url: str,
+    ) -> None:
+        reference = canonicalize_reference(
+            source=source,
+            identifier=identifier,
+        )
+
+        assert reference["identifier_type"] == expected_type
+        assert reference["canonical_url"] == expected_url
+        assert reference["url_status"] == "validated"
+        assert validate_canonical_reference(reference) == reference
+
+    def test_clingen_and_cspec_urls_are_allowlisted(self) -> None:
+        clingen = canonicalize_reference(
+            source="ClinGen / GenCC",
+            identifier="MONDO:0100062",
+            url=(
+                "https://search.clinicalgenome.org/"
+                "kb/gene-validity/example"
+            ),
+        )
+        cspec = canonicalize_reference(
+            source="ClinGen CSpec Registry",
+            identifier="GN001",
+            url=(
+                "https://cspec.genome.network/"
+                "SequenceVariantInterpretation/id/GN001"
+            ),
+        )
+
+        assert clingen["url_status"] == "validated"
+        assert clingen["identifier_type"] == "ClinGen record"
+        assert cspec["url_status"] == "validated"
+        assert cspec["identifier_type"] == "CSpec record"
+        mismatched = canonicalize_reference(
+            source="ClinGen CSpec Registry",
+            identifier="GN001",
+            url=(
+                "https://cspec.genome.network/"
+                "SequenceVariantInterpretation/id/GN999"
+            ),
+        )
+        assert mismatched["url_status"] == "unavailable"
+
+    def test_untrusted_url_has_explicit_safe_fallback(self) -> None:
+        reference = canonicalize_reference(
+            source="Unknown source",
+            title="Evidence record without a trusted link",
+            url="https://fabricated.example/record",
+        )
+
+        assert reference["canonical_url"] is None
+        assert reference["url_status"] == "unavailable"
+        assert "validated link unavailable" in (
+            render_canonical_reference_markdown(reference)
+        )
+
+        tampered = deepcopy(reference)
+        tampered["canonical_url"] = "https://fabricated.example/record"
+        tampered["url_status"] = "validated"
+        with pytest.raises(
+            CanonicalReferenceError,
+            match="canonical URL",
+        ):
+            validate_canonical_reference(tampered)
+
+    def test_evidence_catalog_is_deduplicated_and_stably_numbered(
+        self,
+    ) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        evidence["pathogenicity"]["cspec_context"] = [
+            {
+                "specification_id": "GN001",
+                "title": "SCN1A specification",
+                "specification_url": (
+                    "https://cspec.genome.network/"
+                    "SequenceVariantInterpretation/id/GN001"
+                ),
+                "concept_doi": "10.1000/scn1a.specification",
+            }
+        ]
+        references = build_canonical_references(evidence)
+
+        assert [item["reference_id"] for item in references] == [
+            f"R{index}" for index in range(1, len(references) + 1)
+        ]
+        assert references[0]["identifier"] == "VCV000012345.1"
+        assert references[0]["canonical_url"] == (
+            "https://www.ncbi.nlm.nih.gov/clinvar/variation/12345/"
+        )
+        assert len(
+            {
+                item["canonical_url"]
+                for item in references
+                if item["canonical_url"] is not None
+            }
+        ) == sum(item["canonical_url"] is not None for item in references)
+        assert any(
+            item["identifier_type"] == "CSpec record"
+            and item["identifier"] == "GN001"
+            for item in references
+        )
+        assert any(
+            item["identifier_type"] == "DOI"
+            and item["identifier"] == "10.1000/scn1a.specification"
+            for item in references
+        )
+
+    def test_llm_may_cite_only_catalog_reference_ids(self) -> None:
+        payload = TestStage50SingleModelInterpretation._payload()
+        payload["interpretation"] += " ClinVar evidence is retained [R1]."
+        adapter = FakeLLMAdapter(
+            TestStage50SingleModelInterpretation._response(payload)
+        )
+
+        result = interpret_variant(
+            TestEvidenceObject._complete_evidence_object(),
+            client=LLMClient(adapter),
+        )
+
+        assert result["cited_reference_ids"] == ["R1"]
+        prompt = adapter.requests[0].messages[1].content
+        catalog_text = prompt.split(
+            "BEGIN_ALLOWED_REFERENCE_CATALOG\n",
+            1,
+        )[1].split("\nEND_ALLOWED_REFERENCE_CATALOG", 1)[0]
+        catalog = json.loads(catalog_text)
+        assert catalog[0]["reference_id"] == "R1"
+        assert "canonical_url" not in catalog[0]
+
+    def test_fabricated_llm_reference_id_is_rejected(self) -> None:
+        payload = TestStage50SingleModelInterpretation._payload()
+        payload["interpretation"] += " Unsupported citation [R99]."
+
+        with pytest.raises(
+            VariantInterpretationError,
+            match="absent from its evidence",
+        ):
+            interpret_variant(
+                TestEvidenceObject._complete_evidence_object(),
+                client=LLMClient(
+                    FakeLLMAdapter(
+                        TestStage50SingleModelInterpretation._response(
+                            payload
+                        )
+                    )
+                ),
+            )
+
+    def test_draft_report_maps_citations_to_clickable_objects(self) -> None:
+        evidence = TestEvidenceObject._complete_evidence_object()
+        payload = TestStage50SingleModelInterpretation._payload()
+        payload["interpretation"] += " Exact source [R1]."
+        interpretation = interpret_variant(
+            evidence,
+            client=LLMClient(
+                FakeLLMAdapter(
+                    TestStage50SingleModelInterpretation._response(payload)
+                )
+            ),
+        )
+
+        report = build_draft_variant_report(
+            evidence,
+            interpretation,
+            variant_index=0,
+        )
+
+        assert report["machine_original_report"]["references"][0] == (
+            build_canonical_references(evidence)[0]
+        )
+        assert report["machine_original_report"]["references"][0][
+            "reference_id"
+        ] == interpretation["cited_reference_ids"][0]
+
+        with pytest.raises(
+            DraftVariantReportError,
+            match="absent from canonical references",
+        ):
+            save_draft_variant_report(
+                report,
+                reviewer_summary="Unsupported reviewer citation [R99].",
+                interpretation_narrative=report["reviewed_report"][
+                    "variant_interpretation"
+                ]["narrative"],
+                conflict_assessment=report["reviewed_report"][
+                    "variant_interpretation"
+                ]["conflict_assessment"],
+                reviewer_notes=[],
+            )
+
+    def test_canonical_link_survives_word_and_pdf_export(self) -> None:
+        reference = canonicalize_reference(
+            source="PubMed",
+            identifier="PMID:12345678",
+        )
+        markdown = (
+            "# Report\n\n## References\n\n- "
+            + render_canonical_reference_markdown(reference)
+        )
+
+        docx_data = render_report_docx(markdown)
+        with zipfile.ZipFile(BytesIO(docx_data)) as archive:
+            relationships = archive.read(
+                "word/_rels/document.xml.rels"
+            ).decode("utf-8")
+            document_xml = archive.read("word/document.xml").decode(
+                "utf-8"
+            )
+        pdf_data = render_report_pdf(markdown)
+
+        assert reference["canonical_url"] in relationships
+        assert "hyperlink" in relationships.casefold()
+        assert "w:hyperlink" in document_xml
+        assert reference["canonical_url"].encode("ascii") in pdf_data
+
+    def test_streamlit_uses_only_canonical_reference_targets(self) -> None:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        expected_urls = {
+            reference["canonical_url"]
+            for reference in result["draft_variant_reports"][0][
+                "reviewed_report"
+            ]["references"]
+            if reference["canonical_url"] is not None
+        }
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = result
+        app.run(timeout=10)
+
+        displayed_urls = {
+            button.url
+            for button in app.get("link_button")
+            if button.label.startswith("[R")
+        }
+
+        assert not app.exception
+        assert displayed_urls == expected_urls
 
 
 class TestClinicalReportContract:
@@ -13734,19 +14027,14 @@ class TestClinicalReportComposition:
         assert report["references"] == [
             {
                 "source": "NCBI ClinVar",
-                "identifier": None,
+                "identifier": "VCV000012345.1",
                 "url": (
                     "https://www.ncbi.nlm.nih.gov/"
                     "clinvar/variation/12345/"
                 ),
             },
             {
-                "source": "NCBI ClinVar",
-                "identifier": "VCV000012345.1",
-                "url": None,
-            },
-            {
-                "source": "ClinGen",
+                "source": "ClinGen / GenCC",
                 "identifier": "MONDO:0100062",
                 "url": (
                     "https://search.clinicalgenome.org/"
@@ -13756,7 +14044,7 @@ class TestClinicalReportComposition:
             {
                 "source": "PubMed",
                 "identifier": "PMID:12345678",
-                "url": None,
+                "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
             },
         ]
 

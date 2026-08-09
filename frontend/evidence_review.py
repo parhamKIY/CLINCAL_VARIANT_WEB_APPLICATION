@@ -451,14 +451,20 @@ def _render_draft_variant_report(
     st.markdown("#### References")
     if not content["references"]:
         st.caption("No trusted reference was available.")
-    for index, reference in enumerate(content["references"], start=1):
-        label = reference["source"]
+    for reference in content["references"]:
+        label = f"[{reference['reference_id']}] {reference['source']}"
         if reference["identifier"]:
             label += f" — {reference['identifier']}"
-        if reference["url"]:
-            st.link_button(f"[{index}] {label}", reference["url"])
+        if reference["title"]:
+            label += f" — {reference['title']}"
+        if (
+            reference["url_status"] == "validated"
+            and reference["canonical_url"]
+        ):
+            st.link_button(label, reference["canonical_url"])
         else:
-            st.write(f"[{index}] {label}")
+            st.write(label)
+            st.caption("No validated link is available for this reference.")
 
     with st.expander("Provenance and limitations"):
         provenance = content["provenance"]

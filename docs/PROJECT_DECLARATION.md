@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 54 audited Final Report selection implemented
+**Implementation status:** Stage 55 canonical reference and link hardening implemented
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 55 canonical reference expansion
+**Next implementation milestone:** Stage 56 Final Clinical Report composer
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,7 +24,7 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-54 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-55 now implement its input, phenotype,
 model-selection, interpretation-before-review, draft-report, and audited-editing
 portions. The
 authoritative target is defined in
@@ -209,8 +209,26 @@ conflict state, and exclusion decision. The selected-report projection filters o
 at reporting time and preserves original input order. Any selection change
 invalidates final confirmation. Editing an included report also invalidates it;
 editing an already excluded report does not alter the confirmed selected content.
-Pipeline schema is now `2.6`. Stage 55 owns canonical reference expansion, while
-Stage 56 owns Final Clinical Report composition.
+At the Stage 54 checkpoint, pipeline schema was `2.6`; Stage 55 then hardened
+canonical references. Stage 56 owns Final Clinical Report composition.
+
+### Stage 55 canonical reference and link hardening
+
+`backend/references.py` defines one normalized canonical-reference contract with a
+stable report ID, source, identifier type/value, optional title, canonical URL, and
+explicit validated/unavailable link status. Deterministic builders support PMID,
+PMCID, DOI, ClinVar accession, Europe PMC, ClinGen, and CSpec records. Provider URLs
+must use HTTPS and approved domains without credentials or fragments; CSpec URLs must
+also agree with the retained record identifier. Unsafe or unverifiable URLs become
+explicit non-clickable fallbacks instead of fabricated links.
+
+The Variant Interpretation Model receives only a bounded reference catalog without
+URLs and may cite supplied IDs such as `[R1]`. Backend validation rejects malformed,
+invented, or evidence-absent IDs in model output and reviewer-edited report text.
+Draft Variant Report schema `2.1` maps citations to canonical objects. Streamlit and
+legacy Markdown expose exact links, and generic Word/PDF exports preserve allowlisted
+hyperlinks. Variant Interpretation Result schema is `1.1`; pipeline schema is `2.7`.
+Stage 56 remains responsible for composing the Final Clinical Report.
 
 ## 3. Progress schematic
 
@@ -233,12 +251,13 @@ flowchart LR
     O --> P["Stage 52: Draft Variant Report V2"]
     P --> Q["Stage 53: audited human report editing"]
     Q --> R["Stage 54: audited Final Report selection"]
-    R --> S["Stages 55-62: remaining V3 redesign - pending"]
+    R --> S["Stage 55: canonical reference hardening"]
+    S --> T["Stages 56-62: remaining V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R done
-    class S review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S done
+    class T review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -306,7 +325,8 @@ their original order.
 | 52 | Added Draft Variant Report V2 with coherent identity, phenotype, evidence, conflict, interpretation, reference, provenance, and limitation sections plus immutable machine-original validation and professional Streamlit rendering. | Complete |
 | 53 | Added whitelisted report editing, PHI-safe reviewer text, append-only field history with deterministic replay, comparison/reset controls, and confirmation invalidation after edits. | Complete |
 | 54 | Added audited `include_in_final_report` decisions, full excluded-report retention, ordered selected-report projection, UI controls, and confirmation invalidation after selection changes. | Complete |
-| 55–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 55 | Added normalized canonical references, provider-specific exact-record URL builders, domain/identifier validation, bounded LLM citation IDs, explicit link fallbacks, and clickable Streamlit/Word/PDF rendering. | Complete |
+| 56–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -417,11 +437,11 @@ invalidates that confirmation.
 
 ### Draft Variant Report V2
 
-Draft Variant Report schema `2.0` combines evidence, interpretation, conflict summary,
+Draft Variant Report schema `2.1` combines evidence, interpretation, conflict summary,
 references, provenance, and limitations in one coherent per-variant object. Machine
 original and reviewed copies begin identical. Only reviewer-owned narrative fields
 can differ, and every difference must be reproduced by the append-only edit history.
-Stage 55 expands deterministic canonical reference mapping.
+Stage 55 provides deterministic canonical reference mapping.
 
 Each report also retains an audited `include_in_final_report` decision. Excluded
 reports remain fully recoverable, while the selected projection preserves original
@@ -429,12 +449,12 @@ input order and contains only included reports.
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `2.6`.
+- Active pipeline schema: `2.7`.
 - SQLite schema: `2`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
-- Variant Interpretation Result schema: `1.0`.
-- Draft Variant Report schema: `2.0`.
+- Variant Interpretation Result schema: `1.1`.
+- Draft Variant Report schema: `2.1`.
 - Recovery request schema: `2`.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
@@ -505,7 +525,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **758 passed, 4 skipped**, with **85.57% coverage**. The retained Stage 44
+baseline is **771 passed, 4 skipped**, with **85.60% coverage**. The retained Stage 44
 acceptance runner now exercises the current five-variant, multi-HPO path through
 analysis-phase interpretation, review edits, confirmation, model-free finalization,
 per-variant failure isolation, provenance, and ordering. Stage 59 will replace this
@@ -607,6 +627,7 @@ the non-diagnostic disclaimer.
 | Interpretation-before-review orchestration | `backend/pipeline.py`, `frontend/evidence_review.py`, `frontend/execution.py`, `backend/database.py` |
 | Draft Variant Report V2 | `backend/variant_report.py`, `backend/pipeline.py`, `frontend/evidence_review.py` |
 | Audited report editing | `backend/variant_report.py`, `backend/pipeline.py`, `frontend/evidence_review.py` |
+| Canonical references and citation IDs | `backend/references.py`, `backend/variant_interpretation.py`, `backend/variant_report.py` |
 | MyDisease context | `backend/mydisease.py` |
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
@@ -624,8 +645,8 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-54 are implemented. Stage 55 still owns deterministic canonical
-   reference expansion.
+1. Stages 46-55 are implemented. Stage 56 still owns composition of the Final
+   Clinical Report from the confirmed selected subset.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -660,5 +681,8 @@ Draft Variant Report V2 and its professional Streamlit presentation. Stage 53 ad
 whitelisted report editing, append-only replayable history, comparison/reset controls,
 and confirmation invalidation. Stage 54 added audited reporting-only inclusion
 decisions, complete excluded-report retention, ordered selection projection, and
-selection-change confirmation invalidation. The correct next action is Stage 55:
-expand deterministic canonical references.
+selection-change confirmation invalidation. Stage 55 added normalized canonical
+references, provider-specific exact-record URL builders, strict link allowlisting,
+bounded evidence-only LLM citation IDs, explicit unavailable-link fallbacks, and
+clickable export rendering. The correct next action is Stage 56: compose the Final
+Clinical Report from the confirmed selected subset.

@@ -17,6 +17,10 @@ from backend.llm import (
     call_llm,
 )
 from backend.privacy import ClinicalDataPrivacyError, validate_llm_payload
+from backend.references import (
+    build_canonical_references,
+    cited_reference_ids,
+)
 from backend.report import (
     EvidenceObject,
     EvidenceObjectError,
@@ -25,8 +29,8 @@ from backend.report import (
 from config import settings
 
 
-VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.0"
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.0"
+VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.1"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.1"
 MAX_INTERPRETATION_EVIDENCE_BYTES = 512 * 1024
 MAX_INTERPRETATION_RESPONSE_BYTES = 64 * 1024
 MAX_INTERPRETATION_CHARACTERS = 20_000
@@ -74,6 +78,7 @@ class VariantInterpretationResult(TypedDict):
     interpretation: str | None
     conflict_assessment: str | None
     warnings: list[str]
+    cited_reference_ids: list[str]
     usage: dict[str, int | None] | None
     generated_at: str
     error_type: str | None
@@ -137,7 +142,9 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "conservatively without claiming certainty.",
         "6. Do not diagnose, recommend treatment, give medical advice, or "
         "create a final application classification.",
-        "7. Return only the required structured response. Do not add URLs.",
+        "7. Cite only supplied reference IDs using [R1], [R2], and so on. "
+        "Never invent a reference ID or supply a URL.",
+        "8. Return only the required structured response. Do not add URLs.",
         "",
         "Human review is required before this interpretation can contribute "
         "to a final report.",
@@ -237,13 +244,41 @@ def _build_prompt(
         else "Synthesize the evidence conservatively; do not manufacture a "
         "conflict or overstate agreement."
     )
+    reference_catalog = [
+        {
+            "reference_id": reference["reference_id"],
+            "source": reference["source"],
+            "identifier_type": reference["identifier_type"],
+            "identifier": reference["identifier"],
+            "title": reference["title"],
+        }
+        for reference in build_canonical_references(evidence)
+    ]
+    serialized_references = json.dumps(
+        reference_catalog,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if (
+        len(serialized.encode("utf-8"))
+        + len(serialized_references.encode("utf-8"))
+        > MAX_INTERPRETATION_EVIDENCE_BYTES
+    ):
+        raise VariantInterpretationError(
+            "Evidence and reference catalog exceed the prompt size limit."
+        )
     return (
         f"Prompt version: {VARIANT_INTERPRETATION_PROMPT_VERSION}\n"
         f"Prompt mode: {prompt_mode}\n"
         f"Task instruction: {mode_instruction}\n"
         "BEGIN_VALIDATED_EVIDENCE_OBJECT\n"
         f"{serialized}\n"
-        "END_VALIDATED_EVIDENCE_OBJECT"
+        "END_VALIDATED_EVIDENCE_OBJECT\n"
+        "BEGIN_ALLOWED_REFERENCE_CATALOG\n"
+        f"{serialized_references}\n"
+        "END_ALLOWED_REFERENCE_CATALOG"
     )
 
 
@@ -269,7 +304,9 @@ def _bounded_text(value: object, *, field: str, maximum: int) -> str:
 
 def _parse_response(
     response: LLMResponse,
-) -> tuple[str, str, list[str]]:
+    *,
+    allowed_reference_ids: set[str],
+) -> tuple[str, str, list[str], list[str]]:
     if response.finish_reason not in {None, "stop"}:
         raise VariantInterpretationError(
             "The interpretation response did not finish safely."
@@ -326,6 +363,23 @@ def _parse_response(
         field="conflict_assessment",
         maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
     )
+    citation_tokens = re.findall(
+        r"\[(R[^\]]*)\]",
+        "\n".join((interpretation, conflict_assessment, *warnings)),
+    )
+    if any(not re.fullmatch(r"R[1-9][0-9]*", item) for item in citation_tokens):
+        raise VariantInterpretationError(
+            "Interpretation contains a malformed reference citation."
+        )
+    citations = cited_reference_ids(
+        interpretation,
+        conflict_assessment,
+        *warnings,
+    )
+    if any(item not in allowed_reference_ids for item in citations):
+        raise VariantInterpretationError(
+            "Interpretation cites a reference absent from its evidence."
+        )
     try:
         validate_llm_payload(
             {
@@ -338,7 +392,7 @@ def _parse_response(
         raise VariantInterpretationError(
             "The interpretation response contains prohibited clinical data."
         ) from exc
-    return interpretation, conflict_assessment, warnings
+    return interpretation, conflict_assessment, warnings, citations
 
 
 def _usage(response: LLMResponse) -> dict[str, int | None] | None:
@@ -413,7 +467,13 @@ def interpret_variant(
         max_retries=max_retries,
         response_format=VARIANT_INTERPRETATION_RESPONSE_SCHEMA,
     )
-    interpretation, conflict_assessment, warnings = _parse_response(response)
+    allowed_references = build_canonical_references(evidence)
+    interpretation, conflict_assessment, warnings, citations = _parse_response(
+        response,
+        allowed_reference_ids={
+            reference["reference_id"] for reference in allowed_references
+        },
+    )
     result: VariantInterpretationResult = {
         "schema_version": VARIANT_INTERPRETATION_SCHEMA_VERSION,
         "variant_index": variant_index,
@@ -429,6 +489,7 @@ def interpret_variant(
         "interpretation": interpretation,
         "conflict_assessment": conflict_assessment,
         "warnings": warnings,
+        "cited_reference_ids": citations,
         "usage": _usage(response),
         "generated_at": _timestamp(timestamp),
         "error_type": None,
@@ -462,6 +523,7 @@ def _failed_result(
         "interpretation": None,
         "conflict_assessment": None,
         "warnings": [],
+        "cited_reference_ids": [],
         "usage": None,
         "generated_at": _timestamp(timestamp),
         "error_type": type(error).__name__,
@@ -648,6 +710,19 @@ def validate_variant_interpretation_result(
         raise VariantInterpretationError(
             "Variant interpretation warnings are invalid."
         )
+    cited_ids = value["cited_reference_ids"]
+    if (
+        not isinstance(cited_ids, list)
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"R[1-9][0-9]*", item) is None
+            for item in cited_ids
+        )
+        or len(set(cited_ids)) != len(cited_ids)
+    ):
+        raise VariantInterpretationError(
+            "Interpretation cited reference IDs are invalid."
+        )
     if value["status"] == "success":
         if (
             not isinstance(value["response_model"], str)
@@ -667,11 +742,30 @@ def validate_variant_interpretation_result(
             field="conflict_assessment",
             maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
         )
+        expected_citations = cited_reference_ids(
+            value["interpretation"],
+            value["conflict_assessment"],
+            *warnings,
+        )
+        if cited_ids != expected_citations:
+            raise VariantInterpretationError(
+                "Interpretation citation provenance is inconsistent."
+            )
+        if evidence is not None:
+            allowed_ids = {
+                reference["reference_id"]
+                for reference in build_canonical_references(source)
+            }
+            if any(item not in allowed_ids for item in cited_ids):
+                raise VariantInterpretationError(
+                    "Interpretation cites a reference absent from its evidence."
+                )
     elif (
         value["response_model"] is not None
         or value["interpretation"] is not None
         or value["conflict_assessment"] is not None
         or value["warnings"] != []
+        or value["cited_reference_ids"] != []
         or value["usage"] is not None
         or not isinstance(value["error_type"], str)
         or not value["error_type"].strip()

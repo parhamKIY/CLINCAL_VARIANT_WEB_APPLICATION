@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-54 complete; Stage 55 is next
+**Implementation progress:** Stages 46-55 complete; Stage 56 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 54. Features assigned to
-Stages 55–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 55. Features assigned to
+Stages 56–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -232,11 +232,31 @@ separate reviewed copy with append-only history.
 - Any selection change invalidates final confirmation. An included-report edit also
   invalidates it; an edit to an already excluded report retains confirmation because
   selected report content is unchanged.
-- Pipeline schema `2.6` persists the new state. Stage 55 remains responsible for
-  canonical reference expansion, and Stage 56 remains responsible for composing the
-  Final Clinical Report.
+- Pipeline schema `2.6` persists the Stage 54 state. Stage 56 remains responsible
+  for composing the Final Clinical Report.
 
-## 14. Stage 45 acceptance record
+## 14. Stage 55 implementation record
+
+- A normalized canonical-reference contract assigns stable `R1`, `R2`, and later
+  IDs while retaining source, identifier type/value, optional title, canonical URL,
+  and explicit validated/unavailable link status.
+- Deterministic builders cover PMID, PMCID, DOI, ClinVar accession, Europe PMC,
+  ClinGen, and CSpec records. Known-provider links require HTTPS, no credentials or
+  fragments, allowlisted domains, and CSpec identifier/path agreement.
+- Untrusted, malformed, mismatched, or unavailable URLs cannot become clickable;
+  the report retains an explicit no-validated-link fallback instead.
+- The Variant Interpretation Model receives a bounded catalog without URLs and may
+  cite only supplied bracket IDs. Fabricated, malformed, or evidence-absent IDs fail
+  validation, including citations added during human report editing.
+- Draft Variant Report schema `2.1` maps citation IDs to canonical objects. Pipeline
+  schema `2.7` and Variant Interpretation Result schema `1.1` persist the hardened
+  state.
+- Streamlit, legacy Markdown, and generic Word/PDF rendering expose allowlisted
+  canonical links. Text fallback retains the canonical URL as readable text.
+- Stage 56 remains responsible for composing one Final Clinical Report from the
+  confirmed selected subset.
+
+## 15. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

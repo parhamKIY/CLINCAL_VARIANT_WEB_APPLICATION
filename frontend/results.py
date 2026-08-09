@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from backend.pipeline import PipelineResult
+from backend.references import build_canonical_references
 
 
 SOURCE_LABELS = {
@@ -667,14 +668,17 @@ def _render_evidence_details(evidence: dict[str, object]) -> None:
             or "None",
         )
 
-    references = evidence.get("references")
+    references = build_canonical_references(evidence)
     st.markdown("**References**")
-    if isinstance(references, list) and references:
+    if references:
         st.dataframe(
             [
                 {
-                    "Source": _dictionary(reference).get("source"),
-                    "URL": _dictionary(reference).get("url"),
+                    "Reference": reference["reference_id"],
+                    "Source": reference["source"],
+                    "Identifier": reference["identifier"],
+                    "Link status": reference["url_status"],
+                    "URL": reference["canonical_url"],
                 }
                 for reference in references
             ],

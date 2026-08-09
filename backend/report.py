@@ -24,6 +24,10 @@ from backend.privacy import (
     validate_llm_payload,
     validate_no_prohibited_fields,
 )
+from backend.references import (
+    build_canonical_references,
+    validated_reference_url,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -1417,6 +1421,10 @@ def _validate_report_references(value: object) -> None:
                 url = _validate_url(url, f"{path}.url")
             except EvidenceObjectError as exc:
                 raise ClinicalReportError(str(exc)) from exc
+            if validated_reference_url(url) != url:
+                raise ClinicalReportError(
+                    f"{path}.url is not an allowlisted canonical reference."
+                )
         if identifier is None and url is None:
             raise ClinicalReportError(
                 f"{path} must provide an identifier, a URL, or both."
@@ -2300,42 +2308,20 @@ def _build_report_references(
 ) -> tuple[list[ClinicalReportReference], bool]:
     """Normalize and bound evidence citations for the final report."""
 
-    references: list[ClinicalReportReference] = []
-    seen: set[tuple[str, str | None, str | None]] = set()
-
-    def add(
-        source: str,
-        identifier: str | None,
-        url: str | None,
-    ) -> None:
-        key = (source, identifier, url)
-        if key in seen or (identifier is None and url is None):
-            return
-        seen.add(key)
-        references.append(
-            {
-                "source": source,
-                "identifier": identifier,
-                "url": url,
-            }
-        )
-
-    for reference in evidence["references"]:
-        add(reference["source"], None, reference["url"])
-    if evidence["clinvar_accession"] is not None:
-        add(
-            "NCBI ClinVar",
-            evidence["clinvar_accession"],
-            None,
-        )
-    for curation in evidence["clingen_curations"]:
-        add(
-            "ClinGen",
-            curation["disease_id"],
-            curation["report_url"],
-        )
-        for pmid in curation["pmids"]:
-            add("PubMed", f"PMID:{pmid}", None)
+    references: list[ClinicalReportReference] = [
+        {
+            "source": reference["source"],
+            "identifier": (
+                f"PMID:{reference['identifier']}"
+                if reference["identifier_type"] == "PMID"
+                else reference["identifier"]
+            ),
+            "url": reference["canonical_url"],
+        }
+        for reference in build_canonical_references(evidence)
+        if reference["identifier"] is not None
+        or reference["canonical_url"] is not None
+    ]
 
     truncated = len(references) > MAX_CLINICAL_REPORT_REFERENCES
     return (
@@ -2417,9 +2403,10 @@ def _render_report_references(
         parts = [_markdown_value(reference["source"])]
         if reference["identifier"] is not None:
             parts.append(_markdown_value(reference["identifier"]))
+        label = " — ".join(parts)
         if reference["url"] is not None:
-            parts.append(_markdown_value(reference["url"]))
-        lines.append(f"- {' — '.join(parts)}")
+            label = f"[{label}]({_markdown_value(reference['url'])})"
+        lines.append(f"- {label}")
     return "\n".join(lines)
 
 
