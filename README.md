@@ -5,10 +5,10 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_56_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_57_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-776_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-782_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
 [![Coverage](https://img.shields.io/badge/coverage-85.58%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
@@ -54,16 +54,17 @@ its original input order.
   offline-verified.
 - Stage 56 Final Clinical Report composition and text/PDF/Word delivery is
   implemented and offline-verified.
-- Stage 57 persistence schema V3 and recovery migration is the next bounded
-  milestone.
-- Pipeline schema: `2.8`.
+- Stage 57 persistence schema V3 and recovery migration is implemented and
+  offline-verified.
+- Stage 58 privacy and safety reverification is the next bounded milestone.
+- Pipeline schema: `2.9`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
 - Final Clinical Report schema: `2.0`.
-- SQLite schema: `2`.
+- SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **776 passed, 4 skipped; 85.58% coverage**.
+- Current verified suite: **782 passed, 4 skipped; 85.58% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -76,7 +77,7 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-56 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-57 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline through Final Clinical Report delivery; later
 persistence and verification items remain planned:
@@ -234,6 +235,21 @@ appear in final findings or references. Streamlit displays the completed report 
 offers in-memory text, PDF, and Word downloads with numbered clickable canonical
 references. Pipeline schema `2.8` integrity-checks the report against the current
 reviewed state so stale or untracked final content fails closed.
+
+### Stage 57 persistence schema V3 and recovery migration
+
+SQLite schema `3` adds normalized analysis, per-variant review, and finalization
+projections beside the canonical pipeline snapshot. It persists input type, accepted
+HPO terms, both task-specific model selections, phenotype-extraction provenance,
+complete evidence/interpretation/report/edit/selection state, confirmation state,
+selected canonical variant IDs, and bounded in-memory artifact metadata. Pipeline
+schema `2.9` validates the same analysis context at the application boundary.
+
+Schema-2 Stage 56 lifecycle snapshots receive a bounded migration to the current
+schema. Older Output A/Output B records remain explicitly unsupported and are never
+silently reinterpreted. Once generated drafts are durably saved, refresh or restart
+recovery loads them by analysis ID without rerunning successful interpretation; the
+reviewer can continue editing, selection, confirmation, and export from restored state.
 
 ## Current implemented workflow
 
@@ -530,7 +546,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-776 passed, 4 skipped
+782 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -679,8 +695,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-56 are implemented; Stage 57 owns persistence schema V3 and recovery
-  migration for the redesigned lifecycle.
+- Stages 46-57 are implemented; Stage 58 owns privacy and safety reverification of
+  the redesigned LLM and persistence boundaries.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -688,8 +704,9 @@ clinical_variant_app/
 - Interpretation quality depends on evidence currency, phenotype completeness,
   reviewer judgment, and model behavior.
 - Live services can change, throttle, or become unavailable.
-- Restart recovery reruns interrupted analysis requests from their last sanitized
-  input checkpoint; it does not resume an operating-system thread mid-request.
+- Restart recovery reloads a durably persisted current-schema draft without another
+  interpretation call. An interrupted, unpersisted request reruns from its sanitized
+  checkpoint; it does not resume an operating-system thread mid-request.
 - Production use requires controls beyond the current local SQLite/Streamlit
   architecture.
 
@@ -705,4 +722,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 57 handoff.
+- current limitations and the Stage 58 handoff.

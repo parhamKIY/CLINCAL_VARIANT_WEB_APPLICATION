@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from backend.pipeline import PipelineResult
 
 
-DATABASE_SCHEMA_VERSION = 2
+DATABASE_SCHEMA_VERSION = 3
 DATABASE_BUSY_TIMEOUT_MS = 5_000
 MAX_ANALYSIS_WARNINGS = 100
 MAX_ANALYSIS_WARNING_LENGTH = 1_000
@@ -96,6 +96,53 @@ DATABASE_TABLES = {
         "pipeline_json",
         "updated_at",
     ),
+    "analysis_contexts": (
+        "analysis_id",
+        "input_type",
+        "accepted_hpo_json",
+        "phenotype_extraction_model",
+        "variant_interpretation_model",
+        "phenotype_extraction_provenance_json",
+        "analysis_state",
+        "updated_at",
+    ),
+    "variant_review_states": (
+        "analysis_id",
+        "variant_index",
+        "evidence_json",
+        "conflict_json",
+        "interpretation_json",
+        "machine_original_report_json",
+        "reviewed_report_json",
+        "edit_history_json",
+        "include_in_final_report",
+        "selection_history_json",
+        "interpretation_failure_json",
+        "canonical_references_json",
+        "updated_at",
+    ),
+    "finalization_states": (
+        "analysis_id",
+        "confirmation_state",
+        "confirmed_at",
+        "selected_variant_ids_json",
+        "final_report_schema_version",
+        "final_report_id",
+        "final_report_generated_at",
+        "artifact_metadata_json",
+        "final_report_json",
+        "updated_at",
+    ),
+}
+
+_DATABASE_SCHEMA_V2_TABLES = {
+    name: columns
+    for name, columns in DATABASE_TABLES.items()
+    if name not in {
+        "analysis_contexts",
+        "variant_review_states",
+        "finalization_states",
+    }
 }
 
 _DATABASE_SCHEMA_SQL = f"""
@@ -163,11 +210,64 @@ CREATE TABLE pipeline_states (
         ON DELETE CASCADE
 ) WITHOUT ROWID;
 
+CREATE TABLE analysis_contexts (
+    analysis_id TEXT PRIMARY KEY,
+    input_type TEXT
+        CHECK (input_type IN ('vcf', 'vcf_gz', 'excel', 'manual')),
+    accepted_hpo_json TEXT NOT NULL,
+    phenotype_extraction_model TEXT,
+    variant_interpretation_model TEXT,
+    phenotype_extraction_provenance_json TEXT,
+    analysis_state TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE TABLE variant_review_states (
+    analysis_id TEXT NOT NULL,
+    variant_index INTEGER NOT NULL CHECK (variant_index >= 0),
+    evidence_json TEXT NOT NULL,
+    conflict_json TEXT NOT NULL,
+    interpretation_json TEXT NOT NULL,
+    machine_original_report_json TEXT NOT NULL,
+    reviewed_report_json TEXT NOT NULL,
+    edit_history_json TEXT NOT NULL,
+    include_in_final_report INTEGER NOT NULL
+        CHECK (include_in_final_report IN (0, 1)),
+    selection_history_json TEXT NOT NULL,
+    interpretation_failure_json TEXT,
+    canonical_references_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (analysis_id, variant_index),
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE TABLE finalization_states (
+    analysis_id TEXT PRIMARY KEY,
+    confirmation_state TEXT NOT NULL
+        CHECK (confirmation_state IN ('draft', 'confirmed', 'finalized')),
+    confirmed_at TEXT,
+    selected_variant_ids_json TEXT NOT NULL,
+    final_report_schema_version TEXT,
+    final_report_id TEXT,
+    final_report_generated_at TEXT,
+    artifact_metadata_json TEXT NOT NULL,
+    final_report_json TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
 PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
 COMMIT;
 """
 
-_MIGRATE_SCHEMA_V1_TO_V2_SQL = f"""
+_MIGRATE_SCHEMA_V1_TO_V2_SQL = """
 BEGIN IMMEDIATE;
 CREATE TABLE pipeline_states (
     analysis_id TEXT PRIMARY KEY,
@@ -184,6 +284,66 @@ CREATE TABLE pipeline_states (
         REFERENCES analyses (analysis_id)
         ON DELETE CASCADE
 ) WITHOUT ROWID;
+PRAGMA user_version = 2;
+COMMIT;
+"""
+
+_MIGRATE_SCHEMA_V2_TO_V3_SQL = f"""
+BEGIN IMMEDIATE;
+
+CREATE TABLE analysis_contexts (
+    analysis_id TEXT PRIMARY KEY,
+    input_type TEXT
+        CHECK (input_type IN ('vcf', 'vcf_gz', 'excel', 'manual')),
+    accepted_hpo_json TEXT NOT NULL,
+    phenotype_extraction_model TEXT,
+    variant_interpretation_model TEXT,
+    phenotype_extraction_provenance_json TEXT,
+    analysis_state TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE TABLE variant_review_states (
+    analysis_id TEXT NOT NULL,
+    variant_index INTEGER NOT NULL CHECK (variant_index >= 0),
+    evidence_json TEXT NOT NULL,
+    conflict_json TEXT NOT NULL,
+    interpretation_json TEXT NOT NULL,
+    machine_original_report_json TEXT NOT NULL,
+    reviewed_report_json TEXT NOT NULL,
+    edit_history_json TEXT NOT NULL,
+    include_in_final_report INTEGER NOT NULL
+        CHECK (include_in_final_report IN (0, 1)),
+    selection_history_json TEXT NOT NULL,
+    interpretation_failure_json TEXT,
+    canonical_references_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (analysis_id, variant_index),
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE TABLE finalization_states (
+    analysis_id TEXT PRIMARY KEY,
+    confirmation_state TEXT NOT NULL
+        CHECK (confirmation_state IN ('draft', 'confirmed', 'finalized')),
+    confirmed_at TEXT,
+    selected_variant_ids_json TEXT NOT NULL,
+    final_report_schema_version TEXT,
+    final_report_id TEXT,
+    final_report_generated_at TEXT,
+    artifact_metadata_json TEXT NOT NULL,
+    final_report_json TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
 PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
 COMMIT;
 """
@@ -337,7 +497,7 @@ def _validate_schema_v1(connection: sqlite3.Connection) -> None:
 
     legacy_tables = {
         name: columns
-        for name, columns in DATABASE_TABLES.items()
+        for name, columns in _DATABASE_SCHEMA_V2_TABLES.items()
         if name != "pipeline_states"
     }
     if _existing_application_tables(connection) != set(legacy_tables):
@@ -354,6 +514,29 @@ def _validate_schema_v1(connection: sqlite3.Connection) -> None:
         if actual_columns != expected_columns:
             raise DatabaseInitializationError(
                 "The legacy analysis database schema is incomplete or "
+                "unexpected."
+            )
+
+
+def _validate_schema_v2(connection: sqlite3.Connection) -> None:
+    """Verify the exact schema-2 layout before the V3 migration."""
+
+    if _existing_application_tables(connection) != set(
+        _DATABASE_SCHEMA_V2_TABLES
+    ):
+        raise DatabaseInitializationError(
+            "The schema-2 analysis database is incomplete or unexpected."
+        )
+    for table_name, expected_columns in _DATABASE_SCHEMA_V2_TABLES.items():
+        actual_columns = tuple(
+            str(row["name"])
+            for row in connection.execute(
+                f'PRAGMA table_info("{table_name}")'
+            )
+        )
+        if actual_columns != expected_columns:
+            raise DatabaseInitializationError(
+                "The schema-2 analysis database is incomplete or "
                 "unexpected."
             )
 
@@ -400,6 +583,7 @@ def initialize_database(
         ) from exc
 
     connection = connect_database(resolved_path)
+    migrated_to_v3 = False
     try:
         schema_version = int(
             connection.execute("PRAGMA user_version").fetchone()[0]
@@ -419,13 +603,17 @@ def initialize_database(
         elif schema_version == 1:
             _validate_schema_v1(connection)
             connection.executescript(_MIGRATE_SCHEMA_V1_TO_V2_SQL)
-        elif schema_version < DATABASE_SCHEMA_VERSION:
-            raise DatabaseInitializationError(
-                "The analysis database requires an unsupported schema "
-                "migration."
-            )
+            _validate_schema_v2(connection)
+            connection.executescript(_MIGRATE_SCHEMA_V2_TO_V3_SQL)
+            migrated_to_v3 = True
+        elif schema_version == 2:
+            _validate_schema_v2(connection)
+            connection.executescript(_MIGRATE_SCHEMA_V2_TO_V3_SQL)
+            migrated_to_v3 = True
 
         _validate_schema(connection)
+        if migrated_to_v3:
+            _backfill_v3_projections(connection)
         connection.execute("PRAGMA journal_mode = WAL")
     except DatabaseError:
         connection.rollback()
@@ -1249,6 +1437,378 @@ def _prepare_pipeline_state(
     return validated, serialized, _derive_review_state(validated)
 
 
+def _json_text(value: object) -> str:
+    """Serialize one validated projection value deterministically."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def _v3_projection(
+    value: "PipelineResult",
+    *,
+    updated_at: str,
+) -> tuple[tuple[object, ...], list[tuple[object, ...]], tuple[object, ...]]:
+    """Derive normalized V3 rows from one validated pipeline snapshot."""
+
+    analysis_id = value["analysis_id"]
+    assert analysis_id is not None
+    context = value["analysis_context"]
+    context_row: tuple[object, ...] = (
+        analysis_id,
+        context["input_type"],
+        _json_text(context["accepted_hpo_terms"]),
+        context["phenotype_extraction_model"],
+        context["variant_interpretation_model"],
+        (
+            _json_text(context["phenotype_extraction_provenance"])
+            if context["phenotype_extraction_provenance"] is not None
+            else None
+        ),
+        value["workflow_state"],
+        updated_at,
+    )
+
+    variant_rows: list[tuple[object, ...]] = []
+    if len(value["draft_variant_reports"]) == value["variant_count"]:
+        for index, report in enumerate(value["draft_variant_reports"]):
+            interpretation = value["variant_interpretation_results"][index]
+            reviewed = report["reviewed_report"]
+            failure = (
+                {
+                    "status": interpretation["status"],
+                    "error_type": interpretation["error_type"],
+                    "warnings": interpretation["warnings"],
+                }
+                if interpretation["status"] == "failed"
+                else None
+            )
+            variant_rows.append(
+                (
+                    analysis_id,
+                    index,
+                    _json_text(value["evidence_objects"][index]),
+                    _json_text(reviewed["conflict_summary"]),
+                    _json_text(interpretation),
+                    _json_text(report["machine_original_report"]),
+                    _json_text(reviewed),
+                    _json_text(report["edit_history"]),
+                    int(report["include_in_final_report"]),
+                    _json_text(report["selection_history"]),
+                    _json_text(failure) if failure is not None else None,
+                    _json_text(reviewed["references"]),
+                    updated_at,
+                )
+            )
+
+    packages = value["reviewed_evidence_packages"]
+    fully_confirmed = (
+        value["variant_count"] > 0
+        and [package["variant_index"] for package in packages]
+        == list(range(value["variant_count"]))
+    )
+    final_report = value["final_clinical_report"]
+    confirmation_state = (
+        "finalized"
+        if final_report is not None
+        else ("confirmed" if fully_confirmed else "draft")
+    )
+    confirmed_at = (
+        max(str(package["confirmed_at"]) for package in packages)
+        if fully_confirmed
+        else None
+    )
+    selected_variant_ids = []
+    for report in value["draft_variant_reports"]:
+        if not report["include_in_final_report"]:
+            continue
+        variant_index = report["variant_index"]
+        evidence = value["evidence_objects"][variant_index]
+        variant = evidence["variant"]
+        selected_variant_ids.append(
+            f"{evidence['assembly']}:{variant['chrom']}:"
+            f"{variant['pos']}:{variant['ref']}:{variant['alt']}"
+        )
+    artifact_metadata = {
+        "available_formats": (
+            ["text", "pdf", "docx"]
+            if final_report is not None
+            else []
+        ),
+        "delivery": "in_memory",
+        "persisted_file_paths": [],
+    }
+    finalization_row: tuple[object, ...] = (
+        analysis_id,
+        confirmation_state,
+        confirmed_at,
+        _json_text(selected_variant_ids),
+        (
+            final_report["schema_version"]
+            if final_report is not None
+            else None
+        ),
+        final_report["report_id"] if final_report is not None else None,
+        (
+            final_report["generated_at"]
+            if final_report is not None
+            else None
+        ),
+        _json_text(artifact_metadata),
+        _json_text(final_report) if final_report is not None else None,
+        updated_at,
+    )
+    return context_row, variant_rows, finalization_row
+
+
+def _write_v3_projection(
+    connection: sqlite3.Connection,
+    value: "PipelineResult",
+    *,
+    updated_at: str,
+) -> None:
+    """Replace one analysis's normalized V3 projection atomically."""
+
+    context_row, variant_rows, finalization_row = _v3_projection(
+        value,
+        updated_at=updated_at,
+    )
+    analysis_id = value["analysis_id"]
+    assert analysis_id is not None
+    connection.execute(
+        """
+        INSERT INTO analysis_contexts (
+            analysis_id, input_type, accepted_hpo_json,
+            phenotype_extraction_model, variant_interpretation_model,
+            phenotype_extraction_provenance_json, analysis_state, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (analysis_id) DO UPDATE SET
+            input_type = excluded.input_type,
+            accepted_hpo_json = excluded.accepted_hpo_json,
+            phenotype_extraction_model = excluded.phenotype_extraction_model,
+            variant_interpretation_model = excluded.variant_interpretation_model,
+            phenotype_extraction_provenance_json = excluded.phenotype_extraction_provenance_json,
+            analysis_state = excluded.analysis_state,
+            updated_at = excluded.updated_at
+        """,
+        context_row,
+    )
+    connection.execute(
+        "DELETE FROM variant_review_states WHERE analysis_id = ?",
+        (analysis_id,),
+    )
+    if variant_rows:
+        connection.executemany(
+            """
+            INSERT INTO variant_review_states (
+                analysis_id, variant_index, evidence_json, conflict_json,
+                interpretation_json, machine_original_report_json,
+                reviewed_report_json, edit_history_json,
+                include_in_final_report, selection_history_json,
+                interpretation_failure_json, canonical_references_json,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            variant_rows,
+        )
+    connection.execute(
+        """
+        INSERT INTO finalization_states (
+            analysis_id, confirmation_state, confirmed_at,
+            selected_variant_ids_json, final_report_schema_version,
+            final_report_id, final_report_generated_at,
+            artifact_metadata_json, final_report_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (analysis_id) DO UPDATE SET
+            confirmation_state = excluded.confirmation_state,
+            confirmed_at = excluded.confirmed_at,
+            selected_variant_ids_json = excluded.selected_variant_ids_json,
+            final_report_schema_version = excluded.final_report_schema_version,
+            final_report_id = excluded.final_report_id,
+            final_report_generated_at = excluded.final_report_generated_at,
+            artifact_metadata_json = excluded.artifact_metadata_json,
+            final_report_json = excluded.final_report_json,
+            updated_at = excluded.updated_at
+        """,
+        finalization_row,
+    )
+
+
+def _validate_v3_projection(
+    connection: sqlite3.Connection,
+    value: "PipelineResult",
+    *,
+    updated_at: str,
+) -> None:
+    """Require normalized V3 rows to match the canonical pipeline JSON."""
+
+    expected_context, expected_variants, expected_finalization = (
+        _v3_projection(value, updated_at=updated_at)
+    )
+    analysis_id = value["analysis_id"]
+    assert analysis_id is not None
+    context_row = connection.execute(
+        "SELECT * FROM analysis_contexts WHERE analysis_id = ?",
+        (analysis_id,),
+    ).fetchone()
+    variant_rows = connection.execute(
+        """
+        SELECT * FROM variant_review_states
+        WHERE analysis_id = ? ORDER BY variant_index
+        """,
+        (analysis_id,),
+    ).fetchall()
+    finalization_row = connection.execute(
+        "SELECT * FROM finalization_states WHERE analysis_id = ?",
+        (analysis_id,),
+    ).fetchone()
+    if (
+        context_row is None
+        or tuple(context_row) != expected_context
+        or [tuple(row) for row in variant_rows] != expected_variants
+        or finalization_row is None
+        or tuple(finalization_row) != expected_finalization
+    ):
+        raise DatabaseReadError(
+            "The stored Stage 57 persistence projection is invalid."
+        )
+
+
+def _bounded_stage56_pipeline_migration(
+    raw: object,
+) -> "PipelineResult" | None:
+    """Upgrade only the Stage 56 report lifecycle; never reinterpret Output A/B."""
+
+    from backend.final_clinical_report import (
+        FinalClinicalReportError,
+        compose_final_clinical_report,
+    )
+    from backend.pipeline import (
+        PIPELINE_SCHEMA_VERSION,
+        validate_pipeline_result,
+    )
+
+    if not isinstance(raw, dict):
+        return None
+    candidate = dict(raw)
+    if candidate.get("schema_version") == PIPELINE_SCHEMA_VERSION:
+        try:
+            return validate_pipeline_result(candidate)
+        except (TypeError, ValueError):
+            return None
+    if candidate.get("schema_version") != "2.8":
+        return None
+    variant_count = candidate.get("variant_count")
+    reports = candidate.get("draft_variant_reports")
+    interpretations = candidate.get("variant_interpretation_results")
+    if (
+        isinstance(variant_count, bool)
+        or not isinstance(variant_count, int)
+        or not isinstance(reports, list)
+        or len(reports) != variant_count
+        or not isinstance(interpretations, list)
+        or len(interpretations) != variant_count
+    ):
+        return None
+    accepted_hpo_terms: list[str] = []
+    if reports:
+        reviewed = reports[0].get("reviewed_report")
+        phenotype = (
+            reviewed.get("phenotype_context")
+            if isinstance(reviewed, dict)
+            else None
+        )
+        accepted = (
+            phenotype.get("accepted_hpo_terms")
+            if isinstance(phenotype, dict)
+            else None
+        )
+        if isinstance(accepted, list) and all(
+            isinstance(item, str) for item in accepted
+        ):
+            accepted_hpo_terms = list(accepted)
+    interpretation_model = None
+    if interpretations and isinstance(interpretations[0], dict):
+        model = interpretations[0].get("configured_model")
+        if isinstance(model, str) and model.strip():
+            interpretation_model = model
+    candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
+    candidate["analysis_context"] = {
+        "input_type": None,
+        "accepted_hpo_terms": accepted_hpo_terms,
+        "phenotype_extraction_model": None,
+        "variant_interpretation_model": interpretation_model,
+        "phenotype_extraction_provenance": None,
+    }
+    final_report = candidate.get("final_clinical_report")
+    if final_report is not None:
+        generated_at = (
+            final_report.get("generated_at")
+            if isinstance(final_report, dict)
+            else None
+        )
+        candidate["final_clinical_report"] = None
+        try:
+            candidate["final_clinical_report"] = dict(
+                compose_final_clinical_report(
+                    candidate,
+                    timestamp=generated_at,
+                )
+            )
+        except FinalClinicalReportError:
+            return None
+    try:
+        return validate_pipeline_result(candidate)
+    except (TypeError, ValueError):
+        return None
+
+
+def _backfill_v3_projections(connection: sqlite3.Connection) -> None:
+    """Materialize valid Stage 56 snapshots during the bounded V2-to-V3 migration."""
+
+    rows = connection.execute(
+        """
+        SELECT analysis_id, pipeline_json, updated_at
+        FROM pipeline_states ORDER BY analysis_id
+        """
+    ).fetchall()
+    with connection:
+        for row in rows:
+            raw_json = row["pipeline_json"]
+            if not isinstance(raw_json, str):
+                continue
+            try:
+                raw = json.loads(raw_json)
+            except json.JSONDecodeError:
+                continue
+            migrated = _bounded_stage56_pipeline_migration(raw)
+            if migrated is None:
+                continue
+            serialized = _json_text(migrated)
+            connection.execute(
+                """
+                UPDATE pipeline_states
+                SET pipeline_schema_version = ?, pipeline_json = ?
+                WHERE analysis_id = ?
+                """,
+                (
+                    migrated["schema_version"],
+                    serialized,
+                    row["analysis_id"],
+                ),
+            )
+            _write_v3_projection(
+                connection,
+                migrated,
+                updated_at=row["updated_at"],
+            )
+
+
 def save_pipeline_state(
     value: object,
     *,
@@ -1311,6 +1871,11 @@ def save_pipeline_state(
                     updated_at,
                 ),
             )
+            _write_v3_projection(
+                connection,
+                validated,
+                updated_at=updated_at,
+            )
             connection.execute(
                 """
                 UPDATE analyses
@@ -1353,7 +1918,8 @@ def load_pipeline_state(
                 review_state,
                 workflow_state,
                 pipeline_schema_version,
-                pipeline_json
+                pipeline_json,
+                updated_at
             FROM pipeline_states
             WHERE analysis_id = ?
             """,
@@ -1383,7 +1949,7 @@ def load_pipeline_state(
         ):
             raise DatabaseReadError(
                 "This legacy Stage 44 analysis cannot be resumed by the "
-                "Stage 52 report workflow."
+                "Stage 57 report workflow."
             )
         validated = validate_pipeline_result(raw)
     except DatabaseReadError:
@@ -1404,6 +1970,19 @@ def load_pipeline_state(
         or _derive_review_state(validated) != row["review_state"]
     ):
         raise DatabaseReadError("The stored pipeline state is invalid.")
+    projection_connection = connect_database(resolved_database_path)
+    try:
+        _validate_v3_projection(
+            projection_connection,
+            validated,
+            updated_at=row["updated_at"],
+        )
+    except sqlite3.Error as exc:
+        raise DatabaseReadError(
+            "The stored Stage 57 persistence projection could not be read."
+        ) from exc
+    finally:
+        projection_connection.close()
     return validated
 
 

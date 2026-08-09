@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-56 complete; Stage 57 is next
+**Implementation progress:** Stages 46-57 complete; Stage 58 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 56. Features assigned to
-Stages 57–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 57. Features assigned to
+Stages 58–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -117,9 +117,9 @@ The target lifecycle has three phases:
 3. **Finalization:** validate confirmation and compose exports from the persisted
    reviewed state without a new LLM call.
 
-New persistence must keep analysis-level phenotype/model state, complete per-variant
+New persistence keeps analysis-level phenotype/model state, complete per-variant
 evidence and review state, inclusion decisions, final confirmation, selected variant
-IDs, and export metadata. Stage 57 will choose and implement the exact schema version.
+IDs, and export metadata in SQLite schema `3` and pipeline schema `2.9`.
 
 ## 7. Legacy-analysis compatibility
 
@@ -127,12 +127,13 @@ Stage 44 SQLite schema-2 analyses are legacy records. They may remain readable i
 bounded implementation is practical, but they must never be silently reinterpreted
 as the new report lifecycle.
 
-Before Stage 57 migration code is implemented, the safe default is:
+The implemented Stage 57 compatibility boundary is:
 
-- preserve existing records unchanged;
-- identify them explicitly as legacy Stage 44 analyses; and
+- migrate only validated Stage 56 report-lifecycle snapshots through the bounded
+  schema-2 to schema-3 path;
+- preserve older records unchanged and identify them as legacy Stage 44 analyses; and
 - return a clear unsupported-legacy-resume state wherever the new workflow cannot
-  represent them faithfully.
+  represent them faithfully, without silently mapping Output A/B to current reports.
 
 ## 8. Safety invariants
 
@@ -270,10 +271,29 @@ separate reviewed copy with append-only history.
   during validation so stale, tampered, reordered, or unconfirmed content fails closed.
 - Streamlit displays the completed report and provides in-memory text, PDF, and Word
   exports with numbered clickable allowlisted references.
-- Stage 57 remains responsible for SQLite schema V3, artifact metadata persistence,
+- Stage 57 implements SQLite schema V3, artifact metadata persistence, bounded
   migration behavior, and restart recovery of the redesigned lifecycle.
 
-## 16. Stage 45 acceptance record
+## 16. Stage 57 implementation record
+
+- SQLite schema `3` adds normalized analysis-context, variant-review, and
+  finalization projections beside the canonical validated pipeline snapshot.
+- Pipeline schema `2.9` persists input type, accepted HPO terms, phenotype and
+  interpretation model selections, and bounded phenotype-extraction provenance.
+- Each variant projection retains Evidence Object, conflict and interpretation
+  results, immutable machine original, editable reviewed report, append-only edit
+  history, inclusion/selection history, interpretation failure, and canonical
+  references. Finalization retains confirmation state/time, selected canonical
+  variant IDs, the Final Clinical Report, and bounded in-memory artifact metadata.
+- Valid Stage 56 schema-2 lifecycle snapshots receive a bounded migration. Older
+  Stage 44 Output A/B records remain explicitly unsupported and are never silently
+  reinterpreted.
+- A recovery checkpoint linked to a persisted draft reloads SQLite state after
+  refresh or restart without rerunning successful interpretation. Editing,
+  selection, confirmation, and export state remain recoverable.
+- Stage 58 is the next bounded increment and will reverify privacy and safety.
+
+## 17. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

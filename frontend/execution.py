@@ -23,13 +23,18 @@ from typing import (
     Protocol,
     Sequence,
     TypedDict,
+    cast,
 )
 from uuid import uuid4
 
+from backend.database import DatabaseError, load_pipeline_state
 from backend.pipeline import (
+    ANALYSIS_ID_PATTERN,
     PipelineProgressCallback,
     PipelineResult,
+    PipelineResultError,
     run_analysis,
+    validate_analysis_context,
 )
 from backend.excel_processing import parse_excel_variants
 from backend.vcf_processing import (
@@ -80,7 +85,7 @@ AnalysisRunner = Callable[
 ANALYSIS_JOB_TOKEN_PATTERN = re.compile(r"job-[0-9a-f]{32}")
 MAX_RECOVERABLE_ANALYSIS_JOBS = 32
 RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS = 60 * 60
-RECOVERY_REQUEST_SCHEMA_VERSION = 2
+RECOVERY_REQUEST_SCHEMA_VERSION = 3
 MAX_RECOVERY_REQUEST_BYTES = 1024 * 1024
 
 
@@ -91,6 +96,10 @@ class AnalysisRecoveryRequest(TypedDict):
     manual_variants: list[dict[str, object]]
     phenotypes: list[str]
     llm_model: str | None
+    input_type: str
+    phenotype_extraction_model: str | None
+    phenotype_extraction_provenance: dict[str, object] | None
+    analysis_id: str | None
     created_at: float
 
 
@@ -156,6 +165,7 @@ class AnalysisJob:
         self._result: PipelineResult | None = None
         self._error_message: str | None = None
         self._cleanup_warning: str | None = None
+        self._recovery_token: str | None = None
         self._thread = threading.Thread(
             target=self._run,
             name="clinical-variant-analysis",
@@ -166,6 +176,16 @@ class AnalysisJob:
         """Start the background worker exactly once."""
 
         self._thread.start()
+
+    def bind_recovery_token(self, token: str) -> None:
+        """Attach the registry token used to checkpoint a persisted result."""
+
+        if ANALYSIS_JOB_TOKEN_PATTERN.fullmatch(token) is None:
+            raise FrontendExecutionError(
+                "Analysis job recovery token is invalid."
+            )
+        with self._lock:
+            self._recovery_token = token
 
     def request_cancel(self) -> bool:
         """Request cancellation while the job is still active."""
@@ -289,6 +309,14 @@ class AnalysisJob:
             return
 
         with self._lock:
+            recovery_token = self._recovery_token
+        analysis_id = result.get("analysis_id")
+        if recovery_token is not None and isinstance(analysis_id, str):
+            _mark_recovery_request_persisted(
+                recovery_token,
+                analysis_id,
+            )
+        with self._lock:
             self._state = "completed"
             self._latest_result = deepcopy(result)
             self._result = deepcopy(result)
@@ -331,8 +359,45 @@ def _persist_recovery_request(
     token: str,
     request: AnalysisRecoveryRequest,
 ) -> None:
+    try:
+        context = validate_analysis_context(
+            {
+                "input_type": request["input_type"],
+                "accepted_hpo_terms": request["phenotypes"],
+                "phenotype_extraction_model": request[
+                    "phenotype_extraction_model"
+                ],
+                "variant_interpretation_model": request["llm_model"],
+                "phenotype_extraction_provenance": request[
+                    "phenotype_extraction_provenance"
+                ],
+            }
+        )
+    except (KeyError, PipelineResultError) as exc:
+        raise FrontendExecutionError(
+            "The analysis recovery context is invalid."
+        ) from exc
+    if context["input_type"] is None:
+        raise FrontendExecutionError(
+            "The analysis recovery context is invalid."
+        )
+    normalized_request = AnalysisRecoveryRequest(
+        schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
+        manual_variants=request["manual_variants"],
+        phenotypes=context["accepted_hpo_terms"],
+        llm_model=context["variant_interpretation_model"],
+        input_type=context["input_type"],
+        phenotype_extraction_model=context[
+            "phenotype_extraction_model"
+        ],
+        phenotype_extraction_provenance=context[
+            "phenotype_extraction_provenance"
+        ],
+        analysis_id=request["analysis_id"],
+        created_at=request["created_at"],
+    )
     payload = json.dumps(
-        request,
+        normalized_request,
         ensure_ascii=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -392,6 +457,12 @@ def _load_recovery_request(
     variants = value.get("manual_variants")
     phenotypes = value.get("phenotypes")
     llm_model = value.get("llm_model")
+    input_type = value.get("input_type")
+    phenotype_model = value.get("phenotype_extraction_model")
+    phenotype_provenance = value.get(
+        "phenotype_extraction_provenance"
+    )
+    analysis_id = value.get("analysis_id")
     if (
         not isinstance(created_at, (int, float))
         or time() - float(created_at) > RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS
@@ -402,16 +473,69 @@ def _load_recovery_request(
         or not isinstance(phenotypes, list)
         or any(not isinstance(item, str) for item in phenotypes)
         or (llm_model is not None and not isinstance(llm_model, str))
+        or input_type not in {"vcf", "vcf_gz", "excel", "manual"}
+        or (
+            phenotype_model is not None
+            and not isinstance(phenotype_model, str)
+        )
+        or (
+            phenotype_provenance is not None
+            and not isinstance(phenotype_provenance, dict)
+        )
+        or (
+            analysis_id is not None
+            and (
+                not isinstance(analysis_id, str)
+                or ANALYSIS_ID_PATTERN.fullmatch(analysis_id) is None
+            )
+        )
     ):
+        _delete_recovery_request(token)
+        return None
+    try:
+        context = validate_analysis_context(
+            {
+                "input_type": input_type,
+                "accepted_hpo_terms": phenotypes,
+                "phenotype_extraction_model": phenotype_model,
+                "variant_interpretation_model": llm_model,
+                "phenotype_extraction_provenance": phenotype_provenance,
+            }
+        )
+    except PipelineResultError:
         _delete_recovery_request(token)
         return None
     return AnalysisRecoveryRequest(
         schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
         manual_variants=variants,
-        phenotypes=phenotypes,
-        llm_model=llm_model,
+        phenotypes=context["accepted_hpo_terms"],
+        llm_model=context["variant_interpretation_model"],
+        input_type=cast(str, context["input_type"]),
+        phenotype_extraction_model=context[
+            "phenotype_extraction_model"
+        ],
+        phenotype_extraction_provenance=context[
+            "phenotype_extraction_provenance"
+        ],
+        analysis_id=analysis_id,
         created_at=float(created_at),
     )
+
+
+def _mark_recovery_request_persisted(
+    token: str,
+    analysis_id: str,
+) -> None:
+    """Record a durable draft so restart recovery never repeats its LLM work."""
+
+    request = _load_recovery_request(token)
+    if request is None or ANALYSIS_ID_PATTERN.fullmatch(analysis_id) is None:
+        return
+    request["analysis_id"] = analysis_id
+    try:
+        _persist_recovery_request(token, request)
+    except FrontendExecutionError:
+        return
 
 
 def _delete_recovery_request(token: str) -> None:
@@ -519,6 +643,7 @@ def register_analysis_job(
     try:
         if recovery_request is not None:
             _persist_recovery_request(resolved_token, recovery_request)
+        job.bind_recovery_token(resolved_token)
     except FrontendExecutionError:
         with _ANALYSIS_JOB_REGISTRY_LOCK:
             _ANALYSIS_JOB_REGISTRY.pop(resolved_token, None)
@@ -811,6 +936,9 @@ def prepare_analysis_recovery_request(
     manual_variants: Sequence[Mapping[str, object]] | None,
     phenotypes: list[str],
     llm_model: str | None,
+    input_type: str | None = None,
+    phenotype_extraction_model: str | None = None,
+    phenotype_extraction_provenance: Mapping[str, object] | None = None,
 ) -> AnalysisRecoveryRequest:
     """Normalize input into a restart-safe analysis-phase checkpoint."""
 
@@ -833,6 +961,14 @@ def prepare_analysis_recovery_request(
                     manual_variants=[dict(variant) for variant in variants],
                     phenotypes=list(phenotypes),
                     llm_model=llm_model,
+                    input_type=input_type or "excel",
+                    phenotype_extraction_model=phenotype_extraction_model,
+                    phenotype_extraction_provenance=(
+                        dict(phenotype_extraction_provenance)
+                        if phenotype_extraction_provenance is not None
+                        else None
+                    ),
+                    analysis_id=None,
                     created_at=time(),
                 )
             _validate_upload_content(payload, suffix)
@@ -859,6 +995,17 @@ def prepare_analysis_recovery_request(
         manual_variants=[dict(variant) for variant in variants],
         phenotypes=list(phenotypes),
         llm_model=llm_model,
+        input_type=(
+            input_type
+            or ("manual" if uploaded_vcf is None else "vcf")
+        ),
+        phenotype_extraction_model=phenotype_extraction_model,
+        phenotype_extraction_provenance=(
+            dict(phenotype_extraction_provenance)
+            if phenotype_extraction_provenance is not None
+            else None
+        ),
+        analysis_id=None,
         created_at=time(),
     )
 
@@ -869,6 +1016,9 @@ def execute_analysis(
     manual_variants: Sequence[Mapping[str, object]] | None,
     phenotypes: list[str],
     llm_model: str | None = None,
+    input_type: str | None = None,
+    phenotype_extraction_model: str | None = None,
+    phenotype_extraction_provenance: Mapping[str, object] | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
@@ -884,6 +1034,11 @@ def execute_analysis(
             manual_variants=manual_variants,
             phenotypes=phenotypes,
             llm_model=llm_model,
+            input_type=input_type or "manual",
+            phenotype_extraction_model=phenotype_extraction_model,
+            phenotype_extraction_provenance=(
+                phenotype_extraction_provenance
+            ),
             progress_callback=progress_callback,
         )
 
@@ -901,6 +1056,11 @@ def execute_analysis(
             manual_variants=variants,
             phenotypes=phenotypes,
             llm_model=llm_model,
+            input_type=input_type or "excel",
+            phenotype_extraction_model=phenotype_extraction_model,
+            phenotype_extraction_provenance=(
+                phenotype_extraction_provenance
+            ),
             progress_callback=progress_callback,
         )
     _validate_upload_content(payload, suffix)
@@ -929,6 +1089,14 @@ def execute_analysis(
                 manual_variants=None,
                 phenotypes=phenotypes,
                 llm_model=llm_model,
+                input_type=(
+                    input_type
+                    or ("vcf_gz" if suffix == ".vcf.gz" else "vcf")
+                ),
+                phenotype_extraction_model=phenotype_extraction_model,
+                phenotype_extraction_provenance=(
+                    phenotype_extraction_provenance
+                ),
                 progress_callback=progress_callback,
             )
     except FrontendExecutionError:
@@ -954,6 +1122,31 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
     if request is None:
         return None
 
+    persisted_analysis_id = request["analysis_id"]
+    if persisted_analysis_id is not None:
+        try:
+            persisted_result = load_pipeline_state(persisted_analysis_id)
+        except DatabaseError:
+            def persisted_runner(
+                _progress: PipelineProgressCallback,
+            ) -> PipelineResult:
+                raise FrontendExecutionError(
+                    "The saved analysis is unavailable or invalid."
+                )
+        else:
+            def persisted_runner(
+                _progress: PipelineProgressCallback,
+            ) -> PipelineResult:
+                return persisted_result
+        job = AnalysisJob(persisted_runner)
+        try:
+            register_analysis_job(job, token=token)
+            job.start()
+        except (FrontendExecutionError, RuntimeError):
+            release_registered_analysis_job(token)
+            return None
+        return job
+
     def runner(
         progress_callback: PipelineProgressCallback,
     ) -> PipelineResult:
@@ -962,6 +1155,13 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
             manual_variants=request["manual_variants"],
             phenotypes=request["phenotypes"],
             llm_model=request["llm_model"],
+            input_type=request["input_type"],
+            phenotype_extraction_model=request[
+                "phenotype_extraction_model"
+            ],
+            phenotype_extraction_provenance=request[
+                "phenotype_extraction_provenance"
+            ],
             progress_callback=progress_callback,
         )
 

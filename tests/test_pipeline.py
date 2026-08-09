@@ -12720,6 +12720,9 @@ class TestStage39ReviewStatePersistence:
         record = save_analysis(status="success", database_path=database_path)
         connection = connect_database(database_path)
         try:
+            connection.execute("DROP TABLE finalization_states")
+            connection.execute("DROP TABLE variant_review_states")
+            connection.execute("DROP TABLE analysis_contexts")
             connection.execute("DROP TABLE pipeline_states")
             connection.execute("PRAGMA user_version = 1")
             connection.commit()
@@ -13824,6 +13827,355 @@ class TestStage56FinalClinicalReport:
             section["variant_index"]
             for section in final_report["variant_sections"]
         ] == [1, 4, 8]
+
+
+class TestStage57PersistenceSchemaV3:
+    """Verify normalized report-lifecycle persistence and restart recovery."""
+
+    @staticmethod
+    def _stored_report_draft(database_path: Path) -> PipelineResult:
+        result = TestStage40FrontendReviewWorkflow._draft_result()
+        accepted_hpo_terms = result["draft_variant_reports"][0][
+            "reviewed_report"
+        ]["phenotype_context"]["accepted_hpo_terms"]
+        interpretation_model = result["variant_interpretation_results"][0][
+            "configured_model"
+        ]
+        result["analysis_context"] = {
+            "input_type": "excel",
+            "accepted_hpo_terms": list(accepted_hpo_terms),
+            "phenotype_extraction_model": "phenotype-model-v3",
+            "variant_interpretation_model": interpretation_model,
+            "phenotype_extraction_provenance": {
+                "schema_version": PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+                "task": PHENOTYPE_EXTRACTION_TASK,
+                "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+                "model": "phenotype-model-v3",
+                "candidate_hpo_ids": list(accepted_hpo_terms),
+            },
+        }
+        record = save_analysis(
+            status=result["status"],
+            warnings=result["warnings"],
+            database_path=database_path,
+        )
+        result["analysis_id"] = record["analysis_id"]
+        return save_pipeline_state(result, database_path=database_path)
+
+    def test_schema_v3_persists_complete_normalized_review_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft = self._stored_report_draft(database_path)
+
+        restored = load_pipeline_state(
+            draft["analysis_id"],
+            database_path=database_path,
+        )
+
+        assert restored == draft
+        connection = connect_database(database_path)
+        try:
+            assert connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0] == 3
+            context = connection.execute(
+                "SELECT * FROM analysis_contexts"
+            ).fetchone()
+            variant = connection.execute(
+                "SELECT * FROM variant_review_states"
+            ).fetchone()
+            finalization = connection.execute(
+                "SELECT * FROM finalization_states"
+            ).fetchone()
+        finally:
+            connection.close()
+        assert context["input_type"] == "excel"
+        assert json.loads(context["accepted_hpo_json"]) == draft[
+            "analysis_context"
+        ]["accepted_hpo_terms"]
+        assert context["phenotype_extraction_model"] == (
+            "phenotype-model-v3"
+        )
+        assert json.loads(variant["evidence_json"]) == draft[
+            "evidence_objects"
+        ][0]
+        assert json.loads(variant["reviewed_report_json"]) == draft[
+            "draft_variant_reports"
+        ][0]["reviewed_report"]
+        assert json.loads(variant["edit_history_json"]) == draft[
+            "draft_variant_reports"
+        ][0]["edit_history"]
+        assert variant["include_in_final_report"] == 1
+        assert finalization["confirmation_state"] == "draft"
+        assert json.loads(finalization["artifact_metadata_json"])[
+            "available_formats"
+        ] == []
+
+    def test_finalized_artifact_metadata_and_selected_ids_round_trip(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft = self._stored_report_draft(database_path)
+        report = draft["draft_variant_reports"][0]
+        edited = save_draft_variant_report(
+            report,
+            reviewer_summary="Persisted reviewer-approved summary.",
+            interpretation_narrative=report["reviewed_report"][
+                "variant_interpretation"
+            ]["narrative"],
+            conflict_assessment=report["reviewed_report"][
+                "variant_interpretation"
+            ]["conflict_assessment"],
+            reviewer_notes=[],
+            timestamp="2026-08-09T11:50:00Z",
+        )
+        excluded = set_draft_variant_report_inclusion(
+            edited,
+            False,
+            timestamp="2026-08-09T11:55:00Z",
+        )
+        restored_selection = set_draft_variant_report_inclusion(
+            excluded,
+            True,
+            timestamp="2026-08-09T11:56:00Z",
+        )
+        draft = update_draft_variant_report(draft, restored_selection)
+        confirmed = confirm_reviewed_evidence(
+            draft,
+            draft["evidence_review_reports"],
+            timestamp="2026-08-09T12:00:00Z",
+        )
+        completed = finalize_reviewed_analysis(
+            confirmed,
+            timestamp="2026-08-09T12:05:00Z",
+        )
+        save_pipeline_state(completed, database_path=database_path)
+
+        restored = load_pipeline_state(
+            completed["analysis_id"],
+            database_path=database_path,
+        )
+        connection = connect_database(database_path)
+        try:
+            row = connection.execute(
+                "SELECT * FROM finalization_states"
+            ).fetchone()
+        finally:
+            connection.close()
+
+        assert restored == completed
+        assert row["confirmation_state"] == "finalized"
+        assert row["confirmed_at"] == "2026-08-09T12:00:00Z"
+        assert json.loads(row["selected_variant_ids_json"]) == [
+            "GRCh38:2:166848215:C:T"
+        ]
+        assert restored["draft_variant_reports"][0]["edit_history"]
+        assert len(
+            restored["draft_variant_reports"][0]["selection_history"]
+        ) == 2
+        assert restored["draft_variant_reports"][0]["reviewed_report"][
+            "reviewer_summary"
+        ] == "Persisted reviewer-approved summary."
+        assert row["final_report_schema_version"] == "2.0"
+        assert json.loads(row["artifact_metadata_json"])[
+            "available_formats"
+        ] == ["text", "pdf", "docx"]
+        assert json.loads(row["final_report_json"]) == completed[
+            "final_clinical_report"
+        ]
+
+    def test_schema_2_stage56_snapshot_has_bounded_migration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft = self._stored_report_draft(database_path)
+        confirmed = confirm_reviewed_evidence(
+            draft,
+            draft["evidence_review_reports"],
+            timestamp="2026-08-09T13:00:00Z",
+        )
+        completed = finalize_reviewed_analysis(
+            confirmed,
+            timestamp="2026-08-09T13:05:00Z",
+        )
+        save_pipeline_state(completed, database_path=database_path)
+        legacy_stage56 = deepcopy(completed)
+        legacy_stage56["schema_version"] = "2.8"
+        legacy_stage56.pop("analysis_context")
+        connection = connect_database(database_path)
+        try:
+            connection.execute("DROP TABLE finalization_states")
+            connection.execute("DROP TABLE variant_review_states")
+            connection.execute("DROP TABLE analysis_contexts")
+            connection.execute(
+                """
+                UPDATE pipeline_states
+                SET pipeline_schema_version = '2.8', pipeline_json = ?
+                WHERE analysis_id = ?
+                """,
+                (
+                    json.dumps(legacy_stage56, ensure_ascii=False),
+                    draft["analysis_id"],
+                ),
+            )
+            connection.execute("PRAGMA user_version = 2")
+            connection.commit()
+        finally:
+            connection.close()
+
+        initialize_database(database_path)
+        migrated = load_pipeline_state(
+            draft["analysis_id"],
+            database_path=database_path,
+        )
+
+        assert migrated["schema_version"] == PIPELINE_SCHEMA_VERSION
+        assert migrated["analysis_context"]["input_type"] is None
+        assert migrated["analysis_context"][
+            "accepted_hpo_terms"
+        ] == draft["analysis_context"]["accepted_hpo_terms"]
+        assert migrated["draft_variant_reports"] == draft[
+            "draft_variant_reports"
+        ]
+        assert migrated["final_clinical_report"] is not None
+        assert migrated["final_clinical_report"]["generated_at"] == (
+            "2026-08-09T13:05:00Z"
+        )
+
+    def test_projection_tampering_fails_closed(self, tmp_path: Path) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft = self._stored_report_draft(database_path)
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                UPDATE variant_review_states
+                SET reviewed_report_json = '{}'
+                WHERE analysis_id = ?
+                """,
+                (draft["analysis_id"],),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(
+            DatabaseReadError,
+            match="Stage 57 persistence projection",
+        ):
+            load_pipeline_state(
+                draft["analysis_id"],
+                database_path=database_path,
+            )
+
+    def test_restart_checkpoint_reuses_persisted_draft_without_llm_rerun(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        monkeypatch.setattr(settings, "DATABASE_PATH", database_path)
+        draft = self._stored_report_draft(database_path)
+        request = prepare_analysis_recovery_request(
+            uploaded_vcf=None,
+            manual_variants=_manual_rows("1:941284:G:A"),
+            phenotypes=[],
+            llm_model="variant-model-v3",
+            input_type="manual",
+            phenotype_extraction_model="phenotype-model-v3",
+        )
+        job = AnalysisJob(lambda _progress: draft)
+        token = register_analysis_job(job, recovery_request=request)
+        job.start()
+        job.join(2)
+        assert job.view().state == "completed"
+
+        with frontend_execution_module._ANALYSIS_JOB_REGISTRY_LOCK:
+            frontend_execution_module._ANALYSIS_JOB_REGISTRY.clear()
+        monkeypatch.setattr(
+            frontend_execution_module,
+            "execute_analysis",
+            lambda **_: pytest.fail("Persisted interpretation was rerun."),
+        )
+
+        recovered_job = recover_analysis_job(token)
+        assert recovered_job is not None
+        recovered_job.join(2)
+        assert recovered_job.view().result == draft
+
+        with frontend_execution_module._ANALYSIS_JOB_REGISTRY_LOCK:
+            frontend_execution_module._ANALYSIS_JOB_REGISTRY.clear()
+        monkeypatch.setattr(
+            frontend_execution_module,
+            "load_pipeline_state",
+            lambda _: (_ for _ in ()).throw(
+                DatabaseReadError("Stored draft is invalid.")
+            ),
+        )
+        failed_recovery = recover_analysis_job(token)
+        assert failed_recovery is not None
+        failed_recovery.join(2)
+        assert failed_recovery.view().state == "error"
+        assert failed_recovery.view().error_message == (
+            "The saved analysis is unavailable or invalid."
+        )
+        release_registered_analysis_job(token)
+
+    def test_refresh_restores_hpo_and_task_model_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        analysis_id = f"analysis-{'9' * 32}"
+        expected = create_pipeline_result()
+        expected["analysis_id"] = analysis_id
+        expected["analysis_context"] = {
+            "input_type": "excel",
+            "accepted_hpo_terms": ["HP:0001250"],
+            "phenotype_extraction_model": "phenotype-restored-v3",
+            "variant_interpretation_model": "variant-restored-v3",
+            "phenotype_extraction_provenance": {
+                "schema_version": PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+                "task": PHENOTYPE_EXTRACTION_TASK,
+                "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+                "model": "phenotype-restored-v3",
+                "candidate_hpo_ids": ["HP:0001250"],
+            },
+        }
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "load_pipeline_state",
+            lambda _: deepcopy(expected),
+        )
+        monkeypatch.setattr(
+            frontend_ui_module,
+            "lookup_hpo_term",
+            lambda _: {"id": "HP:0001250", "name": "Seizure"},
+        )
+
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
+        app.query_params["analysis"] = analysis_id
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["selected_hpo_terms"] == [
+            {"id": "HP:0001250", "name": "Seizure"}
+        ]
+        selectors = {field.label: field.value for field in app.selectbox}
+        assert selectors["Phenotype Extraction Model"] == (
+            "phenotype-restored-v3"
+        )
+        assert selectors["Variant Interpretation Model"] == (
+            "variant-restored-v3"
+        )
+        assert app.session_state[
+            "phenotype_extraction_provenance"
+        ] == expected["analysis_context"][
+            "phenotype_extraction_provenance"
+        ]
 
 
 class TestClinicalInterpretationValidation:
@@ -17087,6 +17439,9 @@ class TestFrontendExecution:
             manual_variants: list[dict[str, object]] | None,
             phenotypes: list[str],
             llm_model: str | None,
+            input_type: str,
+            phenotype_extraction_model: str | None,
+            phenotype_extraction_provenance: object,
             progress_callback: PipelineProgressCallback | None,
         ) -> PipelineResult:
             assert vcf_path is not None
@@ -17102,6 +17457,13 @@ class TestFrontendExecution:
             observed["manual_variants"] = manual_variants
             observed["phenotypes"] = phenotypes
             observed["llm_model"] = llm_model
+            observed["input_type"] = input_type
+            observed["phenotype_extraction_model"] = (
+                phenotype_extraction_model
+            )
+            observed["phenotype_extraction_provenance"] = (
+                phenotype_extraction_provenance
+            )
             observed["callback"] = progress_callback
             return expected
 
@@ -17127,6 +17489,11 @@ class TestFrontendExecution:
         assert observed["manual_variants"] is None
         assert observed["phenotypes"] == ["HP:0001250"]
         assert observed["llm_model"] is None
+        assert observed["input_type"] == (
+            "vcf_gz" if filename.endswith(".gz") else "vcf"
+        )
+        assert observed["phenotype_extraction_model"] is None
+        assert observed["phenotype_extraction_provenance"] is None
         assert observed["callback"] is callback
         temporary_path = observed["path"]
         assert isinstance(temporary_path, Path)
@@ -19074,6 +19441,10 @@ class TestFrontendFoundation:
         ) -> dict[str, object]:
             observed_model.append(model)
             return {
+                "schema_version": PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+                "task": PHENOTYPE_EXTRACTION_TASK,
+                "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+                "model": model,
                 "candidates": [
                     {
                         "hpo_id": "HP:0001250",
@@ -19136,6 +19507,15 @@ class TestFrontendFoundation:
         assert not app.exception
         assert observed_model == [settings.PHENOTYPE_EXTRACTION_MODEL]
         assert app.session_state["selected_hpo_terms"] == []
+        assert app.session_state[
+            "phenotype_extraction_provenance"
+        ] == {
+            "schema_version": PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+            "task": PHENOTYPE_EXTRACTION_TASK,
+            "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+            "model": settings.PHENOTYPE_EXTRACTION_MODEL,
+            "candidate_hpo_ids": ["HP:0001250"],
+        }
         assert any(
             button.label == "Accept HPO candidates"
             for button in app.button
@@ -19161,6 +19541,10 @@ class TestFrontendFoundation:
             frontend_ui_module,
             "extract_hpo_candidates",
             lambda _, **__: {
+                "schema_version": PHENOTYPE_EXTRACTION_SCHEMA_VERSION,
+                "task": PHENOTYPE_EXTRACTION_TASK,
+                "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
+                "model": settings.PHENOTYPE_EXTRACTION_MODEL,
                 "candidates": [
                     {
                         "hpo_id": "HP:9999999",
@@ -19624,6 +20008,9 @@ class TestFrontendFoundation:
             uploaded_vcf: object,
             manual_variants: list[dict[str, object]] | None,
             phenotypes: list[str],
+            input_type: str,
+            phenotype_extraction_model: str,
+            phenotype_extraction_provenance: object,
             llm_model: str,
             progress_callback: PipelineProgressCallback,
         ) -> PipelineResult:
@@ -19632,6 +20019,13 @@ class TestFrontendFoundation:
                     "uploaded_vcf": uploaded_vcf,
                     "manual_variants": manual_variants,
                     "phenotypes": phenotypes,
+                    "input_type": input_type,
+                    "phenotype_extraction_model": (
+                        phenotype_extraction_model
+                    ),
+                    "phenotype_extraction_provenance": (
+                        phenotype_extraction_provenance
+                    ),
                     "llm_model": llm_model,
                 }
             )
@@ -19753,6 +20147,9 @@ class TestFrontendFoundation:
             "uploaded_vcf": None,
             "manual_variants": manual_rows,
             "phenotypes": [],
+            "input_type": "manual",
+            "phenotype_extraction_model": "phenotype-test-model",
+            "phenotype_extraction_provenance": None,
             "llm_model": "variant-test-model",
         }
         assert app.session_state["pipeline_result"]["status"] == (

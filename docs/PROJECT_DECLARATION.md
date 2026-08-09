@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 56 Final Clinical Report composer implemented
+**Implementation status:** Stage 57 persistence schema V3 and recovery migration implemented
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 57 persistence schema V3 and recovery migration
+**Next implementation milestone:** Stage 58 privacy and safety reverification
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,9 +24,9 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-56 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-57 now implement its input, phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
-and Final Clinical Report portions. The
+Final Clinical Report, persistence, and recovery portions. The
 authoritative target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
@@ -268,12 +268,13 @@ flowchart LR
     Q --> R["Stage 54: audited Final Report selection"]
     R --> S["Stage 55: canonical reference hardening"]
     S --> T["Stage 56: Final Clinical Report composer"]
-    T --> U["Stages 57-62: persistence, verification, and release - pending"]
+    T --> U["Stage 57: persistence schema V3 and recovery migration"]
+    U --> W["Stages 58-62: verification and release - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T done
-    class U review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U done
+    class W review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -343,7 +344,8 @@ their original order.
 | 54 | Added audited `include_in_final_report` decisions, full excluded-report retention, ordered selected-report projection, UI controls, and confirmation invalidation after selection changes. | Complete |
 | 55 | Added normalized canonical references, provider-specific exact-record URL builders, domain/identifier validation, bounded LLM citation IDs, explicit link fallbacks, and clickable Streamlit/Word/PDF rendering. | Complete |
 | 56 | Added deterministic selected-only Final Clinical Report composition, exact reviewed-state integrity validation, grouped canonical references, audit/provenance summary, and text/PDF/Word delivery without another LLM call. | Complete |
-| 57–62 | Implement persistence V3, privacy reverification, testing, acceptance, live validation, and final documentation. | Planned |
+| 57 | Added SQLite schema V3 normalized lifecycle projections, pipeline schema `2.9` analysis context, bounded Stage 56 migration, explicit legacy Output A/B rejection, and persisted-draft refresh/restart recovery without repeated interpretation. | Complete |
+| 58–62 | Perform privacy reverification, Testing V3, acceptance, live validation, and final documentation. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -473,16 +475,33 @@ their report and resolve to grouped canonical HTTPS links or explicit unavailabl
 fallbacks. The artifact also carries de-identified phenotype context, method/source
 notes, limitations, the fixed decision-support disclaimer, and bounded audit data.
 
+### Stage 57 persistence schema V3 and recovery migration
+
+SQLite schema `3` stores normalized projections for analysis context, every
+variant's evidence/interpretation/review lifecycle, and finalization state while
+retaining the canonical validated pipeline snapshot. Pipeline schema `2.9` records
+input type, accepted HPO terms, phenotype and interpretation model selections, and
+bounded phenotype-extraction provenance. Per-variant rows retain immutable machine
+originals, editable reviewed reports, edit/selection histories, failure state,
+canonical references, and inclusion decisions. Finalization rows retain confirmation,
+selected canonical variant IDs, the final report, and in-memory delivery metadata.
+
+Migration is deliberately bounded: valid schema-2 Stage 56 report-lifecycle
+snapshots can be upgraded, while older Stage 44 Output A/Output B snapshots receive
+an explicit unsupported-legacy error and are never reinterpreted as current reports.
+Persisted drafts are recovered by analysis ID after refresh or restart without
+rerunning successful interpretation.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `2.8`.
-- SQLite schema: `2`.
+- Active pipeline schema: `2.9`.
+- SQLite schema: `3`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
 - Final Clinical Report schema: `2.0`.
-- Recovery request schema: `2`.
+- Recovery request schema: `3`.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
 interprets each variant, and persists the ordered review state. Review may edit and
@@ -495,11 +514,12 @@ Long analyses execute in cancellable background jobs. The browser stores only an
 opaque, unguessable recovery token. A page refresh reconnects to an active in-process
 job; when the job has completed and the result was persisted, the UI reloads it from
 SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
-A private one-hour checkpoint stores normalized variants and HPO terms, never raw VCF
-content. After a process/server restart, the same token reruns interrupted analysis
-work, including interpretation, from that sanitized checkpoint and selected model.
-Persisted current-schema Draft or Confirmed snapshots remain recoverable without
-rerunning; older pipeline payloads return an explicit unsupported-legacy-resume error.
+A private one-hour checkpoint stores normalized variants, HPO terms, task model
+choices, and bounded extraction provenance, never raw VCF content. After a
+process/server restart, a checkpoint linked to a durably persisted draft reloads that
+state without another interpretation call. Only interrupted, unpersisted work reruns
+from sanitized input. Older Output A/B payloads return an explicit unsupported-legacy
+resume error.
 
 ## 9. Privacy, security, and audit position
 
@@ -553,7 +573,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **776 passed, 4 skipped**, with **85.58% coverage**. The retained Stage 44
+baseline is **782 passed, 4 skipped**, with **85.58% coverage**. The retained Stage 44
 acceptance runner now exercises the current five-variant, multi-HPO path through
 analysis-phase interpretation, review edits, confirmation, model-free finalization,
 per-variant failure isolation, provenance, and ordering. Stage 59 will replace this
@@ -674,8 +694,8 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-56 are implemented. Stage 57 owns persistence schema V3 and recovery
-   migration for the redesigned report lifecycle.
+1. Stages 46-57 are implemented. Stage 58 owns privacy and safety reverification for
+   the redesigned early phenotype-LLM and persistence boundaries.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -684,9 +704,9 @@ the non-diagnostic disclaimer.
 5. GeneBe automated ACMG results are retained as source evidence, not adopted as a
    final application classification.
 6. Human review is required for every variant before finalization.
-7. Local restart recovery reruns analysis from a sanitized checkpoint; it does not resume
-   the exact interrupted HTTP call. A durable distributed queue would still be required
-   for multi-instance production execution.
+7. Local restart recovery reuses durably persisted drafts; unpersisted work reruns from
+   a sanitized checkpoint and cannot resume the exact interrupted HTTP call. A durable
+   distributed queue would still be required for multi-instance production execution.
 8. SQLite is suitable for the current bounded single-application workflow, not a
    production multi-user clinical deployment.
 9. Interpretation quality still depends on upstream data quality, evidence currency,
@@ -715,6 +735,9 @@ references, provider-specific exact-record URL builders, strict link allowlistin
 bounded evidence-only LLM citation IDs, explicit unavailable-link fallbacks, and
 clickable export rendering. Stage 56 added selected-only deterministic Final Clinical
 Report schema `2.0`, exact reviewed-state composition, grouped references,
-audit/provenance disclosure, and text/PDF/Word delivery without a new LLM call. The
-correct next action is Stage 57: persist and recover the redesigned lifecycle with
-an explicit schema V3 migration.
+audit/provenance disclosure, and text/PDF/Word delivery without a new LLM call.
+Stage 57 added normalized SQLite schema V3 lifecycle projections, pipeline schema
+`2.9` analysis context, bounded Stage 56 migration, explicit unsupported handling
+for legacy Output A/B records, and refresh/restart recovery of persisted drafts
+without rerunning successful interpretation. The correct next action is Stage 58:
+reverify privacy and safety across the redesigned boundaries.

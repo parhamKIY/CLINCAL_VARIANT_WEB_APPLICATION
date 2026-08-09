@@ -96,7 +96,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "2.8"
+PIPELINE_SCHEMA_VERSION = "2.9"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -128,6 +128,7 @@ PipelineAPIStatus = Literal[
     "skipped",
 ]
 PipelineInputMode = Literal["vcf", "manual"]
+PersistedInputType = Literal["vcf", "vcf_gz", "excel", "manual"]
 PipelineWorkflowState = Literal[
     "analysis_running",
     "awaiting_final_review",
@@ -205,6 +206,16 @@ class AnalysisInput(TypedDict):
     phenotypes: list[str]
 
 
+class AnalysisContext(TypedDict):
+    """Stage 57 analysis-level state required for durable recovery."""
+
+    input_type: PersistedInputType | None
+    accepted_hpo_terms: list[str]
+    phenotype_extraction_model: str | None
+    variant_interpretation_model: str | None
+    phenotype_extraction_provenance: dict[str, object] | None
+
+
 class PipelineStageRecord(TypedDict):
     """Progress state for one stable pipeline stage."""
 
@@ -241,6 +252,7 @@ class PipelineResult(TypedDict):
     progress_percent: int
     stages: list[PipelineStageRecord]
     api_statuses: list[PipelineAPIRecord]
+    analysis_context: AnalysisContext
     variant_count: int
     variants: list[dict[str, object]]
     annotations: list[dict[str, object]]
@@ -263,6 +275,16 @@ PipelineProgressCallback = Callable[[PipelineResult], None]
 
 
 ANALYSIS_INPUT_FIELDS = frozenset(AnalysisInput.__required_keys__)
+ANALYSIS_CONTEXT_FIELDS = frozenset(AnalysisContext.__required_keys__)
+PHENOTYPE_EXTRACTION_PROVENANCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "task",
+        "prompt_version",
+        "model",
+        "candidate_hpo_ids",
+    }
+)
 PIPELINE_STAGE_FIELDS = frozenset(
     PipelineStageRecord.__required_keys__
 )
@@ -463,6 +485,13 @@ def create_pipeline_result() -> PipelineResult:
             }
             for source in PIPELINE_API_ORDER
         ],
+        "analysis_context": {
+            "input_type": None,
+            "accepted_hpo_terms": [],
+            "phenotype_extraction_model": None,
+            "variant_interpretation_model": None,
+            "phenotype_extraction_provenance": None,
+        },
         "variant_count": 0,
         "variants": [],
         "annotations": [],
@@ -481,6 +510,89 @@ def create_pipeline_result() -> PipelineResult:
         "errors": [],
     }
     return validate_pipeline_result(result)
+
+
+def validate_analysis_context(value: object) -> AnalysisContext:
+    """Validate persisted task models, accepted HPOs, and provenance."""
+
+    if not isinstance(value, dict) or set(value) != ANALYSIS_CONTEXT_FIELDS:
+        raise PipelineResultError(
+            "pipeline.analysis_context has invalid fields."
+        )
+    input_type = value["input_type"]
+    if input_type not in {None, "vcf", "vcf_gz", "excel", "manual"}:
+        raise PipelineResultError(
+            "pipeline.analysis_context.input_type is unsupported."
+        )
+    accepted = value["accepted_hpo_terms"]
+    if (
+        not isinstance(accepted, list)
+        or len(accepted) > MAX_PIPELINE_PHENOTYPES
+        or len(accepted) != len(set(accepted))
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"HP:[0-9]{7}", item) is None
+            for item in accepted
+        )
+    ):
+        raise PipelineResultError(
+            "pipeline.analysis_context.accepted_hpo_terms is invalid."
+        )
+    for field in (
+        "phenotype_extraction_model",
+        "variant_interpretation_model",
+    ):
+        model = value[field]
+        if model is not None:
+            normalized = _required_text(
+                model,
+                f"pipeline.analysis_context.{field}",
+                PipelineResultError,
+            )
+            if normalized != model or len(normalized) > 500:
+                raise PipelineResultError(
+                    f"pipeline.analysis_context.{field} is invalid."
+                )
+    provenance = value["phenotype_extraction_provenance"]
+    if provenance is not None:
+        if (
+            not isinstance(provenance, dict)
+            or set(provenance)
+            != PHENOTYPE_EXTRACTION_PROVENANCE_FIELDS
+        ):
+            raise PipelineResultError(
+                "pipeline.analysis_context phenotype provenance is invalid."
+            )
+        for field in ("schema_version", "task", "prompt_version", "model"):
+            normalized = _required_text(
+                provenance[field],
+                f"pipeline.analysis_context.phenotype_extraction_provenance.{field}",
+                PipelineResultError,
+            )
+            if normalized != provenance[field] or len(normalized) > 500:
+                raise PipelineResultError(
+                    "pipeline.analysis_context phenotype provenance is invalid."
+                )
+        candidates = provenance["candidate_hpo_ids"]
+        if (
+            not isinstance(candidates, list)
+            or len(candidates) > 25
+            or len(candidates) != len(set(candidates))
+            or any(
+                not isinstance(item, str)
+                or re.fullmatch(r"HP:[0-9]{7}", item) is None
+                for item in candidates
+            )
+        ):
+            raise PipelineResultError(
+                "pipeline.analysis_context phenotype provenance is invalid."
+            )
+        if value["phenotype_extraction_model"] is None:
+            raise PipelineResultError(
+                "pipeline.analysis_context phenotype provenance requires "
+                "its selected model."
+            )
+    return cast(AnalysisContext, deepcopy(value))
 
 
 def _validate_stage_records(value: object) -> None:
@@ -683,6 +795,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
 
     _validate_stage_records(value["stages"])
     _validate_api_records(value["api_statuses"])
+    analysis_context = validate_analysis_context(
+        value["analysis_context"]
+    )
     variant_count = value["variant_count"]
     if (
         isinstance(variant_count, bool)
@@ -717,6 +832,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 field: value[field]
                 for field in (
                     "variants",
+                    "analysis_context",
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
@@ -739,6 +855,23 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "pipeline.variant_count must match the complete variant list."
         )
+    if analysis_context["accepted_hpo_terms"] and value[
+        "phenotype_results"
+    ]:
+        accepted_hpo_terms = analysis_context["accepted_hpo_terms"]
+        for phenotype_result in value["phenotype_results"]:
+            phenotype_context = phenotype_result.get("phenotype_context")
+            if isinstance(phenotype_context, dict):
+                observed = phenotype_context.get("patient_hpo_terms")
+                if (
+                    isinstance(observed, list)
+                    and observed
+                    and observed != accepted_hpo_terms
+                ):
+                    raise PipelineResultError(
+                        "pipeline.analysis_context accepted HPO terms do "
+                        "not match phenotype results."
+                    )
     review_reports = value["evidence_review_reports"]
     if review_reports:
         if len(review_reports) != len(value["evidence_objects"]):
@@ -1953,6 +2086,13 @@ def _build_evidence_and_report(
         dict(item)
         for item in interpretation_results
     ]
+    if (
+        result["analysis_context"]["variant_interpretation_model"] is None
+        and interpretation_results
+    ):
+        result["analysis_context"]["variant_interpretation_model"] = (
+            interpretation_results[0]["configured_model"]
+        )
     failed_interpretations = sum(
         item["status"] == "failed"
         for item in interpretation_results
@@ -2127,6 +2267,9 @@ def _run_analysis_unpersisted(
     literature_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
+    input_type: PersistedInputType | None = None,
+    phenotype_extraction_model: str | None = None,
+    phenotype_extraction_provenance: Mapping[str, object] | None = None,
     report_dir: str | Path | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
@@ -2146,6 +2289,34 @@ def _run_analysis_unpersisted(
             error=exc,
             default_code="invalid_input",
             default_message="The analysis input is invalid.",
+            default_recoverable=False,
+            progress_callback=progress_callback,
+        )
+
+    resolved_input_type: PersistedInputType = cast(
+        PersistedInputType,
+        input_type or request["input_mode"],
+    )
+    context: dict[str, object] = {
+        "input_type": resolved_input_type,
+        "accepted_hpo_terms": list(request["phenotypes"]),
+        "phenotype_extraction_model": phenotype_extraction_model,
+        "variant_interpretation_model": llm_model,
+        "phenotype_extraction_provenance": (
+            dict(phenotype_extraction_provenance)
+            if phenotype_extraction_provenance is not None
+            else None
+        ),
+    }
+    try:
+        result["analysis_context"] = validate_analysis_context(context)
+    except PipelineResultError as exc:
+        return _finish_exception(
+            result,
+            stage="input",
+            error=PipelineInputError(str(exc)),
+            default_code="invalid_input",
+            default_message="The analysis context is invalid.",
             default_recoverable=False,
             progress_callback=progress_callback,
         )
@@ -2329,6 +2500,9 @@ def run_analysis(
     literature_session: requests.Session | None = None,
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
+    input_type: PersistedInputType | None = None,
+    phenotype_extraction_model: str | None = None,
+    phenotype_extraction_provenance: Mapping[str, object] | None = None,
     report_dir: str | Path | None = None,
     database_path: str | Path | None = None,
     persist_analysis: bool = True,
@@ -2372,6 +2546,11 @@ def run_analysis(
             literature_session=literature_session,
             llm_client=llm_client,
             llm_model=llm_model,
+            input_type=input_type,
+            phenotype_extraction_model=phenotype_extraction_model,
+            phenotype_extraction_provenance=(
+                phenotype_extraction_provenance
+            ),
             report_dir=report_dir,
             progress_callback=progress_callback,
         )
@@ -3056,6 +3235,7 @@ def resume_saved_analysis(
 
 
 __all__ = [
+    "AnalysisContext",
     "AnalysisInput",
     "MAX_PIPELINE_ERRORS",
     "MAX_PIPELINE_PHENOTYPES",
@@ -3076,6 +3256,7 @@ __all__ = [
     "PipelineStageStatus",
     "PipelineStatus",
     "PipelineWorkflowState",
+    "PersistedInputType",
     "confirm_reviewed_evidence",
     "finalize_reviewed_analysis",
     "generate_confirmed_interpretations",
@@ -3089,5 +3270,6 @@ __all__ = [
     "run_annotation_and_phenotype",
     "run_variant_processing",
     "validate_analysis_input",
+    "validate_analysis_context",
     "validate_pipeline_result",
 ]

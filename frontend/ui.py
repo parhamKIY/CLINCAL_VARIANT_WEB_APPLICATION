@@ -1,5 +1,6 @@
 """Presentation-only Streamlit interface for the analysis pipeline."""
 
+from copy import deepcopy
 from math import isfinite
 from numbers import Integral, Real
 from pathlib import Path
@@ -23,6 +24,7 @@ from backend.pipeline import (
 from backend.phenotype import (
     HPODataError,
     PhenotypeError,
+    lookup_hpo_term,
     search_hpo_terms,
     update_hpo_data,
 )
@@ -81,6 +83,7 @@ SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 HPO_MODEL_CANDIDATES_KEY = "hpo_model_candidates"
 HPO_MODEL_REJECTIONS_KEY = "hpo_model_rejections"
+PHENOTYPE_EXTRACTION_PROVENANCE_KEY = "phenotype_extraction_provenance"
 HPO_CANDIDATE_EDITOR_KEY = "hpo_candidate_editor"
 PIPELINE_RESULT_KEY = "pipeline_result"
 ANALYSIS_JOB_KEY = "analysis_job"
@@ -139,6 +142,9 @@ class AnalysisSubmission(TypedDict):
     uploaded_vcf: UploadedVCF | None
     manual_variants: list[dict[str, object]] | None
     phenotypes: list[str]
+    input_type: str
+    phenotype_extraction_model: str
+    phenotype_extraction_provenance: dict[str, object] | None
     llm_model: str
 
 
@@ -240,6 +246,31 @@ def _restore_refresh_state() -> None:
         st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "warning"
         return
     st.session_state[PIPELINE_RESULT_KEY] = restored
+    context = restored["analysis_context"]
+    restored_terms: list[dict[str, str]] = []
+    for hpo_id in context["accepted_hpo_terms"]:
+        try:
+            term = lookup_hpo_term(hpo_id)
+        except (HPODataError, PhenotypeError):
+            restored_terms.append(
+                {"id": hpo_id, "name": "Ontology label unavailable"}
+            )
+        else:
+            restored_terms.append(
+                {"id": term["id"], "name": term["name"]}
+            )
+    st.session_state[SELECTED_HPO_KEY] = restored_terms
+    if context["phenotype_extraction_model"] is not None:
+        st.session_state[PHENOTYPE_MODEL_KEY] = context[
+            "phenotype_extraction_model"
+        ]
+    if context["variant_interpretation_model"] is not None:
+        st.session_state[VARIANT_MODEL_KEY] = context[
+            "variant_interpretation_model"
+        ]
+    st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = deepcopy(
+        context["phenotype_extraction_provenance"]
+    )
     st.session_state[ANALYSIS_NOTICE_KEY] = (
         "Restored the saved analysis after page refresh."
     )
@@ -253,6 +284,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(HPO_RESULTS_KEY, [])
     st.session_state.setdefault(HPO_MODEL_CANDIDATES_KEY, [])
     st.session_state.setdefault(HPO_MODEL_REJECTIONS_KEY, [])
+    st.session_state.setdefault(PHENOTYPE_EXTRACTION_PROVENANCE_KEY, None)
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
@@ -413,6 +445,7 @@ def _clear_hpo_candidate_draft() -> None:
 
     st.session_state[HPO_MODEL_CANDIDATES_KEY] = []
     st.session_state[HPO_MODEL_REJECTIONS_KEY] = []
+    st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = None
     st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
 
 
@@ -465,6 +498,16 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 )
             )
         else:
+            st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = {
+                "schema_version": extraction["schema_version"],
+                "task": extraction["task"],
+                "prompt_version": extraction["prompt_version"],
+                "model": extraction["model"],
+                "candidate_hpo_ids": [
+                    candidate["hpo_id"]
+                    for candidate in extraction["candidates"]
+                ],
+            }
             st.session_state[HPO_MODEL_CANDIDATES_KEY] = [
                 {"include": True, **candidate}
                 for candidate in validation["validated_candidates"]
@@ -1077,6 +1120,7 @@ def _prepare_input(
     input_mode: str,
     uploaded_vcf: object | None,
     manual_table: object,
+    phenotype_model: str,
     llm_model: str,
 ) -> AnalysisSubmission | None:
     """Validate frontend presence rules and build one submission."""
@@ -1103,6 +1147,19 @@ def _prepare_input(
             "uploaded_vcf": cast(UploadedVCF, uploaded_vcf),
             "manual_variants": None,
             "phenotypes": phenotype_ids,
+            "input_type": (
+                "excel"
+                if filename.casefold().endswith(".xlsx")
+                else (
+                    "vcf_gz"
+                    if filename.casefold().endswith(".vcf.gz")
+                    else "vcf"
+                )
+            ),
+            "phenotype_extraction_model": phenotype_model,
+            "phenotype_extraction_provenance": st.session_state.get(
+                PHENOTYPE_EXTRACTION_PROVENANCE_KEY
+            ),
             "llm_model": llm_model,
         }
 
@@ -1118,11 +1175,17 @@ def _prepare_input(
         "uploaded_vcf": None,
         "manual_variants": normalized_variants,
         "phenotypes": phenotype_ids,
+        "input_type": "manual",
+        "phenotype_extraction_model": phenotype_model,
+        "phenotype_extraction_provenance": st.session_state.get(
+            PHENOTYPE_EXTRACTION_PROVENANCE_KEY
+        ),
         "llm_model": llm_model,
     }
 
 
 def _render_variant_input(
+    phenotype_model: str,
     llm_model: str,
 ) -> AnalysisSubmission | None:
     """Render source selection and the batched analysis submission form."""
@@ -1212,6 +1275,7 @@ def _render_variant_input(
                 input_mode or VCF_INPUT_MODE,
                 uploaded_vcf,
                 manual_table,
+                phenotype_model,
                 llm_model,
             )
     return None
@@ -1317,6 +1381,13 @@ def _start_submission(
             uploaded_vcf=submission["uploaded_vcf"],
             manual_variants=submission["manual_variants"],
             phenotypes=submission["phenotypes"],
+            input_type=submission["input_type"],
+            phenotype_extraction_model=submission[
+                "phenotype_extraction_model"
+            ],
+            phenotype_extraction_provenance=submission[
+                "phenotype_extraction_provenance"
+            ],
             llm_model=submission["llm_model"],
             progress_callback=progress_callback,
         )
@@ -1329,6 +1400,13 @@ def _start_submission(
             uploaded_vcf=submission["uploaded_vcf"],
             manual_variants=submission["manual_variants"],
             phenotypes=submission["phenotypes"],
+            input_type=submission["input_type"],
+            phenotype_extraction_model=submission[
+                "phenotype_extraction_model"
+            ],
+            phenotype_extraction_provenance=submission[
+                "phenotype_extraction_provenance"
+            ],
             llm_model=submission["llm_model"],
         )
         token = register_analysis_job(
@@ -1486,7 +1564,7 @@ def render_app() -> None:
     st.divider()
     phenotype_model, variant_model = _render_task_model_selectors()
     _render_hpo_picker(phenotype_model)
-    submission = _render_variant_input(variant_model)
+    submission = _render_variant_input(phenotype_model, variant_model)
     st.divider()
 
     _render_analysis_notice()
