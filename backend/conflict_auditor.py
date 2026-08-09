@@ -226,6 +226,11 @@ def _add_structural_findings(
     genebe = _mapping(annotations.get("genebe"))
     population = _mapping(annotations.get("population"))
     pathogenicity = _mapping(evidence.get("pathogenicity"))
+    clinvar_source = _source_name(
+        evidence,
+        "pathogenicity.clinvar",
+        "NCBI ClinVar",
+    )
 
     transcript_values = {
         path: value
@@ -291,7 +296,7 @@ def _add_structural_findings(
                     "pathogenicity.clinvar_conditions",
                     "annotations.genebe.clinvar_derived.disease",
                 ],
-                sources=["NCBI ClinVar", "GeneBe"],
+                sources=[clinvar_source, "GeneBe"],
                 message=(
                     "Condition labels do not overlap across ClinVar evidence."
                 ),
@@ -311,7 +316,7 @@ def _add_structural_findings(
             evidence_paths=[
                 "pathogenicity.clinvar_conflicting_submissions"
             ],
-            sources=["NCBI ClinVar"],
+            sources=[clinvar_source],
             message="ClinVar explicitly reports conflicting submissions.",
         )
 

@@ -3954,6 +3954,32 @@ class TestAnnotation:
         }
 
     @staticmethod
+    def _myvariant_clinvar_response() -> dict[str, object]:
+        payload = TestAnnotation._myvariant_response()
+        payload["clinvar"] = {
+            "allele_id": 456,
+            "gene": {"symbol": "GENE1"},
+            "variant_id": 123,
+            "rcv": {
+                "accession": "RCV000000001",
+                "clinical_significance": "Pathogenic",
+                "conditions": {
+                    "name": "Example disease",
+                    "identifiers": {
+                        "medgen": "C0000001",
+                        "mondo": "MONDO:0000001",
+                    },
+                },
+                "last_evaluated": "2025-01-02",
+                "origin": "germline",
+                "review_status": (
+                    "criteria provided, single submitter"
+                ),
+            },
+        }
+        return payload
+
+    @staticmethod
     def _genebe_variant_response(
         *,
         chrom: str = "1",
@@ -4503,7 +4529,12 @@ class TestAnnotation:
             "fields": (
                 "_id,dbsnp.rsid,dbsnp.gene.symbol,dbsnp.alleles,"
                 "dbnsfp.genename,cadd.gene.genename,gnomad_exome.af,"
-                "gnomad_genome.af,exac.af"
+                "gnomad_genome.af,exac.af,clinvar.allele_id,"
+                "clinvar.gene.symbol,clinvar.rcv.accession,"
+                "clinvar.rcv.clinical_significance,"
+                "clinvar.rcv.conditions,clinvar.rcv.last_evaluated,"
+                "clinvar.rcv.origin,clinvar.rcv.review_status,"
+                "clinvar.variant_id"
             ),
         }
         assert session.myvariant_get_calls[0]["url"].endswith(
@@ -5249,6 +5280,152 @@ class TestAnnotation:
             "HTTP 500" in warning
             for warning in annotation["warnings"]
         )
+
+    def test_stage_67_direct_clinvar_success_avoids_fallback(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_clinvar_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+        evidence = build_evidence_object(annotation)
+        clinvar_lineage = [
+            record
+            for record in evidence["provenance"]["lineage"]
+            if "ClinVar" in record["upstream_sources"]
+        ]
+
+        assert annotation["sources"]["clinvar"]["provider"] == (
+            "NCBI ClinVar"
+        )
+        assert annotation["sources"]["myvariant"]["clinvar_derived"][
+            "independent_evidence"
+        ] is False
+        assert "fallback_used" not in annotation["sources"]["clinvar"]
+        assert len(clinvar_lineage) == 1
+        assert clinvar_lineage[0]["provider"] == "NCBI ClinVar"
+        assert evidence["provenance"]["shared_upstream_groups"] == []
+
+    def test_stage_67_clinvar_failure_uses_myvariant_derived_fallback(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_clinvar_response())
+            ],
+            clinvar_responses=[FakeResponse(500, {})],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+        clinvar = annotation["sources"]["clinvar"]
+        evidence = build_evidence_object(annotation)
+        lineage = next(
+            record
+            for record in evidence["provenance"]["lineage"]
+            if record["evidence_path"] == "pathogenicity.clinvar"
+        )
+        provider = next(
+            record
+            for record in evidence["provenance"]["providers"]
+            if record["source"] == "clinvar"
+        )
+        section = next(
+            item
+            for item in _evidence_sections(evidence)
+            if item["source"].startswith("ClinVar-derived")
+        )
+
+        assert clinvar["status"] == "success"
+        assert clinvar["provider"] == "MyVariant.info"
+        assert clinvar["source_type"] == "derived_fallback"
+        assert clinvar["provider_role"] == "fallback"
+        assert clinvar["fallback_used"] is True
+        assert clinvar["fallback_for"] == "ncbi_clinvar"
+        assert clinvar["primary_failure"] == "server_error"
+        assert clinvar["independent_evidence"] is False
+        assert clinvar["clinical_significance"] == "Pathogenic"
+        assert clinvar["conditions"][0]["name"] == "Example disease"
+        assert evidence["clinvar_significance"] == "Pathogenic"
+        assert lineage["provider"] == "MyVariant.info"
+        assert lineage["upstream_sources"] == ["ClinVar"]
+        assert lineage["derivation"] == "derived"
+        assert provider["provider_role"] == "fallback"
+        assert provider["fallback_for"] == "ncbi_clinvar"
+        assert provider["primary_failure"] == "server_error"
+        assert [
+            record["evidence_path"]
+            for record in evidence["provenance"]["lineage"]
+            if "ClinVar" in record["upstream_sources"]
+        ] == ["pathogenicity.clinvar"]
+        assert evidence["provenance"]["shared_upstream_groups"] == []
+        assert section["source"] == (
+            "ClinVar-derived evidence — MyVariant.info fallback"
+        )
+        assert not any(
+            reference["source"] == "NCBI ClinVar"
+            for reference in annotation["references"]
+        )
+
+    def test_stage_67_valid_clinvar_no_match_is_terminal(self) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                get_responses=[
+                    FakeResponse(
+                        200,
+                        self._myvariant_clinvar_response(),
+                    )
+                ],
+                clinvar_responses=[
+                    FakeResponse(200, self._clinvar_search_response([]))
+                ],
+            ),
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "not_found"
+        assert clinvar["provider"] == "NCBI ClinVar"
+        assert "fallback_used" not in clinvar
+        assert clinvar["clinical_significance"] is None
+
+    def test_stage_67_both_clinvar_paths_unavailable_are_explicit(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                get_responses=[requests.Timeout("myvariant")],
+                clinvar_responses=[FakeResponse(500, {})],
+            ),
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert annotation["sources"]["myvariant"]["status"] == "error"
+        assert clinvar["status"] == "unavailable"
+        assert clinvar["direct_verification_status"] == "unavailable"
+        assert clinvar["primary_failure"] == "server_error"
+        assert clinvar["fallback_attempted"] is True
+        assert clinvar["fallback_status"] == "unavailable"
+        assert clinvar["clinical_significance"] is None
 
     def test_clinvar_empty_search_is_marked_not_found(self) -> None:
         session = FakeSession(

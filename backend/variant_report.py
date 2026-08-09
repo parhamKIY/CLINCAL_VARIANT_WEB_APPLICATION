@@ -240,6 +240,23 @@ def _provider_status(evidence: EvidenceObject, source: str) -> str:
     return _status(evidence["source_statuses"].get(source), "unavailable")
 
 
+def _provider_record(
+    evidence: EvidenceObject,
+    source: str,
+) -> dict[str, object]:
+    providers = evidence["provenance"].get("providers")
+    if not isinstance(providers, list):
+        return {}
+    return next(
+        (
+            item
+            for item in providers
+            if isinstance(item, dict) and item.get("source") == source
+        ),
+        {},
+    )
+
+
 def _disease_context(evidence: EvidenceObject) -> list[str]:
     relationship = evidence["phenotype_relationship"]
     mydisease = _mapping(relationship.get("mydisease"))
@@ -306,6 +323,10 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
     literature = _mapping(enrichment.get("literature"))
     cspec = pathogenicity["cspec_context"]
     clingen = pathogenicity["clingen_context"]
+    clinvar_provider = _provider_record(evidence, "clinvar")
+    clinvar_is_fallback = (
+        clinvar_provider.get("provider_role") == "fallback"
+    )
     sections: list[EvidenceSection] = [
         {
             "source": "Ensembl VEP",
@@ -344,13 +365,21 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": "NCBI ClinVar",
+            "source": (
+                "ClinVar-derived evidence — MyVariant.info fallback"
+                if clinvar_is_fallback
+                else "NCBI ClinVar"
+            ),
             "status": _provider_status(evidence, "clinvar"),
             "items": _items(
                 _item("Accession", evidence["clinvar_accession"]),
                 _item("Significance", pathogenicity["clinvar_classification"]),
                 _item("Review status", pathogenicity["clinvar_review_status"]),
                 _item("Conditions", pathogenicity["clinvar_conditions"]),
+                _item(
+                    "Primary failure",
+                    clinvar_provider.get("primary_failure"),
+                ),
             ),
         },
         {

@@ -2226,8 +2226,21 @@ def _build_gene_and_consequence(evidence: EvidenceObject) -> str:
 def _build_clinical_evidence(evidence: EvidenceObject) -> str:
     """Render ClinVar and ClinGen facts directly from the evidence."""
 
+    clinvar_provider = next(
+        (
+            provider
+            for provider in evidence["provenance"]["providers"]
+            if provider.get("source") == "clinvar"
+        ),
+        {},
+    )
+    clinvar_heading = (
+        "### ClinVar-derived evidence (MyVariant.info fallback)"
+        if clinvar_provider.get("provider_role") == "fallback"
+        else "### ClinVar"
+    )
     lines = [
-        "### ClinVar",
+        clinvar_heading,
         (
             "- Accession: "
             f"{_markdown_value(evidence['clinvar_accession'])}"
@@ -3521,7 +3534,11 @@ def _build_evidence_lineage(
                 clinvar,
                 default_provider="NCBI ClinVar",
                 default_upstream_sources=("ClinVar",),
-                derivation="direct",
+                derivation=(
+                    "derived"
+                    if clinvar.get("source_type") == "derived_fallback"
+                    else "direct"
+                ),
             )
         )
     if clingen:
@@ -3853,13 +3870,22 @@ def _build_v2_sections(
             else provider_defaults.get(source_name, source_name)
         )
         status = payload.get("status", payload.get("availability"))
-        providers.append(
-            {
-                "source": source_name,
-                "provider": provider_name,
-                "status": status if isinstance(status, str) else None,
-            }
-        )
+        provider_record: dict[str, str | None] = {
+            "source": source_name,
+            "provider": provider_name,
+            "status": status if isinstance(status, str) else None,
+        }
+        if payload.get("provider_role") == "fallback":
+            for field in (
+                "provider_role",
+                "fallback_for",
+                "primary_failure",
+                "source_type",
+            ):
+                field_value = payload.get(field)
+                if isinstance(field_value, str) and field_value:
+                    provider_record[field] = field_value
+        providers.append(provider_record)
         version = payload.get("provider_version")
         if isinstance(version, str) and version:
             versions[source_name] = version

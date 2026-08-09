@@ -14,6 +14,13 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from backend.logging_config import get_logger
+from backend.provider_resilience import (
+    ProviderStatus,
+    build_provider_provenance,
+    classify_http_status,
+    classify_request_exception,
+    should_trigger_fallback,
+)
 from backend.vcf_processing import VariantData
 from config import settings
 
@@ -59,6 +66,15 @@ MYVARIANT_FIELDS = ",".join(
         "gnomad_exome.af",
         "gnomad_genome.af",
         "exac.af",
+        "clinvar.allele_id",
+        "clinvar.gene.symbol",
+        "clinvar.rcv.accession",
+        "clinvar.rcv.clinical_significance",
+        "clinvar.rcv.conditions",
+        "clinvar.rcv.last_evaluated",
+        "clinvar.rcv.origin",
+        "clinvar.rcv.review_status",
+        "clinvar.variant_id",
     )
 )
 CLINVAR_REFSEQ_BASES = {
@@ -192,6 +208,18 @@ class GeneBeResponseError(AnnotationServiceError):
 
 class ClinVarResponseError(AnnotationServiceError):
     """Raised when ClinVar returns malformed or non-matching evidence."""
+
+
+class ClinVarOperationalError(AnnotationServiceError):
+    """Carry one normalized direct ClinVar operational failure."""
+
+    def __init__(
+        self,
+        message: str,
+        provider_status: ProviderStatus,
+    ) -> None:
+        super().__init__(message)
+        self.provider_status = provider_status
 
 
 class CSpecResponseError(AnnotationServiceError):
@@ -981,9 +1009,10 @@ def _get_clinvar_json(
                 exception=exc,
             )
             if attempt >= max_retries:
-                raise AnnotationServiceError(
+                raise ClinVarOperationalError(
                     "NCBI ClinVar request failed because the service "
-                    "was unavailable."
+                    "was unavailable.",
+                    classify_request_exception(exc),
                 ) from exc
 
             delay = _retry_delay(attempt)
@@ -1022,9 +1051,10 @@ def _get_clinvar_json(
                 continue
 
         if not 200 <= response.status_code < 300:
-            raise AnnotationServiceError(
+            raise ClinVarOperationalError(
                 "NCBI ClinVar returned HTTP "
-                f"{response.status_code}."
+                f"{response.status_code}.",
+                classify_http_status(response.status_code),
             )
 
         try:
@@ -1052,14 +1082,16 @@ def _get_clinvar_json(
                 time.sleep(delay)
                 continue
 
-            raise AnnotationServiceError(
-                "NCBI ClinVar returned an API error."
+            raise ClinVarOperationalError(
+                "NCBI ClinVar returned an API error.",
+                "invalid_response",
             )
 
         return payload
 
-    raise AnnotationServiceError(
-        "NCBI ClinVar retry loop ended unexpectedly."
+    raise ClinVarOperationalError(
+        "NCBI ClinVar retry loop ended unexpectedly.",
+        "unavailable",
     )
 
 
@@ -2417,6 +2449,205 @@ def _extract_dbsnp_frequencies(
     return frequencies
 
 
+def _myvariant_clinvar_conditions(value: Any) -> list[dict[str, Any]]:
+    """Normalize bounded MyVariant ClinVar-derived condition records."""
+
+    source_labels = {
+        "medgen": "MedGen",
+        "mondo": "MONDO",
+        "omim": "OMIM",
+        "orphanet": "Orphanet",
+    }
+    conditions: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+    for record in _iter_source_records(value):
+        name = _optional_text(record.get("name"))
+        if name is None:
+            continue
+        identifiers: list[dict[str, str]] = []
+        raw_identifiers = record.get("identifiers")
+        if isinstance(raw_identifiers, dict):
+            for source, raw_identifier in raw_identifiers.items():
+                values = (
+                    raw_identifier
+                    if isinstance(raw_identifier, list)
+                    else [raw_identifier]
+                )
+                for value in values:
+                    identifier = _optional_text(value)
+                    if identifier is None:
+                        continue
+                    normalized_source = source_labels.get(
+                        str(source).casefold(),
+                        str(source),
+                    )
+                    item = {
+                        "source": normalized_source,
+                        "id": identifier,
+                    }
+                    if item not in identifiers:
+                        identifiers.append(item)
+        key = (
+            name,
+            tuple(
+                (item["source"], item["id"])
+                for item in identifiers
+            ),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        conditions.append(
+            {"name": name, "identifiers": identifiers}
+        )
+        if len(conditions) >= MAX_CLINVAR_CONDITIONS:
+            break
+    return conditions
+
+
+def _myvariant_clinvar_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    """Retain bounded ClinVar-derived fields for possible fallback use."""
+
+    clinvar_records = list(_iter_source_records(payload.get("clinvar")))
+    if not clinvar_records:
+        return {"status": "not_found"}
+
+    rcv_records: list[dict[str, Any]] = []
+    for clinvar_record in clinvar_records:
+        for record in _iter_source_records(clinvar_record.get("rcv")):
+            raw_origin = record.get("origin")
+            origins = [
+                origin
+                for value in (
+                    raw_origin
+                    if isinstance(raw_origin, list)
+                    else [raw_origin]
+                )
+                if (origin := _optional_text(value))
+            ]
+            if origins and not any(
+                "germline" in origin.casefold()
+                for origin in origins
+            ):
+                continue
+            rcv_records.append(record)
+
+    significances = _bounded_string_list(
+        [
+            significance
+            for record in rcv_records
+            if (
+                significance := _optional_text(
+                    record.get("clinical_significance")
+                )
+            )
+        ],
+        MAX_CLINVAR_ACCESSIONS,
+    )
+    review_statuses = _bounded_string_list(
+        [
+            review_status
+            for record in rcv_records
+            if (
+                review_status := _optional_text(
+                    record.get("review_status")
+                )
+            )
+        ],
+        MAX_CLINVAR_ACCESSIONS,
+    )
+    rcv_accessions = _bounded_string_list(
+        [
+            accession
+            for record in rcv_records
+            if (
+                accession := _optional_text(record.get("accession"))
+            )
+        ],
+        MAX_CLINVAR_ACCESSIONS,
+    )
+    conditions = _myvariant_clinvar_conditions(
+        [
+            condition
+            for record in rcv_records
+            for condition in _iter_source_records(
+                record.get("conditions")
+            )
+        ]
+    )
+    last_evaluated_values = sorted(
+        {
+            value
+            for record in rcv_records
+            if (
+                value := _optional_text(record.get("last_evaluated"))
+            )
+        },
+        reverse=True,
+    )
+    first_clinvar = clinvar_records[0]
+    variation_value = first_clinvar.get("variant_id")
+    variation_id = (
+        str(variation_value)
+        if isinstance(variation_value, (int, str))
+        and not isinstance(variation_value, bool)
+        and str(variation_value).strip()
+        else None
+    )
+    allele_value = first_clinvar.get("allele_id")
+    allele_id = (
+        str(allele_value)
+        if isinstance(allele_value, (int, str))
+        and not isinstance(allele_value, bool)
+        and str(allele_value).strip()
+        else None
+    )
+    usable = bool(
+        significances
+        or review_statuses
+        or rcv_accessions
+        or conditions
+    )
+    return {
+        "status": "available" if usable else "not_found",
+        "provider": MYVARIANT_PROVIDER_NAME,
+        "provider_version": MYVARIANT_API_VERSION,
+        "upstream_source": "ClinVar",
+        "derivation": "derived",
+        "independent_evidence": False,
+        "variation_id": variation_id,
+        "allele_id": allele_id,
+        "gene": _first_nested_string(
+            clinvar_records,
+            "gene",
+            "symbol",
+        ),
+        "clinical_significance": (
+            significances[0] if len(significances) == 1 else None
+        ),
+        "review_status": (
+            review_statuses[0] if len(review_statuses) == 1 else None
+        ),
+        "last_evaluated": (
+            last_evaluated_values[0]
+            if last_evaluated_values
+            else None
+        ),
+        "conditions": conditions,
+        "condition_count": len(conditions),
+        "conditions_truncated": False,
+        "scv_accessions": [],
+        "scv_accession_count": 0,
+        "scv_accessions_truncated": False,
+        "rcv_accessions": rcv_accessions,
+        "rcv_accession_count": len(rcv_accessions),
+        "rcv_accessions_truncated": False,
+        "ambiguous_classifications": (
+            significances if len(significances) > 1 else []
+        ),
+    }
+
+
 def _standardize_myvariant_response(
     annotation: AnnotationData,
     payload: dict[str, Any],
@@ -2474,6 +2705,11 @@ def _standardize_myvariant_response(
             "max_population_frequency": max_frequency,
         }
     )
+    clinvar_candidate = _myvariant_clinvar_candidate(payload)
+    if clinvar_candidate["status"] != "not_found":
+        annotation["sources"]["myvariant"][
+            "clinvar_derived"
+        ] = clinvar_candidate
     annotation["references"].append(
         {
             "source": "MyVariant.info",
@@ -2751,6 +2987,103 @@ def _standardize_clinvar_response(
         )
 
 
+def _activate_myvariant_clinvar_fallback(
+    annotation: AnnotationData,
+    primary_failure: ProviderStatus,
+) -> bool:
+    """Promote exact MyVariant ClinVar-derived fields after primary failure."""
+
+    if not should_trigger_fallback(primary_failure):
+        return False
+    source = annotation["sources"]["clinvar"]
+    myvariant = annotation["sources"]["myvariant"]
+    derived = myvariant.get("clinvar_derived")
+    if (
+        myvariant.get("status") != "success"
+        or not isinstance(derived, dict)
+        or derived.get("status") != "available"
+    ):
+        source.update(
+            {
+                "primary_failure": primary_failure,
+                "fallback_attempted": True,
+                "fallback_provider": "MyVariant.info",
+                "fallback_status": "unavailable",
+            }
+        )
+        return False
+
+    provenance = build_provider_provenance(
+        capability="clinvar_evidence",
+        provider="myvariant",
+        provider_role="fallback",
+        primary_provider="ncbi_clinvar",
+        primary_failure=primary_failure,
+    )
+    source.update(
+        {
+            "status": "success",
+            "direct_verification_status": primary_failure,
+            "provider": MYVARIANT_PROVIDER_NAME,
+            "provider_version": MYVARIANT_API_VERSION,
+            "api": "MyVariant.info variant annotation API",
+            "api_version": MYVARIANT_API_VERSION,
+            "source_type": "derived_fallback",
+            "retrieved_at": myvariant.get("retrieved_at"),
+            "upstream_sources": ["ClinVar"],
+            "operational_provider": provenance["provider"],
+            "capability": provenance["capability"],
+            "provider_role": provenance["provider_role"],
+            "fallback_used": provenance["fallback_used"],
+            "primary_provider": provenance["primary_provider"],
+            "primary_failure": provenance["primary_failure"],
+            "fallback_for": "ncbi_clinvar",
+            "fallback_attempted": True,
+            "fallback_provider": MYVARIANT_PROVIDER_NAME,
+            "fallback_status": "success",
+            "independent_evidence": False,
+            "variation_id": derived.get("variation_id"),
+            "accession": None,
+            "accession_version": None,
+            "gene": derived.get("gene"),
+            "clinical_significance": derived.get(
+                "clinical_significance"
+            ),
+            "review_status": derived.get("review_status"),
+            "last_evaluated": derived.get("last_evaluated"),
+            "conditions": deepcopy(derived.get("conditions", [])),
+            "condition_count": derived.get("condition_count", 0),
+            "conditions_truncated": derived.get(
+                "conditions_truncated",
+                False,
+            ),
+            "scv_accessions": [],
+            "scv_accession_count": 0,
+            "scv_accessions_truncated": False,
+            "rcv_accessions": deepcopy(
+                derived.get("rcv_accessions", [])
+            ),
+            "rcv_accession_count": derived.get(
+                "rcv_accession_count",
+                0,
+            ),
+            "rcv_accessions_truncated": derived.get(
+                "rcv_accessions_truncated",
+                False,
+            ),
+            "conflicting_submissions": _clinvar_conflict_evidence(
+                derived.get("review_status"),
+                derived.get("clinical_significance"),
+            ),
+        }
+    )
+    annotation["warnings"].append(
+        "Direct NCBI ClinVar was unavailable; ClinVar-derived fields "
+        "from MyVariant.info were used as a non-independent fallback."
+    )
+    return True
+
+
 def _annotate_with_clinvar(
     annotation: AnnotationData,
     session: requests.Session,
@@ -2775,14 +3108,27 @@ def _annotate_with_clinvar(
             "error_type=%s",
             type(exc).__name__,
         )
+        primary_failure: ProviderStatus = (
+            exc.provider_status
+            if isinstance(exc, ClinVarOperationalError)
+            else (
+                "invalid_response"
+                if isinstance(exc, ClinVarResponseError)
+                else "unavailable"
+            )
+        )
         source_status = (
             "invalid_response"
-            if isinstance(exc, ClinVarResponseError)
+            if primary_failure == "invalid_response"
             else "unavailable"
         )
         source["status"] = source_status
         source["direct_verification_status"] = source_status
         annotation["warnings"].append(str(exc))
+        _activate_myvariant_clinvar_fallback(
+            annotation,
+            primary_failure,
+        )
         return
 
     if unsupported_warning is not None:

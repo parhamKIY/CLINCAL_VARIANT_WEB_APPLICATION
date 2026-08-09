@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 66 gnomAD-to-Ensembl population fallback complete
+**Implementation status:** Stage 67 ClinVar resilience complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 67 ClinVar resilience
+**Next checkpoint:** Stage 68 literature resilience chain
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -30,7 +30,8 @@ model-selection, interpretation-before-review, reviewed-report, selection, refer
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
 bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
-contracts. Stage 66 applies those contracts to population evidence. The authoritative
+contracts. Stages 66-67 apply those contracts to population and ClinVar evidence.
+The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
@@ -282,12 +283,13 @@ flowchart LR
     AA --> AB["Stage 64: shared request policy"]
     AB --> AC["Stage 65: local HPO-gene fallback"]
     AC --> AD["Stage 66: population fallback"]
-    AD --> AE["Stage 67: ClinVar resilience - pending"]
+    AD --> AE["Stage 67: ClinVar resilience"]
+    AE --> AF["Stage 68: literature resilience - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD done
-    class AE review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE done
+    class AF review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -367,6 +369,7 @@ their original order.
 | 64 | Added one bounded provider-call wrapper with separate connect/read deadlines, centralized retry/backoff and practical `Retry-After` handling, analysis-scoped circuits, safe transition logging, and initial MyDisease adoption. | Complete |
 | 65 | Added a deterministic direct HPO-to-gene overlap fallback for operational Phen2Gene failures, with exact source/method/dataset provenance and distinct report/UI wording. | Complete |
 | 66 | Kept gnomAD as the exact-allele primary population source and added Ensembl Variation fallback only for operational failures, with retry-once behavior, analysis-scoped circuit suppression, exact mapping checks, and distinct report provenance. | Complete |
+| 67 | Added a non-independent MyVariant.info path for ClinVar-derived fields after operational direct NCBI ClinVar failure, while preserving direct success/no-match behavior, exact allele identity, fallback provenance, and single-vote lineage. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -403,8 +406,8 @@ report each variant independently.
 |---|---|---|---|
 | Ensembl VEP REST | `https://rest.ensembl.org/vep/homo_sapiens/region` | Submit bounded, assembly-explicit alleles. | Consequence, transcript, gene, identifiers, and available colocated evidence. Exact allele/coordinate validation is enforced in `backend/annotation.py`. |
 | GeneBe API | `https://api.genebe.net/cloud/api-public/v1/variants` | Batch-query normalized variants; optional account credentials are supported. | Independent automated ACMG criteria, classifications, scores, identifiers, and provenance. It is evidence, not the application's final classification. |
-| MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier. | Aggregated identifiers, clinical annotations, and population frequencies. Returned coordinates/alleles must match before use. |
-| NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize a direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. No record is represented as missingness, not negative evidence. |
+| MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier once for normal annotations and any later ClinVar fallback candidate. | Aggregated identifiers and population frequencies plus a bounded ClinVar-derived subset. Exact identity is required; ClinVar-derived fields become fallback evidence only after operational direct ClinVar failure and are never independent ClinVar evidence. |
+| NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize the primary direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. A valid no-record result is missingness, not negative evidence and not a fallback trigger. |
 | UCSC Genome Browser API, GenCC track | `https://genome-euro.ucsc.edu/cgi-bin/hubApi/getData/track` | Query the assembly-specific locus and retain exact gene claims submitted by ClinGen. | Gene-disease validity context, submitter, classification, disease identifiers, and report links. It does not classify the variant. |
 | ClinGen CSpec Registry | `https://cspec.clinicalgenome.org/cspec/{entity}/id/{identifier}` | Resolve matching VCEP/disease/specification entities. | Released specification names, versions, VCEP metadata, and URLs. The app records availability/context only and never executes CSpec rules. |
 | Phen2Gene | `https://phen2gene.wglab.org/api` | Send the canonical HPO set once per analysis with the `sk` weighting model. | Gene score and provider rank metadata attached to matching annotated genes. It supports phenotype correlation and never reorders input variants. |
@@ -672,6 +675,29 @@ variants skip repeated gnomAD calls and proceed to the separately labelled Ensem
 fallback. If Ensembl also fails, the final state remains explicitly unavailable;
 neither provider failure is converted into negative clinical evidence.
 
+### Stage 67 ClinVar resilience
+
+`backend/annotation.py` keeps exact direct NCBI ClinVar ESearch/ESummary evidence as
+the primary path. A direct success remains authoritative, and a valid empty exact
+search remains terminal `not_found`; neither state promotes MyVariant ClinVar fields.
+The existing exact assembly-aware MyVariant query now requests a bounded subset of
+ClinVar-derived fields alongside its independent population annotations.
+
+After retry-bounded operational direct ClinVar failure, the application may promote
+those already-retrieved MyVariant fields as a fallback. The promoted source records
+provider `MyVariant.info`, upstream source `ClinVar`, role `fallback`, target
+`ncbi_clinvar`, the normalized primary failure, source type `derived_fallback`, and
+`independent_evidence = false`. Germline RCV significance, review status, conditions,
+evaluation date, Variation ID, and bounded RCV accessions are retained only after the
+MyVariant record has passed its exact assembly/chromosome/coordinate/allele identity
+check.
+
+Evidence lineage represents the fallback as one derived ClinVar path supplied by
+MyVariant, never as direct NCBI evidence and never as an independent second ClinVar
+vote. Draft and text reports label it as MyVariant ClinVar-derived fallback evidence.
+If direct ClinVar and the MyVariant-derived path are both unavailable, the direct
+source remains explicitly unavailable with the failed fallback attempt recorded.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -759,8 +785,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **877 passed, 4 skipped**,
-with **85.73% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **881 passed, 4 skipped**,
+with **85.84% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -864,6 +890,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
+| ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
 | LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
@@ -879,8 +906,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-66 are implemented and documented. ClinVar resilience begins in Stage
-   67; professor feedback and sign-off remain external pending checkpoints.
+1. Stages 46-67 are implemented and documented. Literature resilience begins in
+   Stage 68; professor feedback and sign-off remain external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
