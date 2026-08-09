@@ -220,6 +220,8 @@ from backend.privacy import (
     sanitize_phenotype_clinical_text,
     validate_llm_payload,
     validate_no_prohibited_fields,
+    validate_phenotype_extraction_payload,
+    validate_variant_interpretation_payload,
 )
 from backend.references import (
     CanonicalReferenceError,
@@ -14176,6 +14178,194 @@ class TestStage57PersistenceSchemaV3:
         ] == expected["analysis_context"][
             "phenotype_extraction_provenance"
         ]
+
+
+class TestStage58PrivacySafetyReverification:
+    """Verify the redesigned LLM, Excel, and report privacy boundaries."""
+
+    def test_persian_identifiers_are_redacted_before_phenotype_llm(
+        self,
+    ) -> None:
+        adapter = FakeLLMAdapter(
+            TestStage47PhenotypeExtractionLLM._response(
+                {"candidates": []}
+            )
+        )
+        raw_text = (
+            "کودک دچار تشنج است؛ نام بیمار: علی رضایی؛ "
+            "کد ملی: ۰۰۱۲۳۴۵۶۷۸؛ شماره تماس: ۰۹۱۲۱۲۳۴۵۶۷."
+        )
+
+        extract_hpo_candidates(raw_text, client=LLMClient(adapter))
+
+        request_text = adapter.requests[0].messages[1].content
+        assert "تشنج" in request_text
+        assert "علی رضایی" not in request_text
+        assert "۰۰۱۲۳۴۵۶۷۸" not in request_text
+        assert "۰۹۱۲۱۲۳۴۵۶۷" not in request_text
+        assert request_text.count(CLINICAL_REDACTED) >= 3
+
+    def test_task_specific_llm_payloads_are_strictly_separated(
+        self,
+    ) -> None:
+        phenotype_payload = {
+            "task": "extract_hpo_candidates",
+            "clinical_text_fa": "کودک دچار تشنج است.",
+        }
+        assert validate_phenotype_extraction_payload(
+            phenotype_payload
+        ) == phenotype_payload
+
+        evidence = TestEvidenceObject._complete_evidence_object()
+        references = [
+            {
+                "reference_id": reference["reference_id"],
+                "source": reference["source"],
+                "identifier_type": reference["identifier_type"],
+                "identifier": reference["identifier"],
+                "title": reference["title"],
+            }
+            for reference in build_canonical_references(evidence)
+        ]
+        validate_variant_interpretation_payload(
+            {
+                "task": "interpret_variant",
+                "prompt_mode": "standard",
+                "evidence": evidence,
+                "reference_catalog": references,
+            }
+        )
+
+        with pytest.raises(
+            ClinicalDataPrivacyError,
+            match="unsupported fields",
+        ):
+            validate_phenotype_extraction_payload(
+                {
+                    **phenotype_payload,
+                    "evidence": evidence,
+                }
+            )
+        with pytest.raises(
+            ClinicalDataPrivacyError,
+            match="phenotype-extraction text",
+        ):
+            validate_variant_interpretation_payload(
+                {
+                    "task": "interpret_variant",
+                    "prompt_mode": "standard",
+                    "evidence": {
+                        "clinical_text_fa": "شرح بالینی خصوصی"
+                    },
+                    "reference_catalog": [],
+                }
+            )
+
+    def test_ignored_excel_sheet_is_removed_before_all_downstream_data(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "IGNORED_SHEET_PATIENT_IDENTIFIER_58"
+        database_path = tmp_path / "analysis.sqlite3"
+        draft = TestStage57PersistenceSchemaV3._stored_report_draft(
+            database_path
+        )
+        confirmed = confirm_reviewed_evidence(
+            draft,
+            draft["evidence_review_reports"],
+            timestamp="2026-08-09T14:00:00Z",
+        )
+        completed = finalize_reviewed_analysis(
+            confirmed,
+            timestamp="2026-08-09T14:05:00Z",
+        )
+        save_pipeline_state(completed, database_path=database_path)
+        captured: dict[str, object] = {}
+
+        def fake_run_analysis(**kwargs: object) -> PipelineResult:
+            captured.update(kwargs)
+            return completed
+
+        monkeypatch.setattr(
+            "frontend.execution.run_analysis",
+            fake_run_analysis,
+        )
+        uploaded = SimpleNamespace(
+            name="variants.xlsx",
+            getvalue=lambda: _xlsx_bytes(
+                [("1", 100, "A", "G", None, "PASS")],
+                later_sheet_rows=[
+                    ("patient_name", secret),
+                    ("clinical_text_fa", secret),
+                ],
+            ),
+        )
+
+        result = execute_frontend_analysis(
+            uploaded_vcf=uploaded,
+            manual_variants=None,
+            phenotypes=["HP:0001250"],
+            input_type="excel",
+        )
+        final_report = result["final_clinical_report"]
+        assert final_report is not None
+        markdown = render_final_clinical_report_markdown(final_report)
+        exports = markdown.encode("utf-8") + render_report_pdf(
+            markdown
+        ) + render_report_docx(markdown)
+        connection = connect_database(database_path)
+        try:
+            database_dump = "\n".join(connection.iterdump())
+        finally:
+            connection.close()
+
+        assert captured["manual_variants"] == [
+            {
+                "chrom": "1",
+                "pos": 100,
+                "ref": "A",
+                "alt": "G",
+                "qual": None,
+                "filter": "PASS",
+            }
+        ]
+        assert secret not in json.dumps(captured, default=str)
+        assert secret not in json.dumps(result, ensure_ascii=False)
+        assert secret not in database_dump
+        assert secret.encode() not in exports
+        assert secret not in caplog.text
+
+    def test_external_identifier_text_cannot_enter_variant_reports(
+        self,
+    ) -> None:
+        evidence, _ = TestStage52DraftVariantReportV2._success_inputs()
+        evidence["clinvar_conditions"] = ["نام بیمار: علی رضایی"]
+        evidence["pathogenicity"]["clinvar_conditions"] = [
+            "نام بیمار: علی رضایی"
+        ]
+        interpretations = interpret_variants(
+            [evidence],
+            client=LLMClient(
+                FakeLLMAdapter(
+                    TestStage50SingleModelInterpretation._response(
+                        TestStage50SingleModelInterpretation._payload()
+                    )
+                )
+            ),
+        )
+        assert interpretations[0]["status"] == "failed"
+
+        with pytest.raises(
+            DraftVariantReportError,
+            match="unsafe data",
+        ):
+            build_draft_variant_report(
+                evidence,
+                interpretations[0],
+                variant_index=0,
+            )
 
 
 class TestClinicalInterpretationValidation:

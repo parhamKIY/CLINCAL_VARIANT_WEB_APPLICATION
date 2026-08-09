@@ -124,6 +124,30 @@ RAW_VCF_LINE_PATTERN = re.compile(
 )
 CLINICAL_REDACTED = "[REDACTED CLINICAL DATA]"
 MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS = 4_000
+PHENOTYPE_EXTRACTION_TASK = "extract_hpo_candidates"
+VARIANT_INTERPRETATION_TASK = "interpret_variant"
+PHENOTYPE_EXTRACTION_PAYLOAD_FIELDS = frozenset(
+    {"clinical_text_fa", "task"}
+)
+VARIANT_INTERPRETATION_PAYLOAD_FIELDS = frozenset(
+    {"evidence", "prompt_mode", "reference_catalog", "task"}
+)
+VARIANT_REFERENCE_CATALOG_FIELDS = frozenset(
+    {"identifier", "identifier_type", "reference_id", "source", "title"}
+)
+MAX_VARIANT_INTERPRETATION_REFERENCES = 200
+PERSIAN_DIGIT = r"0-9۰-۹٠-٩"
+PERSIAN_LABELED_IDENTIFIER_PATTERN = re.compile(
+    r"(?:نام[\s‌]+بیمار|نام[\s‌]+و[\s‌]+نام[\s‌]+خانوادگی|"
+    r"کد[\s‌]+ملی|شماره[\s‌]+(?:ملی|پرونده|تماس|تلفن)|"
+    r"تلفن(?:[\s‌]+همراه)?|موبایل|ایمیل|رایانامه|"
+    r"تاریخ[\s‌]+تولد|نشانی|آدرس)"
+    r"\s*(?:[:=：]|است)?\s*[^\r\n,;،؛.]+"
+)
+IRANIAN_PHONE_PATTERN = re.compile(
+    rf"(?<!\w)(?:\+?(?:98|۹۸|٩٨)[ .-]?)?"
+    rf"(?:0|۰|٠)?(?:9|۹|٩)[{PERSIAN_DIGIT}]{{9}}(?!\w)"
+)
 
 
 class ClinicalDataPrivacyError(ValueError):
@@ -194,7 +218,9 @@ def validate_llm_payload(value: object) -> None:
             if any(
                 pattern.search(item)
                 for pattern in PROHIBITED_LLM_TEXT_PATTERNS
-            ):
+            ) or PERSIAN_LABELED_IDENTIFIER_PATTERN.search(
+                item
+            ) or IRANIAN_PHONE_PATTERN.search(item):
                 raise ClinicalDataPrivacyError(
                     "LLM payload contains prohibited clinical data."
                 )
@@ -209,6 +235,107 @@ def validate_llm_payload(value: object) -> None:
                 inspect(nested)
 
     inspect(value)
+
+
+def validate_phenotype_extraction_payload(
+    value: object,
+) -> dict[str, str]:
+    """Validate the exact minimum-data payload for phenotype extraction."""
+
+    if not isinstance(value, Mapping) or set(value) != (
+        PHENOTYPE_EXTRACTION_PAYLOAD_FIELDS
+    ):
+        raise ClinicalDataPrivacyError(
+            "Phenotype extraction payload has unsupported fields."
+        )
+    if value.get("task") != PHENOTYPE_EXTRACTION_TASK:
+        raise ClinicalDataPrivacyError(
+            "Phenotype extraction payload has an invalid task."
+        )
+    clinical_text = value.get("clinical_text_fa")
+    sanitized = sanitize_phenotype_clinical_text(clinical_text)
+    if sanitized != clinical_text:
+        raise ClinicalDataPrivacyError(
+            "Phenotype extraction payload is not fully sanitized."
+        )
+    normalized = {
+        "clinical_text_fa": sanitized,
+        "task": PHENOTYPE_EXTRACTION_TASK,
+    }
+    validate_llm_payload(normalized)
+    return normalized
+
+
+def validate_variant_interpretation_payload(value: object) -> None:
+    """Validate the separate bounded interpretation-model payload."""
+
+    if not isinstance(value, Mapping) or set(value) != (
+        VARIANT_INTERPRETATION_PAYLOAD_FIELDS
+    ):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation payload has unsupported fields."
+        )
+    if value.get("task") != VARIANT_INTERPRETATION_TASK:
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation payload has an invalid task."
+        )
+    if value.get("prompt_mode") not in {"standard", "conflict_aware"}:
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation payload has an invalid prompt mode."
+        )
+    evidence = value.get("evidence")
+    references = value.get("reference_catalog")
+    if not isinstance(evidence, Mapping):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation evidence is invalid."
+        )
+    if (
+        not isinstance(references, Sequence)
+        or isinstance(references, (str, bytes, bytearray))
+        or len(references) > MAX_VARIANT_INTERPRETATION_REFERENCES
+        or any(not isinstance(item, Mapping) for item in references)
+    ):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation reference catalog is invalid."
+        )
+    if any(
+        set(item) != VARIANT_REFERENCE_CATALOG_FIELDS
+        for item in references
+        if isinstance(item, Mapping)
+    ):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation reference catalog has unsupported fields."
+        )
+    if any(
+        isinstance(nested, str)
+        and re.search(r"(?i)(?:https?://|www\.)", nested)
+        for item in references
+        if isinstance(item, Mapping)
+        for nested in item.values()
+    ):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation reference catalog must not contain URLs."
+        )
+
+    def contains_phenotype_text(item: object) -> bool:
+        if isinstance(item, Mapping):
+            return any(
+                str(key).strip().casefold() == "clinical_text_fa"
+                or contains_phenotype_text(nested)
+                for key, nested in item.items()
+            )
+        if (
+            isinstance(item, Sequence)
+            and not isinstance(item, (str, bytes, bytearray))
+        ):
+            return any(contains_phenotype_text(nested) for nested in item)
+        return False
+
+    if contains_phenotype_text(evidence):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation payload contains phenotype-extraction text."
+        )
+    validate_llm_payload(value)
 
 
 def validate_human_review_content(
@@ -234,6 +361,8 @@ def validate_human_review_content(
                     PHONE_PATTERN,
                     GOVERNMENT_ID_PATTERN,
                     PERSON_NAME_CONTEXT_PATTERN,
+                    PERSIAN_LABELED_IDENTIFIER_PATTERN,
+                    IRANIAN_PHONE_PATTERN,
                 )
             ):
                 raise ClinicalDataPrivacyError(
@@ -296,6 +425,14 @@ def redact_clinical_text(value: str) -> str:
         CLINICAL_REDACTED,
         sanitized,
     )
+    sanitized = PERSIAN_LABELED_IDENTIFIER_PATTERN.sub(
+        CLINICAL_REDACTED,
+        sanitized,
+    )
+    sanitized = IRANIAN_PHONE_PATTERN.sub(
+        CLINICAL_REDACTED,
+        sanitized,
+    )
     return CLINICAL_PATH_PATTERN.sub(CLINICAL_REDACTED, sanitized)
 
 
@@ -332,6 +469,7 @@ __all__ = [
     "ClinicalDataPrivacyError",
     "CLINICAL_REDACTED",
     "MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS",
+    "PHENOTYPE_EXTRACTION_TASK",
     "PROHIBITED_CLINICAL_FIELD_NAMES",
     "PUBLIC_VARIANT_FIELDS",
     "is_prohibited_clinical_field",
@@ -341,4 +479,6 @@ __all__ = [
     "validate_human_review_content",
     "validate_llm_payload",
     "validate_no_prohibited_fields",
+    "validate_phenotype_extraction_payload",
+    "validate_variant_interpretation_payload",
 ]

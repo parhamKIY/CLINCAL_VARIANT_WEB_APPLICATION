@@ -14,15 +14,16 @@ from backend.llm import (
     call_llm,
 )
 from backend.privacy import (
+    PHENOTYPE_EXTRACTION_TASK,
     sanitize_phenotype_clinical_text,
     validate_llm_payload,
+    validate_phenotype_extraction_payload,
 )
 from config import settings
 
 
 PHENOTYPE_EXTRACTION_SCHEMA_VERSION = "1.0"
 PHENOTYPE_EXTRACTION_PROMPT_VERSION = "phenotype-extraction-v1.0"
-PHENOTYPE_EXTRACTION_TASK = "extract_hpo_candidates"
 MAX_PHENOTYPE_CANDIDATES = 25
 MAX_HPO_LABEL_CHARACTERS = 200
 MAX_SOURCE_PHRASE_CHARACTERS = 500
@@ -224,7 +225,9 @@ def extract_hpo_candidates(
         "clinical_text_fa": sanitized_text,
         "task": PHENOTYPE_EXTRACTION_TASK,
     }
-    validate_llm_payload(request_payload)
+    request_payload = validate_phenotype_extraction_payload(
+        request_payload
+    )
     user_prompt = json.dumps(
         request_payload,
         ensure_ascii=False,

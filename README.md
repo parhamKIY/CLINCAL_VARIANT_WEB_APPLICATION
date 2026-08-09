@@ -5,11 +5,11 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_57_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_58_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-782_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
-[![Coverage](https://img.shields.io/badge/coverage-85.58%25-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-786_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Coverage](https://img.shields.io/badge/coverage-85.57%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
 
@@ -56,7 +56,8 @@ its original input order.
   implemented and offline-verified.
 - Stage 57 persistence schema V3 and recovery migration is implemented and
   offline-verified.
-- Stage 58 privacy and safety reverification is the next bounded milestone.
+- Stage 58 privacy and safety reverification is implemented and offline-verified.
+- Stage 59 Testing V3 is the next bounded milestone.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
@@ -64,7 +65,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **782 passed, 4 skipped; 85.58% coverage**.
+- Current verified suite: **786 passed, 4 skipped; 85.57% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -77,10 +78,10 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-57 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-58 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline through Final Clinical Report delivery; later
-persistence and verification items remain planned:
+persistence, and privacy reverification; Testing V3 and release items remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -250,6 +251,22 @@ schema. Older Output A/Output B records remain explicitly unsupported and are ne
 silently reinterpreted. Once generated drafts are durably saved, refresh or restart
 recovery loads them by analysis ID without rerunning successful interpretation; the
 reviewer can continue editing, selection, confirmation, and export from restored state.
+
+### Stage 58 privacy and safety reverification
+
+The two model entry points now have separate exact minimum-data validators. Phenotype
+extraction accepts only the task identifier and sanitized `clinical_text_fa`;
+interpretation accepts only its validated Evidence Object, prompt mode, task, and a
+URL-free canonical-reference catalog. Cross-task clinical text is rejected from the
+interpretation boundary.
+
+Persian labelled identifiers—including patient name, national/record number, contact
+details, birth date, and address—and Iranian mobile-number forms are redacted before
+phenotype-model calls and rejected from review/report content. Automated acceptance
+coverage also proves that ignored Excel worksheets are removed before downstream
+pipeline, log, database, model, and export boundaries. Detection remains defense in
+depth: linguistically ambiguous, unlabelled identifiers cannot be guaranteed and users
+must supply de-identified text.
 
 ## Current implemented workflow
 
@@ -546,7 +563,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-782 passed, 4 skipped
+786 passed, 4 skipped
 ```
 
 Run the final Stage 44 acceptance gate:
@@ -564,7 +581,7 @@ The gate performs:
 - the complete Testing V2 regression suite;
 - the minimum 80% coverage requirement.
 
-Current measured coverage is **85.58%**.
+Current measured coverage is **85.57%**.
 
 The same Stage 44 gate runs automatically on every push and pull request through
 the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -625,6 +642,12 @@ production multi-user clinical deployment.
   credential, and raw-VCF redaction.
 - Reviewer notes reject detected phone numbers, government identifiers, email
   addresses, contextual person names, labelled identifiers, and raw VCF text.
+- Persian labelled identifiers and Iranian mobile-number forms are redacted before
+  phenotype extraction and rejected from stored review/report content.
+- Phenotype-extraction and variant-interpretation payloads use separate exact-field
+  validators; interpretation cannot receive the Persian clinical-text field.
+- Ignored Excel worksheets are discarded at the adapter boundary and cannot enter
+  downstream provider/model calls, logs, SQLite state, reports, or exports.
 - The confirmation button remains disabled until the reviewer explicitly
   attests that the reviewed evidence contains no PHI or direct identifiers;
   editing the Draft clears that attestation and invalidates confirmation.
@@ -695,8 +718,7 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-57 are implemented; Stage 58 owns privacy and safety reverification of
-  the redesigned LLM and persistence boundaries.
+- Stages 46-58 are implemented; Stage 59 owns the comprehensive Testing V3 suite.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -722,4 +744,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 58 handoff.
+- current limitations and the Stage 59 handoff.

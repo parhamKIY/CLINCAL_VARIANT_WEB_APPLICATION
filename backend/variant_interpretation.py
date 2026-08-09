@@ -16,7 +16,12 @@ from backend.llm import (
     LLMResponse,
     call_llm,
 )
-from backend.privacy import ClinicalDataPrivacyError, validate_llm_payload
+from backend.privacy import (
+    VARIANT_INTERPRETATION_TASK,
+    ClinicalDataPrivacyError,
+    validate_llm_payload,
+    validate_variant_interpretation_payload,
+)
 from backend.references import (
     build_canonical_references,
     cited_reference_ids,
@@ -254,6 +259,19 @@ def _build_prompt(
         }
         for reference in build_canonical_references(evidence)
     ]
+    try:
+        validate_variant_interpretation_payload(
+            {
+                "task": VARIANT_INTERPRETATION_TASK,
+                "prompt_mode": prompt_mode,
+                "evidence": evidence,
+                "reference_catalog": reference_catalog,
+            }
+        )
+    except ClinicalDataPrivacyError as exc:
+        raise VariantInterpretationError(
+            "Interpretation payload violates its minimum-data boundary."
+        ) from exc
     serialized_references = json.dumps(
         reference_catalog,
         ensure_ascii=False,

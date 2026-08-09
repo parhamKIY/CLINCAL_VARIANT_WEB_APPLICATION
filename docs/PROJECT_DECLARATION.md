@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 57 persistence schema V3 and recovery migration implemented
+**Implementation status:** Stage 58 privacy and safety reverification implemented
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 58 privacy and safety reverification
+**Next implementation milestone:** Stage 59 Testing V3
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,9 +24,9 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-57 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-58 now implement its input, phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
-Final Clinical Report, persistence, and recovery portions. The
+Final Clinical Report, persistence, recovery, and privacy-reverification portions. The
 authoritative target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
@@ -269,11 +269,12 @@ flowchart LR
     R --> S["Stage 55: canonical reference hardening"]
     S --> T["Stage 56: Final Clinical Report composer"]
     T --> U["Stage 57: persistence schema V3 and recovery migration"]
-    U --> W["Stages 58-62: verification and release - pending"]
+    U --> V["Stage 58: privacy and safety reverification"]
+    V --> W["Stages 59-62: testing and release - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U done
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V done
     class W review
 ```
 
@@ -345,7 +346,8 @@ their original order.
 | 55 | Added normalized canonical references, provider-specific exact-record URL builders, domain/identifier validation, bounded LLM citation IDs, explicit link fallbacks, and clickable Streamlit/Word/PDF rendering. | Complete |
 | 56 | Added deterministic selected-only Final Clinical Report composition, exact reviewed-state integrity validation, grouped canonical references, audit/provenance summary, and text/PDF/Word delivery without another LLM call. | Complete |
 | 57 | Added SQLite schema V3 normalized lifecycle projections, pipeline schema `2.9` analysis context, bounded Stage 56 migration, explicit legacy Output A/B rejection, and persisted-draft refresh/restart recovery without repeated interpretation. | Complete |
-| 58–62 | Perform privacy reverification, Testing V3, acceptance, live validation, and final documentation. | Planned |
+| 58 | Added exact task-specific LLM minimum-data validators, Persian identifier/mobile redaction, ignored-worksheet downstream leakage proof, and report-content privacy enforcement with explicit detection limitations. | Complete |
+| 59–62 | Implement Testing V3, acceptance, live validation, and final documentation. | Planned |
 
 ## 5. Current implemented architecture
 
@@ -492,6 +494,25 @@ an explicit unsupported-legacy error and are never reinterpreted as current repo
 Persisted drafts are recovered by analysis ID after refresh or restart without
 rerunning successful interpretation.
 
+### Stage 58 privacy and safety reverification
+
+`backend/privacy.py` now validates the two LLM entry points independently. The
+phenotype task permits exactly `task` and sanitized `clinical_text_fa`. The variant
+interpretation task permits exactly its task, prompt mode, validated Evidence Object,
+and bounded URL-free reference catalog; phenotype clinical text cannot cross into
+that payload. Existing Evidence Object size and schema validation remains mandatory.
+
+Persian-labelled patient names, national/record numbers, contact details, birth
+dates, addresses, and Iranian mobile-number forms are redacted before phenotype
+extraction and rejected from review/report state. The Excel first-worksheet boundary
+is verified through downstream pipeline arguments, logging, SQLite, model-facing
+state, and text/PDF/Word exports. Provider-derived labelled identifiers are rejected
+before a Draft or Final Clinical Report can retain them.
+
+These checks are defense in depth, not automatic de-identification. Unlabelled names,
+indirect identifiers, unusual spelling, and linguistically ambiguous phrases may not
+be detected; only deliberately de-identified clinical text is permitted.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -536,6 +557,12 @@ resume error.
 - Human-review notes reject detected phone numbers, government identifiers, email
   addresses, contextual person names, labelled identifiers, and raw VCF text before
   storage or LLM use. The same high-risk patterns are redacted from logs.
+- Persian-labelled identifiers and Iranian mobile-number forms are covered by the
+  same redaction/rejection boundary.
+- Exact task-specific payload validation prevents phenotype clinical text and
+  interpretation evidence from being mixed across model entry points.
+- Ignored Excel worksheets are eliminated before provider/model, logging, database,
+  report, and export boundaries.
 - Evidence confirmation requires an explicit no-PHI attestation in the Streamlit UI;
   saving or resetting a Draft clears the attestation and invalidates confirmation.
 - Human-review state and audit history are bounded and validated before persistence.
@@ -573,7 +600,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **782 passed, 4 skipped**, with **85.58% coverage**. The retained Stage 44
+baseline is **786 passed, 4 skipped**, with **85.57% coverage**. The retained Stage 44
 acceptance runner now exercises the current five-variant, multi-HPO path through
 analysis-phase interpretation, review edits, confirmation, model-free finalization,
 per-variant failure isolation, provenance, and ordering. Stage 59 will replace this
@@ -694,8 +721,7 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-57 are implemented. Stage 58 owns privacy and safety reverification for
-   the redesigned early phenotype-LLM and persistence boundaries.
+1. Stages 46-58 are implemented. Stage 59 owns the comprehensive Testing V3 suite.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -739,5 +765,8 @@ audit/provenance disclosure, and text/PDF/Word delivery without a new LLM call.
 Stage 57 added normalized SQLite schema V3 lifecycle projections, pipeline schema
 `2.9` analysis context, bounded Stage 56 migration, explicit unsupported handling
 for legacy Output A/B records, and refresh/restart recovery of persisted drafts
-without rerunning successful interpretation. The correct next action is Stage 58:
-reverify privacy and safety across the redesigned boundaries.
+without rerunning successful interpretation. Stage 58 added separate exact-field LLM
+payload validators, Persian identifier/mobile redaction, end-to-end ignored-sheet
+leakage verification, and report-content privacy rejection while documenting the
+limits of free-text detection. The correct next action is Stage 59: implement the
+comprehensive Testing V3 suite.

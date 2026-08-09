@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-57 complete; Stage 58 is next
+**Implementation progress:** Stages 46-58 complete; Stage 59 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 57. Features assigned to
-Stages 58–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 58. Features assigned to
+Stages 59–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -291,9 +291,27 @@ separate reviewed copy with append-only history.
 - A recovery checkpoint linked to a persisted draft reloads SQLite state after
   refresh or restart without rerunning successful interpretation. Editing,
   selection, confirmation, and export state remain recoverable.
-- Stage 58 is the next bounded increment and will reverify privacy and safety.
+- Stage 58 reverifies privacy and safety across the redesigned boundaries.
 
-## 17. Stage 45 acceptance record
+## 17. Stage 58 implementation record
+
+- Phenotype extraction and variant interpretation use separate exact-field
+  minimum-data validators. Phenotype payloads contain only sanitized Persian clinical
+  text and the extraction task; interpretation payloads contain only validated
+  Evidence Object data, prompt mode, task, and a bounded URL-free reference catalog.
+- Cross-task clinical text is rejected from interpretation payloads, while existing
+  Evidence Object schema, size, prohibited-field, and raw-VCF checks remain active.
+- Persian-labelled names, national/record identifiers, contact details, birth dates,
+  addresses, and Iranian mobile-number forms are redacted before phenotype-model
+  calls and rejected from persisted review/report content.
+- First-worksheet-only Excel handling is verified across downstream pipeline input,
+  logs, SQLite state, model-facing state, and text/PDF/Word exports.
+- Provider-derived labelled identity text cannot enter Draft or Final Clinical
+  Reports. Unlabelled or linguistically ambiguous identifiers remain a documented
+  defense-in-depth limitation requiring deliberate human de-identification.
+- Stage 59 is the next bounded increment and will implement Testing V3.
+
+## 18. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.
