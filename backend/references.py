@@ -369,14 +369,16 @@ def build_canonical_references(
         for item in articles:
             if not isinstance(item, Mapping):
                 continue
-            source = item.get("provider") or item.get("source") or "Literature"
-            identifier = (
-                item.get("pmid")
-                or item.get("pmcid")
-                or item.get("doi")
-                or item.get("id")
-            )
-            add(source, identifier, item.get("title"))
+            if item.get("pmid"):
+                add("PubMed", item.get("pmid"), item.get("title"))
+            elif item.get("pmcid"):
+                add(
+                    "PubMed Central",
+                    item.get("pmcid"),
+                    item.get("title"),
+                )
+            elif item.get("doi"):
+                add("DOI", item.get("doi"), item.get("title"))
     return [validate_canonical_reference(item) for item in pending]
 
 

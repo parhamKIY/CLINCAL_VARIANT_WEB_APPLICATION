@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 67 ClinVar resilience complete
+**Implementation status:** Stage 68 literature resilience complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 68 literature resilience chain
+**Next checkpoint:** Stage 69 MyDisease latency guard and local degraded mode
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -30,7 +30,8 @@ model-selection, interpretation-before-review, reviewed-report, selection, refer
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
 bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
-contracts. Stages 66-67 apply those contracts to population and ClinVar evidence.
+contracts. Stages 66-68 apply those contracts to population, ClinVar, and literature
+evidence.
 The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
@@ -284,12 +285,13 @@ flowchart LR
     AB --> AC["Stage 65: local HPO-gene fallback"]
     AC --> AD["Stage 66: population fallback"]
     AD --> AE["Stage 67: ClinVar resilience"]
-    AE --> AF["Stage 68: literature resilience - pending"]
+    AE --> AF["Stage 68: literature resilience"]
+    AF --> AG["Stage 69: MyDisease degraded mode - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE done
-    class AF review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF done
+    class AG review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -370,6 +372,7 @@ their original order.
 | 65 | Added a deterministic direct HPO-to-gene overlap fallback for operational Phen2Gene failures, with exact source/method/dataset provenance and distinct report/UI wording. | Complete |
 | 66 | Kept gnomAD as the exact-allele primary population source and added Ensembl Variation fallback only for operational failures, with retry-once behavior, analysis-scoped circuit suppression, exact mapping checks, and distinct report provenance. | Complete |
 | 67 | Added a non-independent MyVariant.info path for ClinVar-derived fields after operational direct NCBI ClinVar failure, while preserving direct success/no-match behavior, exact allele identity, fallback provenance, and single-vote lineage. | Complete |
+| 68 | Hardened literature retrieval with operational-only LitVar2-to-Europe PMC-to-PubMed fallback, Europe-PMC-first general searches, persisted search/fallback provenance, identifier-priority deduplication, bounded article results, and exact canonical links. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -698,6 +701,28 @@ vote. Draft and text reports label it as MyVariant ClinVar-derived fallback evid
 If direct ClinVar and the MyVariant-derived path are both unavailable, the direct
 source remains explicitly unavailable with the failed fallback attempt recorded.
 
+### Stage 68 literature resilience chain
+
+`backend/conditional_enrichment.py` now formalizes the existing variant-focused
+literature chain as LitVar2, then Europe PMC after an operational LitVar2 failure,
+then PubMed after an operational Europe PMC failure. General gene-and-disease
+searches without a variant identifier use Europe PMC as the primary source and may
+fall back to PubMed. Valid successful searches with no articles remain terminal
+`no_match` states and never trigger fallback.
+
+Every provider record persists the search provider, exact query and query
+identifier, primary or fallback role, fallback target, normalized primary failure,
+fallback reason, and the canonical identifiers of its retained articles. Articles
+are merged and deduplicated in PMID, then PMCID, then DOI priority, while preserving
+all contributing source providers. The configured article cap applies after the
+fallback merge.
+
+`backend/references.py` derives article links only from those canonical identifiers:
+PMIDs map to exact PubMed records, PMCIDs to PubMed Central, and DOIs to DOI records.
+No model-generated article URL is accepted. Compact evidence/report persistence
+retains the complete fallback provenance needed to distinguish primary and degraded
+literature retrieval.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -785,8 +810,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **881 passed, 4 skipped**,
-with **85.84% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **887 passed, 4 skipped**,
+with **85.91% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -891,6 +916,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
+| Literature resilience and canonical article links | `backend/conditional_enrichment.py`, `backend/references.py`, `backend/report.py`, `tests/test_pipeline.py` |
 | Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
 | LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
@@ -906,8 +932,9 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-67 are implemented and documented. Literature resilience begins in
-   Stage 68; professor feedback and sign-off remain external pending checkpoints.
+1. Stages 46-68 are implemented and documented. MyDisease latency protection and
+   local degraded mode begin in Stage 69; professor feedback and sign-off remain
+   external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -964,6 +991,8 @@ Actions. Stage 61 revalidated every production provider client and both task-spe
 LLM contracts, probed representative exact links, and removed non-navigable VEP and
 GeneBe POST endpoints from report hyperlinks. Stage 62 reconciled the V3 documents,
 added and verified the multi-sheet demo workbook, corrected stale UI wording, and
-prepared the exact demo and professor-feedback checklist. Roadmap implementation is
-complete; the next checkpoint is external professor review and any explicitly
-approved follow-up.
+prepared the exact demo and professor-feedback checklist. Stages 63-68 added the
+shared provider-resilience contract, bounded request policy, local HPO-gene and
+population fallback paths, ClinVar-derived fallback, and the provenance-preserving
+literature resilience chain. Stage 69 is the next implementation checkpoint;
+professor review and sign-off remain external.

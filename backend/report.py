@@ -3233,6 +3233,12 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
                 "http_status",
                 "result_count",
                 "failure_reason",
+                "search_provider",
+                "provider_role",
+                "fallback_for",
+                "primary_failure",
+                "fallback_reason",
+                "article_identifiers",
             ),
         )
         for name in ("litvar", "europe_pmc", "pubmed")

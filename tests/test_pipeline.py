@@ -8279,6 +8279,232 @@ class TestEvidenceObject:
         assert result["articles"] == []
         assert len(session.get_calls) == 1
 
+    def test_stage_68_litvar_failure_records_europe_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+            0,
+        )
+        candidate = self._candidate_with_rsid()
+        result = fetch_literature_evidence(
+            candidate,
+            session=FakeConditionalSession(  # type: ignore[arg-type]
+                get_responses=[
+                    requests.Timeout("litvar"),
+                    FakeResponse(
+                        200,
+                        {
+                            "resultList": {
+                                "result": [{"pmid": "123"}]
+                            }
+                        },
+                    ),
+                ]
+            ),
+        )
+
+        europe = result["providers"]["europe_pmc"]
+        assert europe["provider_role"] == "fallback"
+        assert europe["fallback_for"] == "litvar"
+        assert europe["primary_failure"] == "timeout"
+        assert europe["fallback_reason"] == "timeout"
+        assert europe["search_provider"] == "Europe PMC"
+        assert europe["article_identifiers"] == ["PMID:123"]
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["literature_evidence_need"],
+            "population_frequency": {
+                "status": "not_triggered",
+                "provider": "gnomAD",
+                "populations": [],
+            },
+            "literature": result,
+            "myvariant_fallback": {
+                "used": False,
+                "status": "not_needed",
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+        evidence = build_evidence_object(candidate)
+        stored = evidence["conditional_enrichment"]["literature"][
+            "providers"
+        ]["europe_pmc"]
+        assert stored["provider_role"] == "fallback"
+        assert stored["fallback_for"] == "litvar"
+        assert stored["primary_failure"] == "timeout"
+        assert stored["article_identifiers"] == ["PMID:123"]
+
+    def test_stage_68_europe_failure_records_pubmed_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_RETRIES",
+            0,
+        )
+        result = fetch_literature_evidence(
+            self._candidate_with_rsid(),
+            session=FakeConditionalSession(  # type: ignore[arg-type]
+                get_responses=[
+                    requests.Timeout("litvar"),
+                    requests.Timeout("europe"),
+                    FakeResponse(
+                        200,
+                        {"esearchresult": {"idlist": ["456"]}},
+                    ),
+                    FakeResponse(
+                        200,
+                        {
+                            "result": {
+                                "456": {"title": "Article"}
+                            }
+                        },
+                    ),
+                ]
+            ),
+        )
+
+        pubmed = result["providers"]["pubmed"]
+        assert pubmed["provider_role"] == "fallback"
+        assert pubmed["fallback_for"] == "europe_pmc"
+        assert pubmed["primary_failure"] == "timeout"
+        assert pubmed["fallback_reason"] == "timeout"
+        assert pubmed["query_identifier"]
+        assert pubmed["article_identifiers"] == ["PMID:456"]
+
+    def test_stage_68_general_query_uses_europe_as_primary(self) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant.pop("rsid", None)
+        for field in ("hgvsp", "protein_change", "hgvsc"):
+            candidate[field] = None
+        candidate["mydisease"] = {
+            "diseases": [{"disease_name": "Example disease"}]
+        }
+        session = FakeConditionalSession(
+            get_responses=[
+                FakeResponse(
+                    200,
+                    {"resultList": {"result": [{"pmid": "789"}]}},
+                )
+            ]
+        )
+
+        result = fetch_literature_evidence(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["providers"]["litvar"]["status"] == (
+            "missing_identifier"
+        )
+        assert result["providers"]["europe_pmc"]["status"] == (
+            "available"
+        )
+        assert result["providers"]["europe_pmc"]["provider_role"] == (
+            "primary"
+        )
+        assert result["providers"]["pubmed"]["status"] == (
+            "not_triggered"
+        )
+        assert len(session.get_calls) == 1
+        assert session.get_calls[0]["url"] == (
+            f"{settings.EUROPE_PMC_BASE_URL}/search"
+        )
+
+    def test_stage_68_valid_no_results_is_not_an_outage(self) -> None:
+        result = fetch_literature_evidence(
+            self._candidate_with_rsid(),
+            session=FakeConditionalSession(  # type: ignore[arg-type]
+                get_responses=[
+                    FakeResponse(200, ValueError("empty"), text="")
+                ]
+            ),
+        )
+
+        assert result["status"] == "no_match"
+        assert result["providers"]["litvar"]["status"] == "no_match"
+        assert result["providers"]["litvar"]["primary_failure"] is None
+        assert result["providers"]["europe_pmc"]["status"] == (
+            "not_triggered"
+        )
+
+    def test_stage_68_deduplication_keeps_one_canonical_link(
+        self,
+    ) -> None:
+        articles = _deduplicate_articles(
+            [
+                {
+                    "pmid": "12345678",
+                    "pmcid": "PMC123",
+                    "doi": "10.1000/shared",
+                    "authors": [],
+                    "source_providers": ["Europe PMC"],
+                    "url": None,
+                },
+                {
+                    "pmid": "12345678",
+                    "pmcid": None,
+                    "doi": None,
+                    "authors": [],
+                    "source_providers": ["PubMed"],
+                    "url": None,
+                },
+            ]
+        )
+        evidence = self._complete_evidence_object()
+        evidence["conditional_enrichment"]["literature"][
+            "articles"
+        ] = articles
+
+        references = build_canonical_references(evidence)
+        matching = [
+            reference
+            for reference in references
+            if reference["identifier"] == "12345678"
+        ]
+
+        assert len(articles) == 1
+        assert articles[0]["source_providers"] == [
+            "Europe PMC",
+            "PubMed",
+        ]
+        assert len(matching) == 1
+        assert matching[0]["source"] == "PubMed"
+        assert matching[0]["canonical_url"] == (
+            "https://pubmed.ncbi.nlm.nih.gov/12345678/"
+        )
+
+    def test_stage_68_article_cap_applies_after_fallback_merge(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "CONDITIONAL_ENRICHMENT_MAX_ARTICLES",
+            2,
+        )
+        articles = _deduplicate_articles(
+            [
+                {
+                    "pmid": str(index),
+                    "authors": [],
+                    "source_providers": ["PubMed"],
+                }
+                for index in range(1, 5)
+            ]
+        )
+
+        assert len(articles) == 2
+
     def test_stage_38_feature_flags_skip_configured_enrichment(
         self,
         monkeypatch: pytest.MonkeyPatch,

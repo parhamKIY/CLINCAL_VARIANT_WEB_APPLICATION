@@ -1311,6 +1311,11 @@ def _provider_status(
     http_status: int | None = None,
     failure_reason: str | None = None,
     result_count: int = 0,
+    provider_role: str = "primary",
+    fallback_for: str | None = None,
+    primary_failure: ProviderStatus | None = None,
+    fallback_reason: str | None = None,
+    article_identifiers: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -1326,6 +1331,12 @@ def _provider_status(
         "http_status": http_status,
         "result_count": result_count,
         "failure_reason": failure_reason,
+        "search_provider": provider,
+        "provider_role": provider_role,
+        "fallback_for": fallback_for,
+        "primary_failure": primary_failure,
+        "fallback_reason": fallback_reason,
+        "article_identifiers": list(article_identifiers or []),
     }
 
 
@@ -1663,6 +1674,51 @@ def _provider_failure_status(
     )
 
 
+def _literature_operational_status(
+    provider: Mapping[str, object],
+) -> ProviderStatus:
+    """Map one legacy literature failure into the shared taxonomy."""
+
+    reason = provider.get("failure_reason")
+    if reason == "timeout":
+        return "timeout"
+    if reason == "forbidden":
+        return "forbidden"
+    if reason == "rate_limited":
+        return "rate_limited"
+    if reason == "upstream_error":
+        return "server_error"
+    if provider.get("status") in {"invalid_response", "partial"}:
+        return "invalid_response"
+    return "unavailable"
+
+
+def _literature_fallback_metadata(
+    fallback_for: str,
+    primary: Mapping[str, object],
+) -> dict[str, object]:
+    primary_failure = _literature_operational_status(primary)
+    return {
+        "provider_role": "fallback",
+        "fallback_for": fallback_for,
+        "primary_failure": primary_failure,
+        "fallback_reason": primary_failure,
+    }
+
+
+def _article_identifier(article: Mapping[str, object]) -> str | None:
+    """Return the strongest canonical identifier for one article."""
+
+    pmid = _normalized_pmid(article.get("pmid"))
+    if pmid is not None:
+        return f"PMID:{pmid}"
+    pmcid = _normalized_pmcid(article.get("pmcid"))
+    if pmcid is not None:
+        return pmcid
+    doi = _normalized_doi(article.get("doi"))
+    return f"DOI:{doi}" if doi is not None else None
+
+
 def fetch_literature_evidence(
     candidate: Mapping[str, object],
     *,
@@ -1831,7 +1887,18 @@ def fetch_literature_evidence(
 
     europe_failed = False
     europe_http_status: int | None = None
-    if litvar_failed and query is not None:
+    europe_should_run = query is not None and (
+        litvar_failed or not identifiers
+    )
+    europe_role = (
+        _literature_fallback_metadata(
+            "litvar",
+            result["providers"]["litvar"],
+        )
+        if litvar_failed
+        else {}
+    )
+    if europe_should_run:
         notify("europe_pmc", "running")
         europe_url = f"{settings.EUROPE_PMC_BASE_URL}/search"
         try:
@@ -1881,6 +1948,7 @@ def fetch_literature_evidence(
                     failure_reason=(
                         "invalid_schema" if invalid else None
                     ),
+                    **europe_role,
                 )
             )
         except requests.RequestException as exc:
@@ -1895,6 +1963,7 @@ def fetch_literature_evidence(
                     source_url=europe_url,
                     http_status=http_status,
                     failure_reason=reason,
+                    **europe_role,
                 )
             )
         except ProviderResponseError as exc:
@@ -1910,6 +1979,7 @@ def fetch_literature_evidence(
                         exc.http_status or europe_http_status
                     ),
                     failure_reason=exc.reason,
+                    **europe_role,
                 )
             )
     elif litvar_failed:
@@ -1931,6 +2001,10 @@ def fetch_literature_evidence(
         search_url = f"{settings.PUBMED_BASE_URL}/esearch.fcgi"
         pubmed_pmids: list[str] = []
         pubmed_http_status: int | None = None
+        pubmed_role = _literature_fallback_metadata(
+            "europe_pmc",
+            result["providers"]["europe_pmc"],
+        )
         try:
             search_payload, search_status, _ = _request_json(
                 client,
@@ -1964,6 +2038,7 @@ def fetch_literature_evidence(
                     source_url=search_url,
                     http_status=search_status,
                     result_count=len(pubmed_pmids),
+                    **pubmed_role,
                 )
             )
         except requests.RequestException as exc:
@@ -1977,6 +2052,7 @@ def fetch_literature_evidence(
                     source_url=search_url,
                     http_status=http_status,
                     failure_reason=reason,
+                    **pubmed_role,
                 )
             )
         except ProviderResponseError as exc:
@@ -1989,6 +2065,7 @@ def fetch_literature_evidence(
                     source_url=search_url,
                     http_status=exc.http_status,
                     failure_reason=exc.reason,
+                    **pubmed_role,
                 )
             )
         except ConditionalEnrichmentError:
@@ -2001,6 +2078,7 @@ def fetch_literature_evidence(
                     source_url=search_url,
                     http_status=pubmed_http_status,
                     failure_reason="invalid_schema",
+                    **pubmed_role,
                 )
             )
 
@@ -2041,6 +2119,18 @@ def fetch_literature_evidence(
         client.close()
 
     result["articles"] = _deduplicate_articles(articles)
+    provider_markers = {
+        "litvar": "LitVar2",
+        "europe_pmc": "Europe PMC",
+        "pubmed": "PubMed",
+    }
+    for name, marker in provider_markers.items():
+        result["providers"][name]["article_identifiers"] = [
+            identifier
+            for article in result["articles"]
+            if marker in article.get("source_providers", [])
+            if (identifier := _article_identifier(article)) is not None
+        ][: settings.CONDITIONAL_ENRICHMENT_MAX_ARTICLES]
     provider_statuses = {
         item["status"] for item in result["providers"].values()
     }
