@@ -24,6 +24,13 @@ from backend.privacy import (
     validate_llm_payload,
     validate_no_prohibited_fields,
 )
+from backend.provider_resilience import (
+    CAPABILITY_STATUSES,
+    CapabilityResult,
+    ProviderContractError,
+    build_capability_result,
+    validate_capability_result,
+)
 from backend.references import (
     build_canonical_references,
     validated_reference_url,
@@ -35,13 +42,14 @@ from config import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = "2.4"
+EVIDENCE_SCHEMA_VERSION = "2.5"
 SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {
     "1.0",
     "2.0",
     "2.1",
     "2.2",
     "2.3",
+    "2.4",
     EVIDENCE_SCHEMA_VERSION,
 }
 INTERPRETATION_PROMPT_VERSION = "1.1"
@@ -330,6 +338,7 @@ class EvidenceObject(TypedDict):
     human_review: EvidenceHumanReview
     conflict_audit: EvidenceConflictAudit
     conditional_enrichment: EvidenceConditionalEnrichment
+    capability_results: dict[str, CapabilityResult]
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -403,6 +412,16 @@ EVIDENCE_SOURCE_STATUS_FIELDS = frozenset(
     EvidenceSourceStatuses.__required_keys__
 )
 EVIDENCE_SOURCE_NAMES = ("vep", "myvariant", "clinvar", "clingen")
+EVIDENCE_CAPABILITIES = (
+    "variant_annotation",
+    "variant_context",
+    "clinvar_evidence",
+    "cspec_context",
+    "phenotype_gene",
+    "disease_context",
+    "population_frequency",
+    "literature",
+)
 EVIDENCE_VARIANT_CONTEXT_FIELDS = frozenset(
     EvidenceVariantContext.__required_keys__
 )
@@ -936,6 +955,29 @@ def _validate_evidence_lineage(provenance: dict[str, Any]) -> None:
 
 def _validate_v2_sections(value: dict[str, Any]) -> None:
     """Validate the additive Evidence Object V2 sections."""
+
+    capability_results = value["capability_results"]
+    if not isinstance(capability_results, dict) or set(
+        capability_results
+    ) != set(EVIDENCE_CAPABILITIES):
+        raise EvidenceObjectError(
+            "evidence.capability_results must contain every exact capability."
+        )
+    for capability, result in capability_results.items():
+        try:
+            validated = validate_capability_result(result)
+        except ProviderContractError as exc:
+            raise EvidenceObjectError(
+                f"evidence.capability_results.{capability} is invalid: {exc}"
+            ) from exc
+        if validated["capability"] != capability:
+            raise EvidenceObjectError(
+                "Capability result key does not match its capability."
+            )
+    _validate_context_tree(
+        capability_results,
+        "evidence.capability_results",
+    )
 
     variant_context = value["variant_context"]
     if not isinstance(variant_context, dict):
@@ -2074,6 +2116,15 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
             evidence["conditional_enrichment"],
             "evidence.conditional_enrichment",
         ),
+        "capability_results": {
+            capability: validate_capability_result(
+                _sanitize_context_tree(
+                    result,
+                    f"evidence.capability_results.{capability}",
+                )
+            )
+            for capability, result in evidence["capability_results"].items()
+        },
     }
     clean_evidence = validate_evidence_object(clean_evidence)
     serialized_size = len(
@@ -3866,6 +3917,209 @@ def _build_evidence_lineage(
     )
 
 
+def _capability_status(payload: dict[str, Any]) -> str:
+    raw = payload.get("status")
+    if raw not in CAPABILITY_STATUSES and raw not in {
+        "partial",
+        "available",
+        "found",
+        "not_found",
+        "skipped",
+        "not_needed",
+        "unsupported",
+        "missing_identifier",
+    }:
+        raw = payload.get("availability")
+    if raw in {"success", "partial", "available", "found"}:
+        return "success"
+    if raw in {"not_found", "no_match"}:
+        return "no_match"
+    if raw in {"not_triggered", "skipped", "not_needed"}:
+        return "not_triggered"
+    if raw in {"not_applicable", "unsupported", "missing_identifier"}:
+        return "not_applicable"
+    if raw in CAPABILITY_STATUSES:
+        return cast(str, raw)
+    failure = payload.get("primary_failure", payload.get("failure_reason"))
+    if failure in CAPABILITY_STATUSES:
+        return cast(str, failure)
+    return "unavailable"
+
+
+def _capability_result(
+    *,
+    capability: str,
+    payload: dict[str, Any],
+    primary_provider: str,
+    fallback_provider: str,
+    primary_method: str,
+    fallback_method: str,
+    evidence_path: str,
+    evidence_present: bool,
+) -> CapabilityResult:
+    is_fallback = payload.get("provider_role") == "fallback" or (
+        payload.get("fallback_used") is True
+    )
+    primary_failure = payload.get("primary_failure")
+    if is_fallback and primary_failure not in {
+        "unavailable",
+        "timeout",
+        "forbidden",
+        "rate_limited",
+        "server_error",
+        "invalid_response",
+    }:
+        is_fallback = False
+        primary_failure = None
+    if not is_fallback:
+        primary_failure = None
+    selected_provider = payload.get("capability_provider")
+    if not isinstance(selected_provider, str):
+        selected_provider = fallback_provider if is_fallback else primary_provider
+    selected_fallback_for = payload.get("fallback_for")
+    if not isinstance(selected_fallback_for, str):
+        selected_fallback_for = primary_provider
+    provenance = {
+        key: deepcopy(payload[key])
+        for key in (
+            "provider",
+            "provider_version",
+            "retrieved_at",
+            "source_type",
+            "upstream_sources",
+            "dataset",
+            "dataset_version",
+            "dataset_date",
+        )
+        if key in payload and payload[key] is not None
+    }
+    try:
+        selected_method = (
+            payload.get("method")
+            or payload.get("fallback_method")
+            or (payload.get("source_type") if is_fallback else None)
+            or (fallback_method if is_fallback else primary_method)
+        )
+        return build_capability_result(
+            capability=capability,
+            status=cast(Any, _capability_status(payload)),
+            provider=selected_provider,
+            provider_role="fallback" if is_fallback else "primary",
+            fallback_for=selected_fallback_for if is_fallback else None,
+            primary_failure=cast(Any, primary_failure),
+            method=selected_method,
+            data={
+                "evidence_path": evidence_path,
+                "evidence_present": evidence_present,
+            },
+            provenance=provenance,
+        )
+    except ProviderContractError as exc:
+        raise EvidenceObjectError(
+            f"Invalid {capability} capability result: {exc}"
+        ) from exc
+
+
+def _build_capability_results(
+    candidate: dict[str, Any],
+    sources: dict[str, Any],
+) -> dict[str, CapabilityResult]:
+    enrichment = _compact_conditional_enrichment(
+        candidate.get("conditional_enrichment")
+    )
+    population = _candidate_mapping(enrichment.get("population_frequency"))
+    literature = _candidate_mapping(enrichment.get("literature"))
+    literature_providers = _candidate_mapping(literature.get("providers"))
+    for provider_id in ("litvar", "europe_pmc", "pubmed"):
+        provider_payload = _candidate_mapping(
+            literature_providers.get(provider_id)
+        )
+        if _capability_status(provider_payload) != "success":
+            continue
+        literature = deepcopy(literature)
+        literature["capability_provider"] = provider_id
+        for field in (
+            "provider_role",
+            "fallback_for",
+            "primary_failure",
+            "provider",
+            "retrieved_at",
+            "upstream_sources",
+            "dataset",
+        ):
+            if field in provider_payload:
+                literature[field] = deepcopy(provider_payload[field])
+        break
+    phen2gene = _candidate_mapping(candidate.get("phen2gene"))
+    mydisease = _candidate_mapping(candidate.get("mydisease"))
+    definitions = (
+        (
+            "variant_annotation", _candidate_mapping(sources.get("vep")),
+            "ensembl_vep", "variantvalidator", "vep_annotation",
+            "validation_mapping", "annotations.vep",
+        ),
+        (
+            "variant_context", _candidate_mapping(sources.get("myvariant")),
+            "myvariant", "ensembl_variation", "aggregated_variant_lookup",
+            "overlapping_variant_context", "annotations.population",
+        ),
+        (
+            "clinvar_evidence", _candidate_mapping(sources.get("clinvar")),
+            "ncbi_clinvar", "myvariant", "direct_clinvar_lookup",
+            "myvariant_clinvar_derivation", "pathogenicity.clinvar",
+        ),
+        (
+            "cspec_context", _candidate_mapping(sources.get("cspec")),
+            "clingen_cspec", "cached_cspec", "live_cspec_lookup",
+            "last_known_good_cache", "pathogenicity.cspec_context",
+        ),
+        (
+            "phenotype_gene", phen2gene, "phen2gene",
+            "local_hpo_gene_fallback", "ranked_gene_match",
+            "direct_hpo_gene_overlap", "phenotype_relationship.phen2gene",
+        ),
+        (
+            "disease_context", mydisease, "mydisease",
+            "local_hpo_disease_fallback", "gene_disease_query",
+            "accepted_hpo_local_disease_context",
+            "phenotype_relationship.mydisease",
+        ),
+        (
+            "population_frequency", population, "gnomad",
+            "ensembl_variation", "exact_allele_population_lookup",
+            "exact_mapping_population_lookup",
+            "conditional_enrichment.population_frequency",
+        ),
+        (
+            "literature", literature, "litvar", "literature_fallback_chain",
+            "variant_literature_search", "bounded_literature_search_chain",
+            "conditional_enrichment.literature",
+        ),
+    )
+    return {
+        capability: _capability_result(
+            capability=capability,
+            payload=payload,
+            primary_provider=primary_provider,
+            fallback_provider=fallback_provider,
+            primary_method=primary_method,
+            fallback_method=fallback_method,
+            evidence_path=evidence_path,
+            evidence_present=bool(payload) and _capability_status(payload)
+            == "success",
+        )
+        for (
+            capability,
+            payload,
+            primary_provider,
+            fallback_provider,
+            primary_method,
+            fallback_method,
+            evidence_path,
+        ) in definitions
+    }
+
+
 def _build_v2_sections(
     candidate: dict[str, Any],
     *,
@@ -4269,6 +4523,10 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
         "conditional_enrichment": v2_sections[
             "conditional_enrichment"
         ],
+        "capability_results": _build_capability_results(
+            candidate_data,
+            sources,
+        ),
     }
     evidence["conflict_audit"]["pre_review"] = audit_evidence_conflicts(
         evidence,

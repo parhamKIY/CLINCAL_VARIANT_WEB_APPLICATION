@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock
-from typing import Callable, Generic, Literal, TypeVar, TypedDict, cast
+from typing import Any, Callable, Generic, Literal, TypeVar, TypedDict, cast
 
 import requests
 
@@ -29,6 +30,19 @@ ProviderStatus = Literal[
     "configuration_error",
 ]
 ProviderRole = Literal["primary", "fallback"]
+CapabilityStatus = Literal[
+    "success",
+    "no_match",
+    "unavailable",
+    "timeout",
+    "forbidden",
+    "rate_limited",
+    "server_error",
+    "invalid_response",
+    "configuration_error",
+    "not_applicable",
+    "not_triggered",
+]
 
 PROVIDER_STATUSES = frozenset(
     {
@@ -44,6 +58,13 @@ PROVIDER_STATUSES = frozenset(
     }
 )
 PROVIDER_ROLES = frozenset({"primary", "fallback"})
+CAPABILITY_STATUSES = frozenset(
+    {
+        *PROVIDER_STATUSES,
+        "not_applicable",
+        "not_triggered",
+    }
+)
 OPERATIONAL_FAILURE_STATUSES = frozenset(
     {
         "unavailable",
@@ -74,6 +95,24 @@ PROVIDER_PROVENANCE_FIELDS = frozenset(
         "primary_failure",
     }
 )
+CAPABILITY_RESULT_FIELDS = frozenset(
+    {
+        "capability",
+        "status",
+        "provider",
+        "provider_role",
+        "fallback_used",
+        "fallback_for",
+        "primary_failure",
+        "method",
+        "data",
+        "provenance",
+    }
+)
+MAX_CAPABILITY_TREE_DEPTH = 4
+MAX_CAPABILITY_MAPPING_FIELDS = 32
+MAX_CAPABILITY_LIST_ITEMS = 50
+MAX_CAPABILITY_STRING_CHARS = 500
 
 
 class ProviderContractError(ValueError):
@@ -238,6 +277,21 @@ class ProviderProvenance(TypedDict):
     fallback_used: bool
     primary_provider: str
     primary_failure: ProviderStatus | None
+
+
+class CapabilityResult(TypedDict):
+    """Unified downstream result for one provider-backed capability."""
+
+    capability: str
+    status: CapabilityStatus
+    provider: str
+    provider_role: ProviderRole
+    fallback_used: bool
+    fallback_for: str | None
+    primary_failure: ProviderStatus | None
+    method: str
+    data: dict[str, Any]
+    provenance: dict[str, Any]
 
 
 def validate_provider_status(value: object) -> ProviderStatus:
@@ -574,6 +628,155 @@ def validate_provider_provenance(value: object) -> ProviderProvenance:
             "fallback_used is inconsistent with provider_role."
         )
     return expected
+
+
+def build_capability_result(
+    *,
+    capability: str,
+    status: CapabilityStatus,
+    provider: str,
+    method: str,
+    data: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    provider_role: ProviderRole = "primary",
+    fallback_for: str | None = None,
+    primary_failure: ProviderStatus | None = None,
+) -> CapabilityResult:
+    """Build one strict provider-neutral downstream capability result."""
+
+    _validate_identifier(capability, "capability")
+    _validate_identifier(provider, "provider")
+    _validate_identifier(method, "method")
+    if not isinstance(status, str) or status not in CAPABILITY_STATUSES:
+        raise ProviderContractError("Unsupported capability status.")
+    primary_provider = provider if provider_role == "primary" else fallback_for
+    provider_provenance = build_provider_provenance(
+        capability=capability,
+        provider=provider,
+        provider_role=provider_role,
+        primary_provider=primary_provider,
+        primary_failure=primary_failure,
+    )
+    if fallback_for != (
+        provider_provenance["primary_provider"]
+        if provider_provenance["fallback_used"]
+        else None
+    ):
+        raise ProviderContractError(
+            "fallback_for is inconsistent with provider_role."
+        )
+    safe_data = _validate_capability_tree(data or {}, "data")
+    safe_provenance = _validate_capability_tree(
+        provenance or {}, "provenance"
+    )
+    if not isinstance(safe_data, dict) or not isinstance(
+        safe_provenance, dict
+    ):
+        raise ProviderContractError(
+            "Capability data and provenance must be mappings."
+        )
+    return {
+        "capability": capability,
+        "status": cast(CapabilityStatus, status),
+        "provider": provider,
+        "provider_role": provider_provenance["provider_role"],
+        "fallback_used": provider_provenance["fallback_used"],
+        "fallback_for": fallback_for,
+        "primary_failure": provider_provenance["primary_failure"],
+        "method": method,
+        "data": safe_data,
+        "provenance": safe_provenance,
+    }
+
+
+def validate_capability_result(value: object) -> CapabilityResult:
+    """Validate a persisted capability result and return a safe copy."""
+
+    if not isinstance(value, Mapping):
+        raise ProviderContractError("Capability result must be a mapping.")
+    if set(value) != CAPABILITY_RESULT_FIELDS:
+        raise ProviderContractError(
+            "Capability result fields do not match the contract."
+        )
+    fallback_used = value["fallback_used"]
+    if not isinstance(fallback_used, bool):
+        raise ProviderContractError("fallback_used must be a boolean.")
+    role = value["provider_role"]
+    if not isinstance(role, str) or role not in PROVIDER_ROLES:
+        raise ProviderContractError("Unsupported provider role.")
+    result = build_capability_result(
+        capability=value["capability"],
+        status=value["status"],
+        provider=value["provider"],
+        provider_role=cast(ProviderRole, role),
+        fallback_for=value["fallback_for"],
+        primary_failure=value["primary_failure"],
+        method=value["method"],
+        data=value["data"],
+        provenance=value["provenance"],
+    )
+    if fallback_used != result["fallback_used"]:
+        raise ProviderContractError(
+            "fallback_used is inconsistent with provider_role."
+        )
+    return result
+
+
+def capability_availability(value: object) -> str:
+    """Return one generic downstream availability label."""
+
+    result = validate_capability_result(value)
+    if result["status"] == "success":
+        return (
+            "available via fallback"
+            if result["fallback_used"]
+            else "available"
+        )
+    return result["status"]
+
+
+def _validate_capability_tree(
+    value: object,
+    path: str,
+    depth: int = 0,
+) -> Any:
+    if depth > MAX_CAPABILITY_TREE_DEPTH:
+        raise ProviderContractError(f"Capability {path} is too deeply nested.")
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ProviderContractError(
+                f"Capability {path} number must be finite."
+            )
+        return value
+    if isinstance(value, str):
+        if len(value) > MAX_CAPABILITY_STRING_CHARS:
+            raise ProviderContractError(f"Capability {path} string is too long.")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > MAX_CAPABILITY_MAPPING_FIELDS:
+            raise ProviderContractError(f"Capability {path} has too many fields.")
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > 64:
+                raise ProviderContractError(
+                    f"Capability {path} contains an invalid field name."
+                )
+            result[key] = _validate_capability_tree(
+                item, f"{path}.{key}", depth + 1
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_CAPABILITY_LIST_ITEMS:
+            raise ProviderContractError(f"Capability {path} list is too long.")
+        return [
+            _validate_capability_tree(item, f"{path}[]", depth + 1)
+            for item in value
+        ]
+    raise ProviderContractError(
+        f"Capability {path} contains an unsupported value."
+    )
 
 
 def _retry_delay_for_policy(

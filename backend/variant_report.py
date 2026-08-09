@@ -15,6 +15,7 @@ from backend.privacy import (
     validate_human_review_content,
     validate_no_prohibited_fields,
 )
+from backend.provider_resilience import capability_availability
 from backend.references import (
     CanonicalReference,
     CanonicalReferenceError,
@@ -240,6 +241,12 @@ def _provider_status(evidence: EvidenceObject, source: str) -> str:
     return _status(evidence["source_statuses"].get(source), "unavailable")
 
 
+def _capability_status(evidence: EvidenceObject, capability: str) -> str:
+    return capability_availability(
+        evidence["capability_results"][capability]
+    )
+
+
 def _provider_record(
     evidence: EvidenceObject,
     source: str,
@@ -282,24 +289,21 @@ def _phen2gene_summary(evidence: EvidenceObject) -> list[str]:
     phen2gene = _mapping(
         evidence["phenotype_relationship"].get("phen2gene")
     )
-    is_local_fallback = (
-        phen2gene.get("provider") == "local_hpo_gene_fallback"
-    )
-    prefix = (
-        "Local HPO-Gene fallback"
-        if is_local_fallback
-        else "Phen2Gene"
-    )
+    capability = evidence["capability_results"]["phenotype_gene"]
     return [
         f"{item['label']}: {item['value']}"
         for item in _items(
-            _item(f"{prefix} status", phen2gene.get("status")),
-            _item(f"{prefix} rank", phen2gene.get("rank")),
-            _item(f"{prefix} score", phen2gene.get("score")),
-            _item("Phenotype-gene method", phen2gene.get("method")),
+            _item(
+                "Phenotype-gene availability",
+                capability_availability(capability),
+            ),
+            _item("Phenotype-gene provider", capability["provider"]),
+            _item("Phenotype-gene rank", phen2gene.get("rank")),
+            _item("Phenotype-gene score", phen2gene.get("score")),
+            _item("Phenotype-gene method", capability["method"]),
             _item(
                 "Primary provider failure",
-                phen2gene.get("primary_failure"),
+                capability["primary_failure"],
             ),
             _item(
                 "Local dataset version",
@@ -332,7 +336,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
     sections: list[EvidenceSection] = [
         {
             "source": "Ensembl VEP",
-            "status": _provider_status(evidence, "vep"),
+            "status": _capability_status(evidence, "variant_annotation"),
             "items": _items(
                 _item("Consequence", context["consequence"]),
                 _item("Transcript", context["transcript"]),
@@ -354,7 +358,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
         },
         {
             "source": "MyVariant.info",
-            "status": _provider_status(evidence, "myvariant"),
+            "status": _capability_status(evidence, "variant_context"),
             "items": _items(
                 _item(
                     "Population frequency",
@@ -372,7 +376,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
                 if clinvar_is_fallback
                 else "NCBI ClinVar"
             ),
-            "status": _provider_status(evidence, "clinvar"),
+            "status": _capability_status(evidence, "clinvar_evidence"),
             "items": _items(
                 _item("Accession", evidence["clinvar_accession"]),
                 _item("Significance", pathogenicity["clinvar_classification"]),
@@ -405,7 +409,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
                 if cspec_metadata.get("evidence_source") == "cached_cspec"
                 else "ClinGen CSpec"
             ),
-            "status": _status(cspec_provider.get("status"), "not_found"),
+            "status": _capability_status(evidence, "cspec_context"),
             "items": _items(
                 _item("Matching specifications", len(cspec)),
                 _item(
@@ -441,7 +445,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
                 if population.get("source") == "ensembl_variation"
                 else "Population evidence — gnomAD"
             ),
-            "status": _status(population.get("status"), "not_triggered"),
+            "status": _capability_status(evidence, "population_frequency"),
             "items": _items(
                 _item("Provider", population.get("provider")),
                 _item(
@@ -457,7 +461,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
         },
         {
             "source": "Literature enrichment",
-            "status": _status(literature.get("status"), "not_triggered"),
+            "status": _capability_status(evidence, "literature"),
             "items": _items(
                 _item(
                     "Article count",

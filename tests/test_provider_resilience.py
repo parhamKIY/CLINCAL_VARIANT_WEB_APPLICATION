@@ -15,7 +15,9 @@ from backend.provider_resilience import (
     ProviderRetryPolicy,
     ProviderTimeouts,
     ProviderContractError,
+    build_capability_result,
     build_provider_provenance,
+    capability_availability,
     call_provider_with_policy,
     classify_http_status,
     classify_request_exception,
@@ -23,8 +25,79 @@ from backend.provider_resilience import (
     is_retryable_failure,
     should_trigger_fallback,
     validate_provider_provenance,
+    validate_capability_result,
     validate_provider_status,
 )
+
+
+def test_unified_capability_result_preserves_primary_semantics() -> None:
+    result = build_capability_result(
+        capability="phenotype_gene",
+        status="success",
+        provider="phen2gene",
+        method="ranked_gene_match",
+        data={"evidence_path": "phenotype_relationship.phen2gene"},
+        provenance={"provider_version": "1.0"},
+    )
+
+    assert validate_capability_result(result) == result
+    assert result["provider_role"] == "primary"
+    assert result["fallback_used"] is False
+    assert capability_availability(result) == "available"
+
+
+def test_unified_capability_result_preserves_fallback_semantics() -> None:
+    result = build_capability_result(
+        capability="phenotype_gene",
+        status="success",
+        provider="local_hpo_gene_fallback",
+        provider_role="fallback",
+        fallback_for="phen2gene",
+        primary_failure="timeout",
+        method="direct_hpo_gene_overlap",
+        data={"evidence_present": True},
+        provenance={"dataset": "phenotype_to_genes"},
+    )
+
+    assert result["fallback_used"] is True
+    assert result["fallback_for"] == "phen2gene"
+    assert result["primary_failure"] == "timeout"
+    assert capability_availability(result) == "available via fallback"
+
+
+def test_capability_result_rejects_inconsistent_fallback() -> None:
+    with pytest.raises(ProviderContractError):
+        build_capability_result(
+            capability="phenotype_gene",
+            status="success",
+            provider="local_hpo_gene_fallback",
+            provider_role="fallback",
+            fallback_for="phen2gene",
+            primary_failure="no_match",
+            method="direct_hpo_gene_overlap",
+        )
+
+
+def test_capability_result_rejects_unbounded_context() -> None:
+    with pytest.raises(ProviderContractError):
+        build_capability_result(
+            capability="literature",
+            status="success",
+            provider="literature_chain",
+            method="bounded_search",
+            data={"articles": list(range(51))},
+        )
+
+
+def test_capability_result_rejects_non_finite_numbers() -> None:
+    with pytest.raises(ProviderContractError):
+        build_capability_result(
+            capability="population_frequency",
+            status="success",
+            provider="gnomad",
+            method="exact_allele_lookup",
+            data={"frequency": float("nan")},
+        )
 
 
 class FakeResponse:

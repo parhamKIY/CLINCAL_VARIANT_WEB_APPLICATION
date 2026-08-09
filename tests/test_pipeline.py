@@ -68,7 +68,10 @@ from backend.conditional_enrichment import (
     fetch_literature_evidence,
     fetch_population_evidence_with_fallback,
 )
-from backend.provider_resilience import ProviderCircuitState
+from backend.provider_resilience import (
+    ProviderCircuitState,
+    build_capability_result,
+)
 from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
@@ -253,6 +256,7 @@ from backend.report import (
     ClinicalReportError,
     ClinicalReportStorageError,
     EvidenceObjectError,
+    _build_capability_results,
     build_clinical_interpretation_prompt,
     build_clinical_report,
     build_evidence_object,
@@ -7185,6 +7189,10 @@ class TestEvidenceObject:
                 },
                 "warnings": [],
             },
+            "capability_results": _build_capability_results(
+                TestEvidenceObject._complete_candidate(),
+                TestEvidenceObject._complete_candidate()["sources"],
+            ),
         }
 
     @staticmethod
@@ -8786,6 +8794,12 @@ class TestEvidenceObject:
         assert stored["fallback_for"] == "litvar"
         assert stored["primary_failure"] == "timeout"
         assert stored["article_identifiers"] == ["PMID:123"]
+        capability = evidence["capability_results"]["literature"]
+        assert capability["provider"] == "europe_pmc"
+        assert capability["provider_role"] == "fallback"
+        assert capability["fallback_for"] == "litvar"
+        assert capability["primary_failure"] == "timeout"
+        assert capability["method"] == "bounded_literature_search_chain"
 
     def test_stage_68_europe_failure_records_pubmed_fallback(
         self,
@@ -9159,13 +9173,58 @@ class TestEvidenceObject:
             if item["source"]
             == "ClinGen CSpec — cached last-known-good metadata"
         )
-        assert section["status"] == "partial"
+        assert section["status"] == "available via fallback"
         items = {item["label"]: item["value"] for item in section["items"]}
         assert items["Provider"] == "Local CSpec last-known-good cache"
         assert items["Original live retrieval"] == "2026-08-01T10:00:00Z"
         assert items["Cache stored"] == "2026-08-01T10:00:01Z"
         assert items["Cache fallback used"] == "2026-08-09T10:00:00Z"
         assert items["Freshness"] == "last_known_good_age_unbounded"
+
+    def test_stage_73_unifies_primary_and_fallback_capabilities(self) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        vep = sources["vep"]
+        assert isinstance(vep, dict)
+        vep.update(
+            {
+                "status": "partial",
+                "provider_role": "fallback",
+                "fallback_used": True,
+                "fallback_for": "ensembl_vep",
+                "primary_failure": "timeout",
+                "source_type": "validation_mapping_fallback",
+            }
+        )
+
+        evidence = build_evidence_object(candidate)
+        results = evidence["capability_results"]
+
+        assert set(results) == {
+            "variant_annotation",
+            "variant_context",
+            "clinvar_evidence",
+            "cspec_context",
+            "phenotype_gene",
+            "disease_context",
+            "population_frequency",
+            "literature",
+        }
+        fallback = results["variant_annotation"]
+        assert fallback["status"] == "success"
+        assert fallback["provider"] == "variantvalidator"
+        assert fallback["provider_role"] == "fallback"
+        assert fallback["fallback_for"] == "ensembl_vep"
+        assert fallback["primary_failure"] == "timeout"
+        assert fallback["method"] == "validation_mapping_fallback"
+        section = next(
+            item
+            for item in _evidence_sections(evidence)
+            if item["source"] == "Ensembl VEP"
+        )
+        assert section["status"] == "available via fallback"
+        assert results["clinvar_evidence"]["provider_role"] == "primary"
 
     def test_stage_38_feature_flags_skip_configured_enrichment(
         self,
@@ -12089,6 +12148,17 @@ class TestStage52DraftVariantReportV2:
             "dataset_version": "hp/releases/2026-07-13",
             "dataset_date": "2026-07-13",
         }
+        evidence["capability_results"]["phenotype_gene"] = (
+            build_capability_result(
+                capability="phenotype_gene",
+                status="success",
+                provider="local_hpo_gene_fallback",
+                provider_role="fallback",
+                fallback_for="phen2gene",
+                primary_failure="timeout",
+                method="direct_hpo_gene_overlap",
+            )
+        )
 
         report = build_draft_variant_report(
             evidence,
@@ -12098,10 +12168,11 @@ class TestStage52DraftVariantReportV2:
         summary = report["machine_original_report"][
             "phenotype_context"
         ]["phenotype_to_gene_summary"]
-        assert "Local HPO-Gene fallback score: 0.5" in summary
+        assert "Phenotype-gene availability: available via fallback" in summary
+        assert "Phenotype-gene provider: local_hpo_gene_fallback" in summary
+        assert "Phenotype-gene score: 0.5" in summary
         assert "Phenotype-gene method: direct_hpo_gene_overlap" in summary
         assert "Primary provider failure: timeout" in summary
-        assert not any(item.startswith("Phen2Gene score") for item in summary)
 
     def test_failed_interpretation_remains_a_coherent_report(self) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()

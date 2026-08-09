@@ -65,13 +65,13 @@ its original input order.
 - Stage 62 documentation and demonstration preparation is complete; external
   professor feedback remains pending.
 - Pipeline schema: `2.9`.
-- Evidence Object schema: `2.4`.
+- Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **789 passed, 4 skipped; 85.59% coverage**.
+- Current verified suite: **910 passed, 4 skipped; 85.86% Stage 59 coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
