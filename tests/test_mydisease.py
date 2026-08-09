@@ -9,11 +9,15 @@ import pytest
 import requests
 
 from backend.mydisease import (
+    MYDISEASE_LOCAL_DATASET,
+    MYDISEASE_LOCAL_METHOD,
+    MYDISEASE_LOCAL_PROVIDER,
     MYDISEASE_QUERY_FIELDS,
     clear_mydisease_cache,
     enrich_with_mydisease,
 )
-from backend.report import build_evidence_objects
+from backend.phenotype import HPODataError
+from backend.report import _compact_mydisease_context, build_evidence_objects
 from config import settings
 from frontend.results import (
     build_mydisease_rows,
@@ -366,7 +370,7 @@ def test_failure_statuses_are_explicit(
     assert "private" not in json.dumps(result)
 
 
-def test_retryable_error_retries_but_nonretryable_does_not(
+def test_only_transient_connection_error_gets_one_short_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "MYDISEASE_MAX_RETRIES", 1)
@@ -377,7 +381,7 @@ def test_retryable_error_retries_but_nonretryable_does_not(
     result, session = run(
         [
             metadata(),
-            FakeResponse(503, {"error": "busy"}),
+            requests.ConnectionError("temporary connection failure"),
             query_response(direct_hit()),
         ]
     )
@@ -386,10 +390,94 @@ def test_retryable_error_retries_but_nonretryable_does_not(
 
     clear_mydisease_cache()
     result, session = run(
-        [metadata(), FakeResponse(400, {"error": "bad"})]
+        [metadata(), FakeResponse(503, {"error": "busy"})]
     )
     assert result["status"] == "unavailable"
     assert len(session.calls) == 2
+
+
+def test_stage_69_timeout_is_bounded_without_long_retry_and_uses_local_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "MYDISEASE_TIMEOUT", 8)
+    monkeypatch.setattr(settings, "MYDISEASE_MAX_RETRIES", 1)
+    monkeypatch.setattr(
+        "backend.mydisease.get_diseases_for_hpo",
+        lambda hpo_id: {
+            "hpo_term": {"id": hpo_id, "name": "Seizure"},
+            "diseases": [
+                {"id": "OMIM:607208", "name": "Dravet syndrome"}
+            ],
+            "disease_count": 1,
+        },
+    )
+
+    result, session = run(
+        [metadata(), requests.Timeout("slow provider")],
+        variants=[variant(), variant("BRCA1", 1100)],
+        hpo=["HP:0001250"],
+    )
+
+    evidence = result["variants"][0]["mydisease"]
+    assert len(session.calls) == 2
+    assert session.calls[1]["timeout"] == (3.0, 8.0)
+    assert result["status"] == "partial"
+    assert result["local_degraded_count"] == 2
+    assert all(
+        item["mydisease"]["status"] == "partial"
+        for item in result["variants"]
+    )
+    assert evidence["provider"] == MYDISEASE_LOCAL_PROVIDER
+    assert evidence["provider_role"] == "fallback"
+    assert evidence["fallback_used"] is True
+    assert evidence["primary_provider"] == "MyDisease.info"
+    assert evidence["primary_failure"] == "timeout"
+    assert evidence["fallback_method"] == MYDISEASE_LOCAL_METHOD
+    assert evidence["fallback_dataset"] == MYDISEASE_LOCAL_DATASET
+    assert evidence["diseases"] == []
+    assert evidence["local_phenotype_context"] == [
+        {
+            "hpo_id": "HP:0001250",
+            "hpo_name": "Seizure",
+            "disease_count": 1,
+            "diseases": [
+                {
+                    "disease_id": "OMIM:607208",
+                    "disease_name": "Dravet syndrome",
+                }
+            ],
+        }
+    ]
+    compact = _compact_mydisease_context(evidence)
+    assert compact["primary_failure"] == "timeout"
+    assert compact["local_phenotype_context"] == evidence[
+        "local_phenotype_context"
+    ]
+
+
+def test_stage_69_missing_local_context_remains_explicitly_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(_hpo_id: str) -> object:
+        raise HPODataError("local dataset unavailable")
+
+    monkeypatch.setattr(
+        "backend.mydisease.get_diseases_for_hpo",
+        unavailable,
+    )
+
+    result, _ = run(
+        [metadata(), requests.Timeout("slow provider")],
+        hpo=["HP:0001250"],
+    )
+
+    evidence = result["variants"][0]["mydisease"]
+    assert result["status"] == "unavailable"
+    assert result["local_degraded_count"] == 0
+    assert evidence["fallback_used"] is False
+    assert evidence["primary_failure"] == "timeout"
+    assert evidence["local_phenotype_context"] == []
+    assert "local dataset unavailable" not in json.dumps(result)
 
 
 def test_analysis_circuit_skips_repeated_provider_failure() -> None:

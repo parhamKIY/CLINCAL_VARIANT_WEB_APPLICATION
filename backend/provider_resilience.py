@@ -128,6 +128,9 @@ class ProviderRetryPolicy:
     backoff_base_seconds: float = 1.0
     backoff_max_seconds: float = 5.0
     max_retry_after_seconds: float = 5.0
+    retryable_statuses: frozenset[ProviderStatus] = (
+        RETRYABLE_FAILURE_STATUSES
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -154,6 +157,13 @@ class ProviderRetryPolicy:
         if self.backoff_base_seconds > self.backoff_max_seconds:
             raise ProviderContractError(
                 "Provider backoff base cannot exceed its maximum."
+            )
+        if not isinstance(self.retryable_statuses, frozenset) or not (
+            self.retryable_statuses <= RETRYABLE_FAILURE_STATUSES
+        ):
+            raise ProviderContractError(
+                "retryable_statuses must be a frozenset of retryable "
+                "provider statuses."
             )
 
 
@@ -574,6 +584,8 @@ def _retry_delay_for_policy(
     attempt: int,
     policy: ProviderRetryPolicy,
 ) -> float | None:
+    if status not in policy.retryable_statuses:
+        return None
     if not is_retryable_failure(status, http_status=http_status):
         return None
     if status == "rate_limited" and response is not None:

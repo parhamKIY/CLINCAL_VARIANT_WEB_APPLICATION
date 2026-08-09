@@ -3029,6 +3029,12 @@ def _compact_mydisease_context(value: object) -> dict[str, Any]:
         (
             "status",
             "provider",
+            "provider_role",
+            "fallback_used",
+            "primary_provider",
+            "primary_failure",
+            "fallback_method",
+            "fallback_dataset",
             "provider_version",
             "retrieved_at",
             "query_gene",
@@ -3066,6 +3072,34 @@ def _compact_mydisease_context(value: object) -> dict[str, Any]:
         if isinstance(raw_inferred, list)
         else []
     )
+    raw_local = source.get("local_phenotype_context")
+    if "local_phenotype_context" in source:
+        context["local_phenotype_context"] = (
+            [
+                {
+                    **_selected_context(
+                        item,
+                        ("hpo_id", "hpo_name", "disease_count"),
+                    ),
+                    "diseases": [
+                        _selected_context(
+                            disease,
+                            ("disease_id", "disease_name"),
+                        )
+                        for disease in (
+                            item.get("diseases", [])[:5]
+                            if isinstance(item.get("diseases"), list)
+                            else []
+                        )
+                        if isinstance(disease, dict)
+                    ],
+                }
+                for item in raw_local[:10]
+                if isinstance(item, dict)
+            ]
+            if isinstance(raw_local, list)
+            else []
+        )
     return context
 
 
@@ -3679,6 +3713,23 @@ def _build_evidence_lineage(
                     default_provider="MyDisease.info",
                     default_upstream_sources=("CTD",),
                     derivation="inferred",
+                    evidence_present=True,
+                )
+            )
+        local_context = mydisease.get("local_phenotype_context")
+        if isinstance(local_context, list) and local_context:
+            records.append(
+                _lineage_record(
+                    (
+                        "phenotype_relationship.mydisease."
+                        "local_phenotype_context"
+                    ),
+                    mydisease,
+                    default_provider="Human Phenotype Ontology",
+                    default_upstream_sources=(
+                        "Human Phenotype Ontology",
+                    ),
+                    derivation="direct",
                     evidence_present=True,
                 )
             )

@@ -1925,6 +1925,18 @@ def _annotate_and_match(
             )
         else:
             mydisease_api_status = "warning"
+            if mydisease_result.get("local_degraded_count", 0):
+                _record_issue(
+                    result,
+                    stage="phenotype",
+                    code="mydisease_local_degraded",
+                    message=(
+                        "MyDisease.info was operationally unavailable; "
+                        "bounded local patient HPO context was retained "
+                        "without claiming a gene-disease association."
+                    ),
+                    recoverable=True,
+                )
         _set_api_status(
             result,
             "mydisease",

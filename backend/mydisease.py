@@ -17,9 +17,12 @@ from backend.provider_resilience import (
     ProviderCircuitState,
     ProviderInvalidResponseError,
     ProviderRetryPolicy,
+    ProviderStatus,
     ProviderTimeouts,
     call_provider_with_policy,
+    should_trigger_fallback,
 )
+from backend.phenotype import HPODataError, get_diseases_for_hpo
 from config import settings
 
 
@@ -48,6 +51,11 @@ MYDISEASE_MAX_PATHWAY_CONTEXTS = 10
 MYDISEASE_MAX_SYNONYMS = 20
 MYDISEASE_MAX_CROSS_REFERENCES = 20
 MYDISEASE_MAX_REFERENCE_ITEMS = 20
+MYDISEASE_LOCAL_HPO_TERM_CAP = 10
+MYDISEASE_LOCAL_DISEASE_CAP_PER_TERM = 5
+MYDISEASE_LOCAL_PROVIDER = "Human Phenotype Ontology"
+MYDISEASE_LOCAL_METHOD = "accepted_hpo_local_disease_context"
+MYDISEASE_LOCAL_DATASET = "phenotype.hpoa"
 MYDISEASE_GENE_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 )
@@ -90,11 +98,13 @@ class MyDiseaseError(RuntimeError):
         attempts: int = 0,
         kind: str = "invalid_response",
         status_code: int | None = None,
+        provider_status: ProviderStatus = "invalid_response",
     ) -> None:
         super().__init__(message)
         self.attempts = attempts
         self.kind = kind
         self.status_code = status_code
+        self.provider_status = provider_status
 
 
 class MyDiseaseEvidence(TypedDict):
@@ -102,6 +112,12 @@ class MyDiseaseEvidence(TypedDict):
 
     status: MyDiseaseStatus
     provider: str
+    provider_role: Literal["primary", "fallback"]
+    fallback_used: bool
+    primary_provider: str
+    primary_failure: ProviderStatus | None
+    fallback_method: str | None
+    fallback_dataset: str | None
     provider_version: str | None
     retrieved_at: str | None
     query_gene: str | None
@@ -113,6 +129,7 @@ class MyDiseaseEvidence(TypedDict):
     disease_count: int
     diseases: list[dict[str, Any]]
     inferred_pathway_context: list[dict[str, Any]]
+    local_phenotype_context: list[dict[str, Any]]
     upstream_sources: list[str]
     warnings: list[str]
     failure_reason: str | None
@@ -132,6 +149,7 @@ class MyDiseaseEnrichmentResult(TypedDict):
     unsupported_count: int
     unavailable_count: int
     invalid_response_count: int
+    local_degraded_count: int
 
 
 def _safe_text(
@@ -238,7 +256,7 @@ def _request_json(
         operation_name=operation,
         operation=request,
         timeouts=ProviderTimeouts(
-            connect=min(timeout_seconds, 5.0),
+            connect=min(timeout_seconds, 3.0),
             read=timeout_seconds,
         ),
         retry_policy=ProviderRetryPolicy(
@@ -246,6 +264,7 @@ def _request_json(
             backoff_base_seconds=0.25,
             backoff_max_seconds=2.0,
             max_retry_after_seconds=2.0,
+            retryable_statuses=frozenset({"unavailable"}),
         ),
         circuit_state=circuit_state,
     )
@@ -264,6 +283,7 @@ def _request_json(
         attempts=result.attempts,
         kind=kind,
         status_code=result.http_status,
+        provider_status=result.status,
     )
 
 
@@ -947,6 +967,12 @@ def _evidence_from_lookup(
     return {
         "status": lookup["status"],  # type: ignore[typeddict-item]
         "provider": MYDISEASE_PROVIDER_NAME,
+        "provider_role": "primary",
+        "fallback_used": False,
+        "primary_provider": MYDISEASE_PROVIDER_NAME,
+        "primary_failure": None,
+        "fallback_method": None,
+        "fallback_dataset": None,
         "provider_version": provider_version,
         "retrieved_at": datetime.now(timezone.utc).isoformat(),
         "query_gene": gene,
@@ -973,6 +999,7 @@ def _evidence_from_lookup(
         "disease_count": len(diseases),
         "diseases": diseases,
         "inferred_pathway_context": pathway_items,
+        "local_phenotype_context": [],
         "upstream_sources": sorted(upstream_sources),
         "warnings": warnings,
         "failure_reason": None,
@@ -989,10 +1016,17 @@ def _missing_evidence(
     failure_reason: str | None,
     http_status: int | None = None,
     provider_version: str | None = None,
+    primary_failure: ProviderStatus | None = None,
 ) -> MyDiseaseEvidence:
     return {
         "status": status,
         "provider": MYDISEASE_PROVIDER_NAME,
+        "provider_role": "primary",
+        "fallback_used": False,
+        "primary_provider": MYDISEASE_PROVIDER_NAME,
+        "primary_failure": primary_failure,
+        "fallback_method": None,
+        "fallback_dataset": None,
         "provider_version": provider_version,
         "retrieved_at": datetime.now(timezone.utc).isoformat(),
         "query_gene": gene,
@@ -1004,9 +1038,78 @@ def _missing_evidence(
         "disease_count": 0,
         "diseases": [],
         "inferred_pathway_context": [],
+        "local_phenotype_context": [],
         "upstream_sources": [],
         "warnings": [warning],
         "failure_reason": failure_reason,
+        "cache_state": "not_applicable",
+    }
+
+
+def _local_phenotype_context(
+    patient_hpo_terms: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Load bounded patient-level context from installed HPO data."""
+
+    contexts: list[dict[str, Any]] = []
+    for hpo_id in patient_hpo_terms[:MYDISEASE_LOCAL_HPO_TERM_CAP]:
+        result = get_diseases_for_hpo(hpo_id)
+        contexts.append(
+            {
+                "hpo_id": result["hpo_term"]["id"],
+                "hpo_name": result["hpo_term"]["name"],
+                "disease_count": result["disease_count"],
+                "diseases": [
+                    {
+                        "disease_id": disease["id"],
+                        "disease_name": disease["name"],
+                    }
+                    for disease in result["diseases"][
+                        :MYDISEASE_LOCAL_DISEASE_CAP_PER_TERM
+                    ]
+                ],
+            }
+        )
+    return contexts
+
+
+def _local_degraded_evidence(
+    *,
+    gene: str,
+    gene_id: str,
+    error: MyDiseaseError,
+    contexts: list[dict[str, Any]],
+) -> MyDiseaseEvidence:
+    """Retain local phenotype context without implying gene-disease evidence."""
+
+    return {
+        "status": "partial",
+        "provider": MYDISEASE_LOCAL_PROVIDER,
+        "provider_role": "fallback",
+        "fallback_used": True,
+        "primary_provider": MYDISEASE_PROVIDER_NAME,
+        "primary_failure": error.provider_status,
+        "fallback_method": MYDISEASE_LOCAL_METHOD,
+        "fallback_dataset": MYDISEASE_LOCAL_DATASET,
+        "provider_version": None,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "query_gene": gene,
+        "query_gene_id": gene_id,
+        "query": None,
+        "http_status": error.status_code,
+        "provider_total": None,
+        "provider_returned_count": 0,
+        "disease_count": 0,
+        "diseases": [],
+        "inferred_pathway_context": [],
+        "local_phenotype_context": contexts,
+        "upstream_sources": [MYDISEASE_LOCAL_PROVIDER],
+        "warnings": [
+            "MyDisease was operationally unavailable; only bounded local "
+            "patient HPO context was retained. It is not a gene-disease "
+            "association."
+        ],
+        "failure_reason": error.kind,
         "cache_state": "not_applicable",
     }
 
@@ -1074,6 +1177,8 @@ def enrich_with_mydisease(
     provider_version: str | None = None
     metadata_warning: str | None = None
     evidence_by_gene: dict[str, MyDiseaseEvidence] = {}
+    local_context: list[dict[str, Any]] | None = None
+    local_context_unavailable = False
     try:
         if target_genes:
             (
@@ -1112,6 +1217,28 @@ def enrich_with_mydisease(
                     attempts += request_attempts
                 except MyDiseaseError as error:
                     attempts += error.attempts
+                    if (
+                        should_trigger_fallback(error.provider_status)
+                        and patient_hpo
+                        and local_context is None
+                        and not local_context_unavailable
+                    ):
+                        try:
+                            local_context = _local_phenotype_context(
+                                patient_hpo
+                            )
+                        except HPODataError:
+                            local_context_unavailable = True
+                    if local_context:
+                        evidence_by_gene[
+                            gene.casefold()
+                        ] = _local_degraded_evidence(
+                            gene=gene,
+                            gene_id=gene_id,
+                            error=error,
+                            contexts=deepcopy(local_context),
+                        )
+                        continue
                     evidence_by_gene[
                         gene.casefold()
                     ] = _missing_evidence(
@@ -1125,6 +1252,7 @@ def enrich_with_mydisease(
                         failure_reason=error.kind,
                         http_status=error.status_code,
                         provider_version=provider_version,
+                        primary_failure=error.provider_status,
                     )
                     continue
                 _cache_put(key, lookup)
@@ -1172,6 +1300,10 @@ def enrich_with_mydisease(
     unsupported_count = statuses.count("unsupported")
     unavailable_count = statuses.count("unavailable")
     invalid_response_count = statuses.count("invalid_response")
+    local_degraded_count = sum(
+        bool(item["mydisease"].get("fallback_used"))
+        for item in enriched_variants
+    )
     if statuses and all(status == "available" for status in statuses):
         overall: MyDiseaseStatus = "available"
     elif statuses and all(
@@ -1225,6 +1357,7 @@ def enrich_with_mydisease(
         message = (
             "MyDisease.info returned evidence for "
             f"{variants_with_evidence} of {variant_count} variants; "
+            f"{local_degraded_count} used bounded local HPO context, "
             f"{no_association_count} had no validated association, "
             f"{unsupported_count} were unsupported, "
             f"{unavailable_count} were unavailable, and "
@@ -1241,10 +1374,14 @@ def enrich_with_mydisease(
         "unsupported_count": unsupported_count,
         "unavailable_count": unavailable_count,
         "invalid_response_count": invalid_response_count,
+        "local_degraded_count": local_degraded_count,
     }
 
 
 __all__ = [
+    "MYDISEASE_LOCAL_DATASET",
+    "MYDISEASE_LOCAL_METHOD",
+    "MYDISEASE_LOCAL_PROVIDER",
     "MYDISEASE_PROVIDER_NAME",
     "MYDISEASE_QUERY_FIELDS",
     "MyDiseaseEnrichmentResult",

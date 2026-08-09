@@ -600,12 +600,12 @@ class TestConfiguration:
             ),
             (
                 "MYDISEASE_TIMEOUT",
-                121,
+                16,
                 "MYDISEASE_TIMEOUT cannot exceed",
             ),
             (
                 "MYDISEASE_MAX_RETRIES",
-                11,
+                2,
                 "MYDISEASE_MAX_RETRIES cannot exceed",
             ),
             (
@@ -17008,14 +17008,21 @@ class TestPipelineAnnotationAndPhenotype:
 
         variant = result["phenotype_results"][0]
         assert variant["phen2gene"]["score"] == 0.95  # type: ignore[index]
-        assert variant["mydisease"]["status"] == "unavailable"  # type: ignore[index]
+        assert variant["mydisease"]["status"] == "partial"  # type: ignore[index]
+        assert variant["mydisease"]["fallback_used"] is True  # type: ignore[index]
+        assert variant["mydisease"]["primary_failure"] == (  # type: ignore[index]
+            "unavailable"
+        )
+        assert variant["mydisease"][  # type: ignore[index]
+            "local_phenotype_context"
+        ]
         assert next(
             record["status"]
             for record in result["api_statuses"]
             if record["source"] == "mydisease"
-        ) == "error"
+        ) == "warning"
         assert any(
-            issue["code"] == "mydisease_unavailable"
+            issue["code"] == "mydisease_local_degraded"
             for issue in result["errors"]
         )
         assert "private mydisease failure" not in json.dumps(result)

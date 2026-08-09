@@ -350,6 +350,27 @@ def test_server_error_retries_then_succeeds() -> None:
     assert sleeps == [1.0]
 
 
+def test_retry_policy_can_restrict_retries_to_connection_failures() -> None:
+    def timeout_operation(
+        _timeout: tuple[float, float],
+        _attempt: int,
+    ) -> object:
+        raise requests.Timeout("slow")
+
+    result = call_provider_with_policy(
+        provider="mydisease",
+        operation_name="query_gene",
+        operation=timeout_operation,
+        timeouts=ProviderTimeouts(connect=1, read=2),
+        retry_policy=ProviderRetryPolicy(
+            retryable_statuses=frozenset({"unavailable"})
+        ),
+        sleep=lambda _delay: None,
+    )
+    assert result.status == "timeout"
+    assert result.attempts == 1
+
+
 def test_capability_specific_404_remains_terminal_no_match() -> None:
     circuits = ProviderCircuitState()
     result = call_provider_with_policy(

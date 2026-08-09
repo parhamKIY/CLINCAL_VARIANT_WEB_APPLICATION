@@ -309,12 +309,12 @@ class Settings:
 
     MYDISEASE_TIMEOUT: int = _get_positive_int(
         "MYDISEASE_TIMEOUT",
-        REQUEST_TIMEOUT,
+        8,
     )
 
     MYDISEASE_MAX_RETRIES: int = _get_non_negative_int(
         "MYDISEASE_MAX_RETRIES",
-        2,
+        1,
     )
 
     MYDISEASE_CACHE_SIZE: int = _get_positive_int(
@@ -714,14 +714,14 @@ class Settings:
                 "ANNOTATION_CACHE_TTL_SECONDS cannot exceed 86400."
             )
 
-        if cls.MYDISEASE_TIMEOUT > 120:
+        if cls.MYDISEASE_TIMEOUT > 15:
             raise RuntimeError(
-                "MYDISEASE_TIMEOUT cannot exceed 120."
+                "MYDISEASE_TIMEOUT cannot exceed 15."
             )
 
-        if cls.MYDISEASE_MAX_RETRIES > 10:
+        if cls.MYDISEASE_MAX_RETRIES > 1:
             raise RuntimeError(
-                "MYDISEASE_MAX_RETRIES cannot exceed 10."
+                "MYDISEASE_MAX_RETRIES cannot exceed 1."
             )
 
         if cls.MYDISEASE_CACHE_SIZE > 1000:
