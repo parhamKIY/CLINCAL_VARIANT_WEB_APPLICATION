@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 76 reachability regression utility complete
+**Implementation status:** Stage 77 resilience documentation/configuration complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 77 documentation and configuration
+**Next checkpoint:** Stage 78 resilience acceptance gate
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -28,8 +28,9 @@ The professor review on 2026-08-08 changed the accepted target architecture. Sta
 phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
-with central operational-status, retry, timeout, circuit, and fallback-provenance
+bounded live validation. Stages 63-77 implement the separate provider-resilience
+roadmap through central operational-status, retry, timeout, circuit, fallback-provenance,
+free/public degraded paths, failure injection, reachability checks, and operations
 contracts. Stages 66-72 apply those contracts to population, ClinVar, literature,
 MyDisease, VEP-dependent annotation evidence, MyVariant degraded operation, and
 CSpec last-known-good metadata.
@@ -295,12 +296,13 @@ flowchart LR
     AK --> AL["Stage 74: UI/report transparency"]
     AL --> AM["Stage 75: failure injection"]
     AM --> AN["Stage 76: reachability regression"]
-    AN --> AO["Stage 77: documentation/configuration - pending"]
+    AN --> AO["Stage 77: documentation/configuration"]
+    AO --> AP["Stage 78: resilience acceptance gate - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN done
-    class AO review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO done
+    class AP review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -386,18 +388,26 @@ their original order.
 | 70 | Kept Ensembl VEP primary and added one-call VariantValidator validation/HGVS fallback after operational failure, preserving exact normalized identity and provenance while leaving unavailable VEP consequence/plugin fields explicitly missing. | Complete |
 | 71 | Kept MyVariant.info primary and added a one-call Ensembl Variation overlap fallback after operational failure, accepting only exact assembly/coordinate/allele records and retaining provider-specific context without fabricating MyVariant aggregation fields. | Complete |
 | 72 | Added an atomic, bounded, schema-validated local cache for released CSpec metadata and operational-only live-to-cache fallback with exact gene/disease keys, explicit age provenance, and unchanged context-only semantics. | Complete |
+| 73 | Added one unified capability-result contract so primary and fallback results retain exact source, method, failure, data, and provenance semantics downstream. | Complete |
+| 74 | Added concise Evidence Object, review, Draft Report, and Final Report notices identifying every degraded capability and actual fallback source. | Complete |
+| 75 | Added deterministic failure injection for all required provider/fallback chains and verified final-report degraded-source provenance. | Complete |
+| 76 | Added a bounded manual DNS/HTTP reachability checker with normalized failure categories and optional JSON/CSV output outside deterministic CI. | Complete |
+| 77 | Consolidated the fallback matrix, architecture, actual configuration controls, pre-demo operations, and troubleshooting in the resilience runbook and synchronized public documentation. | Complete |
 
 ## 5. Current implemented architecture
 
 ```mermaid
 flowchart TD
     U["Filtered VCF/VCF.GZ/XLSX worksheet 1 or manual table"] --> V["Validation and allele standardization<br/>1-10 variants"]
-    V --> A["Independent annotation providers"]
-    A --> P["Local HPO + Phen2Gene + MyDisease context"]
+    V --> A["Primary annotation providers"]
+    A --> AO{"Operational failure?"}
+    AO -- No --> P["Local HPO + Phen2Gene/MyDisease context"]
+    AO -- Yes --> AF["Bounded annotation fallback with exact provenance"]
+    AF --> P
     P --> E["Evidence Object V2 + lineage"]
     E --> C1["Deterministic pre-review conflict audit"]
     C1 --> CE{"Conditional enrichment needed?"}
-    CE -- Yes --> X["gnomAD with Ensembl fallback and bounded literature services"]
+    CE -- Yes --> X["gnomAD to Ensembl and LitVar2 to Europe PMC to PubMed"]
     CE -- No --> VI
     X --> VI["One Variant Interpretation Model per variant"]
     VI --> D["Evidence and interpretation review state"]
@@ -902,6 +912,21 @@ may select individual providers and optionally save the results as JSON and CSV.
 The checker is intentionally network-dependent and remains outside deterministic CI;
 its classification and export behavior are covered by offline unit tests.
 
+### Stage 77 documentation and configuration
+
+`docs/PROVIDER_RESILIENCE_RUNBOOK.md` is the consolidated operational source for the
+implemented fallback matrix, operational-failure versus valid-missingness contract,
+analysis-scoped circuits, architecture, actual `.env` controls, pre-demo checks,
+result interpretation, troubleshooting, and reviewer provenance verification.
+
+The README now links the resilience contract and distinguishes the lightweight
+DNS/HTTP reachability utility from the quota-consuming production-client live gate.
+`.env.example` documents the fixed operational-only fallback policy beside the
+existing provider URLs, provider-specific timeouts, retry bounds, enrichment flags,
+local HPO sources, and CSpec cache path. No unused per-fallback feature flags were
+introduced: safe fallback behavior remains the default, and source identity is never
+configurably relabelled.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -1051,8 +1076,10 @@ Streamlit automatically.
 
 The authoritative sequence and review form are in
 [`STAGE62_DEMO_AND_REVIEW.md`](STAGE62_DEMO_AND_REVIEW.md). Before the demonstration,
-run Stage 60 offline acceptance, optionally refresh the Stage 61 point-in-time live
-result, confirm `GRCh38` plus both task-model settings, and start Streamlit.
+follow the pre-demo provider checks in
+[`PROVIDER_RESILIENCE_RUNBOOK.md`](PROVIDER_RESILIENCE_RUNBOOK.md), run Stage 60
+offline acceptance, optionally refresh the Stage 61 point-in-time live result,
+confirm `GRCh38` plus both task-model settings, and start Streamlit.
 
 Use `data/samples/stage62_demo_variants.xlsx`. First show its second worksheet and
 the `THIS_SHEET_MUST_NOT_BE_PROCESSED` marker, then upload the workbook. Demonstrate
@@ -1100,6 +1127,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Fallback UI and report transparency | `backend/fallback_transparency.py`, `backend/variant_report.py`, `frontend/results.py`, `frontend/evidence_review.py`, `tests/test_fallback_transparency.py` |
 | Deterministic provider failure injection | `tests/test_failure_injection.py` |
 | Manual provider reachability regression | `tools/provider_reachability.py`, `tests/test_provider_reachability.py` |
+| Provider resilience configuration and operations | `.env.example`, `docs/PROVIDER_RESILIENCE_RUNBOOK.md`, `README.md` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1119,9 +1147,9 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-76 are implemented and documented. Consolidated resilience
-   documentation and configuration remain for Stage 77; professor feedback and
-   sign-off remain external.
+1. Stages 46-77 are implemented and documented. The multi-variant resilience
+   acceptance gate remains for Stage 78; professor feedback and sign-off remain
+   external.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1190,6 +1218,8 @@ report provenance notices that disclose every affected fallback capability. Stag
 added deterministic outage injection for all required fallback chains and verified
 degraded-source provenance through final report composition. Stage 76 added a bounded
 manual DNS/HTTP reachability checker with safe failure categories and optional JSON
-and CSV exports. Stage 77 is the next
+and CSV exports. Stage 77 consolidated the fallback matrix, architecture,
+configuration, operations, and troubleshooting into a dedicated runbook. Stage 78
+is the next
 implementation checkpoint;
 professor review and sign-off remain external.

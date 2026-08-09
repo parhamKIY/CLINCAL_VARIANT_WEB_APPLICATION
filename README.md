@@ -5,7 +5,7 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_62_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_77_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
 [![Tests](https://img.shields.io/badge/tests-933_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
@@ -64,9 +64,10 @@ its original input order.
 - Stage 61 live provider and canonical-link validation is implemented and verified.
 - Stage 62 documentation and demonstration preparation is complete; external
   professor feedback remains pending.
-- Stages 63-76 provider resilience, free fallbacks, unified capability results,
+- Stages 63-77 provider resilience, free fallbacks, unified capability results,
   reviewer-facing fallback transparency, and deterministic failure injection are
-  implemented and offline-verified; the manual reachability utility is available.
+  implemented, documented, and offline-verified; the manual reachability utility is
+  available.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
@@ -445,6 +446,20 @@ None of these states are converted into negative clinical evidence.
 The detailed endpoints, request purposes, and provider responsibilities are in
 the [API catalog](docs/PROJECT_DECLARATION.md#6-external-api-and-data-source-catalog).
 
+### Provider resilience
+
+Fallback activates only after a normalized operational failure, never after valid
+`no_match`/`not_found`. Every degraded result retains the actual provider, method,
+primary failure, and lineage in the Evidence Object and reports. Primary/fallback
+pairs include VEP/VariantValidator, MyVariant/Ensembl Variation, direct
+ClinVar/MyVariant-derived ClinVar, CSpec/local last-known-good metadata,
+Phen2Gene/local direct HPO-gene overlap, gnomAD/Ensembl Variation, and
+LitVar2/Europe PMC/PubMed.
+
+Configuration, the complete capability matrix, architecture, pre-demo checks, and
+troubleshooting are in the
+[Provider Resilience Runbook](docs/PROVIDER_RESILIENCE_RUNBOOK.md).
+
 ## Human review and outputs
 
 ### Pre-interpreted review state
@@ -646,7 +661,7 @@ Run Testing V3 alone when the end-to-end release scenario does not need repetiti
 The historical Stage 44 runner remains available for legacy regression checks but is
 no longer the active release gate.
 
-Current measured coverage is **85.59%**.
+Current measured Stage 59 coverage is **85.81%**.
 
 The Stage 60 gate runs automatically on every push and pull request through the
 read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
@@ -662,6 +677,16 @@ population, literature, and configured LLM endpoint through production clients:
 Use `--skip-llm` when only biomedical providers should be checked. The gate
 writes a non-clinical, ignored summary to
 `output/live-provider-validation.json`. It may consume provider quotas.
+
+For a quicker manual DNS/HTTP check that does not exercise production evidence
+contracts or LLMs, run:
+
+```powershell
+.\.venv\Scripts\python.exe tools\provider_reachability.py --json output\provider-reachability.json --csv output\provider-reachability.csv
+```
+
+This checker is network-dependent and intentionally excluded from CI. Its result is a
+point-in-time operational observation, not proof of provider schema correctness.
 
 The complete Stage 61 live gate passed on **2026-08-09**. VEP, GeneBe, MyVariant,
 ClinVar, Phen2Gene, MyDisease, gnomAD, Ensembl Variation, both configured task-model
@@ -768,6 +793,7 @@ clinical_variant_app/
 │   └── samples/
 │       └── stage62_demo_variants.xlsx
 ├── docs/
+│   ├── PROVIDER_RESILIENCE_RUNBOOK.md
 │   ├── PROJECT_DECLARATION.md
 │   ├── STAGE45_ARCHITECTURE_CONTRACT.md
 │   └── STAGE62_DEMO_AND_REVIEW.md
@@ -781,6 +807,8 @@ clinical_variant_app/
 │   ├── run_live_provider_validation.py
 │   ├── run_stage44_acceptance.py
 │   └── manual_*.py
+├── tools/
+│   └── provider_reachability.py
 ├── .env.example
 ├── requirements-dev.txt
 ├── requirements.txt
@@ -789,8 +817,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-62 are implemented and documented. Professor feedback/sign-off is an
-  external pending checkpoint.
+- Stages 46-77 are implemented and documented. Stage 78 resilience acceptance and
+  professor feedback/sign-off remain pending checkpoints.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -817,3 +845,8 @@ for:
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
 - current limitations and the professor-review checkpoint.
+
+Use the
+[Provider Resilience Runbook](docs/PROVIDER_RESILIENCE_RUNBOOK.md)
+for the fallback matrix, configuration contract, operational checks, and degraded-
+mode troubleshooting.
