@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-58 complete; Stage 59 is next
+**Implementation progress:** Stages 46-59 complete; Stage 60 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 58. Features assigned to
-Stages 59–62 remain targets and are not implemented merely because Stage 45 is
+The repository implements the redesign through Stage 59. Features assigned to
+Stages 60–62 remain targets and are not implemented merely because Stage 45 is
 complete.
 
 ## 2. Accepted product contract
@@ -309,9 +309,24 @@ separate reviewed copy with append-only history.
 - Provider-derived labelled identity text cannot enter Draft or Final Clinical
   Reports. Unlabelled or linguistically ambiguous identifiers remain a documented
   defense-in-depth limitation requiring deliberate human de-identification.
-- Stage 59 is the next bounded increment and will implement Testing V3.
+- Stage 59 implements the deterministic Testing V3 suite and runner.
 
-## 18. Stage 45 acceptance record
+## 18. Stage 59 implementation record
+
+- The complete offline suite is registered under `stage59_testing_v3` while the
+  historical Testing V2 marker remains available for compatibility.
+- Eight explicit groups cover Input, Phenotype LLM/HPO, Interpretation, Draft Report,
+  Selection, Canonical References, Final Report, and Recovery/Retry requirements.
+- The Testing V3 runner fails if any required group collects no tests, then executes
+  the full V3 marker with an 80% minimum coverage threshold.
+- A shared autouse fixture blocks unmocked HTTP across all offline test modules;
+  live-provider diagnostics remain explicitly separate.
+- The verified baseline is 786 passed, 4 skipped, with 85.57% coverage. The retained
+  Stage 44 acceptance runner also remains green.
+- Stage 60 is the next bounded increment and will create the V3 end-to-end release
+  gate that replaces Stage 44 assumptions in GitHub Actions.
+
+## 19. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

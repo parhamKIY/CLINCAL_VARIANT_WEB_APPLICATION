@@ -5,7 +5,7 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_58_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_59_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
 [![Tests](https://img.shields.io/badge/tests-786_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
@@ -57,7 +57,8 @@ its original input order.
 - Stage 57 persistence schema V3 and recovery migration is implemented and
   offline-verified.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
-- Stage 59 Testing V3 is the next bounded milestone.
+- Stage 59 Testing V3 is implemented and offline-verified.
+- Stage 60 End-to-End Acceptance Gate V3 is the next bounded milestone.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
@@ -78,10 +79,10 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture (partially implemented)
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-58 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-59 have implemented the expanded input boundary, isolated human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
-interpretation-before-review pipeline through Final Clinical Report delivery; later
-persistence, and privacy reverification; Testing V3 and release items remain planned:
+interpretation-before-review pipeline through Final Clinical Report delivery,
+persistence, privacy reverification, and Testing V3; release gates remain planned:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -566,13 +567,23 @@ Current verified result:
 786 passed, 4 skipped
 ```
 
-Run the final Stage 44 acceptance gate:
+Run the complete Testing V3 gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage59_testing_v3.py
+```
+
+The gate verifies that all eight required V3 test groups collect non-empty suites,
+then runs the complete `stage59_testing_v3` marker with external HTTP blocked and the
+minimum 80% coverage requirement.
+
+The retained Stage 44 acceptance gate remains available until Stage 60 replaces it:
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_stage44_acceptance.py
 ```
 
-The gate performs:
+The retained gate performs:
 
 - Python compilation;
 - installed dependency consistency checks;
@@ -583,8 +594,9 @@ The gate performs:
 
 Current measured coverage is **85.57%**.
 
-The same Stage 44 gate runs automatically on every push and pull request through
-the read-only GitHub Actions workflow in `.github/workflows/verify.yml`.
+The Stage 44 gate still runs automatically on every push and pull request through
+the read-only GitHub Actions workflow in `.github/workflows/verify.yml`; Stage 60
+will replace it with the V3 end-to-end release gate.
 
 Automated tests mock or block external HTTP traffic. Run the bounded live
 contract gate separately; it checks every active annotation, phenotype,
@@ -705,8 +717,10 @@ clinical_variant_app/
 │   └── STAGE45_ARCHITECTURE_CONTRACT.md
 ├── storage/
 ├── tests/
+│   ├── conftest.py
 │   ├── test_pipeline.py
 │   ├── test_mydisease.py
+│   ├── run_stage59_testing_v3.py
 │   ├── run_live_provider_validation.py
 │   ├── run_stage44_acceptance.py
 │   └── manual_*.py
@@ -718,7 +732,7 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-58 are implemented; Stage 59 owns the comprehensive Testing V3 suite.
+- Stages 46-59 are implemented; Stage 60 owns the End-to-End Acceptance Gate V3.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -744,4 +758,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 59 handoff.
+- current limitations and the Stage 60 handoff.

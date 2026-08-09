@@ -309,39 +309,15 @@ from frontend.ui import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.stage43_testing_v2
+pytestmark = [
+    pytest.mark.stage43_testing_v2,
+    pytest.mark.stage59_testing_v3,
+]
 
 MINIMAL_HEADER = (
     "##fileformat=VCFv4.2\n"
     '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
 )
-
-
-@pytest.fixture(autouse=True)
-def block_live_http_requests(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Fail every automated test that attempts unmocked HTTP."""
-
-    if os.getenv("RUN_LIVE_PROVIDER_TESTS") == "1":
-        return
-
-    def blocked_request(
-        _session: requests.Session,
-        method: str,
-        url: str,
-        **_kwargs: object,
-    ) -> object:
-        raise AssertionError(
-            "Automated tests must not call live HTTP services: "
-            f"{method.upper()} {url}"
-        )
-
-    monkeypatch.setattr(
-        requests.sessions.Session,
-        "request",
-        blocked_request,
-    )
 
 
 class TestConfiguration:
@@ -1681,6 +1657,7 @@ def _xlsx_bytes(
     return buffer.getvalue()
 
 
+@pytest.mark.testing_v3_input
 class TestVCFProcessing:
     def test_standard_primary_chromosome_contract(self) -> None:
         assert STANDARD_PRIMARY_CHROMOSOMES == (
@@ -2050,6 +2027,7 @@ class TestVCFProcessing:
             )
 
 
+@pytest.mark.testing_v3_input
 class TestExcelProcessing:
     """Verify first-worksheet-only Excel normalization."""
 
@@ -9887,6 +9865,7 @@ class TestLLMContract:
             )
 
 
+@pytest.mark.testing_v3_phenotype
 class TestStage47PhenotypeExtractionLLM:
     """Verify the bounded Persian-text to HPO-candidate contract."""
 
@@ -10164,6 +10143,7 @@ class TestStage47PhenotypeExtractionLLM:
         ) == "کودک دچار ضعف عضلانی است."
 
 
+@pytest.mark.testing_v3_phenotype
 class TestStage48HPOCandidateAcceptance:
     """Verify local ontology validation and explicit human acceptance."""
 
@@ -10328,6 +10308,7 @@ class TestStage48HPOCandidateAcceptance:
             validate_hpo_candidates(value)
 
 
+@pytest.mark.testing_v3_interpretation
 class TestStage50SingleModelInterpretation:
     """Verify route-free interpretation with preserved conflict context."""
 
@@ -10639,6 +10620,7 @@ class TestStage50SingleModelInterpretation:
             validate_variant_interpretation_result(invalid)
 
 
+@pytest.mark.testing_v3_draft_report
 class TestStage52DraftVariantReportV2:
     """Verify coherent evidence-and-interpretation report composition."""
 
@@ -10799,6 +10781,7 @@ class TestStage52DraftVariantReportV2:
         ] == [166848215, 166848216]
 
 
+@pytest.mark.testing_v3_draft_report
 class TestStage53HumanReportEditing:
     """Verify bounded report edits, audit replay, and invalidation."""
 
@@ -10975,6 +10958,7 @@ class TestStage53HumanReportEditing:
         assert updated["draft_variant_reports"][0] == edited
 
 
+@pytest.mark.testing_v3_selection
 class TestStage54FinalReportSelection:
     """Verify audited reporting choices without discarding variants."""
 
@@ -11208,6 +11192,7 @@ class TestStage54FinalReportSelection:
         )
 
 
+@pytest.mark.testing_v3_references
 class TestStage55CanonicalReferences:
     """Verify deterministic exact-record links and bounded LLM citations."""
 
@@ -12620,6 +12605,8 @@ class TestStage37PipelineV2Integration:
             validate_pipeline_result(paused)
 
 
+@pytest.mark.testing_v3_interpretation
+@pytest.mark.testing_v3_recovery
 class TestStage41FailureResilience:
     """Verify failed LLM work can be retried without evidence loss."""
 
@@ -13662,6 +13649,7 @@ class TestStage44EndToEndAcceptance:
         validate_pipeline_result(completed)
 
 
+@pytest.mark.testing_v3_final_report
 class TestStage56FinalClinicalReport:
     """Verify deterministic composition from the approved subset."""
 
@@ -13831,6 +13819,8 @@ class TestStage56FinalClinicalReport:
         ] == [1, 4, 8]
 
 
+@pytest.mark.testing_v3_selection
+@pytest.mark.testing_v3_recovery
 class TestStage57PersistenceSchemaV3:
     """Verify normalized report-lifecycle persistence and restart recovery."""
 
@@ -15218,6 +15208,7 @@ class TestClinicalDataPrivacy:
             validate_pipeline_result(result)
 
 
+@pytest.mark.testing_v3_input
 class TestPipelineContract:
     """Verify the Stage 10 public input and result boundaries."""
 
@@ -15487,6 +15478,7 @@ class TestPipelineContract:
         json.dumps(validated, allow_nan=False)
 
 
+@pytest.mark.testing_v3_input
 class TestPipelineVariantProcessing:
     """Verify direct processing of the professor-filtered variant table."""
 
@@ -17453,6 +17445,8 @@ class TestStage13MockedServiceFailures:
 
 
 @pytest.mark.stage15_security
+@pytest.mark.testing_v3_recovery
+@pytest.mark.testing_v3_input
 class TestFrontendExecution:
     """Verify safe bridging from uploads to the public pipeline."""
 

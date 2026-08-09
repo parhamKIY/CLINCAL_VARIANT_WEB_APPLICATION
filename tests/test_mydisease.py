@@ -22,7 +22,10 @@ from frontend.results import (
 )
 
 
-pytestmark = pytest.mark.stage43_testing_v2
+pytestmark = [
+    pytest.mark.stage43_testing_v2,
+    pytest.mark.stage59_testing_v3,
+]
 
 
 class FakeResponse:
