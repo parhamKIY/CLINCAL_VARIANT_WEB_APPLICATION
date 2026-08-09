@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-61 complete; Stage 62 is next
+**Implementation progress:** Stages 46-62 complete; professor feedback pending
 
 **Contract date:** 2026-08-08
 
@@ -15,8 +15,8 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository implements the redesign through Stage 61. Stage 62 remains a target
-and is not implemented merely because Stage 45 is complete.
+The repository implements and documents the redesign through Stage 62. External
+professor feedback remains pending and is not claimed by repository changes alone.
 
 ## 2. Accepted product contract
 
@@ -165,8 +165,8 @@ The redesign must preserve:
 | 59–61 | Testing V3, acceptance gate, and separate live validation |
 | 62 | Final documentation, demo, and professor re-review |
 
-No Stage 46–62 behavior is claimed as implemented until its own acceptance criteria
-and relevant verification gates pass.
+Each Stage 46–62 behavior was claimed only after its acceptance criteria and relevant
+verification gates passed.
 
 ## 10. Stage 51 implementation record
 
@@ -320,7 +320,7 @@ separate reviewed copy with append-only history.
   the full V3 marker with an 80% minimum coverage threshold.
 - A shared autouse fixture blocks unmocked HTTP across all offline test modules;
   live-provider diagnostics remain explicitly separate.
-- The verified baseline is 788 passed, 4 skipped, with 85.59% coverage. The retained
+- The verified baseline is 789 passed, 4 skipped, with 85.59% coverage. The retained
   Stage 44 acceptance runner is historical compatibility coverage; Stage 60 is the
   active release gate.
 - Stage 60 wraps Testing V3 in the redesigned end-to-end acceptance gate used by
@@ -339,7 +339,7 @@ separate reviewed copy with append-only history.
   repository/Git-history secret audit, the Stage 60 scenario, and the complete
   coverage-enforced Testing V3 runner.
 - `.github/workflows/verify.yml` uses the Stage 60 runner for every push and pull
-  request. The verified baseline is 788 passed, 4 skipped, with 85.59% coverage.
+  request. The verified baseline is 789 passed, 4 skipped, with 85.59% coverage.
 - Stage 61 performs separate bounded live provider and canonical-link validation.
 
 ## 20. Stage 61 implementation record
@@ -356,10 +356,28 @@ separate reviewed copy with append-only history.
 - Representative ClinVar and MyVariant report links were reachable. Non-navigable
   Ensembl VEP and GeneBe batch POST endpoints now produce the explicit unavailable-
   link fallback instead of a clickable canonical URL.
-- The live JSON result remains ignored and point-in-time. Stage 62 is the next
-  bounded increment for documentation, demonstration, and professor re-review.
+- The live JSON result remains ignored and point-in-time. Stage 62 delivers the final
+  documentation and professor-review handoff.
 
-## 21. Stage 45 acceptance record
+## 21. Stage 62 implementation record
+
+- README, project declaration, architecture contract, active UI wording, schemas,
+  verification status, workflow, and remaining limitations consistently describe V3
+  as current. Stage 44 terms remain only in explicit history/compatibility context.
+- `data/samples/stage62_demo_variants.xlsx` contains five ordered public GRCh38
+  variants on worksheet 1 and conspicuous demo-only markers on worksheet 2. An
+  offline regression proves the sample remains parseable and later-sheet content is
+  excluded from normalized variants.
+- `docs/STAGE62_DEMO_AND_REVIEW.md` defines the complete multi-sheet Excel, Persian
+  phenotype/HPO, independent-model, Draft Report edit, inclusion/exclusion,
+  confirmation, export, and reference demonstration sequence.
+- The same guide records the professor-review focus and an explicit pending review
+  record. Repository preparation is complete without falsely claiming external
+  approval.
+- Roadmap implementation is complete. Any subsequent work requires professor
+  feedback or another explicitly approved scope.
+
+## 22. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

@@ -5,10 +5,10 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_61_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_62_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-788_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-789_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
 [![Coverage](https://img.shields.io/badge/coverage-85.59%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
@@ -62,7 +62,8 @@ its original input order.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
   active in GitHub Actions.
 - Stage 61 live provider and canonical-link validation is implemented and verified.
-- Stage 62 documentation, demonstration, and professor re-review is next.
+- Stage 62 documentation and demonstration preparation is complete; external
+  professor feedback remains pending.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.4`.
 - Variant Interpretation Result schema: `1.1`.
@@ -70,7 +71,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **788 passed, 4 skipped; 85.59% coverage**.
+- Current verified suite: **789 passed, 4 skipped; 85.59% coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -83,11 +84,12 @@ The authoritative redesign contract and implemented-versus-planned boundary are 
 ## Accepted target architecture
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.
-Stages 46-61 have implemented the expanded input boundary, isolated human-reviewed
+Stages 46-62 have implemented and documented the expanded input boundary, isolated
+human-reviewed
 phenotype extraction, task-specific UI model controls, and the route-free
 interpretation-before-review pipeline through Final Clinical Report delivery,
-persistence, privacy reverification, Testing V3, the V3 release gate, and bounded
-live validation; final documentation and professor re-review remain planned:
+persistence, privacy reverification, Testing V3, the V3 release gate, bounded live
+validation, and the final demo/review handoff:
 
 - VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
   pre-filtered variants;
@@ -302,6 +304,16 @@ The runner also builds the report's canonical-reference catalog and performs bou
 live GET probes against representative exact links. Stage 61 removed non-navigable
 Ensembl VEP and GeneBe POST endpoints from report links, so they now render the
 explicit unavailable-link fallback instead of a misleading hyperlink.
+
+### Stage 62 documentation and professor-review handoff
+
+The project declaration, README, architecture contract, schemas, verification
+baseline, and user workflow now describe V3 as the active architecture. The
+[Stage 62 Demo and Professor Review Guide](docs/STAGE62_DEMO_AND_REVIEW.md) provides
+the exact demonstration sequence, expected checkpoints, provider-failure fallback,
+and professor feedback checklist. Its multi-sheet public demo workbook is
+`data/samples/stage62_demo_variants.xlsx`; worksheet 2 contains a conspicuous marker
+that must never enter application artifacts.
 
 ## Current implemented workflow
 
@@ -553,8 +565,11 @@ and redacted structured logging is initialized.
 5. Start analysis and monitor provider and per-variant interpretation progress.
 6. Inspect every variant's evidence, interpretation, and provider status.
 7. Make any necessary evidence edits and add non-PHI reviewer notes.
-8. Confirm every variant.
-9. Finalize the reviewed analysis without another model call.
+8. Choose which variants enter the Final Clinical Report; excluded variants remain
+   persisted and recoverable.
+9. Complete the privacy attestation and confirm every variant.
+10. Finalize without another model call, then download the selected-only text, PDF,
+    or Word report and open validated canonical references.
 
 Analyses run in cancellable background jobs. Progress updates on each normal
 annotation provider, conditional-enrichment variant step, phenotype provider,
@@ -581,6 +596,14 @@ installs compatible ontology, gene-association, and disease-annotation files.
 Do not replace only one file manually; the coordinated release is part of the
 phenotype evidence contract.
 
+## Demonstration and professor review
+
+Use the reproducible multi-sheet workbook and complete checklist in the
+[Stage 62 Demo and Professor Review Guide](docs/STAGE62_DEMO_AND_REVIEW.md). The
+repository preparation is complete; the guide intentionally records professor
+review date, outcome, required changes, and sign-off as pending until that external
+checkpoint occurs.
+
 ## Verification
 
 Install the runtime and test dependencies:
@@ -598,7 +621,7 @@ Run the complete deterministic offline suite:
 Current verified result:
 
 ```text
-788 passed, 4 skipped
+789 passed, 4 skipped
 ```
 
 Run the active V3 release gate:
@@ -740,9 +763,11 @@ clinical_variant_app/
 ├── data/
 │   ├── hpo/
 │   └── samples/
+│       └── stage62_demo_variants.xlsx
 ├── docs/
 │   ├── PROJECT_DECLARATION.md
-│   └── STAGE45_ARCHITECTURE_CONTRACT.md
+│   ├── STAGE45_ARCHITECTURE_CONTRACT.md
+│   └── STAGE62_DEMO_AND_REVIEW.md
 ├── storage/
 ├── tests/
 │   ├── conftest.py
@@ -761,8 +786,8 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-61 are implemented; Stage 62 owns final documentation, demonstration,
-  and professor re-review.
+- Stages 46-62 are implemented and documented. Professor feedback/sign-off is an
+  external pending checkpoint.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
@@ -788,4 +813,4 @@ for:
 - schema and persistence contracts;
 - privacy, security, failure-handling, and audit boundaries;
 - the demonstration runbook;
-- current limitations and the Stage 62 handoff.
+- current limitations and the professor-review checkpoint.

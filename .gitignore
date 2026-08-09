@@ -8,7 +8,9 @@ coverage.json
 coverage.xml
 htmlcov/
 tmp/coverage-*.json
+/tmp/
 output/
+/outputs/
 streamlit-effective-config.txt
 storage/uploads/*
 storage/reports/*
@@ -18,3 +20,4 @@ data/cache/*
 /docs/*
 !/docs/PROJECT_DECLARATION.md
 !/docs/STAGE45_ARCHITECTURE_CONTRACT.md
+!/docs/STAGE62_DEMO_AND_REVIEW.md

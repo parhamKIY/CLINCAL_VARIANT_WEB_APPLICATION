@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from streamlit.testing.v1 import AppTest
 
 import config as config_module
@@ -2074,6 +2074,39 @@ class TestExcelProcessing:
         assert len(variants) == 1
         assert variants[0]["pos"] == 100
         assert secret not in json.dumps(variants)
+
+    def test_stage62_demo_workbook_is_safe_and_parseable(self) -> None:
+        path = (
+            PROJECT_ROOT
+            / "data"
+            / "samples"
+            / "stage62_demo_variants.xlsx"
+        )
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            assert workbook.sheetnames == [
+                "Variants",
+                "Ignored_Demo_Data",
+            ]
+            assert (
+                workbook["Ignored_Demo_Data"]["B2"].value
+                == "THIS_SHEET_MUST_NOT_BE_PROCESSED"
+            )
+        finally:
+            workbook.close()
+
+        variants = parse_excel_variants(path.read_bytes())
+
+        assert [variant["pos"] for variant in variants] == [
+            941284,
+            11796321,
+            169549811,
+            26092913,
+            44908684,
+        ]
+        assert "THIS_SHEET_MUST_NOT_BE_PROCESSED" not in json.dumps(
+            variants
+        )
 
     def test_excel_accepts_ten_rows_and_preserves_order(self) -> None:
         payload = _xlsx_bytes(

@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 61 live provider and link validation complete
+**Implementation status:** Stage 62 documentation and demo handoff complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next implementation milestone:** Stage 62 documentation and professor re-review
+**Next checkpoint:** External professor review and approved follow-up, if any
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,7 +24,8 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-61 now implement its input, phenotype,
+45 froze that architecture, and Stages 46-62 now implement and document its input,
+phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
 bounded live validation. The authoritative target is defined in
@@ -273,12 +274,13 @@ flowchart LR
     V --> W["Stage 59: Testing V3"]
     W --> X["Stage 60: End-to-End Acceptance Gate V3"]
     X --> Y["Stage 61: live provider and link validation"]
-    Y --> Z["Stage 62: documentation and professor re-review - pending"]
+    Y --> Z["Stage 62: documentation and demo handoff"]
+    Z --> AA["External professor feedback - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y done
-    class Z review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z done
+    class AA review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -353,7 +355,7 @@ their original order.
 | 59 | Registered the deterministic offline Testing V3 suite, eight required test-group markers with collection checks, suite-wide live-HTTP blocking, and an 80%-coverage runner. | Complete |
 | 60 | Added the deterministic ten-variant redesigned acceptance scenario, release runner, and GitHub Actions V3 gate covering all professor-review assertions plus Testing V3. | Complete |
 | 61 | Revalidated every configured biomedical provider and both task-specific LLM contracts, live-probed representative report links, and removed non-navigable provider POST endpoints from canonical hyperlinks. | Complete |
-| 62 | Finalize documentation, demonstration materials, and professor re-review. | Planned |
+| 62 | Reconciled V3 documentation, added a reproducible multi-sheet Excel demo, corrected stale UI wording, and prepared the exact demonstration and professor-feedback checklist. | Complete; external professor feedback pending |
 
 ## 5. Current implemented architecture
 
@@ -562,6 +564,24 @@ endpoints are source endpoints rather than browser-navigable records; Stage 61 n
 maps them to the explicit unavailable-link fallback. Representative ClinVar and
 MyVariant exact links returned reachable responses.
 
+### Stage 62 documentation and professor-review handoff
+
+The project declaration, README, architecture contract, verification baseline, and
+active UI language now consistently describe the implemented V3 workflow. Historical
+Stage 44 terminology remains only in explicitly labelled compatibility and stage-
+history sections.
+
+`data/samples/stage62_demo_variants.xlsx` is a reproducible two-worksheet GRCh38
+demo input. Worksheet 1 contains five ordered public variants; worksheet 2 contains
+conspicuous demo-only markers that must not appear downstream. The workbook is covered
+by the offline Input test group.
+
+`docs/STAGE62_DEMO_AND_REVIEW.md` records the exact UI sequence from independent model
+selection and Persian phenotype extraction through HPO correction, report editing,
+inclusion/exclusion, confirmation, selected-only export, and canonical-link review.
+It also provides the final professor questions and leaves review date, outcome,
+required changes, and sign-off explicitly pending until the external review occurs.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -649,7 +669,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **788 passed, 4 skipped**,
+consume external API quotas. The current recorded baseline is **789 passed, 4 skipped**,
 with **85.59% coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
@@ -707,37 +727,29 @@ python -m venv .venv
 On Windows, `run_app.bat` is also available. Running `python app.py` delegates to
 Streamlit automatically.
 
-## 13. Demonstration runbook
+## 13. Demonstration and professor-review runbook
 
-Before a demonstration, confirm that `.env` contains the intended assembly and LLM
-provider settings, that the coordinated HPO files exist, and that the automated
-suite and Stage 60 gate pass. Start the application with `run_app.bat` or the
-Streamlit command above.
+The authoritative sequence and review form are in
+[`STAGE62_DEMO_AND_REVIEW.md`](STAGE62_DEMO_AND_REVIEW.md). Before the demonstration,
+run Stage 60 offline acceptance, optionally refresh the Stage 61 point-in-time live
+result, confirm `GRCh38` plus both task-model settings, and start Streamlit.
 
-The primary demonstration uses `data/samples/mvp_demo.vcf`, a public one-row GRCh38
-example without sample or patient columns. Select several relevant HPO terms, choose
-the Phenotype Extraction Model and Variant Interpretation Model, run analysis, inspect
-provider states plus the generated interpretation, make a clearly identifiable review
-edit, confirm every variant, and finalize. Show that interpretation is available
-before final confirmation and that finalization makes no additional model request.
+Use `data/samples/stage62_demo_variants.xlsx`. First show its second worksheet and
+the `THIS_SHEET_MUST_NOT_BE_PROCESSED` marker, then upload the workbook. Demonstrate
+independent model selection, de-identified Persian phenotype extraction, local HPO
+correction and explicit acceptance, five ordered analyses and Draft Variant Reports,
+one audited reviewer edit, at least one reporting-only exclusion, per-variant privacy
+attestation and confirmation, model-free finalization, selected-only text/PDF/Word
+downloads, and one validated canonical or literature link.
 
-The manual-input fallback uses the same public allele entered through the table UI.
-The expected safe result is a validated variant in original order with explicit
-provider evidence or missingness, a bounded interpretation or explicit failure, and
-an editable confirmation-gated review state. A historical Stage 16 live check completed the
-SAMD11 demo workflow; UCSC GenCC returned no exact claim and was correctly represented
-as missing evidence. This historical result is not a current provider-availability
-guarantee.
-
-If a live source fails, check network access, the provider's service status, assembly,
-configured base URL, timeout, and credentials where applicable. Do not alter evidence
-or hide an unavailable state for a demonstration; use the deterministic offline gate
+If a live source fails, retain and explain the explicit no-match/unavailable state;
+never rewrite it as negative clinical evidence. Use the deterministic Stage 60 gate
 to demonstrate application behavior when external connectivity is unreliable.
 
-Key presentation points are independent-source provenance, correct missingness,
-immutable machine evidence, explicit human confirmation, task-specific model controls,
-single-model provenance, per-variant failure isolation, privacy boundaries, and
-the non-diagnostic disclaimer.
+Professor feedback should address report usefulness and visual organization,
+evidence-bound interpretation wording, phenotype/HPO correction usability, selection
+semantics, reference quality, and any additional bounded clinical fields. Feedback
+and sign-off remain external and must not be recorded as complete before review.
 
 ## 14. Implementation map
 
@@ -770,11 +782,12 @@ the non-diagnostic disclaimer.
 | Background jobs and refresh recovery | `frontend/execution.py`, `frontend/ui.py` |
 | Report rendering/export | `backend/report_exports.py`, `frontend/report_viewer.py` |
 | Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage59_testing_v3.py`, `tests/run_stage60_acceptance.py`, `tests/run_live_provider_validation.py`, `tests/manual_*.py` |
+| Stage 62 demo and professor-review handoff | `data/samples/stage62_demo_variants.xlsx`, `docs/STAGE62_DEMO_AND_REVIEW.md` |
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-61 are implemented. Stage 62 owns final documentation,
-   demonstration preparation, and professor re-review.
+1. Stages 46-62 are implemented and documented. Professor feedback and sign-off are
+   external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -829,5 +842,8 @@ ten-variant Excel-to-final-report acceptance scenario, wrapped it with compilati
 dependency, secret, and Testing V3 checks, and activated the new gate in GitHub
 Actions. Stage 61 revalidated every production provider client and both task-specific
 LLM contracts, probed representative exact links, and removed non-navigable VEP and
-GeneBe POST endpoints from report hyperlinks. The correct next action is Stage 62:
-finalize documentation, demonstration materials, and professor re-review.
+GeneBe POST endpoints from report hyperlinks. Stage 62 reconciled the V3 documents,
+added and verified the multi-sheet demo workbook, corrected stale UI wording, and
+prepared the exact demo and professor-feedback checklist. Roadmap implementation is
+complete; the next checkpoint is external professor review and any explicitly
+approved follow-up.

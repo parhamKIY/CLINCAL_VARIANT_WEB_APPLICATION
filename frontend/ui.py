@@ -1214,8 +1214,7 @@ def _render_variant_input(
                 f"Enter up to {MAX_VARIANTS_PER_ANALYSIS} already-filtered "
                 "variants. "
                 "CHROM, POS, REF, and ALT are required. Every row "
-                "is annotated; the report focuses on the first listed "
-                "variant."
+                "is analyzed in order and receives a Draft Variant Report."
             )
             manual_table, position_errors = (
                 _render_manual_variant_table()
@@ -1234,8 +1233,7 @@ def _render_variant_input(
                         "and FILTER are optional. "
                         f"The filtered input must produce 1 to "
                         f"{MAX_VARIANTS_PER_ANALYSIS} variants. Every row is "
-                        "annotated; the report focuses on the first listed "
-                        "variant. "
+                        "analyzed in order and receives a Draft Variant Report. "
                         f"Maximum size: "
                         f"{settings.MAX_UPLOAD_BYTES // 1_000_000} MB."
                     ),
