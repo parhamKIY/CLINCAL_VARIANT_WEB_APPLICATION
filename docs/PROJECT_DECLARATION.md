@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 62 documentation and demo handoff complete
+**Implementation status:** Stage 63 provider-resilience contract complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** External professor review and approved follow-up, if any
+**Next checkpoint:** Stage 64 shared retry, timeout, and circuit-breaker layer
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -24,11 +24,13 @@ use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-62 now implement and document its input,
+45 froze that architecture, and Stages 46-62 implement and document its input,
 phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. The authoritative target is defined in
+bounded live validation. Stage 63 begins the separate provider-resilience roadmap
+with a central operational-status and fallback-provenance contract. The authoritative
+V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
 describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
 they are not part of the active workflow for new analyses.
@@ -275,12 +277,13 @@ flowchart LR
     W --> X["Stage 60: End-to-End Acceptance Gate V3"]
     X --> Y["Stage 61: live provider and link validation"]
     Y --> Z["Stage 62: documentation and demo handoff"]
-    Z --> AA["External professor feedback - pending"]
+    Z --> AA["Stage 63: provider-resilience contract"]
+    AA --> AB["Stage 64: shared request policy - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z done
-    class AA review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA done
+    class AB review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -356,6 +359,7 @@ their original order.
 | 60 | Added the deterministic ten-variant redesigned acceptance scenario, release runner, and GitHub Actions V3 gate covering all professor-review assertions plus Testing V3. | Complete |
 | 61 | Revalidated every configured biomedical provider and both task-specific LLM contracts, live-probed representative report links, and removed non-navigable provider POST endpoints from canonical hyperlinks. | Complete |
 | 62 | Reconciled V3 documentation, added a reproducible multi-sheet Excel demo, corrected stale UI wording, and prepared the exact demonstration and professor-feedback checklist. | Complete; external professor feedback pending |
+| 63 | Added one strict provider operational-status taxonomy, centralized retry/fallback decisions, request/HTTP classification, and validated primary/fallback provenance while preserving `no_match` as a non-failure. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -582,6 +586,19 @@ inclusion/exclusion, confirmation, selected-only export, and canonical-link revi
 It also provides the final professor questions and leaves review date, outcome,
 required changes, and sign-off explicitly pending until the external review occurs.
 
+### Stage 63 resilience contract and provider failure taxonomy
+
+`backend/provider_resilience.py` defines the normalized operational statuses
+`success`, `no_match`, `unavailable`, `timeout`, `forbidden`, `rate_limited`,
+`server_error`, `invalid_response`, and `configuration_error`. This operational
+taxonomy remains separate from provider-specific clinical evidence statuses.
+
+The contract classifies HTTP/request failures without retaining exception text,
+centralizes retryability and fallback eligibility, and validates exact primary or
+fallback provenance. A valid `no_match` is neither retryable nor a fallback trigger.
+Stage 63 does not modify provider clients or implement retries, circuits, or fallback
+calls; those integrations begin in Stage 64.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -669,8 +686,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **789 passed, 4 skipped**,
-with **85.59% coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **841 passed, 4 skipped**,
+with **85.14% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -771,6 +788,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
 | Conditional enrichment | `backend/conditional_enrichment.py` |
+| Provider resilience contract | `backend/provider_resilience.py`, `tests/test_provider_resilience.py` |
 | Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
 | LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
@@ -786,7 +804,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-62 are implemented and documented. Professor feedback and sign-off are
+1. Stages 46-63 are implemented and documented. Provider-client adoption of the
+   Stage 63 contract begins in Stage 64; professor feedback and sign-off remain
    external pending checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
