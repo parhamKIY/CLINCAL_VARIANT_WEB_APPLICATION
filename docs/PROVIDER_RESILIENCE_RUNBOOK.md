@@ -1,6 +1,6 @@
 # Provider Resilience Configuration and Operations Runbook
 
-**Scope:** Stages 63-77 provider resilience layer
+**Scope:** Stages 63-78 provider resilience layer
 
 **Last verified:** 2026-08-09
 
@@ -91,11 +91,14 @@ tests.
 
 1. Confirm `.env` uses the intended genome assembly, provider endpoints, and both
    task-specific model settings.
-2. Run the deterministic offline suite:
+2. Run the deterministic resilience acceptance gate:
 
    ```powershell
-   .\.venv\Scripts\python.exe -m pytest -q
+   .\.venv\Scripts\python.exe tests\run_stage78_resilience_acceptance.py
    ```
+
+   This includes the mocked multi-variant degraded-mode scenario, the complete
+   offline suite, and the Testing V3 coverage gate.
 
 3. Run the manual reachability checker from the current network:
 

@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 77 resilience documentation/configuration complete
-**Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 78 resilience acceptance gate
+**Implementation status:** Stage 78 provider-resilience roadmap complete
+**Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
+**Next checkpoint:** Separate full web-application acceptance plan
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -28,7 +28,7 @@ The professor review on 2026-08-08 changed the accepted target architecture. Sta
 phenotype,
 model-selection, interpretation-before-review, reviewed-report, selection, reference,
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. Stages 63-77 implement the separate provider-resilience
+bounded live validation. Stages 63-78 implement the separate provider-resilience
 roadmap through central operational-status, retry, timeout, circuit, fallback-provenance,
 free/public degraded paths, failure injection, reachability checks, and operations
 contracts. Stages 66-72 apply those contracts to population, ClinVar, literature,
@@ -297,12 +297,11 @@ flowchart LR
     AL --> AM["Stage 75: failure injection"]
     AM --> AN["Stage 76: reachability regression"]
     AN --> AO["Stage 77: documentation/configuration"]
-    AO --> AP["Stage 78: resilience acceptance gate - pending"]
+    AO --> AP["Stage 78: resilience acceptance gate"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO done
-    class AP review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -393,6 +392,7 @@ their original order.
 | 75 | Added deterministic failure injection for all required provider/fallback chains and verified final-report degraded-source provenance. | Complete |
 | 76 | Added a bounded manual DNS/HTTP reachability checker with normalized failure categories and optional JSON/CSV output outside deterministic CI. | Complete |
 | 77 | Consolidated the fallback matrix, architecture, actual configuration controls, pre-demo operations, and troubleshooting in the resilience runbook and synchronized public documentation. | Complete |
+| 78 | Added and passed a deterministic persisted two-variant degraded-mode gate covering Phen2Gene timeout, gnomAD 403 circuit reuse, LitVar2 5xx fallback, successful ClinVar/CSpec primaries, Draft Reports, and exact provenance. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -927,6 +927,25 @@ local HPO sources, and CSpec cache path. No unused per-fallback feature flags we
 introduced: safe fallback behavior remains the default, and source identity is never
 configurably relabelled.
 
+### Stage 78 resilience acceptance gate
+
+`tests/test_resilience_acceptance.py` runs two ordered variants through the production
+pipeline under one deterministic mocked outage scenario. Phen2Gene times out and
+activates local direct HPO-gene context; the first gnomAD request returns `403`, opens
+the analysis circuit, and both variants use exact Ensembl Variation fallback; LitVar2
+returns retry-exhausting `5xx` responses and both variants use Europe PMC. Direct
+ClinVar and live CSpec fixture evidence remain successful primary sources.
+
+The gate proves that analysis continues with explicit partial/degraded status, the
+gnomAD primary is called only once, sources are not relabelled, two Draft Variant
+Reports remain buildable, and capability/fallback provenance survives SQLite
+persistence and reload. It also exposed and fixed mapping-order-sensitive fallback
+notice composition so JSON key sorting cannot invalidate a persisted Draft Report.
+
+`tests/run_stage78_resilience_acceptance.py` compiles the project, runs the repository
+secrets audit, executes the focused scenario, runs the complete offline suite, and
+enforces the Stage 59 Testing V3 coverage gate.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -1014,7 +1033,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **933 passed, 4 skipped**,
+consume external API quotas. The current recorded baseline is **935 passed, 4 skipped**,
 with **85.81% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
@@ -1128,6 +1147,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Deterministic provider failure injection | `tests/test_failure_injection.py` |
 | Manual provider reachability regression | `tools/provider_reachability.py`, `tests/test_provider_reachability.py` |
 | Provider resilience configuration and operations | `.env.example`, `docs/PROVIDER_RESILIENCE_RUNBOOK.md`, `README.md` |
+| Provider resilience acceptance gate | `tests/test_resilience_acceptance.py`, `tests/run_stage78_resilience_acceptance.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1147,9 +1167,9 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-77 are implemented and documented. The multi-variant resilience
-   acceptance gate remains for Stage 78; professor feedback and sign-off remain
-   external.
+1. Stages 46-78 are implemented and documented. The provider-resilience roadmap is
+   complete; professor feedback/sign-off and the separate full web-application
+   acceptance plan remain external.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1220,6 +1240,7 @@ degraded-source provenance through final report composition. Stage 76 added a bo
 manual DNS/HTTP reachability checker with safe failure categories and optional JSON
 and CSV exports. Stage 77 consolidated the fallback matrix, architecture,
 configuration, operations, and troubleshooting into a dedicated runbook. Stage 78
-is the next
-implementation checkpoint;
+added and passed the persisted multi-variant resilience acceptance gate, completing
+the provider-resilience roadmap. The project is ready to return to the separate full
+web-application acceptance plan;
 professor review and sign-off remain external.

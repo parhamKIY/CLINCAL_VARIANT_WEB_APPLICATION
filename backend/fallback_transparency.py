@@ -87,12 +87,25 @@ def build_fallback_notices(value: object) -> list[FallbackNotice]:
         raise FallbackTransparencyError(
             "Capability results must be a mapping."
         )
+    if any(not isinstance(capability, str) for capability in value):
+        raise FallbackTransparencyError(
+            "Capability result keys must be strings."
+        )
+    ordered_capabilities = [
+        capability
+        for capability in CAPABILITY_LABELS
+        if capability in value
+    ]
+    ordered_capabilities.extend(
+        sorted(
+            capability
+            for capability in value
+            if capability not in CAPABILITY_LABELS
+        )
+    )
     notices: list[FallbackNotice] = []
-    for capability, raw_result in value.items():
-        if not isinstance(capability, str):
-            raise FallbackTransparencyError(
-                "Capability result keys must be strings."
-            )
+    for capability in ordered_capabilities:
+        raw_result = value[capability]
         try:
             result = validate_capability_result(raw_result)
         except ProviderContractError as exc:

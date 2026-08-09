@@ -35,6 +35,18 @@ def _phenotype_fallback() -> dict[str, object]:
     )
 
 
+def _literature_fallback() -> dict[str, object]:
+    return build_capability_result(
+        capability="literature",
+        status="success",
+        provider="europe_pmc",
+        provider_role="fallback",
+        fallback_for="litvar",
+        primary_failure="server_error",
+        method="bounded_literature_search_chain",
+    )
+
+
 def test_notice_is_concise_and_preserves_exact_provenance() -> None:
     notices = build_fallback_notices(
         {
@@ -88,6 +100,19 @@ def test_primary_results_do_not_create_degraded_mode_notices() -> None:
     assert build_fallback_notices(
         {"variant_annotation": _primary_result()}
     ) == []
+
+
+def test_notice_order_is_stable_after_sorted_json_round_trip() -> None:
+    forward = {
+        "phenotype_gene": _phenotype_fallback(),
+        "literature": _literature_fallback(),
+    }
+    reverse = dict(reversed(tuple(forward.items())))
+
+    assert build_fallback_notices(forward) == build_fallback_notices(reverse)
+    assert [
+        notice["capability"] for notice in build_fallback_notices(reverse)
+    ] == ["phenotype_gene", "literature"]
 
 
 def test_invalid_capability_results_are_rejected() -> None:

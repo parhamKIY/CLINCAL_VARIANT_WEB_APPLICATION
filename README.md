@@ -5,10 +5,10 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_77_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_78_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-933_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-935_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
 [![Coverage](https://img.shields.io/badge/coverage-85.81%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
@@ -32,8 +32,8 @@ its original input order.
 
 ### Current status
 
-- The implemented roadmap has passed the Stage 60 V3 release gate and Stage 61
-  point-in-time live validation.
+- The implemented roadmap has passed the Stage 60 V3 release gate, Stage 61
+  point-in-time live validation, and Stage 78 resilience acceptance gate.
 - Stage 45 has frozen the post-professor-review architecture; it is a documentation
   milestone and does not claim the redesign is implemented.
 - Stage 46 input expansion is implemented and offline-verified.
@@ -64,10 +64,10 @@ its original input order.
 - Stage 61 live provider and canonical-link validation is implemented and verified.
 - Stage 62 documentation and demonstration preparation is complete; external
   professor feedback remains pending.
-- Stages 63-77 provider resilience, free fallbacks, unified capability results,
+- Stages 63-78 provider resilience, free fallbacks, unified capability results,
   reviewer-facing fallback transparency, and deterministic failure injection are
-  implemented, documented, and offline-verified; the manual reachability utility is
-  available.
+  implemented, documented, and offline-verified; the multi-variant resilience gate
+  and manual reachability utility are available.
 - Pipeline schema: `2.9`.
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
@@ -75,7 +75,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `3`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **933 passed, 4 skipped; 85.81% Stage 59 coverage**.
+- Current verified suite: **935 passed, 4 skipped; 85.81% Stage 59 coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -648,6 +648,15 @@ Run the active V3 release gate:
 .\.venv\Scripts\python.exe tests\run_stage60_acceptance.py
 ```
 
+Run the completed provider-resilience acceptance gate:
+
+```powershell
+.\.venv\Scripts\python.exe tests\run_stage78_resilience_acceptance.py
+```
+
+This gate compiles the project, audits secrets, runs the mocked multi-variant
+degraded-mode scenario, runs the full offline suite, and enforces Testing V3 coverage.
+
 The gate performs compilation, dependency consistency, repository secret auditing,
 the deterministic ten-variant Stage 60 scenario, all eight Testing V3 groups, the
 complete offline suite, and the minimum 80% coverage requirement.
@@ -804,6 +813,7 @@ clinical_variant_app/
 │   ├── test_mydisease.py
 │   ├── run_stage59_testing_v3.py
 │   ├── run_stage60_acceptance.py
+│   ├── run_stage78_resilience_acceptance.py
 │   ├── run_live_provider_validation.py
 │   ├── run_stage44_acceptance.py
 │   └── manual_*.py
@@ -817,8 +827,9 @@ clinical_variant_app/
 
 ## Known limitations
 
-- Stages 46-77 are implemented and documented. Stage 78 resilience acceptance and
-  professor feedback/sign-off remain pending checkpoints.
+- Stages 46-78 are implemented and documented. The provider-resilience roadmap is
+  complete; professor feedback/sign-off and the separate full web-app acceptance
+  plan remain external checkpoints.
 - Candidate filtering and ranking must happen upstream.
 - Human confirmation is mandatory before finalization.
 - CSpec is context-only; no CSpec rule engine is implemented.
