@@ -389,11 +389,31 @@ def _render_draft_variant_report(
     for context in phenotype["disease_context"]:
         st.write(f"- {context}")
 
+    fallback_messages = [
+        provider.removeprefix("Fallback: ")
+        for provider in content["provenance"]["providers"]
+        if provider.startswith("Fallback: ")
+    ]
+    if fallback_messages:
+        with st.container(border=True):
+            st.markdown(
+                ":material/swap_horiz: **Fallback evidence used**"
+            )
+            st.caption(
+                "Primary and fallback sources remain distinct in report "
+                "provenance."
+            )
+            for message in fallback_messages:
+                st.write(f"- {message}")
+
     st.markdown("#### Evidence")
     for section in content["evidence_sections"]:
         with st.expander(
             f"{section['source']} — {section['status']}",
-            expanded=section["status"] == "success",
+            expanded=section["status"] in {
+                "success",
+                "available via fallback",
+            },
         ):
             if section["items"]:
                 st.table(

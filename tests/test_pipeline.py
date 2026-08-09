@@ -5485,7 +5485,8 @@ class TestAnnotation:
         section = next(
             item
             for item in _evidence_sections(evidence)
-            if item["source"].startswith("ClinVar-derived")
+            if item["source"]
+            == "ClinVar evidence — fallback: MyVariant.info"
         )
 
         assert clinvar["status"] == "success"
@@ -5512,7 +5513,7 @@ class TestAnnotation:
         ] == ["pathogenicity.clinvar"]
         assert evidence["provenance"]["shared_upstream_groups"] == []
         assert section["source"] == (
-            "ClinVar-derived evidence — MyVariant.info fallback"
+            "ClinVar evidence — fallback: MyVariant.info"
         )
         assert not any(
             reference["source"] == "NCBI ClinVar"
@@ -8295,7 +8296,7 @@ class TestEvidenceObject:
         section = next(
             item
             for item in _evidence_sections(evidence)
-            if item["source"].startswith("Population evidence")
+            if item["source"].startswith("Population frequency")
         )
 
         assert stored["source"] == "ensembl_variation"
@@ -8304,7 +8305,7 @@ class TestEvidenceObject:
         assert lineage["upstream_sources"] == ["dbSNP"]
         assert lineage["derivation"] == "direct"
         assert section["source"] == (
-            "Population evidence — Ensembl Variation"
+            "Population frequency — fallback: Ensembl Variation"
         )
         assert "gnomAD" not in section["source"]
 
@@ -9171,7 +9172,7 @@ class TestEvidenceObject:
             item
             for item in _evidence_sections(evidence)
             if item["source"]
-            == "ClinGen CSpec — cached last-known-good metadata"
+            == "CSpec context — fallback: local CSpec last-known-good cache"
         )
         assert section["status"] == "available via fallback"
         items = {item["label"]: item["value"] for item in section["items"]}
@@ -9221,7 +9222,8 @@ class TestEvidenceObject:
         section = next(
             item
             for item in _evidence_sections(evidence)
-            if item["source"] == "Ensembl VEP"
+            if item["source"]
+            == "Variant annotation — fallback: VariantValidator"
         )
         assert section["status"] == "available via fallback"
         assert results["clinvar_evidence"]["provider_role"] == "primary"
@@ -12173,6 +12175,11 @@ class TestStage52DraftVariantReportV2:
         assert "Phenotype-gene score: 0.5" in summary
         assert "Phenotype-gene method: direct_hpo_gene_overlap" in summary
         assert "Primary provider failure: timeout" in summary
+        assert (
+            "Fallback: Phenotype-gene: Phen2Gene unavailable — local "
+            "HPO-gene fallback used via direct HPO-gene overlap."
+            in report["machine_original_report"]["provenance"]["providers"]
+        )
 
     def test_failed_interpretation_remains_a_coherent_report(self) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()

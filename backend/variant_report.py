@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Literal, TypedDict, cast
 
+from backend.fallback_transparency import build_fallback_notices
 from backend.privacy import (
     ClinicalDataPrivacyError,
     validate_human_review_content,
@@ -330,12 +331,25 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
     clingen = pathogenicity["clingen_context"]
     clinvar_provider = _provider_record(evidence, "clinvar")
     cspec_provider = _provider_record(evidence, "cspec")
-    clinvar_is_fallback = (
-        clinvar_provider.get("provider_role") == "fallback"
-    )
+    fallback_notices = {
+        notice["capability"]: notice
+        for notice in build_fallback_notices(
+            evidence["capability_results"]
+        )
+    }
+
+    def source_label(primary: str, capability: str) -> str:
+        notice = fallback_notices.get(capability)
+        if notice is None:
+            return primary
+        return (
+            f"{notice['capability_label']} — fallback: "
+            f"{notice['fallback_provider_label']}"
+        )
+
     sections: list[EvidenceSection] = [
         {
-            "source": "Ensembl VEP",
+            "source": source_label("Ensembl VEP", "variant_annotation"),
             "status": _capability_status(evidence, "variant_annotation"),
             "items": _items(
                 _item("Consequence", context["consequence"]),
@@ -357,7 +371,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": "MyVariant.info",
+            "source": source_label("MyVariant.info", "variant_context"),
             "status": _capability_status(evidence, "variant_context"),
             "items": _items(
                 _item(
@@ -371,11 +385,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": (
-                "ClinVar-derived evidence — MyVariant.info fallback"
-                if clinvar_is_fallback
-                else "NCBI ClinVar"
-            ),
+            "source": source_label("NCBI ClinVar", "clinvar_evidence"),
             "status": _capability_status(evidence, "clinvar_evidence"),
             "items": _items(
                 _item("Accession", evidence["clinvar_accession"]),
@@ -404,11 +414,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": (
-                "ClinGen CSpec — cached last-known-good metadata"
-                if cspec_metadata.get("evidence_source") == "cached_cspec"
-                else "ClinGen CSpec"
-            ),
+            "source": source_label("ClinGen CSpec", "cspec_context"),
             "status": _capability_status(evidence, "cspec_context"),
             "items": _items(
                 _item("Matching specifications", len(cspec)),
@@ -440,10 +446,9 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": (
-                "Population evidence — Ensembl Variation"
-                if population.get("source") == "ensembl_variation"
-                else "Population evidence — gnomAD"
+            "source": source_label(
+                "Population evidence — gnomAD",
+                "population_frequency",
             ),
             "status": _capability_status(evidence, "population_frequency"),
             "items": _items(
@@ -460,7 +465,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": "Literature enrichment",
+            "source": source_label("Literature enrichment", "literature"),
             "status": _capability_status(evidence, "literature"),
             "items": _items(
                 _item(
@@ -501,6 +506,12 @@ def _provenance(
         status = _text(provider.get("status"))
         if name:
             providers.append(f"{name}: {status}" if status else name)
+    providers.extend(
+        f"Fallback: {notice['message']}"
+        for notice in build_fallback_notices(
+            evidence["capability_results"]
+        )
+    )
     return {
         "evidence_schema_version": evidence["schema_version"],
         "interpretation_schema_version": interpretation["schema_version"],

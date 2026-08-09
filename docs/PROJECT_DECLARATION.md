@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 73 unified capability result schema complete
+**Implementation status:** Stage 74 UI and report transparency complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 74 UI and report transparency
+**Next checkpoint:** Stage 75 failure-injection test suite
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -292,12 +292,13 @@ flowchart LR
     AH --> AI["Stage 71: MyVariant fallback hardening"]
     AI --> AJ["Stage 72: CSpec LKG cache"]
     AJ --> AK["Stage 73: unified capability schema"]
-    AK --> AL["Stage 74: UI/report transparency - pending"]
+    AK --> AL["Stage 74: UI/report transparency"]
+    AL --> AM["Stage 75: failure injection - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK done
-    class AL review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL done
+    class AM review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -850,6 +851,23 @@ fallback evidence as its primary source. Draft report status composition now use
 generic availability function and renders successful degraded evidence as
 `available via fallback`; exact provider and method remain in the capability result.
 
+### Stage 74 UI and report transparency
+
+`backend/fallback_transparency.py` derives one bounded reviewer-facing notice for
+every capability whose Stage 73 result records `fallback_used=true`. Notices use
+controlled capability, provider, and method labels; retain the exact provider IDs,
+fallback target, normalized primary failure, and method; and never expose raw HTTP
+exceptions or provider response text.
+
+The Evidence Object view now shows a single concise fallback panel plus an optional
+provenance table, and its overview counts affected capabilities. Draft report review
+shows the same source-specific notices before evidence sections and automatically
+expands sections available through fallback. Evidence-section titles name both the
+primary capability source and actual fallback source. Draft and final report
+provenance carries every fallback notice, including the exact retrieval method, so a
+reviewer can determine which source supplied every degraded-mode result without
+mistaking it for primary-provider evidence.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -937,8 +955,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **910 passed, 4 skipped**,
-with **85.86% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **915 passed, 4 skipped**,
+with **85.81% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -1045,6 +1063,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Conditional enrichment | `backend/conditional_enrichment.py` |
 | Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
 | Unified primary/fallback capability results | `backend/provider_resilience.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_provider_resilience.py`, `tests/test_pipeline.py` |
+| Fallback UI and report transparency | `backend/fallback_transparency.py`, `backend/variant_report.py`, `frontend/results.py`, `frontend/evidence_review.py`, `tests/test_fallback_transparency.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1064,8 +1083,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-73 are implemented and documented. UI and report fallback transparency
-   continues in Stage 74; professor feedback and sign-off remain external checkpoints.
+1. Stages 46-74 are implemented and documented. Deterministic failure-injection
+   coverage continues in Stage 75; professor feedback and sign-off remain external.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1129,6 +1148,8 @@ literature resilience chain, followed by bounded MyDisease latency and local
 context-only degraded mode, limited VEP-to-VariantValidator validation/HGVS mapping,
 MyVariant-to-Ensembl exact-overlap context fallback, an explicit-freshness CSpec
 last-known-good metadata cache, and a unified source-preserving capability result
-contract consumed generically by draft report statuses. Stage 74 is the next
+contract consumed generically by draft report statuses, followed by concise UI and
+report provenance notices that disclose every affected fallback capability. Stage 75
+is the next
 implementation checkpoint;
 professor review and sign-off remain external.

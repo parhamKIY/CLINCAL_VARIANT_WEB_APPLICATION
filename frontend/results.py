@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from backend.fallback_transparency import build_fallback_notices
 from backend.pipeline import PipelineResult
 from backend.references import build_canonical_references
 
@@ -348,6 +349,9 @@ def _evidence_summary_rows(
             for status in source_statuses.values()
         )
         warnings = evidence.get("warnings")
+        fallback_notices = build_fallback_notices(
+            evidence.get("capability_results")
+        )
         rows.append(
             {
                 "Variant": _variant_label(evidence),
@@ -358,6 +362,7 @@ def _evidence_summary_rows(
                 ),
                 "Phenotype score": evidence.get("phenotype_score"),
                 "Successful sources": successful_sources,
+                "Fallback capabilities": len(fallback_notices),
                 "Warnings": (
                     len(warnings) if isinstance(warnings, list) else 0
                 ),
@@ -560,6 +565,38 @@ def _render_source_statuses(evidence: dict[str, object]) -> None:
             )
 
 
+def _render_fallback_notices(evidence: dict[str, object]) -> None:
+    """Show concise degraded-mode notices and exact fallback provenance."""
+
+    notices = build_fallback_notices(evidence.get("capability_results"))
+    if not notices:
+        return
+    with st.container(border=True):
+        st.markdown(":material/swap_horiz: **Fallback evidence used**")
+        st.caption(
+            "Fallback results remain source-specific and are not relabelled "
+            "as primary-provider evidence."
+        )
+        for notice in notices:
+            st.write(f"- {notice['message']}")
+        with st.expander(
+            "Fallback provenance details",
+            icon=":material/info:",
+        ):
+            st.table(
+                [
+                    {
+                        "Capability": notice["capability_label"],
+                        "Primary": notice["primary_provider_label"],
+                        "Fallback": notice["fallback_provider_label"],
+                        "Primary failure": notice["primary_failure"],
+                        "Method": notice["method_label"],
+                    }
+                    for notice in notices
+                ]
+            )
+
+
 def _render_evidence_details(evidence: dict[str, object]) -> None:
     """Render one sanitized Evidence Object in clinical sections."""
 
@@ -569,6 +606,7 @@ def _render_evidence_details(evidence: dict[str, object]) -> None:
             evidence.get("gene") or "Not available",
             border=True,
         )
+
         frequency = evidence.get("population_frequency")
         st.metric(
             "Population frequency",
@@ -579,6 +617,7 @@ def _render_evidence_details(evidence: dict[str, object]) -> None:
             ),
             border=True,
         )
+
         phenotype_score = evidence.get("phenotype_score")
         st.metric(
             "Phenotype score",
@@ -589,6 +628,8 @@ def _render_evidence_details(evidence: dict[str, object]) -> None:
             ),
             border=True,
         )
+
+    _render_fallback_notices(evidence)
 
     st.markdown("**Annotation**")
     st.table(
@@ -732,6 +773,9 @@ def _render_evidence_view(result: PipelineResult) -> None:
                 format="percent"
             ),
             "Successful sources": st.column_config.NumberColumn(
+                format="%d"
+            ),
+            "Fallback capabilities": st.column_config.NumberColumn(
                 format="%d"
             ),
             "Warnings": st.column_config.NumberColumn(format="%d"),
