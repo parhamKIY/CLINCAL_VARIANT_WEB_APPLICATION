@@ -483,6 +483,7 @@ class TestConfiguration:
             "REPORT_DIR": tmp_path / "reports",
             "DATABASE_PATH": tmp_path / "database" / "analysis.sqlite3",
             "CACHE_DIR": tmp_path / "cache",
+            "CSPEC_LKG_CACHE_PATH": tmp_path / "cache" / "cspec_lkg.json",
             "HPO_DATA_DIR": tmp_path / "hpo",
             "LOG_PATH": tmp_path / "logs" / "application.log",
         }
@@ -495,13 +496,18 @@ class TestConfiguration:
         assert directories["REPORT_DIR"].is_dir()
         assert directories["DATABASE_PATH"].parent.is_dir()
         assert directories["CACHE_DIR"].is_dir()
+        assert directories["CSPEC_LKG_CACHE_PATH"].parent.is_dir()
         assert directories["HPO_DATA_DIR"].is_dir()
         assert directories["LOG_PATH"].parent.is_dir()
         if os.name == "posix":
             for name, directory in directories.items():
                 checked_directory = (
                     directory.parent
-                    if name in {"DATABASE_PATH", "LOG_PATH"}
+                    if name in {
+                        "DATABASE_PATH",
+                        "CSPEC_LKG_CACHE_PATH",
+                        "LOG_PATH",
+                    }
                     else directory
                 )
                 assert stat.S_IMODE(
@@ -1538,6 +1544,18 @@ def _isolate_pipeline_mydisease(
     monkeypatch.setattr(
         "backend.pipeline.enrich_with_mydisease",
         fake_enrich,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cspec_lkg_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "CSPEC_LKG_CACHE_PATH",
+        tmp_path / "cspec_lkg.json",
     )
 
 
@@ -5932,6 +5950,10 @@ class TestAnnotation:
         cspec = annotation["sources"]["cspec"]
         assert cspec["status"] == "success"
         assert cspec["provider"] == "ClinGen CSpec Registry"
+        assert cspec["provider_role"] == "primary"
+        assert cspec["fallback_used"] is False
+        assert cspec["source"] == "live_cspec"
+        assert cspec["freshness_status"] == "live"
         assert cspec["provider_version"] is None
         assert re.fullmatch(
             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
@@ -5997,6 +6019,10 @@ class TestAnnotation:
                 "SequenceVariantInterpretation/id/GN001"
             ),
         }
+        assert settings.CSPEC_LKG_CACHE_PATH.is_file()
+        assert "criteria" not in settings.CSPEC_LKG_CACHE_PATH.read_text(
+            encoding="utf-8"
+        ).casefold()
 
     def test_cspec_gene_only_scope_does_not_claim_disease_match(
         self,
@@ -6116,6 +6142,107 @@ class TestAnnotation:
         assert cspec["specification_available"] is False
         assert cspec["specifications"] == []
         assert cspec["rule_logic_applied"] is False
+        assert cspec["fallback_status"] == "not_triggered"
+
+    def test_stage_72_cspec_outage_uses_exact_lkg_metadata(self) -> None:
+        live_session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+            cspec_responses=[
+                FakeResponse(200, self._cspec_gene_response()),
+                FakeResponse(200, self._cspec_disease_response()),
+            ],
+        )
+        live = annotate_variants(
+            [self._variant()],
+            session=live_session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+        live_specifications = deepcopy(
+            live["sources"]["cspec"]["specifications"]
+        )
+
+        outage_session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clingen_responses=[
+                FakeResponse(200, self._clingen_response())
+            ],
+            cspec_responses=[requests.Timeout("CSpec timeout")],
+        )
+        annotation = annotate_variants(
+            [self._variant()],
+            session=outage_session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "partial"
+        assert cspec["provider"] == "Local CSpec last-known-good cache"
+        assert cspec["provider_role"] == "fallback"
+        assert cspec["fallback_used"] is True
+        assert cspec["fallback_for"] == "clingen_cspec"
+        assert cspec["primary_failure"] == "timeout"
+        assert cspec["fallback_status"] == "success"
+        assert cspec["source"] == "cached_cspec"
+        assert cspec["source_type"] == "last_known_good_cache"
+        assert cspec["freshness_status"] == (
+            "last_known_good_age_unbounded"
+        )
+        assert cspec["retrieved_at"] == cspec["source_retrieved_at"]
+        assert isinstance(cspec["cache_stored_at"], str)
+        assert isinstance(cspec["fallback_used_at"], str)
+        assert cspec["specifications"] == live_specifications
+        assert cspec["classification_effect"] == "context_only"
+        assert cspec["rule_logic_applied"] is False
+
+    def test_stage_72_cspec_outage_without_cache_stays_unavailable(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[FakeResponse(503, {"error": "unavailable"})],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "unavailable"
+        assert cspec["primary_failure"] == "server_error"
+        assert cspec["fallback_status"] == "missing"
+        assert cspec["fallback_used"] is False
+        assert cspec["specifications"] == []
+
+    def test_stage_72_invalid_cspec_cache_is_explicit(self) -> None:
+        settings.CSPEC_LKG_CACHE_PATH.write_text(
+            '{"schema_version":1,"entries":[{"unsafe":true}]}',
+            encoding="utf-8",
+        )
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            cspec_responses=[requests.Timeout("CSpec timeout")],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "unavailable"
+        assert cspec["fallback_status"] == "invalid"
+        assert cspec["fallback_failure"] == "invalid_response"
+        assert cspec["fallback_used"] is False
+        assert any(
+            "cache was invalid" in warning
+            for warning in annotation["warnings"]
+        )
 
     @pytest.mark.parametrize(
         ("payload", "expected_warning"),
@@ -8963,6 +9090,82 @@ class TestEvidenceObject:
         )
         assert lineage["provider"] == "Ensembl REST Variation"
         assert lineage["upstream_sources"] == ["dbSNP"]
+
+    def test_stage_72_cached_cspec_freshness_persists_in_evidence(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        sources["cspec"] = {
+            "status": "partial",
+            "provider": "Local CSpec last-known-good cache",
+            "provider_role": "fallback",
+            "fallback_used": True,
+            "primary_provider": "ClinGen CSpec Registry",
+            "primary_failure": "timeout",
+            "fallback_provider": "Local CSpec last-known-good cache",
+            "fallback_for": "clingen_cspec",
+            "fallback_status": "success",
+            "fallback_failure": None,
+            "source": "cached_cspec",
+            "source_type": "last_known_good_cache",
+            "retrieved_at": "2026-08-01T10:00:00Z",
+            "source_retrieved_at": "2026-08-01T10:00:00Z",
+            "cache_stored_at": "2026-08-01T10:00:01Z",
+            "fallback_used_at": "2026-08-09T10:00:00Z",
+            "freshness_status": "last_known_good_age_unbounded",
+            "upstream_sources": ["ClinGen CSpec Registry"],
+            "specifications": [
+                {
+                    "specification_id": "GN009",
+                    "title": "SCN1A specification",
+                    "version": "2.4",
+                    "status": "Released",
+                    "matched_disease_ids": ["MONDO:0012320"],
+                    "scope_match": "gene_and_disease",
+                }
+            ],
+        }
+
+        evidence = build_evidence_object(candidate)
+        context = evidence["pathogenicity"]["cspec_context"][0]
+        assert context["evidence_source"] == "cached_cspec"
+        assert context["source_type"] == "last_known_good_cache"
+        assert context["source_retrieved_at"] == "2026-08-01T10:00:00Z"
+        assert context["cache_stored_at"] == "2026-08-01T10:00:01Z"
+        assert context["fallback_used_at"] == "2026-08-09T10:00:00Z"
+        assert context["freshness_status"] == (
+            "last_known_good_age_unbounded"
+        )
+        provider = next(
+            item
+            for item in evidence["provenance"]["providers"]
+            if item["source"] == "cspec"
+        )
+        assert provider["provider_role"] == "fallback"
+        assert provider["primary_failure"] == "timeout"
+        lineage = next(
+            item
+            for item in evidence["provenance"]["lineage"]
+            if item["evidence_path"] == "pathogenicity.cspec_context"
+        )
+        assert lineage["provider"] == "Local CSpec last-known-good cache"
+        assert lineage["derivation"] == "derived"
+        assert lineage["retrieved_at"] == "2026-08-01T10:00:00Z"
+        section = next(
+            item
+            for item in _evidence_sections(evidence)
+            if item["source"]
+            == "ClinGen CSpec — cached last-known-good metadata"
+        )
+        assert section["status"] == "partial"
+        items = {item["label"]: item["value"] for item in section["items"]}
+        assert items["Provider"] == "Local CSpec last-known-good cache"
+        assert items["Original live retrieval"] == "2026-08-01T10:00:00Z"
+        assert items["Cache stored"] == "2026-08-01T10:00:01Z"
+        assert items["Cache fallback used"] == "2026-08-09T10:00:00Z"
+        assert items["Freshness"] == "last_known_good_age_unbounded"
 
     def test_stage_38_feature_flags_skip_configured_enrichment(
         self,

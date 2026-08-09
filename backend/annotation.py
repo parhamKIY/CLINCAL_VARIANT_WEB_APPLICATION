@@ -13,6 +13,11 @@ from urllib.parse import quote, urlsplit
 
 import requests
 
+from backend.cspec_cache import (
+    CSpecCacheError,
+    load_cspec_lkg,
+    store_cspec_lkg,
+)
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
     ProviderCircuitState,
@@ -256,6 +261,18 @@ class ClinVarOperationalError(AnnotationServiceError):
 
 class CSpecResponseError(AnnotationServiceError):
     """Raised when CSpec returns malformed or non-matching metadata."""
+
+
+class CSpecOperationalError(AnnotationServiceError):
+    """Carry one normalized live CSpec operational failure."""
+
+    def __init__(
+        self,
+        message: str,
+        provider_status: ProviderStatus,
+    ) -> None:
+        super().__init__(message)
+        self.provider_status = provider_status
 
 
 # ---------------------------------------------------------------------------
@@ -1558,9 +1575,10 @@ def _get_cspec_entity(
                 exception=exc,
             )
             if attempt >= max_retries:
-                raise AnnotationServiceError(
+                raise CSpecOperationalError(
                     "ClinGen CSpec request failed because the service "
-                    "was unavailable."
+                    "was unavailable.",
+                    classify_request_exception(exc),
                 ) from exc
 
             delay = _retry_delay(attempt)
@@ -1602,9 +1620,10 @@ def _get_cspec_entity(
             return None
 
         if not 200 <= response.status_code < 300:
-            raise AnnotationServiceError(
+            raise CSpecOperationalError(
                 "ClinGen CSpec returned HTTP "
-                f"{response.status_code}."
+                f"{response.status_code}.",
+                classify_http_status(response.status_code),
             )
 
         try:
@@ -1635,8 +1654,9 @@ def _get_cspec_entity(
 
         return data
 
-    raise AnnotationServiceError(
-        "ClinGen CSpec retry loop ended unexpectedly."
+    raise CSpecOperationalError(
+        "ClinGen CSpec retry loop ended unexpectedly.",
+        "unavailable",
     )
 
 
@@ -1963,8 +1983,21 @@ def _base_annotation(
             "cspec": {
                 "status": "pending",
                 "provider": "ClinGen CSpec Registry",
+                "provider_role": "primary",
+                "fallback_used": False,
+                "primary_provider": "ClinGen CSpec Registry",
+                "primary_failure": None,
+                "fallback_provider": "Local CSpec last-known-good cache",
+                "fallback_status": "not_triggered",
+                "fallback_failure": None,
+                "source": "live_cspec",
+                "source_type": "direct",
                 "provider_version": None,
                 "retrieved_at": None,
+                "source_retrieved_at": None,
+                "cache_stored_at": None,
+                "fallback_used_at": None,
+                "freshness_status": "live",
                 "query_gene": None,
                 "query_disease_ids": [],
                 "disease_queries_truncated": False,
@@ -3642,6 +3675,38 @@ def _standardize_cspec_record(
     }
 
 
+def _cache_cspec_last_known_good(
+    source: dict[str, Any],
+    *,
+    gene: str,
+    disease_ids: list[str],
+) -> str | None:
+    """Persist only validated released metadata; return a safe warning on failure."""
+
+    retrieved_at = source.get("retrieved_at")
+    specifications = source.get("specifications")
+    if not isinstance(retrieved_at, str) or not isinstance(
+        specifications,
+        list,
+    ):
+        return "Released CSpec metadata could not be stored in the local cache."
+    try:
+        store_cspec_lkg(
+            settings.CSPEC_LKG_CACHE_PATH,
+            gene=gene,
+            disease_ids=disease_ids,
+            source_retrieved_at=retrieved_at,
+            cache_stored_at=_retrieval_timestamp(),
+            specifications=specifications,
+        )
+    except (CSpecCacheError, OSError):
+        LOGGER.error(
+            "event=cspec_cache_write_failed error_type=cache_storage_error"
+        )
+        return "Released CSpec metadata could not be stored in the local cache."
+    return None
+
+
 def _annotate_with_cspec(
     annotation: AnnotationData,
     session: requests.Session,
@@ -3717,6 +3782,7 @@ def _annotate_with_cspec(
         source.update(
             {
                 "status": "success",
+                "source_retrieved_at": source["retrieved_at"],
                 "specification_available": True,
                 "specifications": retained,
                 "specification_count": len(specifications),
@@ -3725,6 +3791,13 @@ def _annotate_with_cspec(
                 ),
             }
         )
+        cache_warning = _cache_cspec_last_known_good(
+            source,
+            gene=gene,
+            disease_ids=disease_ids,
+        )
+        if cache_warning is not None:
+            annotation["warnings"].append(cache_warning)
 
         for specification in retained:
             annotation["references"].append(
@@ -3746,7 +3819,96 @@ def _annotate_with_cspec(
             else "unavailable"
         )
         source["status"] = source_status
+        source["primary_failure"] = (
+            exc.provider_status
+            if isinstance(exc, CSpecOperationalError)
+            else "invalid_response"
+            if isinstance(exc, CSpecResponseError)
+            else "unavailable"
+        )
         annotation["warnings"].append(str(exc))
+
+
+def _apply_cspec_lkg_fallback(annotation: AnnotationData) -> None:
+    """Use an exact local CSpec LKG entry only after live operational failure."""
+
+    source = annotation["sources"]["cspec"]
+    primary_failure = source.get("primary_failure")
+    if not isinstance(primary_failure, str) or not should_trigger_fallback(
+        primary_failure
+    ):
+        source["fallback_status"] = "not_eligible"
+        return
+    gene = source.get("query_gene")
+    disease_ids = source.get("query_disease_ids")
+    if not isinstance(gene, str) or not isinstance(disease_ids, list):
+        source["fallback_status"] = "no_match"
+        return
+
+    cache_status, entry = load_cspec_lkg(
+        settings.CSPEC_LKG_CACHE_PATH,
+        gene=gene,
+        disease_ids=disease_ids,
+    )
+    source["fallback_status"] = cache_status
+    source["cache_status"] = cache_status
+    if cache_status != "success" or entry is None:
+        source["fallback_failure"] = (
+            "invalid_response" if cache_status == "invalid" else None
+        )
+        annotation["warnings"].append(
+            (
+                "The local CSpec last-known-good cache was invalid; live "
+                "CSpec context remains unavailable."
+                if cache_status == "invalid"
+                else "No exact local CSpec last-known-good entry was "
+                "available; live CSpec context remains unavailable."
+            )
+        )
+        return
+
+    specifications = entry["specifications"]
+    provenance = build_provider_provenance(
+        capability="cspec_context",
+        provider="cached_cspec",
+        provider_role="fallback",
+        primary_provider="clingen_cspec",
+        primary_failure=primary_failure,
+    )
+    source.update(
+        {
+            "status": "partial",
+            "provider": "Local CSpec last-known-good cache",
+            "provider_role": provenance["provider_role"],
+            "fallback_used": provenance["fallback_used"],
+            "fallback_for": "clingen_cspec",
+            "fallback_failure": None,
+            "source": "cached_cspec",
+            "source_type": "last_known_good_cache",
+            "retrieved_at": entry["source_retrieved_at"],
+            "source_retrieved_at": entry["source_retrieved_at"],
+            "cache_stored_at": entry["cache_stored_at"],
+            "fallback_used_at": _retrieval_timestamp(),
+            "freshness_status": "last_known_good_age_unbounded",
+            "upstream_sources": ["ClinGen CSpec Registry"],
+            "specification_available": True,
+            "specifications": specifications,
+            "specification_count": len(specifications),
+            "specifications_truncated": False,
+        }
+    )
+    for specification in specifications:
+        annotation["references"].append(
+            {
+                "source": "ClinGen CSpec Registry",
+                "url": specification["specification_url"],
+            }
+        )
+    annotation["warnings"].append(
+        "Live ClinGen CSpec was operationally unavailable; cached "
+        "last-known-good metadata was used with its original retrieval and "
+        "cache dates. Cache age is not treated as current live evidence."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4818,6 +4980,9 @@ def annotate_variants(
             ),
             progress_callback=progress_callback,
         )
+        for annotation in annotations:
+            if _source_failed(annotation, "cspec"):
+                _apply_cspec_lkg_fallback(annotation)
         cspec_status, cspec_message = _source_progress_summary(
             annotations,
             "cspec",

@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 71 MyVariant fallback hardening complete
+**Implementation status:** Stage 72 CSpec last-known-good cache complete
 **Current release gate:** Stage 60 V3 acceptance passed; Stage 61 live gate passed
-**Next checkpoint:** Stage 72 CSpec last-known-good cache
+**Next checkpoint:** Stage 73 unified capability result schema
 **Document date:** 2026-08-09
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -30,8 +30,9 @@ model-selection, interpretation-before-review, reviewed-report, selection, refer
 Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
 bounded live validation. Stages 63-66 begin the separate provider-resilience roadmap
 with central operational-status, retry, timeout, circuit, and fallback-provenance
-contracts. Stages 66-71 apply those contracts to population, ClinVar, literature,
-MyDisease, VEP-dependent annotation evidence, and MyVariant degraded operation.
+contracts. Stages 66-72 apply those contracts to population, ClinVar, literature,
+MyDisease, VEP-dependent annotation evidence, MyVariant degraded operation, and
+CSpec last-known-good metadata.
 The authoritative
 V3 target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
@@ -289,12 +290,13 @@ flowchart LR
     AF --> AG["Stage 69: MyDisease degraded mode"]
     AG --> AH["Stage 70: VEP fallback hardening"]
     AH --> AI["Stage 71: MyVariant fallback hardening"]
-    AI --> AJ["Stage 72: CSpec LKG cache - pending"]
+    AI --> AJ["Stage 72: CSpec LKG cache"]
+    AJ --> AK["Stage 73: unified capability schema - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI done
-    class AJ review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ done
+    class AK review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -379,6 +381,7 @@ their original order.
 | 69 | Bounded MyDisease connect/read latency, limited retries to one transient connection retry, retained exact primary-failure provenance, and added a bounded local HPO disease-annotation context that never claims a gene-disease association. | Complete |
 | 70 | Kept Ensembl VEP primary and added one-call VariantValidator validation/HGVS fallback after operational failure, preserving exact normalized identity and provenance while leaving unavailable VEP consequence/plugin fields explicitly missing. | Complete |
 | 71 | Kept MyVariant.info primary and added a one-call Ensembl Variation overlap fallback after operational failure, accepting only exact assembly/coordinate/allele records and retaining provider-specific context without fabricating MyVariant aggregation fields. | Complete |
+| 72 | Added an atomic, bounded, schema-validated local cache for released CSpec metadata and operational-only live-to-cache fallback with exact gene/disease keys, explicit age provenance, and unchanged context-only semantics. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -419,7 +422,7 @@ report each variant independently.
 | MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier once for normal annotations and any later ClinVar fallback candidate. | Aggregated identifiers and population frequencies plus a bounded ClinVar-derived subset. Exact identity is required; an operational outage may activate only the separate Ensembl Variation overlap-context fallback, while a valid no-match remains terminal. |
 | NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize the primary direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. A valid no-record result is missingness, not negative evidence and not a fallback trigger. |
 | UCSC Genome Browser API, GenCC track | `https://genome-euro.ucsc.edu/cgi-bin/hubApi/getData/track` | Query the assembly-specific locus and retain exact gene claims submitted by ClinGen. | Gene-disease validity context, submitter, classification, disease identifiers, and report links. It does not classify the variant. |
-| ClinGen CSpec Registry | `https://cspec.clinicalgenome.org/cspec/{entity}/id/{identifier}` | Resolve matching VCEP/disease/specification entities. | Released specification names, versions, VCEP metadata, and URLs. The app records availability/context only and never executes CSpec rules. |
+| ClinGen CSpec Registry | `https://cspec.clinicalgenome.org/cspec/{entity}/id/{identifier}` | Resolve matching VCEP/disease/specification entities; after operational live failure only, look for the exact gene/disease key in the local LKG cache. | Released specification names, versions, VCEP metadata, URLs, and explicit live/cache freshness provenance. Cached metadata remains context only and is never presented as current live data or executed as CSpec rules. |
 | Phen2Gene | `https://phen2gene.wglab.org/api` | Send the canonical HPO set once per analysis with the `sk` weighting model. | Gene score and provider rank metadata attached to matching annotated genes. It supports phenotype correlation and never reorders input variants. |
 | MyDisease.info | `https://mydisease.info/v1/query` | Search bounded disease records by normalized gene symbol. | MONDO/DOID/OMIM/MedGen context, names, synonyms, HPO terms, pathways, and references. Primary records require an exact MONDO material-basis HGNC relation. |
 | Monarch API | `https://api-v3.monarchinitiative.org/v3/api` | Retained as centralized configuration/compatibility metadata. | It is not called by the active Stage 28 path; MyDisease.info supplies the bounded Monarch-derived disease context. |
@@ -803,6 +806,32 @@ Compact evidence, provider summaries, direct-source lineage, and references pres
 the Ensembl identity. A fallback no-match or outage leaves MyVariant explicitly failed
 and does not stop the rest of the annotation pipeline.
 
+### Stage 72 CSpec last-known-good cache
+
+`backend/cspec_cache.py` provides a private local last-known-good store for released
+CSpec context. The cache accepts only the bounded standardized metadata already
+retained by the application: specification identifier, title/version, VCEP and date
+fields, trusted canonical/source URLs, exact gene/disease scope, and retrieval dates.
+It rejects unknown fields, unsafe URLs, malformed identifiers, invalid timestamps,
+oversized files, and non-released records. Writes use a private temporary file plus
+atomic replacement; the schema is versioned, capped at 500 exact query entries and
+two megabytes, and contains no criteria/rule payloads.
+
+Live CSpec remains primary. A live success refreshes the exact gene and ordered MONDO
+query key; a valid live no-result remains terminal and never activates cached data.
+Only a normalized operational live failure remaining after bounded retries checks the
+cache. Missing, non-matching, or invalid cache state remains explicit and leaves CSpec
+unavailable. `CSPEC_LKG_CACHE_PATH` defaults to the ignored private
+`data/cache/cspec_lkg.json` location and may be configured independently.
+
+When an exact cache entry is available, the result is labelled provider
+`Local CSpec last-known-good cache`, role `fallback`, source `cached_cspec`, and source
+type `last_known_good_cache`, while retaining the live primary failure. The original
+live retrieval time, cache-storage time, fallback-use time, and
+`last_known_good_age_unbounded` freshness state are persisted in compact evidence and
+lineage. Cached specifications remain `context_only`, never apply rule logic, and are
+not silently treated as current live registry data.
+
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `2.9`.
@@ -890,8 +919,8 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **900 passed, 4 skipped**,
-with **85.93% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
+consume external API quotas. The current recorded baseline is **904 passed, 4 skipped**,
+with **85.89% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
 80% coverage.
@@ -982,6 +1011,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Core annotation providers | `backend/annotation.py` |
 | VEP-to-VariantValidator validation/mapping fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
 | MyVariant-to-Ensembl overlapping-context fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
+| CSpec last-known-good metadata cache | `backend/cspec_cache.py`, `backend/annotation.py`, `backend/report.py`, `config.py`, `.env.example`, `tests/test_pipeline.py` |
 | HPO and Phen2Gene | `backend/phenotype.py` |
 | Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
 | Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
@@ -1015,8 +1045,8 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-71 are implemented and documented. The CSpec last-known-good cache begins
-   in Stage 72; professor feedback and sign-off remain external pending checkpoints.
+1. Stages 46-72 are implemented and documented. The unified capability result schema
+   begins in Stage 73; professor feedback and sign-off remain external checkpoints.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1073,10 +1103,11 @@ Actions. Stage 61 revalidated every production provider client and both task-spe
 LLM contracts, probed representative exact links, and removed non-navigable VEP and
 GeneBe POST endpoints from report hyperlinks. Stage 62 reconciled the V3 documents,
 added and verified the multi-sheet demo workbook, corrected stale UI wording, and
-prepared the exact demo and professor-feedback checklist. Stages 63-71 added the
+prepared the exact demo and professor-feedback checklist. Stages 63-72 added the
 shared provider-resilience contract, bounded request policy, local HPO-gene and
 population fallback paths, ClinVar-derived fallback, and the provenance-preserving
 literature resilience chain, followed by bounded MyDisease latency and local
-context-only degraded mode plus limited VEP-to-VariantValidator validation/HGVS
-mapping and MyVariant-to-Ensembl exact-overlap context fallbacks. Stage 72 is the next implementation checkpoint;
+context-only degraded mode, limited VEP-to-VariantValidator validation/HGVS mapping,
+MyVariant-to-Ensembl exact-overlap context fallback, and an explicit-freshness CSpec
+last-known-good metadata cache. Stage 73 is the next implementation checkpoint;
 professor review and sign-off remain external.

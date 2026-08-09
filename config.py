@@ -545,6 +545,11 @@ class Settings:
         "data/cache",
     )
 
+    CSPEC_LKG_CACHE_PATH: Path = _resolve_path(
+        "CSPEC_LKG_CACHE_PATH",
+        "data/cache/cspec_lkg.json",
+    )
+
     HPO_DATA_DIR: Path = _resolve_path(
         "HPO_DATA_DIR",
         "data/hpo",
@@ -560,6 +565,7 @@ class Settings:
             cls.REPORT_DIR,
             cls.DATABASE_PATH.parent,
             cls.CACHE_DIR,
+            cls.CSPEC_LKG_CACHE_PATH.parent,
             cls.HPO_DATA_DIR,
             cls.LOG_PATH.parent,
         )
@@ -785,6 +791,14 @@ class Settings:
         if cls.LOG_PATH.exists() and cls.LOG_PATH.is_dir():
             raise RuntimeError(
                 "LOG_PATH must point to a file, not a directory."
+            )
+
+        if (
+            cls.CSPEC_LKG_CACHE_PATH.exists()
+            and cls.CSPEC_LKG_CACHE_PATH.is_dir()
+        ):
+            raise RuntimeError(
+                "CSPEC_LKG_CACHE_PATH must point to a file, not a directory."
             )
 
     @classmethod

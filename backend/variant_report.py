@@ -322,8 +322,10 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
     population = _mapping(enrichment.get("population_frequency"))
     literature = _mapping(enrichment.get("literature"))
     cspec = pathogenicity["cspec_context"]
+    cspec_metadata = _mapping(cspec[0]) if cspec else {}
     clingen = pathogenicity["clingen_context"]
     clinvar_provider = _provider_record(evidence, "clinvar")
+    cspec_provider = _provider_record(evidence, "cspec")
     clinvar_is_fallback = (
         clinvar_provider.get("provider_role") == "fallback"
     )
@@ -398,13 +400,38 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             ),
         },
         {
-            "source": "ClinGen CSpec",
-            "status": "success" if cspec else "not_found",
+            "source": (
+                "ClinGen CSpec — cached last-known-good metadata"
+                if cspec_metadata.get("evidence_source") == "cached_cspec"
+                else "ClinGen CSpec"
+            ),
+            "status": _status(cspec_provider.get("status"), "not_found"),
             "items": _items(
                 _item("Matching specifications", len(cspec)),
                 _item(
                     "Specification titles",
                     [record.get("title") for record in cspec],
+                ),
+                _item("Provider", cspec_provider.get("provider")),
+                _item(
+                    "Primary provider failure",
+                    cspec_provider.get("primary_failure"),
+                ),
+                _item(
+                    "Original live retrieval",
+                    cspec_metadata.get("source_retrieved_at"),
+                ),
+                _item(
+                    "Cache stored",
+                    cspec_metadata.get("cache_stored_at"),
+                ),
+                _item(
+                    "Cache fallback used",
+                    cspec_metadata.get("fallback_used_at"),
+                ),
+                _item(
+                    "Freshness",
+                    cspec_metadata.get("freshness_status"),
                 ),
             ),
         },

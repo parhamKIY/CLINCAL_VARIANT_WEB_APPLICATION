@@ -3129,9 +3129,18 @@ def _compact_cspec_context(value: object) -> list[dict[str, Any]]:
         "scope_match",
         "applicable_to_disease_context",
     )
+    cache_context = {
+        "evidence_source": source.get("source", "live_cspec"),
+        "source_type": source.get("source_type", "direct"),
+        "source_retrieved_at": source.get("source_retrieved_at"),
+        "cache_stored_at": source.get("cache_stored_at"),
+        "fallback_used_at": source.get("fallback_used_at"),
+        "freshness_status": source.get("freshness_status", "live"),
+    }
     return [
         {
             **_selected_context(item, fields),
+            **cache_context,
             "classification_effect": "context_only",
             "rule_logic_applied": False,
         }
@@ -3631,7 +3640,11 @@ def _build_evidence_lineage(
                 default_upstream_sources=(
                     "ClinGen CSpec Registry",
                 ),
-                derivation="direct",
+                derivation=(
+                    "derived"
+                    if cspec.get("source_type") == "last_known_good_cache"
+                    else "direct"
+                ),
                 source_release=(
                     ",".join(specification_versions)
                     if specification_versions
