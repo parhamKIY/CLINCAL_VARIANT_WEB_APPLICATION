@@ -87,7 +87,6 @@ from backend.evidence_review import (
     validate_evidence_review_report,
 )
 from backend.final_interpretation_report import (
-    FINAL_INTERPRETATION_REPORT_FILENAME,
     FinalInterpretationReportError,
     build_final_interpretation_report,
     render_final_interpretation_report_text,
@@ -181,6 +180,7 @@ from backend.pipeline import (
     PipelineResultError,
     confirm_reviewed_evidence,
     create_pipeline_result,
+    finalize_reviewed_analysis,
     generate_confirmed_interpretations,
     generate_final_interpretation_report,
     retry_failed_interpretations,
@@ -1559,6 +1559,28 @@ class SequenceLLMAdapter:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+def _variant_interpretation_response(
+    *,
+    model: str = "variant-interpretation-test-model",
+    conflict_assessment: str = "No meaningful conflict is present.",
+) -> LLMResponse:
+    """Return one valid Stage 50 response for pipeline integration tests."""
+
+    return LLMResponse(
+        content=json.dumps(
+            {
+                "interpretation": (
+                    "The supplied evidence supports cautious human review."
+                ),
+                "conflict_assessment": conflict_assessment,
+                "warnings": [],
+            }
+        ),
+        model=model,
+        finish_reason="stop",
+    )
 
 
 def _write_vcf(
@@ -8017,7 +8039,7 @@ class TestEvidenceObject:
             enrich_conditionally,
         )
         adapter = FakeLLMAdapter(
-            LLMTimeoutError("must not be called")
+            _variant_interpretation_response()
         )
         result = run_analysis(
             vcf_path=None,
@@ -8062,8 +8084,9 @@ class TestEvidenceObject:
             report["original_machine_report"]
             for report in result["evidence_review_reports"]
         ] == result["evidence_objects"]
-        assert adapter.requests == []
-        assert result["api_statuses"][-1]["status"] == "skipped"
+        assert len(adapter.requests) == 2
+        assert len(result["variant_interpretation_results"]) == 2
+        assert result["api_statuses"][-1]["status"] == "success"
 
     def test_stage_32_enrichment_flows_into_bounded_evidence_lineage(
         self,
@@ -11541,7 +11564,7 @@ class TestStage36FinalInterpretationReport:
         with pytest.raises(FinalInterpretationReportError, match="invalid fields"):
             validate_final_interpretation_report(report)
 
-    def test_pipeline_builds_output_b_and_streamlit_offers_download(self) -> None:
+    def test_legacy_output_b_is_not_rendered_by_active_streamlit(self) -> None:
         confirmed = TestStage35TwoLayerLLMRouting._confirmed_result()
         routed = generate_confirmed_interpretations(
             confirmed,
@@ -11568,17 +11591,10 @@ class TestStage36FinalInterpretationReport:
         app.run(timeout=10)
 
         assert not app.exception
-        assert any(
-            subheader.value == "Output B — Final interpretation only"
-            for subheader in app.subheader
-        )
-        download = next(
-            button
+        assert all(
+            button.label != "Download Output B"
             for button in app.get("download_button")
-            if button.label == "Download Output B"
         )
-        assert download.key == "download_final_interpretation_report"
-        assert FINAL_INTERPRETATION_REPORT_FILENAME.endswith(".txt")
 
     def test_pipeline_requires_stage35_results(self) -> None:
         with pytest.raises(PipelineError, match="requires completed Stage 35"):
@@ -11701,11 +11717,14 @@ class TestStage37PipelineV2Integration:
         with pytest.raises(PipelineError, match="paused after Phase A"):
             resume_confirmed_analysis(paused, reports)
 
-    def test_completed_state_requires_output_b(self) -> None:
+    def test_completed_state_requires_finalized_review_state(self) -> None:
         paused, _ = self._paused_result()
         paused["workflow_state"] = "completed"
 
-        with pytest.raises(PipelineResultError, match="requires Output B"):
+        with pytest.raises(
+            PipelineResultError,
+            match="requires finalized reviewed variants",
+        ):
             validate_pipeline_result(paused)
 
 
@@ -11936,15 +11955,63 @@ class TestStage39ReviewStatePersistence:
                 draft["analysis_id"], database_path=database_path
             )
 
+    def test_legacy_pipeline_state_has_clear_resume_error(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft, _ = self._stored_draft(database_path)
+        legacy = deepcopy(draft)
+        legacy["schema_version"] = "2.3"
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                UPDATE pipeline_states
+                SET pipeline_schema_version = '2.3', pipeline_json = ?
+                WHERE analysis_id = ?
+                """,
+                (
+                    json.dumps(legacy, ensure_ascii=False),
+                    draft["analysis_id"],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(
+            DatabaseReadError,
+            match="legacy Stage 44 analysis",
+        ):
+            load_pipeline_state(
+                draft["analysis_id"], database_path=database_path
+            )
+
 
 class TestStage40FrontendReviewWorkflow:
-    """Verify full-access review through confirmed Output B generation."""
+    """Verify pre-interpreted review through final confirmation."""
 
     @staticmethod
     def _draft_result() -> PipelineResult:
         result = TestStage35TwoLayerLLMRouting._confirmed_result()
-        result["workflow_state"] = "awaiting_confirmation"
+        evidence = result["evidence_objects"][0]
+        result["variant_interpretation_results"] = [
+            dict(
+                interpret_variant(
+                    evidence,
+                    client=LLMClient(
+                        FakeLLMAdapter(
+                            _variant_interpretation_response()
+                        )
+                    ),
+                )
+            )
+        ]
+        result["workflow_state"] = "awaiting_final_review"
         result["reviewed_evidence_packages"] = []
+        result["llm_routing_results"] = []
+        result["final_interpretation_report"] = None
         result["analysis_id"] = f"analysis-{'4' * 32}"
         return validate_pipeline_result(result)
 
@@ -11999,53 +12066,26 @@ class TestStage40FrontendReviewWorkflow:
             "reviewed_user_report"
         ] == original
 
-    def test_confirmation_unlocks_selected_models_and_output_b(
+    def test_confirmation_finalizes_without_another_llm_call(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         saved: list[PipelineResult] = []
-        observed: dict[str, str | None] = {}
         monkeypatch.setattr(
             "frontend.evidence_review.save_pipeline_state",
             lambda result: saved.append(deepcopy(result)) or result,
         )
 
-        def fake_resume(
-            result: PipelineResult,
-            *,
-            light_model: str | None,
-            strong_model: str | None,
-        ) -> PipelineResult:
-            observed.update(
-                {
-                    "light_model": light_model,
-                    "strong_model": strong_model,
-                }
-            )
-            response = TestStage35TwoLayerLLMRouting._response(
-                model="light-response",
-                resolution="not_applicable",
-            )
-            return resume_confirmed_analysis(
-                result,
-                light_client=LLMClient(FakeLLMAdapter(response)),
-                strong_client=LLMClient(FakeLLMAdapter(response)),
-            )
-
-        monkeypatch.setattr(
-            "frontend.evidence_review.resume_confirmed_analysis",
-            fake_resume,
-        )
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
         app.session_state["pipeline_result"] = self._draft_result()
         app.run(timeout=10)
 
-        generate = next(
+        finalize = next(
             button
             for button in app.button
-            if button.label == "Generate interpretation"
+            if button.label == "Finalize review"
         )
-        assert generate.disabled
+        assert finalize.disabled
         assert not any(
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
@@ -12072,97 +12112,63 @@ class TestStage40FrontendReviewWorkflow:
         ).click().run(timeout=10)
 
         assert saved[-1]["reviewed_evidence_packages"]
-        generate = next(
+        finalize = next(
             button
             for button in app.button
-            if button.label == "Generate interpretation"
+            if button.label == "Finalize review"
         )
-        assert not generate.disabled
-        generate.click().run(timeout=10)
+        assert not finalize.disabled
+        interpretations = deepcopy(
+            app.session_state["pipeline_result"][
+                "variant_interpretation_results"
+            ]
+        )
+        finalize.click().run(timeout=10)
 
-        assert observed == {
-            "light_model": settings.LLM_MODEL_LIGHT,
-            "strong_model": settings.LLM_MODEL_STRONG,
-        }
         assert app.session_state["pipeline_result"]["workflow_state"] == (
             "completed"
         )
-        assert saved[-1]["final_interpretation_report"] is not None
-        assert any(
+        assert saved[-1]["final_interpretation_report"] is None
+        assert saved[-1]["llm_routing_results"] == []
+        assert saved[-1]["variant_interpretation_results"] == interpretations
+        assert not any(
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
         )
 
-
-    def test_failed_output_exposes_targeted_retry(
+    def test_failed_interpretation_remains_reviewable(
         self,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        confirmed = TestStage35TwoLayerLLMRouting._confirmed_result()
-        completed = generate_final_interpretation_report(
-            generate_confirmed_interpretations(
-                confirmed,
-                light_client=LLMClient(
-                    FakeLLMAdapter(LLMTimeoutError("temporary timeout"))
-                ),
-            )
-        )
-        completed["analysis_id"] = f"analysis-{'5' * 32}"
-        completed = validate_pipeline_result(completed)
-        observed: dict[str, str | None] = {}
-        saved: list[PipelineResult] = []
-
-        def fake_retry(
-            result: PipelineResult,
-            *,
-            light_model: str | None,
-            strong_model: str | None,
-        ) -> PipelineResult:
-            observed.update(
-                {
-                    "light_model": light_model,
-                    "strong_model": strong_model,
-                }
-            )
-            return retry_failed_interpretations(
-                result,
-                light_client=LLMClient(
-                    FakeLLMAdapter(
-                        TestStage35TwoLayerLLMRouting._response(
-                            model="light-response",
-                            resolution="not_applicable",
+        result = self._draft_result()
+        result["variant_interpretation_results"] = [
+            dict(
+                interpret_variants(
+                    result["evidence_objects"],
+                    client=LLMClient(
+                        FakeLLMAdapter(
+                            LLMTimeoutError("temporary timeout")
                         )
-                    )
-                ),
+                    ),
+                )[0]
             )
-
-        monkeypatch.setattr(
-            "frontend.evidence_review.retry_failed_interpretations",
-            fake_retry,
-        )
-        monkeypatch.setattr(
-            "frontend.evidence_review.save_pipeline_state",
-            lambda result: saved.append(deepcopy(result)) or result,
-        )
+        ]
+        result = validate_pipeline_result(result)
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
-        app.session_state["pipeline_result"] = completed
+        app.session_state["pipeline_result"] = result
         app.run(timeout=10)
 
-        retry_button = next(
-            button
-            for button in app.button
-            if button.label == "Retry failed interpretations"
+        assert any(
+            "Interpretation is unavailable" in error.value
+            for error in app.error
         )
-        retry_button.click().run(timeout=10)
-
-        assert observed == {
-            "light_model": settings.LLM_MODEL_LIGHT,
-            "strong_model": settings.LLM_MODEL_STRONG,
-        }
-        assert saved[-1]["reviewed_evidence_packages"] == completed[
-            "reviewed_evidence_packages"
-        ]
-        assert saved[-1]["llm_routing_results"][0]["status"] == "success"
+        assert any(
+            area.label == "Reviewed evidence report (JSON)"
+            for area in app.text_area
+        )
+        assert not any(
+            button.label == "Retry failed interpretations"
+            for button in app.button
+        )
 
 
 @pytest.mark.stage15_security
@@ -12449,9 +12455,9 @@ class TestStage43TestingV2:
 
 @pytest.mark.stage44_acceptance
 class TestStage44EndToEndAcceptance:
-    """Verify the final five-variant MVP workflow gate."""
+    """Keep the five-variant MVP gate aligned with the active workflow."""
 
-    def test_five_variant_case_reaches_both_outputs_with_isolation(
+    def test_five_variant_case_reaches_final_review_with_isolation(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -12514,11 +12520,21 @@ class TestStage44EndToEndAcceptance:
         associations_path = TestPhenotype._write_hpo_gene_fixture(
             tmp_path
         )
-        preconfirmation_adapter = FakeLLMAdapter(
-            LLMRequestError("must not run before confirmation")
+        interpretation_adapter = SequenceLLMAdapter(
+            [
+                _variant_interpretation_response(),
+                _variant_interpretation_response(
+                    conflict_assessment=(
+                        "The reviewed sources require explicit conflict review."
+                    )
+                ),
+                LLMTimeoutError("isolated timeout"),
+                _variant_interpretation_response(),
+                _variant_interpretation_response(),
+            ]
         )
 
-        phase_a = run_analysis(
+        analysis = run_analysis(
             vcf_path=None,
             manual_variants=variants,
             phenotypes=hpo_terms,
@@ -12527,16 +12543,16 @@ class TestStage44EndToEndAcceptance:
             phen2gene_max_retries=0,
             phen2gene_session=_successful_phen2gene_session(),
             phen2gene_use_cache=False,
-            llm_client=LLMClient(preconfirmation_adapter),
+            llm_client=LLMClient(interpretation_adapter),
             persist_analysis=False,
         )
 
-        assert phase_a["variant_count"] == 5
-        assert phase_a["workflow_state"] == "awaiting_confirmation"
-        assert preconfirmation_adapter.requests == []
+        assert analysis["variant_count"] == 5
+        assert analysis["workflow_state"] == "awaiting_final_review"
+        assert len(interpretation_adapter.requests) == 5
         assert [
             evidence["variant"]["pos"]
-            for evidence in phase_a["evidence_objects"]
+            for evidence in analysis["evidence_objects"]
         ] == [100, 101, 102, 103, 104]
         assert all(
             {
@@ -12545,28 +12561,45 @@ class TestStage44EndToEndAcceptance:
                 "clinvar",
                 "clingen",
             }.issubset(evidence["source_statuses"])
-            for evidence in phase_a["evidence_objects"]
+            for evidence in analysis["evidence_objects"]
         )
         assert all(
             evidence["annotations"]["genebe"]["status"] == "success"
             and evidence["pathogenicity"]["cspec_context"]
-            for evidence in phase_a["evidence_objects"]
+            for evidence in analysis["evidence_objects"]
         )
         assert all(
             evidence["provenance"]["lineage"]
-            for evidence in phase_a["evidence_objects"]
+            for evidence in analysis["evidence_objects"]
         )
         assert all(
             evidence["conflict_audit"]["pre_review"]["phase"]
             == "pre_review"
-            for evidence in phase_a["evidence_objects"]
+            for evidence in analysis["evidence_objects"]
         )
         assert all(
             "conditional_enrichment" in evidence
-            for evidence in phase_a["evidence_objects"]
+            for evidence in analysis["evidence_objects"]
         )
+        interpretations = analysis["variant_interpretation_results"]
+        assert [item["variant_index"] for item in interpretations] == [
+            0,
+            1,
+            2,
+            3,
+            4,
+        ]
+        assert [item["status"] for item in interpretations] == [
+            "success",
+            "success",
+            "failed",
+            "success",
+            "success",
+        ]
+        assert interpretations[2]["interpretation"] is None
+        assert interpretations[2]["error_type"] == "LLMTimeoutError"
 
-        reports = deepcopy(phase_a["evidence_review_reports"])
+        reports = deepcopy(analysis["evidence_review_reports"])
         base_time = datetime.fromisoformat(
             reports[0]["updated_at"].replace("Z", "+00:00")
         )
@@ -12603,10 +12636,10 @@ class TestStage44EndToEndAcceptance:
         ]
         assert reports[0]["edit_history"]
         with pytest.raises(PipelineError, match="requires confirmed"):
-            generate_confirmed_interpretations(phase_a)
+            generate_confirmed_interpretations(analysis)
 
         confirmed = confirm_reviewed_evidence(
-            phase_a,
+            analysis,
             reports,
             timestamp=stage_time(3),
         )
@@ -12629,69 +12662,19 @@ class TestStage44EndToEndAcceptance:
             ]
         )
 
-        success = TestStage35TwoLayerLLMRouting._response(
-            model="light-response",
-            resolution="not_applicable",
-        )
-        light_adapter = SequenceLLMAdapter(
-            [
-                success,
-                LLMTimeoutError("isolated timeout"),
-                success,
-                success,
-            ]
-        )
-        strong_adapter = FakeLLMAdapter(
-            TestStage35TwoLayerLLMRouting._response(
-                model="strong-response",
-                resolution="unresolved",
-                text="The reviewed sources remain in conflict.",
-            )
-        )
-        routed = generate_confirmed_interpretations(
+        request_count = len(interpretation_adapter.requests)
+        completed = finalize_reviewed_analysis(
             confirmed,
-            light_client=LLMClient(light_adapter),
-            strong_client=LLMClient(strong_adapter),
             timestamp=stage_time(4),
         )
-        completed = generate_final_interpretation_report(routed)
 
-        assert [
-            item["route"] for item in completed["llm_routing_results"]
-        ] == ["llm_1", "llm_2", "llm_1", "llm_1", "llm_1"]
-        assert [
-            item["status"] for item in completed["llm_routing_results"]
-        ] == ["success", "success", "failed", "success", "success"]
-        assert completed["llm_routing_results"][1][
-            "resolution_status"
-        ] == "unresolved"
+        assert completed["workflow_state"] == "completed"
+        assert len(interpretation_adapter.requests) == request_count
+        assert completed["llm_routing_results"] == []
+        assert completed["final_interpretation_report"] is None
+        assert completed["variant_interpretation_results"] == interpretations
         assert len(completed["evidence_review_reports"]) == 5
-        output_b = completed["final_interpretation_report"]
-        assert [entry["variant_index"] for entry in output_b["entries"]] == [
-            0,
-            1,
-            2,
-            3,
-            4,
-        ]
-        assert [entry["status"] for entry in output_b["entries"]] == [
-            "success",
-            "success",
-            "failed",
-            "success",
-            "success",
-        ]
-        assert output_b["entries"][2]["failure_status"] == (
-            "interpretation_generation_failed"
-        )
-        serialized_output_b = json.dumps(output_b).casefold()
-        for prohibited in (
-            "ranking",
-            "top_n",
-            "raw_evidence",
-            "reviewed_user_report",
-        ):
-            assert prohibited not in serialized_output_b
+        assert completed["reviewed_evidence_packages"] == packages
         validate_pipeline_result(completed)
 
 
@@ -14378,7 +14361,7 @@ class TestCompletePipelineHappyPath:
             f"{CLINICAL_DECISION_SUPPORT_NOTICE}"
         )
 
-    def test_analysis_builds_editable_reports_without_calling_llm(
+    def test_analysis_builds_preinterpreted_review_drafts(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -14413,12 +14396,8 @@ class TestCompletePipelineHappyPath:
             fake_match,
         )
         adapter = FakeLLMAdapter(
-            LLMResponse(
-                content=(
-                    TestClinicalInterpretationValidation
-                    ._valid_markdown()
-                ),
-                model="pipeline-test-model",
+            _variant_interpretation_response(
+                model="pipeline-test-model"
             )
         )
         client = LLMClient(adapter)
@@ -14442,7 +14421,7 @@ class TestCompletePipelineHappyPath:
         )
 
         assert result["status"] == "success"
-        assert result["workflow_state"] == "awaiting_confirmation"
+        assert result["workflow_state"] == "awaiting_final_review"
         assert result["current_stage"] == "completed"
         assert result["progress_percent"] == 100
         assert len(result["evidence_objects"]) == 2
@@ -14462,26 +14441,29 @@ class TestCompletePipelineHappyPath:
             report["variant_index"]
             for report in result["evidence_review_reports"]
         ] == [0, 1]
-        assert adapter.requests == []
+        assert len(adapter.requests) == 2
+        assert [
+            item["status"]
+            for item in result["variant_interpretation_results"]
+        ] == ["success", "success"]
         assert result["api_statuses"][-1] == {
             "source": "llm",
-            "status": "skipped",
-            "message": "Not called before human review and confirmation.",
+            "status": "success",
+            "message": "Interpreted 2 variant(s) before final review.",
         }
         assert result["report_path"] is None
         stage_statuses = {
             record["stage"]: record["status"]
             for record in result["stages"]
         }
-        assert stage_statuses["llm"] == "skipped"
+        assert stage_statuses["llm"] == "success"
         assert all(
             status == "success"
             for stage, status in stage_statuses.items()
-            if stage != "llm"
         )
         json.dumps(result, allow_nan=False)
 
-    def test_preconfirmation_pipeline_never_retries_llm(
+    def test_analysis_phase_isolates_variant_interpretation_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -14501,7 +14483,7 @@ class TestCompletePipelineHappyPath:
             fake_annotate,
         )
         adapter = FakeLLMAdapter(
-            LLMTimeoutError("must not be called")
+            LLMTimeoutError("temporary timeout")
         )
 
         result = run_analysis(
@@ -14512,10 +14494,13 @@ class TestCompletePipelineHappyPath:
             persist_analysis=False,
         )
 
-        assert result["status"] == "success"
-        assert adapter.requests == []
-        assert result["api_statuses"][-1]["status"] == "skipped"
+        assert result["status"] == "partial"
+        assert len(adapter.requests) == 1
+        assert result["api_statuses"][-1]["status"] == "warning"
         assert len(result["evidence_review_reports"]) == 1
+        assert result["variant_interpretation_results"][0]["status"] == (
+            "failed"
+        )
 
     def test_invalid_input_returns_frontend_safe_error(self) -> None:
         result = run_analysis(
@@ -14583,7 +14568,7 @@ class TestCompletePipelineHappyPath:
         ]
         assert "secret database path" not in json.dumps(result)
 
-    def test_configured_failing_llm_is_not_called_before_review(
+    def test_configured_failing_llm_preserves_reviewable_evidence(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -14625,7 +14610,7 @@ class TestCompletePipelineHappyPath:
             persist_analysis=False,
         )
 
-        assert result["status"] == "success"
+        assert result["status"] == "partial"
         assert result["current_stage"] == "completed"
         assert len(result["evidence_objects"]) == 1
         assert len(result["evidence_review_reports"]) == 1
@@ -14636,8 +14621,11 @@ class TestCompletePipelineHappyPath:
             for record in result["stages"]
         }
         assert stage_statuses["evidence"] == "success"
-        assert stage_statuses["llm"] == "skipped"
+        assert stage_statuses["llm"] == "warning"
         assert stage_statuses["report"] == "success"
+        assert result["variant_interpretation_results"][0]["status"] == (
+            "failed"
+        )
         json.dumps(result, allow_nan=False)
 
     def test_phenotype_failure_continues_without_scores(
@@ -14676,9 +14664,8 @@ class TestCompletePipelineHappyPath:
         )
         client = LLMClient(
             FakeLLMAdapter(
-                LLMResponse(
-                    content=self._minimal_interpretation(),
-                    model="pipeline-test-model",
+                _variant_interpretation_response(
+                    model="pipeline-test-model"
                 )
             )
         )
@@ -14850,9 +14837,8 @@ class TestCompletePipelineHappyPath:
         )
         client = LLMClient(
             FakeLLMAdapter(
-                LLMResponse(
-                    content=self._minimal_interpretation(),
-                    model="pipeline-test-model",
+                _variant_interpretation_response(
+                    model="pipeline-test-model"
                 )
             )
         )
@@ -14901,13 +14887,15 @@ class TestCompletePipelineHappyPath:
         assert all(
             stage["status"] == "success"
             for stage in result["stages"]
-            if stage["stage"] != "llm"
         )
         assert next(
             stage["status"]
             for stage in result["stages"]
             if stage["stage"] == "llm"
-        ) == "skipped"
+        ) == "success"
+        assert result["variant_interpretation_results"][0]["status"] == (
+            "success"
+        )
         assert [
             snapshot["progress_percent"]
             for snapshot in progress_snapshots
@@ -15010,6 +14998,12 @@ class TestStage13IntegrationBoundaries:
                     model="integration-test-model",
                 )
             )
+        )
+
+    @staticmethod
+    def _variant_llm_client() -> LLMClient:
+        return LLMClient(
+            FakeLLMAdapter(_variant_interpretation_response())
         )
 
     def test_vcf_to_annotation_boundary(
@@ -15137,7 +15131,7 @@ class TestStage13IntegrationBoundaries:
                 _successful_phen2gene_session()
             ),
             phen2gene_use_cache=False,
-            llm_client=self._llm_client(),
+            llm_client=self._variant_llm_client(),
             report_dir=report_directory,
             database_path=database_path,
         )
@@ -15149,13 +15143,19 @@ class TestStage13IntegrationBoundaries:
         assert all(
             stage["status"] == "success"
             for stage in result["stages"]
-            if stage["stage"] != "llm"
         )
         assert next(
             stage["status"]
             for stage in result["stages"]
             if stage["stage"] == "llm"
-        ) == "skipped"
+        ) == "success"
+        pipeline_state = load_pipeline_state(
+            result["analysis_id"],
+            database_path=database_path,
+        )
+        assert pipeline_state["variant_interpretation_results"][0][
+            "status"
+        ] == "success"
         restored = get_analysis(
             result["analysis_id"],
             database_path=database_path,
@@ -15540,7 +15540,7 @@ class TestPipelineLifecycleLogging:
                 ),
                 phen2gene_use_cache=False,
                 llm_client=(
-                    TestStage13IntegrationBoundaries._llm_client()
+                    TestStage13IntegrationBoundaries._variant_llm_client()
                 ),
                 report_dir=tmp_path / "reports",
                 database_path=tmp_path / "analysis.sqlite3",
@@ -15559,17 +15559,13 @@ class TestPipelineLifecycleLogging:
             "phenotype_count=1"
         ) in contents
         for stage in PIPELINE_STAGE_ORDER:
-            if stage != "llm":
-                assert (
-                    f"event=pipeline_stage_started stage={stage}"
-                    in contents
-                )
-            expected_status = (
-                "skipped" if stage == "llm" else "success"
+            assert (
+                f"event=pipeline_stage_started stage={stage}"
+                in contents
             )
             assert (
                 "event=pipeline_stage_finished "
-                f"stage={stage} status={expected_status}"
+                f"stage={stage} status=success"
                 in contents
             )
         assert (
@@ -15581,7 +15577,12 @@ class TestPipelineLifecycleLogging:
             "event=evidence_build_finished evidence_object_count=1"
         ) in contents
         assert (
-            "event=evidence_review_reports_prepared report_count=1"
+            "event=variant_review_drafts_prepared report_count=1"
+            in contents
+        )
+        assert (
+            "event=variant_interpretations_generated result_count=1 "
+            "failure_count=0"
             in contents
         )
         run_ids = re.findall(
@@ -15741,7 +15742,7 @@ class TestStage13MockedServiceFailures:
             annotation_max_retries=0,
             annotation_session=session,  # type: ignore[arg-type]
             llm_client=(
-                TestStage13IntegrationBoundaries._llm_client()
+                TestStage13IntegrationBoundaries._variant_llm_client()
             ),
             report_dir=tmp_path / "reports",
             persist_analysis=False,
@@ -18513,6 +18514,18 @@ class TestFrontendFoundation:
             result["evidence_objects"] = [
                 TestEvidenceObject._complete_evidence_object()
             ]
+            result["variant_interpretation_results"] = [
+                dict(
+                    interpret_variant(
+                        result["evidence_objects"][0],
+                        client=LLMClient(
+                            FakeLLMAdapter(
+                                _variant_interpretation_response()
+                            )
+                        ),
+                    )
+                )
+            ]
             result["evidence_review_reports"] = [
                 dict(report)
                 for report in build_evidence_review_reports(
@@ -18520,6 +18533,7 @@ class TestFrontendFoundation:
                     timestamp="2026-08-05T08:00:00Z",
                 )
             ]
+            result["workflow_state"] = "awaiting_final_review"
             result["report_path"] = None
             progress_callback(result)
             return result
@@ -18623,7 +18637,7 @@ class TestFrontendFoundation:
         assert len(app.dataframe) == 6
         assert any(
             subheader.value
-            == "Output A — Editable detailed evidence report"
+            == "Draft Variant Review — Evidence and interpretation"
             for subheader in app.subheader
         )
         assert not app.get("download_button")

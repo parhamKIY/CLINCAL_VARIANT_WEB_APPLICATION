@@ -80,12 +80,12 @@ AnalysisRunner = Callable[
 ANALYSIS_JOB_TOKEN_PATTERN = re.compile(r"job-[0-9a-f]{32}")
 MAX_RECOVERABLE_ANALYSIS_JOBS = 32
 RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS = 60 * 60
-RECOVERY_REQUEST_SCHEMA_VERSION = 1
+RECOVERY_REQUEST_SCHEMA_VERSION = 2
 MAX_RECOVERY_REQUEST_BYTES = 1024 * 1024
 
 
 class AnalysisRecoveryRequest(TypedDict):
-    """Sanitized input sufficient to restart an interrupted Phase A run."""
+    """Sanitized input sufficient to restart the complete analysis phase."""
 
     schema_version: int
     manual_variants: list[dict[str, object]]
@@ -812,7 +812,7 @@ def prepare_analysis_recovery_request(
     phenotypes: list[str],
     llm_model: str | None,
 ) -> AnalysisRecoveryRequest:
-    """Normalize input into a private restart-safe Phase A checkpoint."""
+    """Normalize input into a restart-safe analysis-phase checkpoint."""
 
     if uploaded_vcf is not None and manual_variants is not None:
         raise FrontendExecutionError(

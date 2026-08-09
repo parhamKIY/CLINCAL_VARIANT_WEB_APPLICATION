@@ -1,4 +1,4 @@
-"""Stage 33 editable Output A review interface."""
+"""Pre-interpreted variant review and final-confirmation interface."""
 
 from __future__ import annotations
 
@@ -20,8 +20,7 @@ from backend.pipeline import (
     PipelineError,
     PipelineResult,
     confirm_reviewed_evidence,
-    retry_failed_interpretations,
-    resume_confirmed_analysis,
+    finalize_reviewed_analysis,
 )
 
 
@@ -111,7 +110,11 @@ def _invalidate_confirmation(
         if item.get("variant_index") != variant_index
     ]
     result["final_interpretation_report"] = None
-    result["workflow_state"] = "awaiting_confirmation"
+    result["workflow_state"] = (
+        "awaiting_final_review"
+        if result.get("variant_interpretation_results")
+        else "awaiting_confirmation"
+    )
     st.session_state.pop(
         f"{_REVIEW_WIDGET_PREFIX}privacy_{report_id}",
         None,
@@ -300,7 +303,6 @@ def _render_history(report: EvidenceReviewReport) -> None:
 
 def _render_package_summary(
     package: ReviewedEvidencePackage,
-    routing_result: dict[str, object] | None = None,
 ) -> None:
     post_review = package["post_review_conflict"]
     status = post_review.get("status")
@@ -321,16 +323,52 @@ def _render_package_summary(
         )
     else:
         st.success("No meaningful conflict after review.")
-    if (
-        routing_result is not None
-        and routing_result.get("resolution_status") == "unresolved"
-    ):
-        st.error("Unresolved conflict in the final interpretation.")
     if package["user_added_evidence"]:
         st.caption(
             f"{len(package['user_added_evidence'])} user-added "
-            "evidence field(s) will be visible to the LLM."
+            "evidence field(s) are retained in the final review state."
         )
+
+
+def _render_interpretation_state(
+    result: PipelineResult,
+    variant_index: int,
+) -> None:
+    interpretation = next(
+        (
+            item
+            for item in result.get("variant_interpretation_results", [])
+            if item.get("variant_index") == variant_index
+        ),
+        None,
+    )
+    if interpretation is None:
+        st.error("No pre-review interpretation result is available.")
+        return
+    if interpretation.get("status") == "failed":
+        st.error(
+            "Interpretation is unavailable because the model request "
+            f"failed ({interpretation.get('error_type') or 'unknown error'})."
+        )
+        st.caption(
+            "Collected evidence remains available for review and the "
+            "variant has not been removed."
+        )
+        return
+    st.markdown("**Variant interpretation**")
+    st.write(interpretation.get("interpretation"))
+    st.markdown("**Conflict assessment**")
+    st.write(interpretation.get("conflict_assessment"))
+    warnings = interpretation.get("warnings")
+    if isinstance(warnings, list):
+        for warning in warnings:
+            st.warning(str(warning))
+    st.caption(
+        f"Model: {interpretation.get('configured_model')} · "
+        f"Prompt: {interpretation.get('prompt_version')} · "
+        "Conflict severity supplied: "
+        f"{interpretation.get('conflict_severity')}"
+    )
 
 
 def _render_confirmation(
@@ -344,9 +382,9 @@ def _render_confirmation(
     report_id = report["report_id"]
 
     st.caption(
-        "Confirming builds an immutable Reviewed Evidence Package for "
-        "this variant. Stage 35 interpretation routing is available only "
-        "after confirmation."
+        "Confirming builds an immutable reviewed evidence state for this "
+        "variant. Interpretation was already generated during analysis; "
+        "confirmation does not call a model."
     )
     privacy_attested = st.checkbox(
         (
@@ -396,23 +434,10 @@ def _render_confirmation(
 
     package = packages.get(report_id)
     if package is not None:
-        routing_result = next(
-            (
-                item
-                for item in result.get("llm_routing_results", [])
-                if item.get("variant_index") == report["variant_index"]
-            ),
-            None,
-        )
-        _render_package_summary(package, routing_result)
+        _render_package_summary(package)
 
 
-def _render_interpretation_action(
-    result: PipelineResult,
-    *,
-    light_model: str | None,
-    strong_model: str | None,
-) -> None:
+def _render_finalization_action(result: PipelineResult) -> None:
     variant_count = result["variant_count"]
     confirmed_indexes = {
         package["variant_index"]
@@ -425,99 +450,56 @@ def _render_interpretation_action(
     completed = result.get("workflow_state") == "completed"
     failed_count = sum(
         item.get("status") == "failed"
-        for item in result.get("llm_routing_results", [])
-    )
-    single_model = (
-        isinstance(light_model, str)
-        and bool(light_model)
-        and light_model == strong_model
+        for item in result.get("variant_interpretation_results", [])
     )
 
     with st.container(border=True):
-        st.markdown("**Generate final interpretation**")
-        if single_model:
-            st.caption(
-                f"Confirmed variants: {len(confirmed_indexes)} of "
-                f"{variant_count}. Every variant uses {strong_model}; "
-                "conflict status remains interpretation context."
-            )
-        else:
-            st.caption(
-                f"Confirmed variants: {len(confirmed_indexes)} of "
-                f"{variant_count}. No-conflict variants use the low-cost "
-                "model; meaningful conflicts use the strong model."
-            )
+        st.markdown("**Finalize reviewed analysis**")
+        st.caption(
+            f"Confirmed variants: {len(confirmed_indexes)} of "
+            f"{variant_count}. Finalization validates the persisted review "
+            "state and does not make another LLM call."
+        )
         if not fully_confirmed:
             st.info(
-                "Confirm the reviewed evidence for every variant before "
-                "generating Output B."
+                "Confirm the reviewed state for every variant before "
+                "finalization."
             )
         if st.button(
-            "Generate interpretation",
+            "Finalize review",
             type="primary",
-            icon=":material/auto_awesome:",
+            icon=":material/task_alt:",
             disabled=not fully_confirmed or completed,
-            key=f"{_REVIEW_WIDGET_PREFIX}generate_interpretation",
+            key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
         ):
             try:
-                with st.spinner("Generating confirmed interpretations..."):
-                    generated = resume_confirmed_analysis(
-                        result,
-                        light_model=light_model,
-                        strong_model=strong_model,
-                    )
+                with st.spinner("Finalizing reviewed analysis..."):
+                    generated = finalize_reviewed_analysis(result)
             except PipelineError as exc:
-                st.error(f"Interpretation could not be generated: {exc}")
+                st.error(f"Review could not be finalized: {exc}")
                 return
             result.clear()
             result.update(generated)
             st.session_state["pipeline_result"] = result
             persisted = _persist_review_state(result)
             if persisted:
-                _set_notice("success", "Output B generated.")
+                _set_notice("success", "Final review confirmed.")
             else:
                 _set_notice(
                     "warning",
-                    "Output B generated, but database persistence failed.",
+                    "Review finalized, but database persistence failed.",
                 )
             st.rerun()
         if completed:
             if failed_count:
                 st.warning(
-                    f"Output B contains {failed_count} failed "
-                    "interpretation(s). Confirmed evidence is preserved."
+                    f"Final review retains {failed_count} explicit "
+                    "interpretation failure(s)."
                 )
             else:
                 st.success(
-                    "Output B has been generated from confirmed evidence."
+                    "Final review is confirmed. No additional LLM call was made."
                 )
-        if completed and failed_count and st.button(
-            "Retry failed interpretations",
-            icon=":material/refresh:",
-            key=f"{_REVIEW_WIDGET_PREFIX}retry_interpretations",
-        ):
-            try:
-                with st.spinner("Retrying failed interpretations..."):
-                    retried = retry_failed_interpretations(
-                        result,
-                        light_model=light_model,
-                        strong_model=strong_model,
-                    )
-            except PipelineError as exc:
-                st.error(f"Interpretation retry failed: {exc}")
-                return
-            result.clear()
-            result.update(retried)
-            st.session_state["pipeline_result"] = result
-            persisted = _persist_review_state(result)
-            if persisted:
-                _set_notice("success", "Failed interpretations retried.")
-            else:
-                _set_notice(
-                    "warning",
-                    "Interpretations retried, but database persistence failed.",
-                )
-            st.rerun()
 
 
 def render_evidence_review(
@@ -526,9 +508,10 @@ def render_evidence_review(
     light_model: str | None = None,
     strong_model: str | None = None,
 ) -> None:
-    """Render editable reports without invoking final interpretation."""
+    """Render pre-interpreted drafts and final review controls."""
 
-    st.subheader("Output A — Editable detailed evidence report")
+    _ = (light_model, strong_model)
+    st.subheader("Draft Variant Review — Evidence and interpretation")
     _render_notice()
     reports = result.get("evidence_review_reports", [])
     if not reports:
@@ -545,17 +528,20 @@ def render_evidence_review(
     _render_conflict_status(report)
     st.caption(
         "Every reviewed JSON field can be edited, added, or deleted. "
-        "The immutable original remains available for comparison. Final "
-        "interpretation is blocked until every variant is confirmed."
+        "The immutable evidence and pre-review interpretation remain "
+        "available for comparison."
     )
-    editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
+    interpretation_tab, editor_tab, original_tab, history_tab, confirm_tab = st.tabs(
         [
-            "Edit draft",
-            "Original machine report",
+            "Interpretation",
+            "Edit evidence draft",
+            "Original evidence",
             "Edit history",
-            "Confirm evidence",
+            "Final confirmation",
         ]
     )
+    with interpretation_tab:
+        _render_interpretation_state(result, report["variant_index"])
     with editor_tab:
         _render_editor(report, selected, drafts, result)
     with original_tab:
@@ -564,11 +550,7 @@ def render_evidence_review(
         _render_history(report)
     with confirm_tab:
         _render_confirmation(drafts[selected], result)
-    _render_interpretation_action(
-        result,
-        light_model=light_model,
-        strong_model=strong_model,
-    )
+    _render_finalization_action(result)
 
 
 __all__ = [

@@ -6,7 +6,7 @@
 
 **Implemented baseline:** Stage 44
 
-**Implementation progress:** Stages 46-50 complete; Stage 51 is next
+**Implementation progress:** Stages 46-51 complete; Stage 52 is next
 
 **Contract date:** 2026-08-08
 
@@ -15,9 +15,9 @@
 This document is the authoritative contract for the post-professor-review
 redesign. It freezes the target architecture before implementation begins.
 
-The repository still implements the Stage 44 workflow today. Features described
-as targets below are not implemented merely because Stage 45 is complete. Each
-must be delivered and verified in its assigned Stage 46–62 increment.
+The repository implements the redesign through Stage 51. Features assigned to
+Stages 52–62 remain targets and are not implemented merely because Stage 45 is
+complete.
 
 ## 2. Accepted product contract
 
@@ -168,7 +168,29 @@ The redesign must preserve:
 No Stage 46–62 behavior is claimed as implemented until its own acceptance criteria
 and relevant verification gates pass.
 
-## 10. Stage 45 acceptance record
+## 10. Stage 51 implementation record
+
+Stage 51 replaced the active Stage 44 two-phase execution path for new analyses:
+
+- analysis now collects and enriches evidence, then calls one selected Variant
+  Interpretation Model for every variant before review;
+- evidence, interpretation, conflict context, warnings, provenance, and explicit
+  per-variant model failures remain available together during final human review;
+- a reviewer may edit evidence and confirm every variant without triggering another
+  model call;
+- finalization validates the persisted reviewed state and completes without legacy
+  `LLM-1`/`LLM-2` routing or `Output B` generation;
+- interrupted-analysis recovery retains the selected model and reruns the complete
+  analysis phase, including draft interpretations; and
+- persisted pipeline payloads now use schema `2.4`; older schema-2 payloads receive
+  an explicit unsupported-legacy-resume error instead of silent reinterpretation.
+
+Stage 51 intentionally stores the existing evidence review report and the new
+interpretation result as separate, ordered per-variant records. Stage 52 owns the
+coherent Draft Variant Report V2 schema that combines them and adds the next report
+lifecycle fields.
+
+## 11. Stage 45 acceptance record
 
 - The new workflow is recorded as one authoritative contract.
 - Obsolete Stage 44 concepts are explicitly deprecated for new analyses.

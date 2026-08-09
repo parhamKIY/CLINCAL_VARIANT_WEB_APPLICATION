@@ -74,13 +74,18 @@ from backend.report import (
     EvidenceObjectError,
     build_evidence_objects,
 )
+from backend.variant_interpretation import (
+    VariantInterpretationError,
+    interpret_variants,
+    validate_variant_interpretation_result,
+)
 from backend.vcf_processing import (
     VCFProcessingError,
     parse_manual_variants,
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "2.3"
+PIPELINE_SCHEMA_VERSION = "2.4"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -113,6 +118,9 @@ PipelineAPIStatus = Literal[
 ]
 PipelineInputMode = Literal["vcf", "manual"]
 PipelineWorkflowState = Literal[
+    "analysis_running",
+    "awaiting_final_review",
+    "finalization_running",
     "phase_a_running",
     "awaiting_confirmation",
     "phase_b_running",
@@ -139,6 +147,9 @@ PIPELINE_API_STATUS_VALUES = PIPELINE_STAGE_STATUS_VALUES | {
     "no_association"
 }
 PIPELINE_WORKFLOW_STATE_VALUES = {
+    "analysis_running",
+    "awaiting_final_review",
+    "finalization_running",
     "phase_a_running",
     "awaiting_confirmation",
     "phase_b_running",
@@ -224,6 +235,7 @@ class PipelineResult(TypedDict):
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
+    variant_interpretation_results: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
     reviewed_evidence_packages: list[dict[str, object]]
     llm_routing_results: list[dict[str, object]]
@@ -417,7 +429,7 @@ def create_pipeline_result() -> PipelineResult:
 
     result: PipelineResult = {
         "schema_version": PIPELINE_SCHEMA_VERSION,
-        "workflow_state": "phase_a_running",
+        "workflow_state": "analysis_running",
         "status": "pending",
         "current_stage": "input",
         "progress_percent": 0,
@@ -443,6 +455,7 @@ def create_pipeline_result() -> PipelineResult:
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
+        "variant_interpretation_results": [],
         "evidence_review_reports": [],
         "reviewed_evidence_packages": [],
         "llm_routing_results": [],
@@ -670,6 +683,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "annotations",
         "phenotype_results",
         "evidence_objects",
+        "variant_interpretation_results",
         "evidence_review_reports",
         "llm_routing_results",
     ):
@@ -690,6 +704,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
+                    "variant_interpretation_results",
                     "evidence_review_reports",
                     "reviewed_evidence_packages",
                     "llm_routing_results",
@@ -732,6 +747,36 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "pipeline.evidence_review_reports must preserve "
                     "Evidence Object order and originals."
                 )
+    interpretation_results = value["variant_interpretation_results"]
+    if interpretation_results:
+        if len(interpretation_results) != len(value["evidence_objects"]):
+            raise PipelineResultError(
+                "pipeline.variant_interpretation_results must match the "
+                "Evidence Object count."
+            )
+        previous_index = -1
+        for item in interpretation_results:
+            index = item.get("variant_index")
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index <= previous_index
+                or index >= len(value["evidence_objects"])
+            ):
+                raise PipelineResultError(
+                    "pipeline.variant_interpretation_results must preserve "
+                    "ascending variant order without duplicates."
+                )
+            try:
+                validate_variant_interpretation_result(
+                    item,
+                    evidence=value["evidence_objects"][index],
+                )
+            except VariantInterpretationError as exc:
+                raise PipelineResultError(
+                    "pipeline.variant_interpretation_results is invalid."
+                ) from exc
+            previous_index = index
     packages = value["reviewed_evidence_packages"]
     if (
         not isinstance(packages, list)
@@ -831,9 +876,24 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "pipeline.awaiting_confirmation requires editable reports."
         )
-    if workflow_state == "completed" and final_report is None:
+    if workflow_state == "awaiting_final_review" and (
+        not review_reports
+        or len(interpretation_results) != variant_count
+    ):
         raise PipelineResultError(
-            "pipeline.completed requires Output B."
+            "pipeline.awaiting_final_review requires evidence and one "
+            "interpretation result per variant."
+        )
+    if (
+        workflow_state == "completed"
+        and final_report is None
+        and (
+            len(interpretation_results) != variant_count
+            or len(validated_packages) != variant_count
+        )
+    ):
+        raise PipelineResultError(
+            "pipeline.completed requires finalized reviewed variants."
         )
     if final_report is not None and workflow_state != "completed":
         raise PipelineResultError(
@@ -1077,6 +1137,7 @@ def _finish_failed_stage(
             "annotations",
             "phenotype_results",
             "evidence_objects",
+            "variant_interpretation_results",
             "evidence_review_reports",
             "reviewed_evidence_packages",
             "llm_routing_results",
@@ -1682,9 +1743,9 @@ def _build_evidence_and_report(
     literature_session: requests.Session | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
-    """Build Stage 33 Output A for every filtered variant."""
+    """Build evidence, pre-review interpretations, and review drafts."""
 
-    _ = (llm_client, llm_model, report_dir)
+    _ = report_dir
     result["current_stage"] = "evidence"
     result["progress_percent"] = 65
     _set_stage(
@@ -1742,11 +1803,6 @@ def _build_evidence_and_report(
         dict(evidence)
         for evidence in evidence_objects
     ]
-    review_reports = build_evidence_review_reports(evidence_objects)
-    result["evidence_review_reports"] = [
-        dict(report)
-        for report in review_reports
-    ]
     LOGGER.info(
         "event=evidence_build_finished evidence_object_count=%d",
         len(evidence_objects),
@@ -1768,17 +1824,97 @@ def _build_evidence_and_report(
     _set_stage(
         result,
         "llm",
-        "skipped",
-        progress_percent=100,
-        message="Final interpretation requires human confirmation.",
+        "running",
+        progress_percent=0,
+        message="Interpreting every variant before final review.",
     )
     _set_api_status(
         result,
         "llm",
-        "skipped",
-        "Not called before human review and confirmation.",
+        "running",
+        "Variant interpretation started before final review.",
     )
     _notify_progress(result, progress_callback)
+
+    def notify_interpretation_progress(
+        index: int,
+        total: int,
+        interpretation_status: str,
+    ) -> None:
+        completed = (
+            index
+            if interpretation_status != "running"
+            else index - 1
+        )
+        result["progress_percent"] = 75 + int((completed / total) * 13)
+        message = (
+            f"Variant interpretation {index} of {total} "
+            f"{('started' if interpretation_status == 'running' else 'finished')}."
+        )
+        _set_stage(
+            result,
+            "llm",
+            "running",
+            progress_percent=int((completed / total) * 100),
+            message=message,
+        )
+        _set_api_status(result, "llm", "running", message)
+        _notify_progress(result, progress_callback)
+
+    interpretation_results = interpret_variants(
+        evidence_objects,
+        model=llm_model,
+        client=llm_client,
+        progress_callback=notify_interpretation_progress,
+    )
+    result["variant_interpretation_results"] = [
+        dict(item)
+        for item in interpretation_results
+    ]
+    failed_interpretations = sum(
+        item["status"] == "failed"
+        for item in interpretation_results
+    )
+    model_warnings = sum(
+        len(item["warnings"])
+        for item in interpretation_results
+        if item["status"] == "success"
+    )
+    for item in interpretation_results:
+        _retain_warnings(result, item["warnings"])
+    if failed_interpretations:
+        llm_status: PipelineStageStatus = "warning"
+        llm_message = (
+            f"Interpretation completed with {failed_interpretations} "
+            "explicit variant failure(s); collected evidence was preserved."
+        )
+        _append_warning(result, llm_message)
+    elif model_warnings:
+        llm_status = "warning"
+        llm_message = (
+            f"Interpreted {len(interpretation_results)} variant(s) with "
+            f"{model_warnings} model warning(s)."
+        )
+    else:
+        llm_status = "success"
+        llm_message = (
+            f"Interpreted {len(interpretation_results)} variant(s) before "
+            "final review."
+        )
+    _set_stage(
+        result,
+        "llm",
+        llm_status,
+        progress_percent=100,
+        message=llm_message,
+    )
+    _set_api_status(result, "llm", llm_status, llm_message)
+    LOGGER.info(
+        "event=variant_interpretations_generated result_count=%d "
+        "failure_count=%d",
+        len(interpretation_results),
+        failed_interpretations,
+    )
 
     result["current_stage"] = "report"
     result["progress_percent"] = 90
@@ -1787,11 +1923,16 @@ def _build_evidence_and_report(
         "report",
         "running",
         progress_percent=0,
-        message="Preparing editable evidence review reports.",
+        message="Preparing evidence-and-interpretation review drafts.",
     )
     _notify_progress(result, progress_callback)
+    review_reports = build_evidence_review_reports(evidence_objects)
+    result["evidence_review_reports"] = [
+        dict(report)
+        for report in review_reports
+    ]
     LOGGER.info(
-        "event=evidence_review_reports_prepared report_count=%d",
+        "event=variant_review_drafts_prepared report_count=%d",
         len(review_reports),
     )
     _set_stage(
@@ -1800,8 +1941,8 @@ def _build_evidence_and_report(
         "success",
         progress_percent=100,
         message=(
-            f"Prepared {len(review_reports)} editable evidence review "
-            "reports."
+            f"Prepared {len(review_reports)} review draft(s) with "
+            "pre-review interpretation state."
         ),
     )
     result["status"] = (
@@ -1809,7 +1950,7 @@ def _build_evidence_and_report(
         if result["warnings"] or result["errors"]
         else "success"
     )
-    result["workflow_state"] = "awaiting_confirmation"
+    result["workflow_state"] = "awaiting_final_review"
     result["current_stage"] = "completed"
     result["progress_percent"] = 100
     _notify_progress(result, progress_callback)
@@ -2020,6 +2161,18 @@ def _run_analysis_unpersisted(
             literature_session=literature_session,
             progress_callback=progress_callback,
         )
+    except VariantInterpretationError as exc:
+        return _finish_exception(
+            result,
+            stage="llm",
+            error=exc,
+            default_code="variant_interpretation_failed",
+            default_message=(
+                "Variant interpretation could not be completed safely."
+            ),
+            default_recoverable=True,
+            progress_callback=progress_callback,
+        )
     except (EvidenceObjectError, EvidenceReviewError) as exc:
         return _finish_exception(
             result,
@@ -2079,7 +2232,7 @@ def run_analysis(
     persist_analysis: bool = True,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
-    """Run Phase A through editable Output A, then pause for confirmation."""
+    """Run analysis through interpretation, then pause for final review."""
 
     if vcf_path is not None and manual_variants is None:
         input_mode = "vcf"
@@ -2232,8 +2385,96 @@ def confirm_reviewed_evidence(
     ]
     if updated_indexes:
         working["final_interpretation_report"] = None
-        working["workflow_state"] = "awaiting_confirmation"
+        working["workflow_state"] = (
+            "awaiting_final_review"
+            if working["variant_interpretation_results"]
+            else "awaiting_confirmation"
+        )
     return validate_pipeline_result(working)
+
+
+def finalize_reviewed_analysis(
+    result: PipelineResult,
+    reports: Sequence[Mapping[str, object]] | None = None,
+    *,
+    timestamp: str | None = None,
+    progress_callback: PipelineProgressCallback | None = None,
+) -> PipelineResult:
+    """Finalize complete review state without making another LLM call."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if working["workflow_state"] != "awaiting_final_review":
+        raise PipelineError(
+            "Finalization requires an analysis awaiting final review."
+        )
+    if reports is not None:
+        working = confirm_reviewed_evidence(
+            working,
+            reports,
+            timestamp=timestamp,
+        )
+    expected_indexes = list(range(working["variant_count"]))
+    confirmed_indexes = [
+        package["variant_index"]
+        for package in working["reviewed_evidence_packages"]
+    ]
+    if confirmed_indexes != expected_indexes:
+        raise PipelineError(
+            "Finalization requires confirmed review state for every variant."
+        )
+    if len(working["variant_interpretation_results"]) != working[
+        "variant_count"
+    ]:
+        raise PipelineError(
+            "Finalization requires one pre-review interpretation result "
+            "for every variant."
+        )
+
+    working["workflow_state"] = "finalization_running"
+    working["status"] = "running"
+    working["current_stage"] = "report"
+    working["progress_percent"] = 95
+    _set_stage(
+        working,
+        "report",
+        "running",
+        progress_percent=95,
+        message="Validating the complete final review state.",
+    )
+    _notify_progress(working, progress_callback)
+
+    working["llm_routing_results"] = []
+    working["final_interpretation_report"] = None
+    failed = sum(
+        item["status"] == "failed"
+        for item in working["variant_interpretation_results"]
+    )
+    message = (
+        "Final review confirmed with "
+        f"{failed} explicit interpretation failure(s)."
+        if failed
+        else "Final review confirmed without an additional LLM call."
+    )
+    _set_stage(
+        working,
+        "report",
+        "warning" if failed else "success",
+        progress_percent=100,
+        message=message,
+    )
+    if failed:
+        _append_warning(working, message)
+    working["status"] = (
+        "partial"
+        if failed or working["warnings"] or working["errors"]
+        else "success"
+    )
+    working["workflow_state"] = "completed"
+    working["current_stage"] = "completed"
+    working["progress_percent"] = 100
+    validated = validate_pipeline_result(working)
+    _notify_progress(validated, progress_callback)
+    return validated
 
 
 def generate_confirmed_interpretations(
@@ -2612,6 +2853,7 @@ __all__ = [
     "PipelineStatus",
     "PipelineWorkflowState",
     "confirm_reviewed_evidence",
+    "finalize_reviewed_analysis",
     "generate_confirmed_interpretations",
     "generate_final_interpretation_report",
     "resume_confirmed_analysis",

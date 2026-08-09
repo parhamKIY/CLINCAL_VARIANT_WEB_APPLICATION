@@ -1338,7 +1338,10 @@ def load_pipeline_state(
     """Load and revalidate one resumable pipeline snapshot."""
 
     from backend.error_handling import PipelineResultError
-    from backend.pipeline import validate_pipeline_result
+    from backend.pipeline import (
+        PIPELINE_SCHEMA_VERSION,
+        validate_pipeline_result,
+    )
 
     normalized_id = _validate_analysis_id(analysis_id)
     resolved_database_path = initialize_database(database_path)
@@ -1374,7 +1377,17 @@ def load_pipeline_state(
         raise DatabaseReadError("The stored pipeline state is invalid.")
     try:
         raw = json.loads(raw_json)
+        if (
+            isinstance(raw, dict)
+            and raw.get("schema_version") != PIPELINE_SCHEMA_VERSION
+        ):
+            raise DatabaseReadError(
+                "This legacy Stage 44 analysis cannot be resumed by the "
+                "Stage 51 review workflow."
+            )
         validated = validate_pipeline_result(raw)
+    except DatabaseReadError:
+        raise
     except (
         json.JSONDecodeError,
         PipelineResultError,

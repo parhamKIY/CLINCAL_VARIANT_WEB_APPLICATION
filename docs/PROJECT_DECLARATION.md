@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stage 50 single-model interpretation contract implemented; Stage 44 orchestration remains active pending Stage 51
+**Implementation status:** Stage 51 interpretation-before-final-review pipeline implemented
 **Current release gate:** Stage 44 acceptance passed  
-**Next implementation milestone:** Stage 51 interpretation-before-final-review pipeline refactor
+**Next implementation milestone:** Stage 52 Draft Variant Report V2
 **Document date:** 2026-08-08  
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -14,22 +14,21 @@ This repository implements an evidence-centered clinical variant interpretation
 workflow for one to ten already-filtered germline Mendelian variants. It accepts a
 filtered VCF/VCF.GZ file, the first worksheet of an Excel `.xlsx` workbook, or a
 manual VCF-style table, validates and standardizes each allele, collects independent
-annotation and phenotype evidence, creates an
-editable report for every variant, requires explicit human confirmation, and only
-then sends a bounded reviewed evidence package to one of two LLM routes. The final
-output contains interpretation text, provenance, conflict status, and explicit
-per-variant failures in original input order.
+annotation and phenotype evidence, interprets every variant with one selected model,
+then presents ordered evidence and interpretation state for human review and final
+confirmation. Per-variant model failures remain explicit without removing collected
+evidence or successful interpretations.
 
 The application is clinical decision-support software for educational and research
 use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
 judgment, or replace review by a qualified genetics professional.
 
 The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 freezes that architecture without claiming that the redesign is already
-implemented. The authoritative target is defined in
+45 froze that architecture, and Stages 46-51 now implement its input, phenotype,
+model-selection, and interpretation-before-review portions. The authoritative target is defined in
 [`STAGE45_ARCHITECTURE_CONTRACT.md`](STAGE45_ARCHITECTURE_CONTRACT.md). Sections
-describing Output A, Output B, or two-layer routing below document the still-running
-Stage 44 baseline and are legacy implementation facts, not the target for new work.
+describing Output A, Output B, or two-layer routing are historical Stage 44 facts;
+they are not part of the active workflow for new analyses.
 
 ## 2. Current project boundaries
 
@@ -44,7 +43,7 @@ Stage 44 baseline and are legacy implementation facts, not the target for new wo
   phenotype, specification, and literature sources.
 - Human-editable evidence, immutable machine originals, confirmation invalidation
   after edits, and append-only review history.
-- Two-layer LLM routing after confirmation.
+- One selected Variant Interpretation Model applied before final review.
 - Local SQLite persistence, secure report exports, audit metadata, failure
   isolation, and browser-refresh recovery.
 
@@ -127,12 +126,9 @@ provider-advertised models, and bounded custom model IDs; choices remain indepen
 across reruns and are disabled while an analysis job is active.
 
 The selected phenotype model is passed only to the Stage 47 extraction task. The
-selected variant model is forwarded as both compatibility arguments to the current
-Stage 44 interpretation backend, so conflict status cannot select a different model
-through the Stage 49 UI. Legacy route records, route-specific prompt contracts, and
-the old report lifecycle remain deprecated compatibility facts until Stage 51
-connects the Stage 50 contract. Changing either task model invalidates stale analysis
-output and unaccepted phenotype suggestions.
+selected variant model is forwarded to every analysis-phase interpretation call, so
+conflict status cannot select a different model. Changing either task model
+invalidates stale analysis output and unaccepted phenotype suggestions.
 
 ### Stage 50 single-model interpretation contract
 
@@ -153,9 +149,23 @@ closed. Batch calls isolate provider/model failures without changing the selecte
 model for later variants.
 
 `VARIANT_INTERPRETATION_MAX_TOKENS` is independently bounded in centralized
-configuration. Stage 50 intentionally does not alter persistence or the active
-Stage 44 review/confirmation ordering; Stage 51 owns integration of this contract
-before final human review.
+configuration.
+
+### Stage 51 interpretation-before-final-review pipeline
+
+`backend/pipeline.py` now treats evidence collection, conflict audit, conditional
+enrichment, and one interpretation call per variant as a single analysis phase.
+Ordered `variant_interpretation_results` are persisted beside the existing evidence
+review reports. The active review UI shows both records together and explicitly marks
+interpretation as unavailable when an isolated provider or validation failure occurs.
+
+Review edits and confirmation do not invoke a model. Finalization requires one
+confirmed package and one interpretation result per input variant, clears obsolete
+routing/final-interpretation fields, and completes without another LLM call. Pipeline
+schema `2.4` and recovery-request schema `2` carry the new state; legacy pipeline
+payloads receive a clear unsupported-resume error rather than being reinterpreted.
+Stage 52 will combine the parallel evidence and interpretation records into Draft
+Variant Report V2.
 
 ## 3. Progress schematic
 
@@ -174,12 +184,13 @@ flowchart LR
     K --> L["Stage 48: local HPO acceptance"]
     L --> M["Stage 49: task-specific model UI"]
     M --> N["Stage 50: single-model interpretation contract"]
-    N --> O["Stages 51-62: remaining V3 redesign - pending"]
+    N --> O["Stage 51: interpretation-before-review pipeline"]
+    O --> Q["Stages 52-62: remaining V3 redesign - pending"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N done
-    class O review
+    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O done
+    class Q review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -243,9 +254,10 @@ their original order.
 | 48 | Added local ontology validation for every model suggestion, canonical ID/label resolution, editable candidate review, atomic explicit acceptance, and manual-path failure isolation. | Complete |
 | 49 | Reordered the Streamlit input flow, added separate task-specific model selectors, connected phenotype extraction to its selected model, and removed conflict-based model choice from the UI. | Complete |
 | 50 | Added a strict single-model variant interpretation contract with conflict-aware prompt context, route-free provenance, bounded response validation, and per-variant failure isolation. | Complete |
-| 51–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
+| 51 | Moved interpretation into the analysis phase before final review, exposed evidence and interpretation together, isolated per-variant failures, retired active Output A/B routing, and made finalization model-free. | Complete |
+| 52–62 | Implement and verify the remaining post-review V3 redesign defined by the Stage 45 architecture contract. | Planned |
 
-## 5. Current implemented architecture (legacy Stage 44 baseline)
+## 5. Current implemented architecture
 
 ```mermaid
 flowchart TD
@@ -256,20 +268,14 @@ flowchart TD
     E --> C1["Deterministic pre-review conflict audit"]
     C1 --> CE{"Conditional enrichment needed?"}
     CE -- Yes --> X["gnomAD and bounded literature services"]
-    CE -- No --> O
-    X --> O["Output A: editable Evidence Review Reports"]
-    O --> H["Human edit, notes, compare, confirm"]
-    H --> RP["Reviewed Evidence Packages"]
-    RP --> C2["Deterministic post-review conflict audit"]
-    C2 --> R{"Meaningful conflict?"}
-    R -- No --> L1["LLM-1: low-cost arrangement/synthesis"]
-    R -- Yes --> L2["LLM-2: stronger conflict interpretation"]
-    L1 --> B["Output B: final interpretation only"]
-    L2 --> B
+    CE -- No --> VI
+    X --> VI["One Variant Interpretation Model per variant"]
+    VI --> D["Evidence and interpretation review state"]
+    D --> H["Human edit, compare, and final confirmation"]
+    H --> F["Model-free finalization"]
     E --> DB["SQLite draft snapshot"]
-    RP --> DB
-    B --> DB
-    B --> DL["Streamlit view and bounded text download"]
+    D --> DB
+    F --> DB
 ```
 
 ### Active pipeline provider order
@@ -277,8 +283,8 @@ flowchart TD
 The normal progress stream reports `vep`, `genebe`, `myvariant`, `clinvar`,
 `clingen`, `cspec`, `phen2gene`, `mydisease`, and `llm`. Annotation progress is
 updated on each provider start/completion event instead of remaining fixed at 35%.
-Conditional population/literature work reports each variant step, and Phase B
-reports every individual LLM request.
+Conditional population/literature work and the analysis-phase interpretation step
+report each variant independently.
 
 ## 6. External API and data-source catalog
 
@@ -298,7 +304,7 @@ reports every individual LLM request.
 | NCBI LitVar2 | `https://www.ncbi.nlm.nih.gov/research/litvar2-api` | Resolve a variant and collect related publication identifiers. | Variant-linked PMID/PMCID references used only in bounded conditional literature enrichment. |
 | Europe PMC | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | Search bounded variant/gene literature and normalize metadata. | Titles, identifiers, dates, journals, and source metadata; article count is capped. |
 | PubMed E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Search and summarize bounded variant/gene literature. | PMID-linked article metadata. PubMed is independent of the direct ClinVar use of the same NCBI interface. |
-| OpenAI-compatible LLM API | Configured by `LLM_BASE_URL`, `LLM_API_KEY`, and model settings. | Send only a bounded, confirmed Reviewed Evidence Package through the provider-neutral client. | LLM-1 synthesizes no-conflict packages; LLM-2 interprets meaningful conflicts. Both retain route, model, prompt, response, and failure provenance. |
+| OpenAI-compatible LLM API | Configured by `LLM_BASE_URL`, `LLM_API_KEY`, and task-specific model settings. | Send each bounded, sanitized Evidence Object during analysis. | One selected Variant Interpretation Model handles every variant. Conflict changes bounded prompt context, not model selection; prompt/model/failure provenance remains explicit. |
 | Human Phenotype Ontology files | `hp.obo`, `phenotype_to_genes.txt`, and `phenotype.hpoa` release URLs | Download/update coordinated local ontology, gene, and disease association datasets. | Local HPO validation, search, normalization, association lookup, and explainable similarity scoring without a per-analysis ontology API call. |
 
 ### Provider request and failure rules
@@ -337,56 +343,58 @@ without making a final classification. Severity and routing are deterministic.
 Conditional enrichment is invoked only when the audit says additional population or
 literature context is justified.
 
-### Output A and confirmation
+### Pre-interpreted review state and confirmation
 
-Output A is one complete editable Evidence Review Report per variant. The machine
-original remains immutable. Reviewers may edit/add/delete nested evidence, add notes,
-save/reset a draft, and compare the draft with the original. Changes are recorded in
-bounded append-only history. Confirmation creates a validated Reviewed Evidence
-Package; any later draft change invalidates that confirmation.
+Analysis produces one editable Evidence Review Report and one interpretation result
+per variant in the same order. The machine evidence original remains immutable.
+Reviewers inspect interpretation, conflict assessment, warnings, and model provenance;
+they may edit/add/delete nested evidence, add notes, save/reset a draft, and compare
+the draft with the original. Changes are recorded in bounded append-only history.
+Confirmation creates a validated Reviewed Evidence Package; any later draft change
+invalidates that confirmation.
 
-### Two-layer LLM routing
+### Single-model interpretation and failure isolation
 
-- **LLM-1:** a separately selectable low-cost model used when no meaningful
-  conflict remains. Its role is controlled synthesis and arrangement, not conflict
-  resolution.
-- **LLM-2:** a separately selectable stronger model used when meaningful conflict
-  remains. It must explain evidence tension and may return `unresolved`.
-- One model failure becomes an explicit per-variant failure and does not remove
-  confirmed evidence or successful results for other variants.
-- Prompts and responses are versioned, validated, bounded, and stored with model and
-  route provenance.
+- One selected Variant Interpretation Model handles every supplied variant before
+  final review.
+- Meaningful conflict changes prompt instructions and recorded context, never the
+  selected model.
+- One model failure becomes an explicit unavailable interpretation and does not
+  remove evidence or successful results for other variants.
+- Prompts and responses are versioned, validated, bounded, and stored with model
+  provenance.
 
-### Output B
+### Stage 52 boundary
 
-Output B is schema version `1.0`. It preserves the original variant order and contains
-only the final interpretation or an explicit failure, model/route provenance, and
-unresolved-conflict disclosure. Raw evidence, reviewer drafts, ranking, and raw VCF
-content are excluded. The Streamlit UI supports viewing and downloading a bounded
-UTF-8 text representation.
+Stage 51 keeps the evidence review report and interpretation result as separate,
+ordered records. Stage 52 owns Draft Variant Report V2, which will combine evidence,
+interpretation, conflict summary, and later reference/report-lifecycle fields into one
+coherent per-variant schema.
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `2.3`.
+- Active pipeline schema: `2.4`.
 - SQLite schema: `2`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
-- Two-layer routing schema: `1.0`.
-- Final Interpretation Report schema: `1.0`.
+- Variant Interpretation Result schema: `1.0`.
+- Recovery request schema: `2`.
 
-Phase A collects evidence, performs the pre-review audit and optional enrichment,
-creates Output A, and persists a Draft snapshot. Phase B requires every variant to be
-confirmed, reruns the audit, executes per-variant LLM routing, creates Output B, and
-persists Confirmed state without changing the analysis ID.
+Analysis collects evidence, performs pre-review audit and optional enrichment,
+interprets each variant, and persists the ordered review state. Review may edit and
+confirm evidence while retaining the pre-review interpretation provenance.
+Finalization validates every confirmed package and interpretation result, then
+persists completed state without another model call or changing the analysis ID.
 
 Long analyses execute in cancellable background jobs. The browser stores only an
 opaque, unguessable recovery token. A page refresh reconnects to an active in-process
 job; when the job has completed and the result was persisted, the UI reloads it from
 SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
 A private one-hour checkpoint stores normalized variants and HPO terms, never raw VCF
-content. After a process/server restart, the same token reruns interrupted Phase A work
-from that sanitized checkpoint. Persisted Draft or Confirmed snapshots remain
-recoverable without rerunning.
+content. After a process/server restart, the same token reruns interrupted analysis
+work, including interpretation, from that sanitized checkpoint and selected model.
+Persisted current-schema Draft or Confirmed snapshots remain recoverable without
+rerunning; older pipeline payloads return an explicit unsupported-legacy-resume error.
 
 ## 9. Privacy, security, and audit position
 
@@ -428,8 +436,9 @@ and formal privacy/regulatory review.
   touching unrelated files in the recovery directory.
 - Failures are shown as explicit source/model states rather than fabricated evidence.
 - Successful variant/model results remain available when another variant fails.
-- Failed LLM interpretations can be retried without discarding confirmed evidence,
-  reviewer edits, or successful interpretations.
+- Failed interpretations remain explicit and reviewable beside retained evidence;
+  rerunning an interrupted analysis regenerates the complete ordered interpretation
+  set from its sanitized recovery request.
 - User cancellation removes partial session output, temporary uploads, and newly
   generated drafts owned by the cancelled job.
 - Progress updates occur for each normal annotation API, conditional population and
@@ -439,10 +448,11 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is mocked or blocked,
 so it is deterministic and does not consume external API quotas. The current recorded
-baseline is **741 passed, 4 skipped**, with **85.83% coverage**. The Stage 44 acceptance
-runner verifies a five-variant, multi-HPO case through Phase A, review, confirmation,
-both LLM routes, unresolved conflict, per-variant failure isolation, provenance, and
-ordered Output A/Output B generation.
+baseline is **742 passed, 4 skipped**, with **85.61% coverage**. The retained Stage 44
+acceptance runner now exercises the current five-variant, multi-HPO path through
+analysis-phase interpretation, review edits, confirmation, model-free finalization,
+per-variant failure isolation, provenance, and ordering. Stage 59 will replace this
+historically named gate with Testing V3.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
@@ -502,15 +512,15 @@ Streamlit command above.
 
 The primary demonstration uses `data/samples/mvp_demo.vcf`, a public one-row GRCh38
 example without sample or patient columns. Select several relevant HPO terms, choose
-the separate low-cost and strong LLM models, run Phase A, inspect provider states and
-Output A, make a clearly identifiable review edit, confirm every variant, and run
-Phase B. Show that the confirmation gate blocks premature LLM use, the route matches
-the deterministic conflict result, and Output B excludes raw evidence and ranking.
+the Phenotype Extraction Model and Variant Interpretation Model, run analysis, inspect
+provider states plus the generated interpretation, make a clearly identifiable review
+edit, confirm every variant, and finalize. Show that interpretation is available
+before final confirmation and that finalization makes no additional model request.
 
 The manual-input fallback uses the same public allele entered through the table UI.
 The expected safe result is a validated variant in original order with explicit
-provider evidence or missingness, an editable Output A, a confirmation-gated model
-route, and a downloadable Output B. A historical Stage 16 live check completed the
+provider evidence or missingness, a bounded interpretation or explicit failure, and
+an editable confirmation-gated review state. A historical Stage 16 live check completed the
 SAMD11 demo workflow; UCSC GenCC returned no exact claim and was correctly represented
 as missing evidence. This historical result is not a current provider-availability
 guarantee.
@@ -522,7 +532,7 @@ to demonstrate application behavior when external connectivity is unreliable.
 
 Key presentation points are independent-source provenance, correct missingness,
 immutable machine evidence, explicit human confirmation, task-specific model controls,
-legacy route compatibility, per-variant failure isolation, privacy boundaries, and
+single-model provenance, per-variant failure isolation, privacy boundaries, and
 the non-diagnostic disclaimer.
 
 ## 14. Implementation map
@@ -537,14 +547,15 @@ the non-diagnostic disclaimer.
 | Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
 | Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
 | Single-model interpretation contract | `backend/variant_interpretation.py`, `backend/llm.py`, `backend/conflict_auditor.py`, `backend/privacy.py`, `config.py` |
+| Interpretation-before-review orchestration | `backend/pipeline.py`, `frontend/evidence_review.py`, `frontend/execution.py`, `backend/database.py` |
 | MyDisease context | `backend/mydisease.py` |
 | Evidence schemas and original reports | `backend/report.py` |
 | Conflict audit | `backend/conflict_auditor.py` |
 | Conditional enrichment | `backend/conditional_enrichment.py` |
-| Editable Output A | `backend/evidence_review.py`, `frontend/evidence_review.py` |
+| Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
 | Confirmation packages | `backend/evidence_confirmation.py` |
-| LLM provider and two-layer routing | `backend/llm.py`, `backend/llm_routing.py` |
-| Output B | `backend/final_interpretation_report.py`, `frontend/final_interpretation_view.py` |
+| LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
+| Legacy Output B compatibility | `backend/final_interpretation_report.py`, `frontend/final_interpretation_view.py` |
 | Pipeline V2 and progress | `backend/pipeline.py` |
 | SQLite persistence | `backend/database.py` |
 | Privacy, logging, and safe errors | `backend/privacy.py`, `backend/logging_config.py`, `backend/error_handling.py` |
@@ -554,9 +565,9 @@ the non-diagnostic disclaimer.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-50 are implemented. The Stage 50 route-free contract is isolated and
-   verified, but active orchestration, persistence, and report lifecycle remain on
-   the Stage 44 workflow until the Stage 51 pipeline refactor is implemented.
+1. Stages 46-51 are implemented. Stage 52 still owns the coherent Draft Variant
+   Report V2 schema; Stage 51 uses parallel ordered evidence-review and interpretation
+   records during the transition.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -564,8 +575,8 @@ the non-diagnostic disclaimer.
 4. CSpec records are contextual metadata only; no specification rule engine exists.
 5. GeneBe automated ACMG results are retained as source evidence, not adopted as a
    final application classification.
-6. Human review is required for every variant before Phase B.
-7. Local restart recovery reruns Phase A from a sanitized checkpoint; it does not resume
+6. Human review is required for every variant before finalization.
+7. Local restart recovery reruns analysis from a sanitized checkpoint; it does not resume
    the exact interrupted HTTP call. A durable distributed queue would still be required
    for multi-instance production execution.
 8. SQLite is suitable for the current bounded single-application workflow, not a
@@ -576,12 +587,15 @@ the non-diagnostic disclaimer.
 ## 16. Completion statement
 
 The implemented project has passed its Stage 44 offline acceptance gate and provides
-a coherent evidence-collection, human-review, two-layer interpretation, and reporting
-workflow with explicit safety boundaries. Stage 45 incorporated the professor review
+a coherent evidence-collection, single-model interpretation-before-review, and human
+confirmation workflow with explicit safety boundaries. Stage 45 incorporated the professor review
 into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel input
 plus the centralized ten-variant boundary, Stage 47 implemented the isolated bounded
 phenotype-extraction LLM contract, Stage 48 added local ontology validation and
 explicit acceptance, and Stage 49 implemented the task-specific model selectors and
 accepted input layout. Stage 50 added and verified the route-free, single Variant
-Interpretation Model contract while preserving conflict as prompt context. The
-correct next action is Stage 51: integrate interpretation before final human review.
+Interpretation Model contract while preserving conflict as prompt context. Stage 51
+integrated that contract into the analysis phase, moved interpretation before final
+review, preserved failed variants as reviewable evidence, and removed active
+Output A/B routing from the UI. The correct next action is Stage 52: implement Draft
+Variant Report V2.

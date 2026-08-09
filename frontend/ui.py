@@ -54,9 +54,6 @@ from frontend.evidence_review import (
     clear_evidence_review_state,
     render_evidence_review,
 )
-from frontend.final_interpretation_view import (
-    render_final_interpretation_output,
-)
 from frontend.results import render_analysis_results
 
 
@@ -1516,6 +1513,3 @@ def render_app() -> None:
             light_model=variant_model,
             strong_model=variant_model,
         )
-        if pipeline_result.get("final_interpretation_report") is not None:
-            st.divider()
-            render_final_interpretation_output(pipeline_result)
