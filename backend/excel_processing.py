@@ -25,10 +25,12 @@ OPTIONAL_EXCEL_COLUMNS: Final = ("qual", "filter")
 MAX_EXCEL_ROWS_SCANNED: Final = 1_000
 EXCEL_COLUMN_ALIASES: Final = {
     "#chrom": "chrom",
+    "chr": "chrom",
     "chrom": "chrom",
     "chromosome": "chrom",
     "pos": "pos",
     "position": "pos",
+    "start": "pos",
     "ref": "ref",
     "reference": "ref",
     "alt": "alt",
@@ -109,6 +111,20 @@ def _excel_position(value: object, row_number: int) -> object:
     )
 
 
+def _excel_alternate(value: object) -> object:
+    """Map an exported table's zero deletion marker to canonical ALT."""
+
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == 0
+    ) or (
+        isinstance(value, str) and value.strip() == "0"
+    ):
+        return "<DEL>"
+    return value
+
+
 def _manual_row_from_excel(
     values: tuple[object, ...],
     indexes: dict[str, int],
@@ -131,7 +147,7 @@ def _manual_row_from_excel(
         "chrom": chromosome,
         "pos": _excel_position(value_for("pos"), row_number),
         "ref": value_for("ref"),
-        "alt": value_for("alt"),
+        "alt": _excel_alternate(value_for("alt")),
         "qual": value_for("qual"),
         "filter": value_for("filter"),
     }

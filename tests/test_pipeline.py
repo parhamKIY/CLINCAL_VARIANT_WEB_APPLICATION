@@ -19686,6 +19686,98 @@ class TestFrontendExecution:
         ]
         assert secret not in json.dumps(request)
 
+    def test_professor_style_excel_recovery_round_trip_preserves_order(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        secret = "IGNORED_PROFESSOR_WORKSHEET"
+        rows = [
+            ("16", 101, 101, "C", "T", 70, "PASS"),
+            ("5", 202, 202, "G", "A", 69, "PASS"),
+            ("13", 303, 306, "GTGC", 0, 68, "QDfilter"),
+            ("13", 404, 404, "C", 0, 67, "QDfilter"),
+            ("1", 505, 505, "A", "G", 66, "PASS"),
+            ("2", 606, 606, "T", "C", 65, "PASS"),
+            ("3", 707, 707, "G", "T", 64, "PASS"),
+        ]
+        payload = _xlsx_bytes(
+            rows,
+            headers=(
+                "Chr",
+                "Start",
+                "End",
+                "Ref",
+                "Alt",
+                "Quality",
+                "Filter",
+            ),
+            later_sheet_rows=[("patient", secret)],
+        )
+        uploaded = SimpleNamespace(
+            name="professor-variants.xlsx",
+            getvalue=lambda: payload,
+        )
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(tmp_path / "analysis.sqlite3"),
+        )
+
+        request = prepare_analysis_recovery_request(
+            uploaded_vcf=uploaded,
+            manual_variants=None,
+            phenotypes=["HP:0001250"],
+            llm_model="model",
+            input_type="excel",
+        )
+
+        variants = request["manual_variants"]
+        assert len(variants) == 7
+        assert [variant["pos"] for variant in variants] == [
+            101,
+            202,
+            303,
+            404,
+            505,
+            606,
+            707,
+        ]
+        assert [variant["alt"] for variant in variants][2:4] == [
+            "<DEL>",
+            "<DEL>",
+        ]
+        assert request["input_type"] == "excel"
+        assert secret not in json.dumps(request)
+
+        token = register_analysis_job(
+            AnalysisJob(lambda _: create_pipeline_result()),
+            recovery_request=request,
+        )
+        with frontend_execution_module._ANALYSIS_JOB_REGISTRY_LOCK:
+            frontend_execution_module._ANALYSIS_JOB_REGISTRY.clear()
+        observed: dict[str, object] = {}
+
+        def fake_execute_analysis(**kwargs: object) -> PipelineResult:
+            observed.update(kwargs)
+            return create_pipeline_result()
+
+        monkeypatch.setattr(
+            frontend_execution_module,
+            "execute_analysis",
+            fake_execute_analysis,
+        )
+
+        recovered = recover_analysis_job(token)
+
+        assert recovered is not None
+        recovered.join(2)
+        assert recovered.view().state == "completed"
+        assert observed["uploaded_vcf"] is None
+        assert observed["manual_variants"] == variants
+        assert observed["input_type"] == "excel"
+        release_registered_analysis_job(token)
+
     @pytest.mark.parametrize(
         "filename",
         [
