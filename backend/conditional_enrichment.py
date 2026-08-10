@@ -1014,6 +1014,22 @@ def fetch_population_evidence_with_fallback(
         candidate,
         session=session,
     )
+    if fallback.get("status") == "missing_identifier":
+        primary.update(
+            {
+                "fallback_attempted": False,
+                "fallback_provider": "ensembl_variation",
+                "fallback_status": "missing_identifier",
+                "fallback_http_status": None,
+                "fallback_failure_reason": fallback.get("failure_reason"),
+            }
+        )
+        primary.setdefault("warnings", []).insert(
+            0,
+            "gnomAD was unavailable; Ensembl Variation fallback could not "
+            "run because the required rsID was unavailable.",
+        )
+        return primary
     if fallback.get("status") in {
         "unavailable",
         "invalid_response",

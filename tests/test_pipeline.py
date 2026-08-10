@@ -8253,6 +8253,86 @@ class TestEvidenceObject:
         assert stored["fallback_attempted"] is True
         assert stored["fallback_status"] == "unavailable"
 
+    def test_stage_66_missing_rsid_does_not_claim_fallback_use(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        myvariant = sources["myvariant"]
+        assert isinstance(myvariant, dict)
+        myvariant.pop("variant_id")
+        session = FakeConditionalSession(
+            post_responses=[FakeResponse(403, {})],
+        )
+
+        result = fetch_population_evidence_with_fallback(
+            candidate,
+            session=session,  # type: ignore[arg-type]
+        )
+
+        assert result["status"] == "unavailable"
+        assert result["provider"] == "gnomAD"
+        assert result["fallback_used"] is False
+        assert result["fallback_attempted"] is False
+        assert result["fallback_status"] == "missing_identifier"
+        assert result["fallback_failure_reason"] == "missing_rsid"
+        assert session.get_calls == []
+
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["insufficient_evidence"],
+            "population_frequency": result,
+            "literature": {
+                "status": "missing_identifier",
+                "providers": {},
+                "articles": [],
+            },
+            "myvariant_fallback": {
+                "used": False,
+                "status": "unavailable",
+                "independent_evidence": False,
+            },
+            "warnings": list(result["warnings"]),
+        }
+
+        evidence = build_evidence_object(candidate)
+
+        capability = evidence["capability_results"]["population_frequency"]
+        assert capability["status"] == "unavailable"
+        assert capability["fallback_used"] is False
+        assert evidence["variant"] == {
+            "chrom": "2",
+            "pos": 166848215,
+            "ref": "C",
+            "alt": "T",
+        }
+
+        invalid_population = deepcopy(result)
+        invalid_population.update(
+            {
+                "status": "missing_identifier",
+                "response_status": "missing_identifier",
+                "provider": "Ensembl REST Variation",
+                "operational_provider": "ensembl_variation",
+                "provider_role": "fallback",
+                "fallback_used": True,
+                "fallback_for": "gnomad",
+            }
+        )
+        candidate["conditional_enrichment"]["population_frequency"] = (
+            invalid_population
+        )
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match=(
+                "Fallback-used capability results require retained evidence "
+                "or a valid no-match response"
+            ),
+        ):
+            build_evidence_object(candidate)
+
     def test_stage_66_forbidden_opens_analysis_circuit(self) -> None:
         session = FakeConditionalSession(
             post_responses=[FakeResponse(403, {})],
@@ -9998,6 +10078,100 @@ class TestEvidenceObject:
             evidence["variant"]["pos"]
             for evidence in evidence_objects
         ] == [166848215, 166848216]
+
+    def test_seven_partial_candidates_remain_independent_through_drafts(
+        self,
+    ) -> None:
+        candidates: list[dict[str, object]] = []
+        expected_identities: list[tuple[str, int, str, str]] = []
+        for index in range(7):
+            candidate = self._complete_candidate()
+            variant = candidate["variant"]
+            assert isinstance(variant, dict)
+            position = 166848215 + index
+            variant["pos"] = position
+            if index in {2, 3}:
+                candidate["gene"] = "TELO2"
+                candidate["gene_id"] = "ENSG00000100726"
+                sources = candidate["sources"]
+                assert isinstance(sources, dict)
+                sources["vep"] = {"status": "not_found"}
+                sources["myvariant"] = {"status": "unsupported"}
+                sources["clinvar"] = {
+                    "status": "unsupported",
+                    "accession": None,
+                    "accession_version": None,
+                    "clinical_significance": None,
+                    "review_status": None,
+                    "conditions": [],
+                }
+                sources["clingen"] = {
+                    "status": "not_found",
+                    "curations": [],
+                }
+                candidate["population_frequency"] = None
+                candidate["references"] = []
+            expected_identities.append(("2", position, "C", "T"))
+            candidates.append(candidate)
+
+        evidence_objects = build_evidence_objects(candidates)
+
+        assert len(evidence_objects) == 7
+        assert [
+            (
+                evidence["variant"]["chrom"],
+                evidence["variant"]["pos"],
+                evidence["variant"]["ref"],
+                evidence["variant"]["alt"],
+            )
+            for evidence in evidence_objects
+        ] == expected_identities
+        assert [evidence_objects[index]["gene"] for index in (2, 3)] == [
+            "TELO2",
+            "TELO2",
+        ]
+        for index in (2, 3):
+            assert evidence_objects[index]["source_statuses"] == {
+                "vep": "not_found",
+                "myvariant": "unsupported",
+                "clinvar": "unsupported",
+                "clingen": "not_found",
+            }
+
+        invalid_evidence = deepcopy(evidence_objects)
+        invalid_evidence[0].pop("capability_results")
+        blocked_adapter = FakeLLMAdapter(
+            _variant_interpretation_response()
+        )
+        with pytest.raises(
+            VariantInterpretationError,
+            match="Evidence Object collection is invalid or unsafe",
+        ):
+            interpret_variants(
+                invalid_evidence,
+                client=LLMClient(blocked_adapter),
+            )
+        assert blocked_adapter.requests == []
+
+        adapter = FakeLLMAdapter(_variant_interpretation_response())
+        interpretations = interpret_variants(
+            evidence_objects,
+            client=LLMClient(adapter),
+        )
+        reports = build_draft_variant_reports(
+            evidence_objects,
+            interpretations,
+        )
+
+        assert len(adapter.requests) == 7
+        assert len(interpretations) == 7
+        assert [report["variant_index"] for report in reports] == list(
+            range(7)
+        )
+        assert [
+            report["machine_original_report"]["variant_summary"]["gene"]
+            for report in reports[2:4]
+        ] == ["TELO2", "TELO2"]
 
     def test_stage_5_and_6_candidate_flows_into_stage_7(
         self,
