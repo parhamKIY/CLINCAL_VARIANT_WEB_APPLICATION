@@ -44,7 +44,10 @@ from config import settings
 
 
 VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.1"
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.1"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.2"
+SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
+    {"variant-interpretation-v1.1", VARIANT_INTERPRETATION_PROMPT_VERSION}
+)
 MAX_INTERPRETATION_EVIDENCE_BYTES = 512 * 1024
 MAX_INTERPRETATION_RESPONSE_BYTES = 64 * 1024
 MAX_INTERPRETATION_CHARACTERS = 20_000
@@ -57,6 +60,15 @@ LOGGER = get_logger("variant_interpretation")
 
 InterpretationStatus = Literal["success", "failed"]
 InterpretationPromptMode = Literal["standard", "conflict_aware"]
+PhenotypeConclusion = Literal[
+    "supported",
+    "partially supported",
+    "no supported association found",
+    "phenotype evidence unavailable",
+]
+PHENOTYPE_CONCLUSIONS = frozenset(
+    cast(tuple[str, ...], PhenotypeConclusion.__args__)
+)
 InterpretationFailureType = Literal[
     "request_timeout",
     "connection_error",
@@ -96,6 +108,7 @@ SAFE_SCHEMA_ERRORS = frozenset(
         "missing_choices",
         "missing_message",
         "missing_response_field",
+        "phenotype_conclusion_mismatch",
         "privacy_rejection",
         "provider_unavailable",
         "response_size_limit",
@@ -205,6 +218,7 @@ VARIANT_INTERPRETATION_RESPONSE_SCHEMA = LLMJSONSchema(
         "required": [
             "interpretation",
             "conflict_assessment",
+            "phenotype_conclusion",
             "warnings",
         ],
         "properties": {
@@ -217,6 +231,10 @@ VARIANT_INTERPRETATION_RESPONSE_SCHEMA = LLMJSONSchema(
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_CONFLICT_ASSESSMENT_CHARACTERS,
+            },
+            "phenotype_conclusion": {
+                "type": "string",
+                "enum": sorted(PHENOTYPE_CONCLUSIONS),
             },
             "warnings": {
                 "type": "array",
@@ -253,6 +271,13 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "7. Cite only supplied reference IDs using [R1], [R2], and so on. "
         "Never invent a reference ID or supply a URL.",
         "8. Return only the required structured response. Do not add URLs.",
+        "9. Use exactly one allowed phenotype conclusion: supported, "
+        "partially supported, no supported association found, or phenotype "
+        "evidence unavailable.",
+        "10. If phenotype is unsupported, explicitly state that no supported "
+        "association was identified, continue from the remaining evidence, "
+        "and do not treat mismatch as benign or negative pathogenicity "
+        "evidence.",
         "",
         "Human review is required before this interpretation can contribute "
         "to a final report.",
@@ -318,6 +343,28 @@ def _conflict_context(
     return status.strip(), cast(str, severity), mode
 
 
+def _expected_phenotype_conclusion(
+    evidence: Mapping[str, object],
+) -> PhenotypeConclusion:
+    phenotype = evidence.get("phenotype_relationship")
+    status = (
+        phenotype.get("phenotype_status")
+        if isinstance(phenotype, Mapping)
+        else None
+    )
+    conclusion = {
+        "exact_match": "supported",
+        "partial_match": "partially supported",
+        "no_exact_match": "no supported association found",
+        "not_applicable": "phenotype evidence unavailable",
+    }.get(status)
+    if conclusion is None:
+        raise VariantInterpretationError(
+            "Evidence phenotype status is unsupported."
+        )
+    return cast(PhenotypeConclusion, conclusion)
+
+
 def _build_prompt(
     evidence: EvidenceObject,
     *,
@@ -352,6 +399,7 @@ def _build_prompt(
         else "Synthesize the evidence conservatively; do not manufacture a "
         "conflict or overstate agreement."
     )
+    phenotype_conclusion = _expected_phenotype_conclusion(evidence)
     reference_catalog = [
         {
             "reference_id": reference["reference_id"],
@@ -394,6 +442,11 @@ def _build_prompt(
         f"Prompt version: {VARIANT_INTERPRETATION_PROMPT_VERSION}\n"
         f"Prompt mode: {prompt_mode}\n"
         f"Task instruction: {mode_instruction}\n"
+        "Phenotype instruction: Return the conclusion "
+        f"'{phenotype_conclusion}'. If it is 'no supported association "
+        "found', state that explicitly and continue interpreting the "
+        "variant from all remaining evidence. Phenotype mismatch is not "
+        "negative pathogenicity evidence.\n"
         "BEGIN_VALIDATED_EVIDENCE_OBJECT\n"
         f"{serialized}\n"
         "END_VALIDATED_EVIDENCE_OBJECT\n"
@@ -437,6 +490,7 @@ def _bounded_output_text(value: object, *, field: str, maximum: int) -> str:
 def _parse_response(
     response: LLMResponse,
     *,
+    evidence: EvidenceObject,
     allowed_reference_ids: set[str],
 ) -> tuple[str, str, list[str], list[str]]:
     if response.finish_reason not in {None, "stop"}:
@@ -466,12 +520,36 @@ def _parse_response(
             failure_type="output_parse_failure",
             schema_error="invalid_json",
         ) from exc
-    expected = {"interpretation", "conflict_assessment", "warnings"}
+    expected = {
+        "interpretation",
+        "conflict_assessment",
+        "phenotype_conclusion",
+        "warnings",
+    }
     if not isinstance(payload, Mapping) or set(payload) != expected:
         raise VariantInterpretationError(
             "The interpretation response has invalid fields.",
             failure_type="output_schema_failure",
             schema_error="invalid_fields",
+        )
+    phenotype_conclusion = payload["phenotype_conclusion"]
+    if phenotype_conclusion not in PHENOTYPE_CONCLUSIONS:
+        raise VariantInterpretationError(
+            "Interpretation phenotype conclusion is invalid.",
+            failure_type="output_schema_failure",
+            schema_error="phenotype_conclusion_mismatch",
+        )
+    expected_phenotype_conclusion = _expected_phenotype_conclusion(evidence)
+    allowed_phenotype_conclusions = (
+        {"supported", "partially supported"}
+        if expected_phenotype_conclusion == "supported"
+        else {expected_phenotype_conclusion}
+    )
+    if phenotype_conclusion not in allowed_phenotype_conclusions:
+        raise VariantInterpretationError(
+            "Interpretation phenotype conclusion conflicts with evidence.",
+            failure_type="output_schema_failure",
+            schema_error="phenotype_conclusion_mismatch",
         )
     raw_warnings = payload["warnings"]
     if (
@@ -502,6 +580,21 @@ def _parse_response(
         field="interpretation",
         maximum=MAX_INTERPRETATION_CHARACTERS,
     )
+    if phenotype_conclusion in {
+        "no supported association found",
+        "phenotype evidence unavailable",
+    }:
+        interpretation = (
+            f"Phenotype conclusion: {phenotype_conclusion}.\n\n"
+            f"{interpretation}"
+        )
+        if len(interpretation) > MAX_INTERPRETATION_CHARACTERS:
+            raise VariantInterpretationError(
+                "Interpretation exceeds its size limit after phenotype "
+                "conclusion normalization.",
+                failure_type="output_schema_failure",
+                schema_error="response_size_limit",
+            )
     conflict_assessment = _bounded_output_text(
         payload["conflict_assessment"],
         field="conflict_assessment",
@@ -722,6 +815,7 @@ def _execute_interpretation_request(
             )
             parsed = _parse_response(
                 response,
+                evidence=evidence,
                 allowed_reference_ids=allowed_reference_ids,
             )
             return response, parsed, repair_used
@@ -1061,7 +1155,9 @@ def validate_variant_interpretation_result(
         or not variant["alt"].strip()
     ):
         raise VariantInterpretationError("Variant identity is invalid.")
-    if value["prompt_version"] != VARIANT_INTERPRETATION_PROMPT_VERSION:
+    if value["prompt_version"] not in (
+        SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS
+    ):
         raise VariantInterpretationError("Prompt version is invalid.")
     if value["prompt_mode"] not in {"standard", "conflict_aware"}:
         raise VariantInterpretationError("Prompt mode is invalid.")
@@ -1233,6 +1329,9 @@ __all__ = [
     "INTERPRETATION_FAILURE_TYPES",
     "InterpretationFailureDiagnostic",
     "InterpretationFailureType",
+    "PHENOTYPE_CONCLUSIONS",
+    "PhenotypeConclusion",
+    "SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS",
     "MAX_CONFLICT_ASSESSMENT_CHARACTERS",
     "MAX_INTERPRETATION_CHARACTERS",
     "MAX_INTERPRETATION_WARNINGS",

@@ -1642,6 +1642,7 @@ def _variant_interpretation_response(
     *,
     model: str = "variant-interpretation-test-model",
     conflict_assessment: str = "No meaningful conflict is present.",
+    phenotype_conclusion: str = "partially supported",
 ) -> LLMResponse:
     """Return one valid Stage 50 response for pipeline integration tests."""
 
@@ -1652,6 +1653,7 @@ def _variant_interpretation_response(
                     "The supplied evidence supports cautious human review."
                 ),
                 "conflict_assessment": conflict_assessment,
+                "phenotype_conclusion": phenotype_conclusion,
                 "warnings": [],
             }
         ),
@@ -11997,12 +11999,14 @@ class TestStage50SingleModelInterpretation:
     def _payload(
         *,
         conflict_assessment: str = "No meaningful conflict is present.",
+        phenotype_conclusion: str = "partially supported",
     ) -> dict[str, object]:
         return {
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
             "conflict_assessment": conflict_assessment,
+            "phenotype_conclusion": phenotype_conclusion,
             "warnings": ["Human review remains required."],
         }
 
@@ -12144,6 +12148,7 @@ class TestStage50SingleModelInterpretation:
                 {
                     "interpretation": "Text",
                     "conflict_assessment": "None",
+                    "phenotype_conclusion": "partially supported",
                     "warnings": [],
                     "route": "llm_1",
                 },
@@ -12154,6 +12159,7 @@ class TestStage50SingleModelInterpretation:
                     "interpretation": "x"
                     * (MAX_INTERPRETATION_CHARACTERS + 1),
                     "conflict_assessment": "None",
+                    "phenotype_conclusion": "partially supported",
                     "warnings": [],
                 },
                 "size limit",
@@ -12162,6 +12168,7 @@ class TestStage50SingleModelInterpretation:
                 {
                     "interpretation": "See https://invented.example",
                     "conflict_assessment": "None",
+                    "phenotype_conclusion": "partially supported",
                     "warnings": [],
                 },
                 "must not contain URLs",
@@ -12170,6 +12177,7 @@ class TestStage50SingleModelInterpretation:
                 {
                     "interpretation": "Text",
                     "conflict_assessment": "None",
+                    "phenotype_conclusion": "partially supported",
                     "warnings": ["Repeated", "Repeated"],
                 },
                 "must be unique",

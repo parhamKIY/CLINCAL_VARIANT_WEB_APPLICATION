@@ -156,7 +156,10 @@ provenance. Meaningful conflict changes only the bounded instruction mode; it ne
 changes the selected model.
 
 Responses must satisfy a strict route-free JSON schema containing interpretation,
-conflict assessment, and warnings. The contract records model and prompt provenance,
+conflict assessment, phenotype conclusion, and warnings. The phenotype conclusion is
+restricted to supported, partially supported, no supported association found, or
+phenotype evidence unavailable. Unsupported phenotype never removes the variant or
+becomes negative pathogenicity evidence. The contract records model and prompt provenance,
 conflict status/severity, completion state, token usage, and explicit isolated
 failures while preserving variant order. It rejects obsolete `LLM-1`/`LLM-2` route
 fields, malformed or incomplete responses, unsafe evidence, invented response URLs,

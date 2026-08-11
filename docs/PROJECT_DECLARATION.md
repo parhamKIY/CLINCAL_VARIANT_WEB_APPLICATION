@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-89 implemented as recorded below
+**Implementation status:** Stages 0-90 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 90 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 91 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -77,7 +77,11 @@ Stage 89 adds one transient retry, one constrained structured-output repair, and
 optional operational-only fallback model. The user-selected model remains primary for
 every conflict and no-conflict variant, and fallback receives the same normalized
 evidence.
-This declaration is the unified implementation record for Stages 0-89. The former
+Stage 90 makes phenotype non-concordance a valid interpretation outcome. Unrelated or
+unavailable phenotype evidence is stated explicitly while variant interpretation
+continues from remaining evidence without forced disease association or pathogenicity
+down-weighting.
+This declaration is the unified implementation record for Stages 0-90. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -360,12 +364,13 @@ flowchart LR
     AX --> AY["Stage 87: variant cardinality and identity gate"]
     AY --> AZ["Stage 88: interpretation failure diagnostics"]
     AZ --> BA["Stage 89: interpretation recovery policy"]
+    BA --> BB["Stage 90: phenotype non-concordance contract"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA done
+    class AV,AW,AX,AY,AZ,BA,BB done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -468,6 +473,7 @@ their original order.
 | 87 | Added immutable input indexes, assembly-qualified allele digests, cross-stage cardinality validation, and persisted report-lineage integrity records. | Complete |
 | 88 | Replaced internal interpretation exception names with a bounded twelve-category failure taxonomy, secret-free structured diagnostics, and concise reviewer messages. | Complete |
 | 89 | Added one transient interpretation retry, one constrained structured-output repair, and optional operational-only fallback using the unchanged normalized evidence. | Complete |
+| 90 | Added four explicit phenotype conclusions, prompt-level non-concordance instructions, evidence-consistency validation, and an unrelated abdominal-pain acceptance fixture that remains successfully interpretable. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1280,6 +1286,20 @@ invalid requests, non-retryable HTTP 4xx, or internal conversion failures. The a
 fallback model and a concise operational warning remain in result provenance, and
 structured logs identify the recovery without storing prompts, responses, or secrets.
 
+### Stage 90 phenotype non-concordance contract
+
+Variant Interpretation prompt `variant-interpretation-v1.2` requires one of four
+explicit phenotype conclusions: supported, partially supported, no supported
+association found, or phenotype evidence unavailable. The response conclusion is
+validated against the deterministic phenotype status in the sanitized Evidence
+Object. Persisted historical `v1.1` prompt results remain valid.
+
+For valid unrelated phenotype, the interpretation remains successful, prepends an
+explicit no-supported-association statement, and continues from remaining evidence.
+It does not invent a disease match, remove the allele, or reinterpret mismatch as
+benign/negative pathogenicity evidence. `ReportData V4` retains the canonical
+`no_supported_association` concordance independently of classification evidence.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1500,6 +1520,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 87 variant cardinality and identity gate | `backend/variant_integrity.py`, `backend/pipeline.py`, `backend/privacy.py`, `backend/database.py`, `docs/stage_87_variant_integrity.md`, `tests/test_stage87_variant_integrity.py` |
 | Stage 88 interpretation failure diagnostics | `backend/llm.py`, `backend/variant_interpretation.py`, `frontend/evidence_review.py`, `docs/stage_88_interpretation_diagnostics.md`, `tests/test_stage88_interpretation_diagnostics.py` |
 | Stage 89 interpretation recovery policy | `backend/llm.py`, `backend/variant_interpretation.py`, `config.py`, `.env.example`, `docs/stage_89_interpretation_recovery.md`, `tests/test_stage89_interpretation_recovery.py` |
+| Stage 90 phenotype non-concordance contract | `backend/variant_interpretation.py`, `backend/report_data.py`, `backend/report_data_projection.py`, `docs/stage_90_phenotype_non_concordance.md`, `tests/test_stage90_phenotype_non_concordance.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1519,7 +1540,7 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-89 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-90 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
    Stages 86-106, professor feedback, and final visual sign-off remain pending.
@@ -1620,5 +1641,7 @@ interpretation exception names with a stable twelve-category failure taxonomy, a
 secret-free per-variant structured diagnostics, and kept reviewer-facing failures
 concise. Stage 89 then added one bounded transient retry, one constrained
 structured-output repair, and an optional operational-only fallback model while
-preserving the selected model as the primary for every variant. Stage 90 phenotype
-non-concordance work has not started.
+preserving the selected model as the primary for every variant. Stage 90 then made
+unrelated phenotype a valid explicit no-supported-association outcome while retaining
+variant interpretation and source-attributed pathogenicity evidence. Stage 91 model
+quality benchmarking has not started.

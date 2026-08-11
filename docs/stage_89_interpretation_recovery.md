@@ -58,4 +58,5 @@ Validated on 2026-08-11:
 - full repository suite: `1014 passed, 4 skipped`;
 - Stage 60 release gate: passed at `85.69%` coverage.
 
-Stage 90 phenotype non-concordance work is not implemented here.
+Stage 90 subsequently added the phenotype non-concordance response and prompt
+contract while retaining this recovery sequence.

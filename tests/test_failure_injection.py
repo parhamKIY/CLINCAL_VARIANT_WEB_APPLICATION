@@ -47,13 +47,22 @@ def _final_report_asserts_degraded_source(
     notices = build_fallback_notices(evidence["capability_results"])
     notice = next(item for item in notices if item["capability"] == capability)
     expected_provider_entry = f"Fallback: {notice['message']}"
+    phenotype = evidence["phenotype_relationship"]
+    phenotype_conclusion = {
+        "exact_match": "supported",
+        "partial_match": "partially supported",
+        "no_exact_match": "no supported association found",
+        "not_applicable": "phenotype evidence unavailable",
+    }[phenotype["phenotype_status"]]
 
     interpretation = dict(
         interpret_variant(
             evidence,
             client=LLMClient(
                 fixtures.FakeLLMAdapter(
-                    fixtures._variant_interpretation_response()
+                    fixtures._variant_interpretation_response(
+                        phenotype_conclusion=phenotype_conclusion
+                    )
                 )
             ),
         )
