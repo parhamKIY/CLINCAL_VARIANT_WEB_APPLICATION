@@ -17,10 +17,17 @@ from backend.privacy import (
     validate_no_prohibited_fields,
 )
 from backend.provider_resilience import capability_availability
+from backend.reference_model import (
+    DataSourceRecord,
+    REFERENCE_MODEL_SCHEMA_VERSION,
+    ReferenceModelError,
+    build_reference_model_v2,
+    validate_data_source_record,
+    validate_reference_model_v2,
+)
 from backend.references import (
     CanonicalReference,
     CanonicalReferenceError,
-    build_canonical_references,
     cited_reference_ids,
     validate_canonical_reference,
 )
@@ -31,7 +38,7 @@ from backend.variant_interpretation import (
 )
 
 
-DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.1"
+DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.2"
 MAX_DRAFT_VARIANT_REPORT_BYTES = 128 * 1024
 MAX_REPORT_TEXT_CHARS = 20_000
 MAX_EVIDENCE_VALUE_CHARS = 4_000
@@ -136,7 +143,8 @@ class VariantReportContent(TypedDict):
     variant_interpretation: InterpretationSection
     reviewer_summary: str | None
     reviewer_notes: list[str]
-    references: list[CanonicalReference]
+    literature_references: list[CanonicalReference]
+    data_sources: list[DataSourceRecord]
     provenance: ReportProvenance
     limitations: list[str]
 
@@ -490,10 +498,6 @@ def _rsid(evidence: EvidenceObject) -> str | None:
     return None
 
 
-def _references(evidence: EvidenceObject) -> list[CanonicalReference]:
-    return build_canonical_references(evidence)[:MAX_REPORT_REFERENCES]
-
-
 def _provenance(
     evidence: EvidenceObject,
     interpretation: VariantInterpretationResult,
@@ -531,6 +535,7 @@ def _content(
     context = evidence["variant_context"]
     variant = evidence["variant"]
     audit = evidence["conflict_audit"]["pre_review"]
+    reference_model = build_reference_model_v2(evidence)
     gene = context["gene"] or evidence["gene"]
     coordinate = (
         f"{evidence['assembly']} {variant['chrom']}:{variant['pos']} "
@@ -596,7 +601,10 @@ def _content(
         },
         "reviewer_summary": None,
         "reviewer_notes": [],
-        "references": _references(evidence),
+        "literature_references": reference_model["literature_references"][
+            :MAX_REPORT_REFERENCES
+        ],
+        "data_sources": reference_model["data_sources"][:MAX_REPORT_REFERENCES],
         "provenance": _provenance(evidence, interpretation),
         "limitations": limitations[:MAX_REPORT_LIST_ITEMS],
     }
@@ -1148,19 +1156,21 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
             f"{path}.reviewer_notes is not normalized."
         )
 
-    references = content["references"]
+    references = content["literature_references"]
     if not isinstance(references, list) or len(references) > MAX_REPORT_REFERENCES:
-        raise DraftVariantReportError(f"{path}.references is invalid.")
+        raise DraftVariantReportError(
+            f"{path}.literature_references is invalid."
+        )
     for index, reference_value in enumerate(references):
         try:
             reference = validate_canonical_reference(reference_value)
         except CanonicalReferenceError as exc:
             raise DraftVariantReportError(
-                f"{path}.references[{index}] is not canonical."
+                f"{path}.literature_references[{index}] is not canonical."
             ) from exc
         if reference["reference_id"] != f"R{index + 1}":
             raise DraftVariantReportError(
-                f"{path}.references must preserve citation order."
+                f"{path}.literature_references must preserve citation order."
             )
     citation_texts: list[object] = [
         interpretation["narrative"],
@@ -1188,6 +1198,29 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
         raise DraftVariantReportError(
             f"{path} contains a citation absent from canonical references."
         )
+
+    data_sources = content["data_sources"]
+    if not isinstance(data_sources, list) or len(data_sources) > MAX_REPORT_REFERENCES:
+        raise DraftVariantReportError(f"{path}.data_sources is invalid.")
+    try:
+        for source in data_sources:
+            validate_data_source_record(source)
+    except ReferenceModelError as exc:
+        raise DraftVariantReportError(
+            f"{path}.data_sources contains invalid provenance."
+        ) from exc
+    try:
+        validate_reference_model_v2(
+            {
+                "schema_version": REFERENCE_MODEL_SCHEMA_VERSION,
+                "literature_references": references,
+                "data_sources": data_sources,
+            }
+        )
+    except ReferenceModelError as exc:
+        raise DraftVariantReportError(
+            f"{path} mixes literature and data-source references."
+        ) from exc
 
     provenance = _require_fields(
         content["provenance"],

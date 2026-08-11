@@ -30,8 +30,8 @@ from backend.privacy import (
     validate_llm_payload,
     validate_variant_interpretation_payload,
 )
+from backend.reference_model import build_reference_model_v2
 from backend.references import (
-    build_canonical_references,
     cited_reference_ids,
 )
 from backend.report import (
@@ -44,9 +44,13 @@ from config import settings
 
 
 VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.1"
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.2"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.3"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
-    {"variant-interpretation-v1.1", VARIANT_INTERPRETATION_PROMPT_VERSION}
+    {
+        "variant-interpretation-v1.1",
+        "variant-interpretation-v1.2",
+        VARIANT_INTERPRETATION_PROMPT_VERSION,
+    }
 )
 MAX_INTERPRETATION_EVIDENCE_BYTES = 512 * 1024
 MAX_INTERPRETATION_RESPONSE_BYTES = 64 * 1024
@@ -408,7 +412,9 @@ def _build_prompt(
             "identifier": reference["identifier"],
             "title": reference["title"],
         }
-        for reference in build_canonical_references(evidence)
+        for reference in build_reference_model_v2(evidence)[
+            "literature_references"
+        ]
     ]
     try:
         validate_variant_interpretation_payload(
@@ -790,7 +796,9 @@ def _execute_interpretation_request(
 
     allowed_reference_ids = {
         reference["reference_id"]
-        for reference in build_canonical_references(evidence)
+        for reference in build_reference_model_v2(evidence)[
+            "literature_references"
+        ]
     }
     repair_used = False
     for repair_index in range(2):
@@ -1271,7 +1279,9 @@ def validate_variant_interpretation_result(
         if evidence is not None:
             allowed_ids = {
                 reference["reference_id"]
-                for reference in build_canonical_references(source)
+                for reference in build_reference_model_v2(source)[
+                    "literature_references"
+                ]
             }
             if any(item not in allowed_ids for item in cited_ids):
                 raise VariantInterpretationError(

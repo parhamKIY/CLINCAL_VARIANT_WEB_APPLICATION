@@ -561,10 +561,10 @@ def _render_draft_variant_report(
         for note in content["reviewer_notes"]:
             st.write(f"- {note}")
 
-    st.markdown("#### References")
-    if not content["references"]:
-        st.caption("No trusted reference was available.")
-    for reference in content["references"]:
+    st.markdown("#### Literature References")
+    if not content["literature_references"]:
+        st.caption("No scientific literature reference was available.")
+    for reference in content["literature_references"]:
         label = f"[{reference['reference_id']}] {reference['source']}"
         if reference["identifier"]:
             label += f" — {reference['identifier']}"
@@ -578,6 +578,18 @@ def _render_draft_variant_report(
         else:
             st.write(label)
             st.caption("No validated link is available for this reference.")
+
+    st.markdown("#### Data Sources")
+    if not content["data_sources"]:
+        st.caption("No database or tool provenance was recorded.")
+    for source in content["data_sources"]:
+        label = f"{source['source']} — {source['status']}"
+        if source["record_identifier"]:
+            label += f" — {source['record_identifier']}"
+        if source["human_url"] and source["link_status"] == "validated":
+            st.link_button(label, source["human_url"])
+        else:
+            st.write(f"- {label}")
 
     with st.expander("Provenance and limitations"):
         provenance = content["provenance"]

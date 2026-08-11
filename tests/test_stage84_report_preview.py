@@ -91,7 +91,7 @@ def _draft_report() -> dict[str, object]:
         },
         "reviewer_summary": None,
         "reviewer_notes": [],
-        "references": [
+        "literature_references": [
             {
                 "reference_id": "R1",
                 "source": "PubMed",
@@ -100,6 +100,23 @@ def _draft_report() -> dict[str, object]:
                 "title": "Sequence variant interpretation standards",
                 "canonical_url": "https://pubmed.ncbi.nlm.nih.gov/25741868/",
                 "url_status": "validated",
+            }
+        ],
+        "data_sources": [
+            {
+                "source": "ClinVar",
+                "capability": "clinvar_evidence",
+                "status": "available",
+                "operational_status": "success",
+                "provider_role": "primary",
+                "method": "direct_clinvar_lookup",
+                "record_identifier": "VCV000000001.1",
+                "dataset": None,
+                "human_url": None,
+                "link_status": "unavailable",
+                "fallback_used": False,
+                "primary_failure": None,
+                "retrieved_at": None,
             }
         ],
         "provenance": {
@@ -123,7 +140,7 @@ def _draft_report() -> dict[str, object]:
         ).encode("utf-8")
     ).hexdigest()[:20]
     return {
-        "schema_version": "2.1",
+        "schema_version": "2.2",
         "report_id": f"dvr-0-{digest}",
         "variant_index": 0,
         "machine_original_report": deepcopy(content),

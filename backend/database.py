@@ -1512,7 +1512,7 @@ def _v3_projection(
                     int(report["include_in_final_report"]),
                     _json_text(report["selection_history"]),
                     _json_text(failure) if failure is not None else None,
-                    _json_text(reviewed["references"]),
+                    _json_text(reviewed["literature_references"]),
                     updated_at,
                 )
             )

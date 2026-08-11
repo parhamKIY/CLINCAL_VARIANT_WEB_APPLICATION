@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-91 implemented as recorded below
+**Implementation status:** Stages 0-92 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 92 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 93 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -86,7 +86,11 @@ evidence gate covering groundedness, hallucination, clinical coherence, conflict
 handling, phenotype restraint, structured reliability, latency, and cost. Offline
 fixtures cannot promote a model, and the configured default remains unchanged until
 at least two live, human-reviewed candidates have complete evidence.
-This declaration is the unified implementation record for Stages 0-91. The former
+Stage 92 adds Reference Model V2 so PubMed, PMC, and DOI literature remains in a
+numbered bibliography while ClinVar, Ensembl, GeneBe, MyVariant.info, ClinGen/GenCC,
+CSpec, phenotype tools, MyDisease, and population providers remain unnumbered data
+source provenance.
+This declaration is the unified implementation record for Stages 0-92. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -371,12 +375,13 @@ flowchart LR
     AZ --> BA["Stage 89: interpretation recovery policy"]
     BA --> BB["Stage 90: phenotype non-concordance contract"]
     BB --> BC["Stage 91: interpretation quality gate"]
+    BC --> BD["Stage 92: Reference Model V2"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -481,6 +486,7 @@ their original order.
 | 89 | Added one transient interpretation retry, one constrained structured-output repair, and optional operational-only fallback using the unchanged normalized evidence. | Complete |
 | 90 | Added four explicit phenotype conclusions, prompt-level non-concordance instructions, evidence-consistency validation, and an unrelated abdominal-pain acceptance fixture that remains successfully interpretable. | Complete |
 | 91 | Added the fixed seven-case interpretation-model benchmark, strict live/human-review eligibility thresholds, deterministic comparison, and a no-promotion outcome when evidence is incomplete. | Complete; live comparison pending |
+| 92 | Added Reference Model V2 with numbered literature-only citations, unnumbered database/tool provenance, deterministic persistence, and separated reviewer/report rendering. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1295,8 +1301,9 @@ structured logs identify the recovery without storing prompts, responses, or sec
 
 ### Stage 90 phenotype non-concordance contract
 
-Variant Interpretation prompt `variant-interpretation-v1.2` requires one of four
-explicit phenotype conclusions: supported, partially supported, no supported
+Variant Interpretation prompt `variant-interpretation-v1.2`, retained by current
+`variant-interpretation-v1.3`, requires one of four explicit phenotype conclusions:
+supported, partially supported, no supported
 association found, or phenotype evidence unavailable. The response conclusion is
 validated against the deterministic phenotype status in the sanitized Evidence
 Object. Persisted historical `v1.1` prompt results remain valid.
@@ -1322,6 +1329,21 @@ the gate but cannot promote a model. The evaluator is restricted to
 Extraction Model selection independent. The provider catalog check timed out on
 2026-08-11, so no live comparison is claimed and the configured default remains
 unchanged.
+
+### Stage 92 Reference Model V2
+
+The active report path now stores scientific literature and database/tool provenance
+as distinct validated collections. PubMed PMID, PubMed Central PMCID, and DOI
+records are the only numbered literature references.
+ClinVar, Ensembl, VariantValidator, GeneBe, MyVariant.info, ClinGen/GenCC, CSpec,
+Phen2Gene/local HPO-Gene, MyDisease/local context, and population providers remain
+unnumbered Data Sources with capability, status, method, dataset/record identity,
+fallback, failure, retrieval, and link provenance.
+
+Draft Variant Report schema `2.2`, interpretation prompt
+`variant-interpretation-v1.3`, ReportData projection, preview/DOCX surfaces,
+Streamlit review, SQLite projection, and Final Clinical Report Markdown preserve the
+separation. Historical interpretation prompt `v1.1` and `v1.2` records remain valid.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1545,6 +1567,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 89 interpretation recovery policy | `backend/llm.py`, `backend/variant_interpretation.py`, `config.py`, `.env.example`, `docs/stage_89_interpretation_recovery.md`, `tests/test_stage89_interpretation_recovery.py` |
 | Stage 90 phenotype non-concordance contract | `backend/variant_interpretation.py`, `backend/report_data.py`, `backend/report_data_projection.py`, `docs/stage_90_phenotype_non_concordance.md`, `tests/test_stage90_phenotype_non_concordance.py` |
 | Stage 91 interpretation quality gate | `backend/interpretation_quality.py`, `data/benchmarks/stage91_cases.json`, `tools/evaluate_stage91_models.py`, `docs/stage_91_interpretation_quality.md`, `tests/test_stage91_interpretation_quality.py` |
+| Stage 92 Reference Model V2 | `backend/reference_model.py`, `backend/variant_interpretation.py`, `backend/variant_report.py`, `backend/report_data_projection.py`, `backend/final_clinical_report.py`, `frontend/report_preview.py`, `frontend/evidence_review.py`, `docs/stage_92_reference_model_v2.md`, `tests/test_stage92_reference_model.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1669,5 +1692,6 @@ preserving the selected model as the primary for every variant. Stage 90 then ma
 unrelated phenotype a valid explicit no-supported-association outcome while retaining
 variant interpretation and source-attributed pathogenicity evidence. Stage 91 then
 added the fixed interpretation-quality benchmark and evidence gate without claiming a
-live model recommendation or changing the configured default. Stage 92 has not
-started.
+live model recommendation or changing the configured default. Stage 92 then separated
+numbered scientific literature from unnumbered database and tool provenance across
+the active interpretation and report path. Stage 93 has not started.

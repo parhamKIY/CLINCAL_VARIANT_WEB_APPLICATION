@@ -236,12 +236,24 @@ or evidence-absent IDs are rejected. Draft Variant Report schema `2.1` maps thos
 IDs to canonical objects, Streamlit renders validated links and explicit fallbacks,
 and generic Word/PDF exports preserve allowlisted hyperlinks.
 
+### Stage 92 Reference Model V2
+
+The active interpretation and report path now separates numbered scientific
+literature from unnumbered database/tool provenance. Draft Variant Report schema
+`2.2` stores `literature_references` for PubMed, PMC, and DOI article records and
+stores ClinVar, Ensembl, GeneBe, MyVariant.info, ClinGen/GenCC, CSpec,
+Phen2Gene/local HPO-Gene, MyDisease, and population-provider lineage under
+`data_sources`. Interpretation prompt `variant-interpretation-v1.3` receives only
+the literature citation catalog. ReportData, HTML/DOCX rendering, Streamlit review,
+persistence, and final Markdown retain the category boundary.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the
 confirmed reports whose audited `include_in_final_report` value is true. It preserves
 the exact reviewer-edited report state in original variant order, groups each
-variant's local citation namespace with its canonical references, and includes
+variant's local citation namespace with its literature references, keeps database
+and tool provenance in a separate Data Sources section, and includes
 de-identified phenotype context, main findings, detailed findings, methods,
 limitations, disclaimer, and bounded audit/provenance metadata.
 

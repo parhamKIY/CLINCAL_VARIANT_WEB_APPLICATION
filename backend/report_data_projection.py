@@ -252,31 +252,6 @@ def build_report_data_from_draft(
         *interpretation["warnings"],
         *content["limitations"],
     ][:50]
-    data_sources = []
-    for section in content["evidence_sections"][:50]:
-        fallback = "fallback" in section["source"].lower()
-        data_sources.append(
-            {
-                "source": section["source"],
-                "capability": "source_attributed_evidence",
-                "status": _availability(section["status"]),
-                "operational_status": section["status"],
-                "provider_role": "fallback" if fallback else "primary",
-                "method": "draft_report_projection",
-                "record_identifier": None,
-                "dataset": None,
-                "human_url": None,
-                "link_status": "unavailable",
-                "fallback_used": fallback,
-                "primary_failure": (
-                    "Primary provider failure retained in Draft Variant Report."
-                    if fallback
-                    else None
-                ),
-                "retrieved_at": None,
-            }
-        )
-
     projected: dict[str, object] = {
         "schema_version": "4.0",
         "report_id": report["report_id"],
@@ -348,10 +323,10 @@ def build_report_data_from_draft(
         },
         "literature_references": [
             item
-            for item in content["references"]
+            for item in content["literature_references"]
             if item["identifier_type"] in {"PMID", "PMCID", "DOI"}
         ],
-        "data_sources": data_sources,
+        "data_sources": content["data_sources"],
         "warnings": [
             {
                 "severity": "PARTIAL",

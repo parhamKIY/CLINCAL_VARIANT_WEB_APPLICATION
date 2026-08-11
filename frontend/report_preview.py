@@ -215,7 +215,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 
     conflict = content["conflict_summary"]
     reference_rows = []
-    for reference in content["references"]:
+    for reference in content["literature_references"]:
         label = " — ".join(
             str(item)
             for item in (
@@ -234,9 +234,9 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
         else:
             reference_rows.append(f'<p class="cv-ref">{_text(label)}</p>')
     sources = "".join(
-        f"<tr><td>{_text(section['source'])}</td>"
-        f"<td>{_text(section['status'].replace('_', ' '))}</td></tr>"
-        for section in content["evidence_sections"]
+        f"<tr><td>{_text(source['source'])}</td>"
+        f"<td>{_text(source['status'].replace('_', ' '))}</td></tr>"
+        for source in content["data_sources"]
     )
     page_three = _page(
         f"""
@@ -247,7 +247,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <p>The application has not independently adjudicated an ACMG/AMP classification.</p>
 <h2>Comments and scope</h2>
 <ul class="cv-list">{_items([*interpretation['warnings'], *content['limitations'], *content['reviewer_notes']])}</ul>
-<h2>References</h2>
+<h2>Literature References</h2>
 {''.join(reference_rows) or '<p>No trusted literature reference is available.</p>'}
 <h2>Data Sources</h2>
 <table aria-label="Data sources"><thead><tr><th>Source</th><th>Status</th></tr></thead><tbody>{sources}</tbody></table>

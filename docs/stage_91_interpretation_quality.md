@@ -64,7 +64,8 @@ this gate.
 The benchmark definition, strict evidence validator, deterministic comparison,
 offline acceptance coverage, and documentation are implemented. A live default
 recommendation remains intentionally pending until two or more candidates have
-complete human-reviewed provider evidence. Stage 92 is not implemented here.
+complete human-reviewed provider evidence. Stage 92 subsequently added Reference
+Model V2 separation.
 
 Validated on 2026-08-11:
 

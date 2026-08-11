@@ -337,7 +337,9 @@ def compose_final_clinical_report(
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "items": deepcopy(item["reviewed_report"]["references"]),
+                "items": deepcopy(
+                    item["reviewed_report"]["literature_references"]
+                ),
             }
             for item in selected
         ],
@@ -467,7 +469,7 @@ def validate_final_clinical_report(value: object) -> FinalClinicalReport:
             )
         ):
             raise FinalClinicalReportError("Final report finding does not match its reviewed section.")
-        if group["items"] != reviewed.get("references"):
+        if group["items"] != reviewed.get("literature_references"):
             raise FinalClinicalReportError("Final report references do not match reviewed content.")
         if not isinstance(group["items"], list):
             raise FinalClinicalReportError("Final report references are invalid.")
@@ -629,7 +631,7 @@ def render_final_clinical_report_markdown(value: object) -> str:
             for item in evidence_section["items"]:
                 lines.append(f"- {_md(item['label'])}: {_md(item['value'])}")
         lines.append("")
-    lines.extend(["## References", ""])
+    lines.extend(["## Literature References", ""])
     reference_number = 1
     if not report["references"]:
         lines.extend(["No references apply because no variants were selected.", ""])
@@ -647,7 +649,26 @@ def render_final_clinical_report_markdown(value: object) -> str:
             )
             reference_number += 1
         if not group["items"]:
-            lines.append("No canonical references were available.")
+            lines.append("No scientific literature references were available.")
+        lines.append("")
+    lines.extend(["## Data Sources", ""])
+    if not report["variant_sections"]:
+        lines.extend(["No data sources apply because no variants were selected.", ""])
+    for section in report["variant_sections"]:
+        content = section["reviewed_report"]
+        lines.extend(
+            [
+                f"### Variant {cast(int, section['variant_index']) + 1}",
+                "",
+            ]
+        )
+        for source in content["data_sources"]:
+            details = [source["source"], source["status"], source["capability"]]
+            if source["record_identifier"]:
+                details.append(source["record_identifier"])
+            lines.append(f"- {_md(' — '.join(details))}")
+        if not content["data_sources"]:
+            lines.append("No database or tool provenance was recorded.")
         lines.append("")
     methods = report["method_data_sources"]
     lines.extend(

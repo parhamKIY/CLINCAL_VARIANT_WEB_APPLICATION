@@ -229,6 +229,7 @@ from backend.privacy import (
     validate_phenotype_extraction_payload,
     validate_variant_interpretation_payload,
 )
+from backend.reference_model import build_reference_model_v2
 from backend.references import (
     CanonicalReferenceError,
     build_canonical_references,
@@ -12339,10 +12340,11 @@ class TestStage52DraftVariantReportV2:
         assert content["variant_interpretation"]["narrative"] == (
             interpretation["interpretation"]
         )
-        assert content["references"][0]["canonical_url"].startswith(
+        assert content["literature_references"][0]["canonical_url"].startswith(
             "https://"
         )
-        assert content["references"][0]["url_status"] == "validated"
+        assert content["literature_references"][0]["url_status"] == "validated"
+        assert content["data_sources"]
         assert report["reviewed_report"] == content
         assert report["reviewed_report"] is not content
         validate_draft_variant_report(
@@ -12459,7 +12461,7 @@ class TestStage52DraftVariantReportV2:
             interpretation,
             variant_index=0,
         )
-        unsafe["machine_original_report"]["references"][0][
+        unsafe["machine_original_report"]["literature_references"][0][
             "canonical_url"
         ] = "http://untrusted.example/reference"
         unsafe["reviewed_report"] = deepcopy(
@@ -13144,10 +13146,10 @@ class TestStage55CanonicalReferences:
             variant_index=0,
         )
 
-        assert report["machine_original_report"]["references"][0] == (
-            build_canonical_references(evidence)[0]
+        assert report["machine_original_report"]["literature_references"][0] == (
+            build_reference_model_v2(evidence)["literature_references"][0]
         )
-        assert report["machine_original_report"]["references"][0][
+        assert report["machine_original_report"]["literature_references"][0][
             "reference_id"
         ] == interpretation["cited_reference_ids"][0]
 
@@ -13198,7 +13200,7 @@ class TestStage55CanonicalReferences:
             reference["canonical_url"]
             for reference in result["draft_variant_reports"][0][
                 "reviewed_report"
-            ]["references"]
+            ]["literature_references"]
             if reference["canonical_url"] is not None
         }
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
@@ -15713,12 +15715,17 @@ class TestStage60EndToEndAcceptanceV3:
         references = [
             reference
             for report in restored["draft_variant_reports"]
-            for reference in report["reviewed_report"]["references"]
+            for reference in report["reviewed_report"]["literature_references"]
         ]
         assert references
-        assert len({reference["source"] for reference in references}) >= 2
         for reference in references:
             validate_canonical_reference(reference)
+        data_sources = [
+            source
+            for report in restored["draft_variant_reports"]
+            for source in report["reviewed_report"]["data_sources"]
+        ]
+        assert len({source["source"] for source in data_sources}) >= 2
 
         markdown = render_final_clinical_report_markdown(final_report)
         pdf_data = render_report_pdf(markdown)
