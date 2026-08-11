@@ -6,6 +6,11 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Literal, TypedDict, cast
 
+from backend.human_links import (
+    is_machine_readable_url,
+    resolve_ensembl_human_url,
+    resolve_genebe_human_url,
+)
 from backend.provider_resilience import (
     ProviderContractError,
     validate_capability_result,
@@ -193,6 +198,57 @@ def _provider_group(provider: str) -> str:
     return normalized
 
 
+def _population_value(evidence: Mapping[str, object], field: str) -> object:
+    annotations = evidence.get("annotations")
+    population = (
+        annotations.get("population")
+        if isinstance(annotations, Mapping)
+        else None
+    )
+    return population.get(field) if isinstance(population, Mapping) else None
+
+
+def _human_link(
+    *,
+    evidence: Mapping[str, object],
+    provider_group: str,
+    reference: CanonicalReference | None,
+) -> tuple[str | None, str | None]:
+    """Resolve a reviewer-facing record without exposing provider APIs."""
+
+    identifier = reference["identifier"] if reference is not None else None
+    if provider_group == "genebe":
+        resolved = resolve_genebe_human_url(
+            assembly=evidence.get("assembly"),
+            variant=evidence.get("variant"),
+        )
+        return resolved if resolved is not None else (None, identifier)
+    if provider_group == "ensembl":
+        rsid = _population_value(evidence, "rsid")
+        return (
+            resolve_ensembl_human_url(
+                assembly=evidence.get("assembly"),
+                identifier=rsid,
+            ),
+            str(rsid).strip() if isinstance(rsid, str) and rsid.strip() else identifier,
+        )
+    if provider_group == "myvariant":
+        variant_id = _population_value(evidence, "variant_id")
+        return (
+            None,
+            str(variant_id).strip()
+            if isinstance(variant_id, str) and variant_id.strip()
+            else identifier,
+        )
+    url = reference["canonical_url"] if reference is not None else None
+    if is_machine_readable_url(
+        reference["source"] if reference is not None else provider_group,
+        url,
+    ):
+        url = None
+    return url, identifier
+
+
 def _renumber_literature(
     references: Sequence[CanonicalReference],
 ) -> list[CanonicalReference]:
@@ -249,7 +305,11 @@ def build_reference_model_v2(
         reference = by_group.get(key[0])
         role: ProviderRole = "fallback" if provider_role == "fallback" else "primary"
         fallback = bool(fallback_used)
-        url = reference["canonical_url"] if reference is not None else None
+        url, record_identifier = _human_link(
+            evidence=evidence,
+            provider_group=key[0],
+            reference=reference,
+        )
         data_sources.append(
             {
                 "source": _provider_label(provider),
@@ -260,9 +320,7 @@ def build_reference_model_v2(
                 ),
                 "provider_role": role,
                 "method": str(method).strip() if method else None,
-                "record_identifier": (
-                    reference["identifier"] if reference is not None else None
-                ),
+                "record_identifier": record_identifier,
                 "dataset": str(dataset).strip() if dataset else None,
                 "human_url": url,
                 "link_status": "validated" if url else "unavailable",
@@ -396,6 +454,8 @@ def validate_data_source_record(value: object) -> DataSourceRecord:
         raise ReferenceModelError("Data source link status is inconsistent.")
     if url is not None and validated_reference_url(url) != url:
         raise ReferenceModelError("Data source URL is not validated.")
+    if url is not None and is_machine_readable_url(source, url):
+        raise ReferenceModelError("Data source URL is machine-readable.")
     return cast(
         DataSourceRecord,
         {

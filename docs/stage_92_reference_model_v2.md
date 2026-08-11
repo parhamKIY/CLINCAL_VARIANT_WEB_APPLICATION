@@ -51,7 +51,8 @@ scientific citations by themselves.
 - Final Markdown labels the numbered section `Literature References` and renders an
   independent unnumbered `Data Sources` section.
 
-Stage 93 canonical human-link resolver behavior is not implemented here.
+Stage 93 subsequently added provider-specific human-link resolution without changing
+the Reference Model V2 category boundary.
 
 ## Validation
 

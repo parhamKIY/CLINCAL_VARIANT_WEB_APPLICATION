@@ -247,6 +247,15 @@ Phen2Gene/local HPO-Gene, MyDisease, and population-provider lineage under
 the literature citation catalog. ReportData, HTML/DOCX rendering, Streamlit review,
 persistence, and final Markdown retain the category boundary.
 
+### Stage 93 canonical human-link resolver
+
+Reviewer-facing links now resolve through one deterministic policy. PubMed, PMC,
+DOI, ClinVar, exact GeneBe alleles, and rsID-backed Ensembl records use human-readable
+targets. Raw MyVariant.info JSON, Ensembl REST/VEP, GeneBe API, and NCBI E-utilities
+targets cannot become ordinary report links. MyVariant.info remains visible as a
+`Programmatic annotation source`, and sources without a validated human record keep
+provenance with an unavailable link instead of receiving a fabricated URL.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the

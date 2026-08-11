@@ -233,11 +233,24 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
             )
         else:
             reference_rows.append(f'<p class="cv-ref">{_text(label)}</p>')
-    sources = "".join(
-        f"<tr><td>{_text(source['source'])}</td>"
-        f"<td>{_text(source['status'].replace('_', ' '))}</td></tr>"
-        for source in content["data_sources"]
-    )
+    source_rows: list[str] = []
+    for source in content["data_sources"]:
+        source_label = source["source"]
+        if source_label == "MyVariant.info":
+            source_label += " (Programmatic annotation source)"
+        if source["human_url"] and source["link_status"] == "validated":
+            rendered_source = (
+                f'<a href="{escape(source["human_url"], quote=True)}" '
+                f'target="_blank" rel="noopener noreferrer">'
+                f'{_text(source_label)}</a>'
+            )
+        else:
+            rendered_source = _text(source_label)
+        source_rows.append(
+            f"<tr><td>{rendered_source}</td>"
+            f"<td>{_text(source['status'].replace('_', ' '))}</td></tr>"
+        )
+    sources = "".join(source_rows)
     page_three = _page(
         f"""
 <h1>Variant(s) classification</h1>

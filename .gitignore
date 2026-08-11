@@ -38,3 +38,4 @@ data/cache/*
 !/docs/stage_90_phenotype_non_concordance.md
 !/docs/stage_91_interpretation_quality.md
 !/docs/stage_92_reference_model_v2.md
+!/docs/stage_93_human_link_resolver.md

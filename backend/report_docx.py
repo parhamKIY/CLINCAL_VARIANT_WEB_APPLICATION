@@ -456,7 +456,13 @@ def _render_data_sources(document: Document, report: ReportData) -> None:
                 status,
                 record,
                 source["method"].replace("_", " ") if source["method"] else "Not available",
-                "Open record" if source["human_url"] else "Not available",
+                (
+                    "Open record"
+                    if source["human_url"]
+                    else "Programmatic annotation source"
+                    if source["source"] == "MyVariant.info"
+                    else "Not available"
+                ),
             ]
             url = validated_reference_url(source["human_url"])
         for cell, value in zip(row.cells, values, strict=True):

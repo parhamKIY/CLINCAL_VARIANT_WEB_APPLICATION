@@ -586,8 +586,10 @@ def _render_draft_variant_report(
         label = f"{source['source']} — {source['status']}"
         if source["record_identifier"]:
             label += f" — {source['record_identifier']}"
+        if source["source"] == "MyVariant.info":
+            label += " — Programmatic annotation source"
         if source["human_url"] and source["link_status"] == "validated":
-            st.link_button(label, source["human_url"])
+            st.link_button(f"{label} — Open human record", source["human_url"])
         else:
             st.write(f"- {label}")
 

@@ -6,8 +6,15 @@ import re
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Literal, TypedDict, cast
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
+from backend.human_links import (
+    is_machine_readable_url,
+    resolve_clinvar_human_url,
+    resolve_doi_human_url,
+    resolve_pmc_human_url,
+    resolve_pubmed_human_url,
+)
 
 MAX_CANONICAL_REFERENCES = 50
 MAX_REFERENCE_TEXT_CHARS = 500
@@ -73,6 +80,7 @@ def _trusted_hostname(hostname: str) -> bool:
         "search.clinicalgenome.org",
         "rest.ensembl.org",
         "www.ensembl.org",
+        "grch37.ensembl.org",
         "myvariant.info",
         "www.myvariant.info",
         "genebe.net",
@@ -132,15 +140,7 @@ def _navigable_provider_url(
 
     if value is None:
         return None
-    path = urlsplit(value).path.casefold().rstrip("/")
-    source_key = source.casefold()
-    if "ensembl vep" in source_key and path.endswith(
-        "/vep/homo_sapiens/region"
-    ):
-        return None
-    if "genebe" in source_key and path.endswith(
-        "/api-public/v1/variants"
-    ):
+    if is_machine_readable_url(source, value):
         return None
     return value
 
@@ -166,7 +166,7 @@ def _identifier(
         return (
             "PMID",
             normalized,
-            f"https://pubmed.ncbi.nlm.nih.gov/{normalized}/",
+            resolve_pubmed_human_url(normalized),
         )
     pmcid = PMCID_PATTERN.fullmatch(text)
     if pmcid:
@@ -174,7 +174,7 @@ def _identifier(
         return (
             "PMCID",
             normalized,
-            f"https://pmc.ncbi.nlm.nih.gov/articles/{normalized}/",
+            resolve_pmc_human_url(normalized),
         )
     doi = DOI_PATTERN.fullmatch(text.removeprefix("https://doi.org/"))
     if doi:
@@ -182,19 +182,16 @@ def _identifier(
         return (
             "DOI",
             normalized,
-            f"https://doi.org/{quote(normalized, safe='/-._;():')}",
+            resolve_doi_human_url(normalized),
         )
     clinvar = CLINVAR_PATTERN.fullmatch(text)
     if clinvar:
         normalized = clinvar.group(1).upper()
-        if normalized.startswith("VCV"):
-            variation_id = str(int(normalized[3:].split(".", 1)[0]))
-            return (
-                "ClinVar accession",
-                normalized,
-                f"https://www.ncbi.nlm.nih.gov/clinvar/variation/{variation_id}/",
-            )
-        return "ClinVar accession", normalized, None
+        return (
+            "ClinVar accession",
+            normalized,
+            resolve_clinvar_human_url(normalized),
+        )
     if "cspec" in source_key and CSPEC_PATTERN.fullmatch(text):
         return "CSpec record", text.upper(), None
     if "clingen" in source_key:

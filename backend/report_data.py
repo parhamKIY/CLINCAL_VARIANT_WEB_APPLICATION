@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Literal, TypedDict, cast
 
+from backend.human_links import is_machine_readable_url
 from backend.privacy import ClinicalDataPrivacyError, validate_llm_payload
 from backend.references import (
     CanonicalReference,
@@ -752,7 +753,7 @@ def _validate_data_sources(value: object) -> None:
     ):
         path = f"data_sources[{index}]"
         item = _mapping(raw, DATA_SOURCE_FIELDS, path)
-        _text(item["source"], f"{path}.source")
+        source = _text(item["source"], f"{path}.source")
         _text(item["capability"], f"{path}.capability")
         _enum(item["status"], AVAILABILITY_STATUSES, f"{path}.status")
         _text(item["operational_status"], f"{path}.operational_status", optional=True)
@@ -782,6 +783,8 @@ def _validate_data_sources(value: object) -> None:
             link_status != "validated" or validated_reference_url(url) != url
         ):
             raise ReportDataError(f"{path} human URL is not validated.")
+        if url is not None and is_machine_readable_url(source, url):
+            raise ReportDataError(f"{path} human URL is machine-readable.")
 
 
 def _validate_warnings(value: object) -> None:

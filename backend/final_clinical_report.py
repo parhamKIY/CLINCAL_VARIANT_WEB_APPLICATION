@@ -17,6 +17,7 @@ from backend.privacy import (
 from backend.references import (
     CanonicalReferenceError,
     render_canonical_reference_markdown,
+    validated_reference_url,
     validate_canonical_reference,
 )
 from backend.report_lifecycle import (
@@ -666,7 +667,16 @@ def render_final_clinical_report_markdown(value: object) -> str:
             details = [source["source"], source["status"], source["capability"]]
             if source["record_identifier"]:
                 details.append(source["record_identifier"])
-            lines.append(f"- {_md(' — '.join(details))}")
+            if source["source"] == "MyVariant.info":
+                details.append("Programmatic annotation source")
+            label = _md(" — ".join(details)).replace("[", "\\[").replace(
+                "]", "\\]"
+            )
+            url = validated_reference_url(source["human_url"])
+            if url is not None and source["link_status"] == "validated":
+                lines.append(f"- [{label}]({url})")
+            else:
+                lines.append(f"- {label}")
         if not content["data_sources"]:
             lines.append("No database or tool provenance was recorded.")
         lines.append("")
