@@ -44,4 +44,5 @@ Validated on 2026-08-11:
 - Stage 60 acceptance: `832 passed, 4 skipped, 267 deselected`, `85.20%`
   coverage.
 
-Stage 99 persistence and recovery V4 is not implemented here.
+Stage 99 subsequently added normalized report-first persistence and restart recovery
+without changing the Stage 98 diagnostics presentation.

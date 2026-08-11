@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-98 implemented as recorded below
+**Implementation status:** Stages 0-99 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 99 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 100 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -105,7 +105,9 @@ Stage 97 classifies those notices as informational, partial, action required, or
 blocking using consequence-oriented reviewer copy.
 Stage 98 adds collapsed, variant-scoped provider diagnostics while keeping the primary
 reviewer workflow clean.
-This declaration is the unified implementation record for Stages 0-98. The former
+Stage 99 adds normalized report-first persistence and fail-closed restart recovery in
+SQLite schema V4 without regenerating interpretation.
+This declaration is the unified implementation record for Stages 0-99. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -397,12 +399,13 @@ flowchart LR
     BG --> BH["Stage 96: variant-first status cards"]
     BH --> BI["Stage 97: warning semantics V2"]
     BI --> BJ["Stage 98: technical diagnostics drawer"]
+    BJ --> BK["Stage 99: persistence and recovery V4"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -514,6 +517,7 @@ their original order.
 | 96 | Added one bordered status card per input variant with stable report labels, variant-local warnings, concise evidence outcomes, and collapsed provider details. | Complete |
 | 97 | Added four consequence-oriented notice severities, preserved no-match as expected absence, and removed implementation trivia from primary reviewer warnings. | Complete |
 | 98 | Added a collapsed per-variant provider diagnostics drawer with retained attempts, latency, fallback, failure-category, and safe provider-note fields. | Complete |
+| 99 | Added SQLite schema V4 normalized report recovery rows, content-derived artifact identity, schema-3 migration/backfill, and fail-closed restart validation without interpretation regeneration. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1463,7 +1467,25 @@ unpersisted values are shown as `Not recorded` instead of being guessed. No-matc
 failure category `none`, while fallback records preserve the primary operational
 failure. The projection excludes raw responses, endpoint payloads, exception text,
 credentials, and patient data. It performs no provider calls and uses native Streamlit
-layout without custom CSS. Stage 99 has not started.
+layout without custom CSS. Stage 99 subsequently adds the recovery model below.
+
+### Stage 99 persistence and recovery V4
+
+SQLite schema `4` adds `report_recovery_states`, one normalized row per variant that
+persists complete ReportData, deterministic DOCX metadata, template and interpretation
+versions, resolved literature/data-source references, report edits, reviewer notes,
+selection history, include/exclude state, confirmation state, and report warnings.
+
+Artifact identity is the persisted analysis ID, assembly-qualified allele ID, and a
+content-derived report version. Saving replaces the ordered recovery projection in the
+same transaction as the canonical pipeline snapshot. Loading revalidates both the
+Stage 57 and Stage 99 projections and fails closed on missing or altered state. Schema
+`3` databases migrate to schema `4` with bounded backfill of valid report records.
+
+Refresh/restart recovery restores report preview data, edits, selection, confirmation,
+references, warnings, and artifact metadata from persisted state. It does not call the
+LLM or regenerate interpretation. DOCX bytes remain deterministically regenerable from
+the approved ReportData and are not stored in SQLite. Stage 100 has not started.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1476,7 +1498,7 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 ## 8. Pipeline, persistence, and refresh recovery
 
 - Active pipeline schema: `3.1`.
-- SQLite schema: `3`.
+- SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
@@ -1694,6 +1716,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 96 variant-first status cards | `frontend/variant_status.py`, `frontend/evidence_review.py`, `docs/stage_96_variant_status_cards.md`, `tests/test_stage96_variant_status_cards.py` |
 | Stage 97 warning semantics V2 | `frontend/warning_semantics.py`, `frontend/variant_status.py`, `frontend/evidence_review.py`, `docs/stage_97_warning_semantics.md`, `tests/test_stage97_warning_semantics.py` |
 | Stage 98 technical diagnostics drawer | `frontend/technical_diagnostics.py`, `frontend/evidence_review.py`, `docs/stage_98_technical_diagnostics.md`, `tests/test_stage98_technical_diagnostics.py` |
+| Stage 99 persistence and recovery V4 | `backend/database.py`, `docs/stage_99_persistence_recovery_v4.md`, `tests/test_stage99_persistence_recovery_v4.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1713,10 +1736,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-98 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-99 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stages 99-106, professor feedback, and final visual sign-off remain pending.
+   Stages 100-106, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1830,6 +1853,8 @@ added stable variant-first status cards, variant-local warning attribution, and
 collapsed per-variant provider details. Stage 97 then added the four-level warning
 semantics model, preserved no-match as informational missingness, and replaced raw
 implementation warnings with consequence-oriented reviewer copy. Stage 98 then added
-the collapsed per-variant provider diagnostics drawer,
-including retained attempt, latency, fallback, and failure-category telemetry without
-exposing raw provider payloads. Stage 99 has not started.
+the collapsed per-variant provider diagnostics drawer, including retained attempt,
+latency, fallback, and failure-category telemetry without exposing raw provider
+payloads. Stage 99 then added SQLite schema V4 report-first persistence, deterministic
+artifact identity, and fail-closed refresh/restart recovery without regenerating
+interpretation. Stage 100 has not started.

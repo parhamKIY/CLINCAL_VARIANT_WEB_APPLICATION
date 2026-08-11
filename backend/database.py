@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from backend.pipeline import PipelineResult
 
 
-DATABASE_SCHEMA_VERSION = 3
+DATABASE_SCHEMA_VERSION = 4
 DATABASE_BUSY_TIMEOUT_MS = 5_000
 MAX_ANALYSIS_WARNINGS = 100
 MAX_ANALYSIS_WARNING_LENGTH = 1_000
@@ -134,11 +134,33 @@ DATABASE_TABLES = {
         "final_report_json",
         "updated_at",
     ),
+    "report_recovery_states": (
+        "analysis_id",
+        "variant_index",
+        "variant_id",
+        "report_version",
+        "report_data_json",
+        "docx_artifact_json",
+        "template_version",
+        "interpretation_version",
+        "reference_resolution_json",
+        "review_edits_json",
+        "include_in_final_report",
+        "confirmation_state",
+        "warning_state_json",
+        "updated_at",
+    ),
+}
+
+_DATABASE_SCHEMA_V3_TABLES = {
+    name: columns
+    for name, columns in DATABASE_TABLES.items()
+    if name != "report_recovery_states"
 }
 
 _DATABASE_SCHEMA_V2_TABLES = {
     name: columns
-    for name, columns in DATABASE_TABLES.items()
+    for name, columns in _DATABASE_SCHEMA_V3_TABLES.items()
     if name not in {
         "analysis_contexts",
         "variant_review_states",
@@ -264,6 +286,63 @@ CREATE TABLE finalization_states (
         ON DELETE CASCADE
 ) WITHOUT ROWID;
 
+CREATE TABLE report_recovery_states (
+    analysis_id TEXT NOT NULL,
+    variant_index INTEGER NOT NULL CHECK (variant_index >= 0),
+    variant_id TEXT NOT NULL CHECK (length(variant_id) BETWEEN 1 AND 255),
+    report_version TEXT NOT NULL
+        CHECK (length(report_version) BETWEEN 16 AND 64),
+    report_data_json TEXT NOT NULL,
+    docx_artifact_json TEXT NOT NULL,
+    template_version TEXT NOT NULL,
+    interpretation_version TEXT NOT NULL,
+    reference_resolution_json TEXT NOT NULL,
+    review_edits_json TEXT NOT NULL,
+    include_in_final_report INTEGER NOT NULL
+        CHECK (include_in_final_report IN (0, 1)),
+    confirmation_state TEXT NOT NULL
+        CHECK (confirmation_state IN ('draft', 'confirmed', 'finalized')),
+    warning_state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (analysis_id, variant_index),
+    UNIQUE (analysis_id, variant_id, report_version),
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
+PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
+COMMIT;
+"""
+
+_MIGRATE_SCHEMA_V3_TO_V4_SQL = f"""
+BEGIN IMMEDIATE;
+
+CREATE TABLE report_recovery_states (
+    analysis_id TEXT NOT NULL,
+    variant_index INTEGER NOT NULL CHECK (variant_index >= 0),
+    variant_id TEXT NOT NULL CHECK (length(variant_id) BETWEEN 1 AND 255),
+    report_version TEXT NOT NULL
+        CHECK (length(report_version) BETWEEN 16 AND 64),
+    report_data_json TEXT NOT NULL,
+    docx_artifact_json TEXT NOT NULL,
+    template_version TEXT NOT NULL,
+    interpretation_version TEXT NOT NULL,
+    reference_resolution_json TEXT NOT NULL,
+    review_edits_json TEXT NOT NULL,
+    include_in_final_report INTEGER NOT NULL
+        CHECK (include_in_final_report IN (0, 1)),
+    confirmation_state TEXT NOT NULL
+        CHECK (confirmation_state IN ('draft', 'confirmed', 'finalized')),
+    warning_state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (analysis_id, variant_index),
+    UNIQUE (analysis_id, variant_id, report_version),
+    FOREIGN KEY (analysis_id)
+        REFERENCES analyses (analysis_id)
+        ON DELETE CASCADE
+) WITHOUT ROWID;
+
 PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
 COMMIT;
 """
@@ -345,7 +424,7 @@ CREATE TABLE finalization_states (
         ON DELETE CASCADE
 ) WITHOUT ROWID;
 
-PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
+PRAGMA user_version = 3;
 COMMIT;
 """
 
@@ -542,6 +621,29 @@ def _validate_schema_v2(connection: sqlite3.Connection) -> None:
             )
 
 
+def _validate_schema_v3(connection: sqlite3.Connection) -> None:
+    """Verify the exact schema-3 layout before the V4 migration."""
+
+    if _existing_application_tables(connection) != set(
+        _DATABASE_SCHEMA_V3_TABLES
+    ):
+        raise DatabaseInitializationError(
+            "The schema-3 analysis database is incomplete or unexpected."
+        )
+    for table_name, expected_columns in _DATABASE_SCHEMA_V3_TABLES.items():
+        actual_columns = tuple(
+            str(row["name"])
+            for row in connection.execute(
+                f'PRAGMA table_info("{table_name}")'
+            )
+        )
+        if actual_columns != expected_columns:
+            raise DatabaseInitializationError(
+                "The schema-3 analysis database is incomplete or "
+                "unexpected."
+            )
+
+
 def _validate_schema(connection: sqlite3.Connection) -> None:
     """Verify that the installed version has the expected table columns."""
 
@@ -584,7 +686,8 @@ def initialize_database(
         ) from exc
 
     connection = connect_database(resolved_path)
-    migrated_to_v3 = False
+    backfill_v3 = False
+    backfill_v4 = False
     try:
         schema_version = int(
             connection.execute("PRAGMA user_version").fetchone()[0]
@@ -606,15 +709,27 @@ def initialize_database(
             connection.executescript(_MIGRATE_SCHEMA_V1_TO_V2_SQL)
             _validate_schema_v2(connection)
             connection.executescript(_MIGRATE_SCHEMA_V2_TO_V3_SQL)
-            migrated_to_v3 = True
+            _validate_schema_v3(connection)
+            connection.executescript(_MIGRATE_SCHEMA_V3_TO_V4_SQL)
+            backfill_v3 = True
+            backfill_v4 = True
         elif schema_version == 2:
             _validate_schema_v2(connection)
             connection.executescript(_MIGRATE_SCHEMA_V2_TO_V3_SQL)
-            migrated_to_v3 = True
+            _validate_schema_v3(connection)
+            connection.executescript(_MIGRATE_SCHEMA_V3_TO_V4_SQL)
+            backfill_v3 = True
+            backfill_v4 = True
+        elif schema_version == 3:
+            _validate_schema_v3(connection)
+            connection.executescript(_MIGRATE_SCHEMA_V3_TO_V4_SQL)
+            backfill_v4 = True
 
         _validate_schema(connection)
-        if migrated_to_v3:
+        if backfill_v3:
             _backfill_v3_projections(connection)
+        if backfill_v4:
+            _backfill_v4_projections(connection)
         connection.execute("PRAGMA journal_mode = WAL")
     except DatabaseError:
         connection.rollback()
@@ -1577,6 +1692,123 @@ def _v3_projection(
     return context_row, variant_rows, finalization_row
 
 
+def _report_variant_id(report_data: dict[str, object]) -> str:
+    """Return the assembly-qualified allele identity persisted for artifacts."""
+
+    identity = report_data["variant_identity"]
+    assert isinstance(identity, dict)
+    return (
+        f"{identity['genome_build']}:{identity['chromosome']}:"
+        f"{identity['position']}:{identity['reference']}:"
+        f"{identity['alternate']}"
+    )
+
+
+def _v4_recovery_projection(
+    value: "PipelineResult",
+    *,
+    updated_at: str,
+) -> list[tuple[object, ...]]:
+    """Derive normalized Stage 99 report-first recovery rows."""
+
+    analysis_id = value["analysis_id"]
+    assert analysis_id is not None
+    records = value["variant_report_records"]
+    drafts = value["draft_variant_reports"]
+    if not records:
+        return []
+    rows: list[tuple[object, ...]] = []
+    for index, record in enumerate(records):
+        report_data = record["report_data"]
+        artifact = record["docx_artifact"]
+        draft = drafts[index]
+        reference_resolution = {
+            "literature_references": report_data["literature_references"],
+            "data_sources": report_data["data_sources"],
+        }
+        review_edits = {
+            "report_edit_history": draft["edit_history"],
+            "selection_history": draft["selection_history"],
+            "reviewer_summary": report_data["review_state"][
+                "reviewer_summary"
+            ],
+            "reviewer_notes": report_data["review_state"]["reviewer_notes"],
+        }
+        rows.append(
+            (
+                analysis_id,
+                index,
+                _report_variant_id(report_data),
+                artifact["sha256"][:16],
+                _json_text(report_data),
+                _json_text(artifact),
+                report_data["template_version"],
+                report_data["interpretation"]["prompt_version"],
+                _json_text(reference_resolution),
+                _json_text(review_edits),
+                int(report_data["review_state"]["include_in_final_report"]),
+                record["lifecycle_state"],
+                _json_text(report_data["warnings"]),
+                updated_at,
+            )
+        )
+    return rows
+
+
+def _write_v4_recovery_projection(
+    connection: sqlite3.Connection,
+    value: "PipelineResult",
+    *,
+    updated_at: str,
+) -> None:
+    """Replace one analysis's V4 report recovery projection atomically."""
+
+    analysis_id = value["analysis_id"]
+    assert analysis_id is not None
+    rows = _v4_recovery_projection(value, updated_at=updated_at)
+    connection.execute(
+        "DELETE FROM report_recovery_states WHERE analysis_id = ?",
+        (analysis_id,),
+    )
+    if rows:
+        connection.executemany(
+            """
+            INSERT INTO report_recovery_states (
+                analysis_id, variant_index, variant_id, report_version,
+                report_data_json, docx_artifact_json, template_version,
+                interpretation_version, reference_resolution_json,
+                review_edits_json, include_in_final_report,
+                confirmation_state, warning_state_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def _validate_v4_recovery_projection(
+    connection: sqlite3.Connection,
+    value: "PipelineResult",
+    *,
+    updated_at: str,
+) -> None:
+    """Require Stage 99 recovery rows to match the canonical snapshot."""
+
+    analysis_id = value["analysis_id"]
+    assert analysis_id is not None
+    expected = _v4_recovery_projection(value, updated_at=updated_at)
+    actual = connection.execute(
+        """
+        SELECT * FROM report_recovery_states
+        WHERE analysis_id = ? ORDER BY variant_index
+        """,
+        (analysis_id,),
+    ).fetchall()
+    if [tuple(row) for row in actual] != expected:
+        raise DatabaseReadError(
+            "The stored Stage 99 report recovery projection is invalid."
+        )
+
+
 def _write_v3_projection(
     connection: sqlite3.Connection,
     value: "PipelineResult",
@@ -1879,6 +2111,34 @@ def _backfill_v3_projections(connection: sqlite3.Connection) -> None:
             )
 
 
+def _backfill_v4_projections(connection: sqlite3.Connection) -> None:
+    """Materialize valid report recovery rows during the V3-to-V4 migration."""
+
+    rows = connection.execute(
+        """
+        SELECT pipeline_json, updated_at
+        FROM pipeline_states ORDER BY analysis_id
+        """
+    ).fetchall()
+    with connection:
+        for row in rows:
+            raw_json = row["pipeline_json"]
+            if not isinstance(raw_json, str):
+                continue
+            try:
+                raw = json.loads(raw_json)
+            except json.JSONDecodeError:
+                continue
+            migrated = _bounded_stage56_pipeline_migration(raw)
+            if migrated is None:
+                continue
+            _write_v4_recovery_projection(
+                connection,
+                migrated,
+                updated_at=row["updated_at"],
+            )
+
+
 def save_pipeline_state(
     value: object,
     *,
@@ -1942,6 +2202,11 @@ def save_pipeline_state(
                 ),
             )
             _write_v3_projection(
+                connection,
+                validated,
+                updated_at=updated_at,
+            )
+            _write_v4_recovery_projection(
                 connection,
                 validated,
                 updated_at=updated_at,
@@ -2043,6 +2308,11 @@ def load_pipeline_state(
     projection_connection = connect_database(resolved_database_path)
     try:
         _validate_v3_projection(
+            projection_connection,
+            validated,
+            updated_at=row["updated_at"],
+        )
+        _validate_v4_recovery_projection(
             projection_connection,
             validated,
             updated_at=row["updated_at"],

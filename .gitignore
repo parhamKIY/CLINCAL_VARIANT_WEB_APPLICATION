@@ -44,3 +44,4 @@ data/cache/*
 !/docs/stage_96_variant_status_cards.md
 !/docs/stage_97_warning_semantics.md
 !/docs/stage_98_technical_diagnostics.md
+!/docs/stage_99_persistence_recovery_v4.md

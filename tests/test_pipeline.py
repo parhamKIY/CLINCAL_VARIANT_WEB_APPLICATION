@@ -14451,6 +14451,7 @@ class TestStage39ReviewStatePersistence:
         record = save_analysis(status="success", database_path=database_path)
         connection = connect_database(database_path)
         try:
+            connection.execute("DROP TABLE report_recovery_states")
             connection.execute("DROP TABLE finalization_states")
             connection.execute("DROP TABLE variant_review_states")
             connection.execute("DROP TABLE analysis_contexts")
@@ -15982,7 +15983,7 @@ class TestStage57PersistenceSchemaV3:
         try:
             assert connection.execute(
                 "PRAGMA user_version"
-            ).fetchone()[0] == 3
+            ).fetchone()[0] == DATABASE_SCHEMA_VERSION
             context = connection.execute(
                 "SELECT * FROM analysis_contexts"
             ).fetchone()
@@ -16111,6 +16112,7 @@ class TestStage57PersistenceSchemaV3:
         legacy_stage56.pop("analysis_context")
         connection = connect_database(database_path)
         try:
+            connection.execute("DROP TABLE report_recovery_states")
             connection.execute("DROP TABLE finalization_states")
             connection.execute("DROP TABLE variant_review_states")
             connection.execute("DROP TABLE analysis_contexts")

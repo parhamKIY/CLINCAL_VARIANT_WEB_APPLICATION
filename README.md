@@ -57,6 +57,8 @@ its original input order.
   implemented and offline-verified.
 - Stage 57 persistence schema V3 and recovery migration is implemented and
   offline-verified.
+- Stage 99 report-first persistence and recovery V4 is implemented and
+  offline-verified.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -68,14 +70,14 @@ its original input order.
   reviewer-facing fallback transparency, and deterministic failure injection are
   implemented, documented, and offline-verified; the multi-variant resilience gate
   and manual reachability utility are available.
-- Pipeline schema: `2.9`.
+- Pipeline schema: `3.1`.
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
 - Final Clinical Report schema: `2.0`.
-- SQLite schema: `3`.
+- SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **938 passed, 4 skipped; 85.83% Stage 59 coverage**.
+- Current verified suite: **1106 passed, 5 skipped; 85.22% Stage 60 acceptance coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -295,6 +297,14 @@ Every variant card now preserves developer observability under a collapsed
 status, retained attempt and latency telemetry, fallback use, failure category, and a
 safe provider-specific note. Unrecorded telemetry stays explicit instead of being
 guessed, and raw provider payloads never enter the drawer.
+
+### Stage 99 persistence and recovery V4
+
+SQLite schema `4` persists one normalized recovery row per variant with complete
+ReportData, DOCX metadata, template and interpretation versions, resolved references,
+review edits, selection, confirmation, and warning state. Artifact identity combines
+analysis ID, assembly-qualified variant ID, and a content-derived report version.
+Restart recovery validates the projection and never reruns interpretation.
 
 ### Stage 56 Final Clinical Report composer
 
