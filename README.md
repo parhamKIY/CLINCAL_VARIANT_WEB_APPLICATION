@@ -272,6 +272,14 @@ coverage, and interpretations requiring attention. Provider statuses are no long
 default wall of technical output; they remain available in a collapsed technical
 section. Excel, manual, VCF, and compressed-VCF inputs use their actual terminology.
 
+### Stage 96 variant-first status cards
+
+Completed review now shows one bordered status card per input variant before the full
+report preview. Each card uses a stable product-facing report status and summarizes
+annotation, population, ClinVar, phenotype, and interpretation outcomes. Warnings are
+attached to their specific variant, while provider methods and raw source statuses
+remain in a collapsed `Technical provider details` expander.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the

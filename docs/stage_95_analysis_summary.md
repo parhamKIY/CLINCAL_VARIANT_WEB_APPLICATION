@@ -32,7 +32,8 @@ capabilities recorded as `not_assessed`, `not_applicable`, `not_triggered`, or
 - Per-provider statuses remain available under `Technical provider details`, collapsed
   by default, and the report remains the first tab.
 
-Stage 96 variant-first status cards are not implemented here.
+Stage 96 subsequently added variant-first status cards without changing these
+analysis-level count semantics.
 
 ## Validation
 

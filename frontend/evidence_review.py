@@ -40,6 +40,7 @@ from frontend.report_preview import (
     stable_allele_identity,
 )
 from frontend.report_viewer import render_final_clinical_report_viewer
+from frontend.variant_status import build_variant_status_cards
 
 
 REVIEW_DRAFTS_KEY = "evidence_review_drafts"
@@ -48,6 +49,44 @@ REVIEW_VARIANT_KEY = "selected_evidence_review_variant"
 REVIEW_PACKAGES_KEY = "evidence_review_packages"
 REVIEW_NOTICE_KEY = "evidence_review_notice"
 _REVIEW_WIDGET_PREFIX = "evidence_review_"
+
+
+def _render_variant_status_cards(result: PipelineResult) -> None:
+    """Render Stage 96 variant-first status and warning cards."""
+
+    st.markdown("### Variant status")
+    for card in build_variant_status_cards(result):
+        with st.container(border=True):
+            st.markdown(f"**{card['heading']}**")
+            st.write(f"Status: **{card['status']}**")
+            for line in (
+                card["annotation"],
+                card["population"],
+                card["clinvar"],
+                card["phenotype"],
+                card["interpretation"],
+            ):
+                st.write(line)
+            for warning in card["warnings"]:
+                st.warning(
+                    f"Variant {card['variant_index'] + 1}: {warning}",
+                    icon=":material/warning:",
+                )
+            with st.expander(
+                "Technical provider details",
+                expanded=False,
+                icon=":material/api:",
+            ):
+                if not card["technical_details"]:
+                    st.caption("No provider details are available.")
+                for detail in card["technical_details"]:
+                    method = (
+                        f" · {detail['method']}" if detail["method"] else ""
+                    )
+                    st.write(
+                        f"{detail['source']} · {detail['capability']} · "
+                        f"{detail['status']}{method}"
+                    )
 
 
 def _select_review_variant(index: int) -> None:
@@ -1117,6 +1156,7 @@ def render_evidence_review(
         st.info("No editable evidence review reports are available.")
         return
     drafts = _initialize_drafts(reports, result)
+    _render_variant_status_cards(result)
     selected_value = st.session_state.get(REVIEW_VARIANT_KEY, 0)
     selected = (
         selected_value

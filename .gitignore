@@ -41,3 +41,4 @@ data/cache/*
 !/docs/stage_93_human_link_resolver.md
 !/docs/stage_94_reference_validation.md
 !/docs/stage_95_analysis_summary.md
+!/docs/stage_96_variant_status_cards.md
