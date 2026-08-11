@@ -1573,4 +1573,7 @@ Stage 86 then persisted one ordered ReportData-backed lifecycle record per accep
 variant, retained excluded variants as analyzed and auditable records, and made Final
 Clinical Report selection follow the original input order. Stage 87 then added the
 persisted input-index and allele-digest integrity gate, including the dedicated
-seven-variant and duplicate-gene acceptance scenario. Stage 88 has not started.
+seven-variant and duplicate-gene acceptance scenario. Stage 88 then replaced opaque
+interpretation exception names with a stable twelve-category failure taxonomy, added
+secret-free per-variant structured diagnostics, and kept reviewer-facing failures
+concise. Retry, repair, and fallback recovery remain Stage 89 work.

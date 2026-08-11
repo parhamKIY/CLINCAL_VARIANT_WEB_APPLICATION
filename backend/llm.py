@@ -27,6 +27,23 @@ MAX_LLM_RESPONSE_SCHEMA_BYTES = 64 * 1024
 class LLMError(RuntimeError):
     """Base error for the LLM boundary."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        attempt: int = 1,
+        finish_reason: str | None = None,
+        schema_error: str | None = None,
+        failure_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.attempt = attempt
+        self.finish_reason = finish_reason
+        self.schema_error = schema_error
+        self.failure_type = failure_type
+
 
 class LLMConfigurationError(LLMError):
     """Raised when no usable LLM provider configuration exists."""
@@ -116,9 +133,18 @@ def _require_text(
     )
 
     if not isinstance(value, str) or not value.strip():
-        raise error_type(
-            f"{field_name} must be a non-empty string."
-        )
+        if response_field:
+            failure_type = (
+                "empty_response"
+                if field_name == "LLM response content"
+                else "output_schema_failure"
+            )
+            raise LLMResponseError(
+                f"{field_name} must be a non-empty string.",
+                failure_type=failure_type,
+                schema_error="missing_response_field",
+            )
+        raise error_type(f"{field_name} must be a non-empty string.")
 
     return value
 
@@ -136,7 +162,9 @@ def _validate_token_count(
         or value < 0
     ):
         raise LLMResponseError(
-            f"{field_name} must be a non-negative integer or None."
+            f"{field_name} must be a non-negative integer or None.",
+            failure_type="output_schema_failure",
+            schema_error="invalid_token_usage",
         )
 
 
@@ -308,7 +336,9 @@ class LLMResponse:
             )
         ):
             raise LLMResponseError(
-                "finish_reason must be a non-empty string or None."
+                "finish_reason must be a non-empty string or None.",
+                failure_type="output_schema_failure",
+                schema_error="invalid_finish_reason",
             )
 
         if (
@@ -316,7 +346,9 @@ class LLMResponse:
             and not isinstance(self.usage, LLMUsage)
         ):
             raise LLMResponseError(
-                "usage must be an LLMUsage object or None."
+                "usage must be an LLMUsage object or None.",
+                failure_type="internal_conversion_failure",
+                schema_error="invalid_usage_conversion",
             )
 
 
@@ -490,7 +522,8 @@ class OpenAICompatibleAdapter:
             ) from exc
         except requests.RequestException as exc:
             raise LLMRequestError(
-                "Could not connect to the LLM provider."
+                "Could not connect to the LLM provider.",
+                schema_error="connection_failed",
             ) from exc
 
         self._raise_for_status(response)
@@ -499,7 +532,9 @@ class OpenAICompatibleAdapter:
             response_data = response.json()
         except (requests.JSONDecodeError, ValueError) as exc:
             raise LLMResponseError(
-                "The LLM provider returned invalid JSON."
+                "The LLM provider returned invalid JSON.",
+                failure_type="output_parse_failure",
+                schema_error="invalid_provider_json",
             ) from exc
 
         return self._parse_response(response_data)
@@ -513,15 +548,18 @@ class OpenAICompatibleAdapter:
         if status_code in {401, 403}:
             raise LLMAuthenticationError(
                 "The LLM provider rejected the configured credentials "
-                f"or permissions (HTTP {status_code})."
+                f"or permissions (HTTP {status_code}).",
+                http_status=status_code,
             )
         if status_code == 429:
             raise LLMRateLimitError(
-                "The LLM provider rate limit was exceeded (HTTP 429)."
+                "The LLM provider rate limit was exceeded (HTTP 429).",
+                http_status=status_code,
             )
 
         raise LLMRequestError(
-            f"The LLM provider returned HTTP {status_code}."
+            f"The LLM provider returned HTTP {status_code}.",
+            http_status=status_code,
         )
 
     def _parse_response(
@@ -530,7 +568,9 @@ class OpenAICompatibleAdapter:
     ) -> LLMResponse:
         if not isinstance(response_data, Mapping):
             raise LLMResponseError(
-                "The LLM provider response must be a JSON object."
+                "The LLM provider response must be a JSON object.",
+                failure_type="output_schema_failure",
+                schema_error="invalid_response_object",
             )
 
         choices = response_data.get("choices")
@@ -540,13 +580,17 @@ class OpenAICompatibleAdapter:
             or not isinstance(choices[0], Mapping)
         ):
             raise LLMResponseError(
-                "The LLM provider response has no valid choices."
+                "The LLM provider response has no valid choices.",
+                failure_type="empty_response",
+                schema_error="missing_choices",
             )
 
         message = choices[0].get("message")
         if not isinstance(message, Mapping):
             raise LLMResponseError(
-                "The LLM provider response has no valid message."
+                "The LLM provider response has no valid message.",
+                failure_type="empty_response",
+                schema_error="missing_message",
             )
 
         content = message.get("content")
@@ -567,7 +611,9 @@ class OpenAICompatibleAdapter:
             return None
         if not isinstance(usage_data, Mapping):
             raise LLMResponseError(
-                "The LLM provider usage value must be a JSON object."
+                "The LLM provider usage value must be a JSON object.",
+                failure_type="output_schema_failure",
+                schema_error="invalid_usage_object",
             )
 
         return LLMUsage(
@@ -618,7 +664,8 @@ class LLMClient:
                 error_type=type(exc).__name__,
             )
             raise LLMRequestError(
-                "The LLM provider request failed."
+                "The LLM provider request failed.",
+                failure_type="internal_conversion_failure",
             ) from exc
 
         if not isinstance(response, LLMResponse):
@@ -629,7 +676,9 @@ class LLMClient:
                 error_type="InvalidAdapterResponse",
             )
             raise LLMResponseError(
-                "LLM adapter must return an LLMResponse object."
+                "LLM adapter must return an LLMResponse object.",
+                failure_type="internal_conversion_failure",
+                schema_error="invalid_adapter_response",
             )
 
         _log_llm_call(
@@ -760,6 +809,7 @@ def call_llm(
             raise
         except LLMRequestError as exc:
             if attempt >= resolved_retries:
+                exc.attempt = attempt + 1
                 raise
             delay_seconds = min(float(2**attempt), 5.0)
             LOGGER.warning(

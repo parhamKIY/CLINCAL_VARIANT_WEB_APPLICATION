@@ -10,12 +10,20 @@ from datetime import datetime, timezone
 from typing import Literal, TypedDict, cast
 
 from backend.llm import (
+    LLMAuthenticationError,
     LLMClient,
+    LLMConfigurationError,
     LLMError,
     LLMJSONSchema,
+    LLMRateLimitError,
+    LLMRequestError,
     LLMResponse,
+    LLMResponseError,
+    LLMTimeoutError,
+    LLMValidationError,
     call_llm,
 )
+from backend.logging_config import get_logger
 from backend.privacy import (
     VARIANT_INTERPRETATION_TASK,
     ClinicalDataPrivacyError,
@@ -31,6 +39,7 @@ from backend.report import (
     EvidenceObjectError,
     sanitize_evidence_object,
 )
+from backend.variant_integrity import stable_allele_identity
 from config import settings
 
 
@@ -44,9 +53,55 @@ MAX_INTERPRETATION_WARNINGS = 20
 MAX_INTERPRETATION_WARNING_CHARACTERS = 2_000
 MEANINGFUL_CONFLICT_SEVERITIES = {"moderate", "major", "critical"}
 URL_PATTERN = re.compile(r"(?i)(?:https?://|www\.)")
+LOGGER = get_logger("variant_interpretation")
 
 InterpretationStatus = Literal["success", "failed"]
 InterpretationPromptMode = Literal["standard", "conflict_aware"]
+InterpretationFailureType = Literal[
+    "request_timeout",
+    "connection_error",
+    "http_429",
+    "http_5xx",
+    "authentication_error",
+    "invalid_request",
+    "empty_response",
+    "output_schema_failure",
+    "output_parse_failure",
+    "safety_or_finish_failure",
+    "internal_conversion_failure",
+    "unknown_failure",
+]
+INTERPRETATION_FAILURE_TYPES = frozenset(
+    cast(tuple[str, ...], InterpretationFailureType.__args__)
+)
+SAFE_FINISH_REASONS = frozenset(
+    {"stop", "length", "content_filter", "tool_calls", "function_call"}
+)
+SAFE_SCHEMA_ERRORS = frozenset(
+    {
+        "connection_failed",
+        "duplicate_warnings",
+        "invalid_adapter_response",
+        "invalid_fields",
+        "invalid_finish_reason",
+        "invalid_json",
+        "invalid_output_text",
+        "invalid_provider_json",
+        "invalid_response_object",
+        "invalid_token_usage",
+        "invalid_usage_conversion",
+        "invalid_usage_object",
+        "invalid_warnings",
+        "malformed_citation",
+        "missing_choices",
+        "missing_message",
+        "missing_response_field",
+        "privacy_rejection",
+        "provider_unavailable",
+        "response_size_limit",
+        "unknown_citation",
+    }
+)
 InterpretationProgressCallback = Callable[
     [int, int, InterpretationStatus | Literal["running"]],
     None,
@@ -55,6 +110,33 @@ InterpretationProgressCallback = Callable[
 
 class VariantInterpretationError(ValueError):
     """Raised when interpretation input or output violates the contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_type: InterpretationFailureType = "invalid_request",
+        finish_reason: str | None = None,
+        schema_error: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_type = failure_type
+        self.finish_reason = finish_reason
+        self.schema_error = schema_error
+
+
+class InterpretationFailureDiagnostic(TypedDict):
+    """Secret-free diagnostic fields emitted for one failed variant."""
+
+    variant_id: str
+    model: str
+    prompt_version: str
+    attempt: int
+    failure_type: InterpretationFailureType
+    http_status: int | None
+    finish_reason: str | None
+    schema_error: str | None
+    fallback_used: bool
 
 
 class InterpretationVariant(TypedDict):
@@ -320,6 +402,17 @@ def _bounded_text(value: object, *, field: str, maximum: int) -> str:
     return normalized
 
 
+def _bounded_output_text(value: object, *, field: str, maximum: int) -> str:
+    try:
+        return _bounded_text(value, field=field, maximum=maximum)
+    except VariantInterpretationError as exc:
+        raise VariantInterpretationError(
+            str(exc),
+            failure_type="output_schema_failure",
+            schema_error="invalid_output_text",
+        ) from exc
+
+
 def _parse_response(
     response: LLMResponse,
     *,
@@ -327,11 +420,15 @@ def _parse_response(
 ) -> tuple[str, str, list[str], list[str]]:
     if response.finish_reason not in {None, "stop"}:
         raise VariantInterpretationError(
-            "The interpretation response did not finish safely."
+            "The interpretation response did not finish safely.",
+            failure_type="safety_or_finish_failure",
+            finish_reason=response.finish_reason,
         )
     if len(response.content.encode("utf-8")) > MAX_INTERPRETATION_RESPONSE_BYTES:
         raise VariantInterpretationError(
-            "The interpretation response exceeds its size limit."
+            "The interpretation response exceeds its size limit.",
+            failure_type="output_schema_failure",
+            schema_error="response_size_limit",
         )
 
     def reject_nonstandard_constant(value: str) -> object:
@@ -344,12 +441,16 @@ def _parse_response(
         )
     except (json.JSONDecodeError, ValueError) as exc:
         raise VariantInterpretationError(
-            "The interpretation response is not valid JSON."
+            "The interpretation response is not valid JSON.",
+            failure_type="output_parse_failure",
+            schema_error="invalid_json",
         ) from exc
     expected = {"interpretation", "conflict_assessment", "warnings"}
     if not isinstance(payload, Mapping) or set(payload) != expected:
         raise VariantInterpretationError(
-            "The interpretation response has invalid fields."
+            "The interpretation response has invalid fields.",
+            failure_type="output_schema_failure",
+            schema_error="invalid_fields",
         )
     raw_warnings = payload["warnings"]
     if (
@@ -357,10 +458,12 @@ def _parse_response(
         or len(raw_warnings) > MAX_INTERPRETATION_WARNINGS
     ):
         raise VariantInterpretationError(
-            "Interpretation warnings must be a bounded list."
+            "Interpretation warnings must be a bounded list.",
+            failure_type="output_schema_failure",
+            schema_error="invalid_warnings",
         )
     warnings = [
-        _bounded_text(
+        _bounded_output_text(
             warning,
             field=f"warnings[{index}]",
             maximum=MAX_INTERPRETATION_WARNING_CHARACTERS,
@@ -369,14 +472,16 @@ def _parse_response(
     ]
     if len(set(warnings)) != len(warnings):
         raise VariantInterpretationError(
-            "Interpretation warnings must be unique."
+            "Interpretation warnings must be unique.",
+            failure_type="output_schema_failure",
+            schema_error="duplicate_warnings",
         )
-    interpretation = _bounded_text(
+    interpretation = _bounded_output_text(
         payload["interpretation"],
         field="interpretation",
         maximum=MAX_INTERPRETATION_CHARACTERS,
     )
-    conflict_assessment = _bounded_text(
+    conflict_assessment = _bounded_output_text(
         payload["conflict_assessment"],
         field="conflict_assessment",
         maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
@@ -387,7 +492,9 @@ def _parse_response(
     )
     if any(not re.fullmatch(r"R[1-9][0-9]*", item) for item in citation_tokens):
         raise VariantInterpretationError(
-            "Interpretation contains a malformed reference citation."
+            "Interpretation contains a malformed reference citation.",
+            failure_type="output_schema_failure",
+            schema_error="malformed_citation",
         )
     citations = cited_reference_ids(
         interpretation,
@@ -396,7 +503,9 @@ def _parse_response(
     )
     if any(item not in allowed_reference_ids for item in citations):
         raise VariantInterpretationError(
-            "Interpretation cites a reference absent from its evidence."
+            "Interpretation cites a reference absent from its evidence.",
+            failure_type="output_schema_failure",
+            schema_error="unknown_citation",
         )
     try:
         validate_llm_payload(
@@ -408,7 +517,9 @@ def _parse_response(
         )
     except ClinicalDataPrivacyError as exc:
         raise VariantInterpretationError(
-            "The interpretation response contains prohibited clinical data."
+            "The interpretation response contains prohibited clinical data.",
+            failure_type="output_schema_failure",
+            schema_error="privacy_rejection",
         ) from exc
     return interpretation, conflict_assessment, warnings, citations
 
@@ -431,6 +542,115 @@ def _variant_identity(evidence: EvidenceObject) -> InterpretationVariant:
         "ref": variant["ref"],
         "alt": variant["alt"],
     }
+
+
+def _safe_diagnostic_token(
+    value: object,
+    *,
+    allowed: frozenset[str],
+) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    token = value.strip()
+    if token not in allowed:
+        return "unrecognized"
+    return token
+
+
+def classify_interpretation_failure(
+    error: Exception,
+) -> InterpretationFailureType:
+    """Map an internal exception to the bounded Stage 88 taxonomy."""
+
+    declared = getattr(error, "failure_type", None)
+    if declared in INTERPRETATION_FAILURE_TYPES:
+        return cast(InterpretationFailureType, declared)
+    if isinstance(error, LLMAuthenticationError):
+        return "authentication_error"
+    if isinstance(error, LLMRateLimitError):
+        return "http_429"
+    if isinstance(error, LLMTimeoutError):
+        return "request_timeout"
+    if isinstance(error, LLMRequestError):
+        status = getattr(error, "http_status", None)
+        if isinstance(status, int) and 500 <= status <= 599:
+            return "http_5xx"
+        if status == 429:
+            return "http_429"
+        if isinstance(status, int):
+            return "invalid_request"
+        return "connection_error"
+    if isinstance(error, (LLMConfigurationError, LLMValidationError)):
+        return "invalid_request"
+    if isinstance(error, LLMResponseError):
+        return "empty_response"
+    if isinstance(error, (TypeError, KeyError, OverflowError)):
+        return "internal_conversion_failure"
+    return "unknown_failure"
+
+
+def build_interpretation_failure_diagnostic(
+    evidence: EvidenceObject,
+    *,
+    model: str,
+    error: Exception,
+) -> InterpretationFailureDiagnostic:
+    """Build one bounded diagnostic without prompt, response, or secret data."""
+
+    status = getattr(error, "http_status", None)
+    http_status = (
+        status
+        if isinstance(status, int) and not isinstance(status, bool)
+        and 100 <= status <= 599
+        else None
+    )
+    attempt_value = getattr(error, "attempt", 1)
+    attempt = (
+        attempt_value
+        if isinstance(attempt_value, int)
+        and not isinstance(attempt_value, bool)
+        and attempt_value > 0
+        else 1
+    )
+    return {
+        "variant_id": stable_allele_identity(
+            evidence["variant"],
+            assembly=evidence["assembly"],
+        ),
+        "model": model,
+        "prompt_version": VARIANT_INTERPRETATION_PROMPT_VERSION,
+        "attempt": attempt,
+        "failure_type": classify_interpretation_failure(error),
+        "http_status": http_status,
+        "finish_reason": _safe_diagnostic_token(
+            getattr(error, "finish_reason", None),
+            allowed=SAFE_FINISH_REASONS,
+        ),
+        "schema_error": _safe_diagnostic_token(
+            getattr(error, "schema_error", None),
+            allowed=SAFE_SCHEMA_ERRORS,
+        ),
+        "fallback_used": False,
+    }
+
+
+def _log_interpretation_failure(
+    diagnostic: InterpretationFailureDiagnostic,
+) -> None:
+    LOGGER.warning(
+        "event=variant_interpretation_failed variant_id=%s model=%s "
+        "prompt_version=%s attempt=%d failure_type=%s http_status=%s "
+        "finish_reason=%s schema_error=%s fallback_used=%s",
+        diagnostic["variant_id"],
+        diagnostic["model"],
+        diagnostic["prompt_version"],
+        diagnostic["attempt"],
+        diagnostic["failure_type"],
+        diagnostic["http_status"],
+        diagnostic["finish_reason"],
+        diagnostic["schema_error"],
+        diagnostic["fallback_used"],
+    )
 
 
 def interpret_variant(
@@ -526,6 +746,12 @@ def _failed_result(
     conflict_status, conflict_severity, prompt_mode = _conflict_context(
         evidence
     )
+    diagnostic = build_interpretation_failure_diagnostic(
+        evidence,
+        model=model,
+        error=error,
+    )
+    _log_interpretation_failure(diagnostic)
     result: VariantInterpretationResult = {
         "schema_version": VARIANT_INTERPRETATION_SCHEMA_VERSION,
         "variant_index": variant_index,
@@ -544,7 +770,7 @@ def _failed_result(
         "cited_reference_ids": [],
         "usage": None,
         "generated_at": _timestamp(timestamp),
-        "error_type": type(error).__name__,
+        "error_type": diagnostic["failure_type"],
     }
     return validate_variant_interpretation_result(result, evidence=evidence)
 
@@ -787,6 +1013,7 @@ def validate_variant_interpretation_result(
         or value["usage"] is not None
         or not isinstance(value["error_type"], str)
         or not value["error_type"].strip()
+        or value["error_type"] not in INTERPRETATION_FAILURE_TYPES
     ):
         raise VariantInterpretationError(
             "Failed variant interpretation is invalid."
@@ -826,6 +1053,9 @@ def validate_variant_interpretation_result(
 
 
 __all__ = [
+    "INTERPRETATION_FAILURE_TYPES",
+    "InterpretationFailureDiagnostic",
+    "InterpretationFailureType",
     "MAX_CONFLICT_ASSESSMENT_CHARACTERS",
     "MAX_INTERPRETATION_CHARACTERS",
     "MAX_INTERPRETATION_WARNINGS",
@@ -835,6 +1065,8 @@ __all__ = [
     "VARIANT_INTERPRETATION_SYSTEM_PROMPT",
     "VariantInterpretationError",
     "VariantInterpretationResult",
+    "build_interpretation_failure_diagnostic",
+    "classify_interpretation_failure",
     "interpret_variant",
     "interpret_variants",
     "validate_variant_interpretation_result",

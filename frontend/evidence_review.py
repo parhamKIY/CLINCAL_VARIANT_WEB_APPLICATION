@@ -535,8 +535,8 @@ def _render_draft_variant_report(
     st.markdown("#### Variant interpretation")
     if interpretation["status"] == "failed":
         st.error(
-            "Interpretation is unavailable because the model request "
-            f"failed ({interpretation['failure_type'] or 'unknown error'})."
+            "Interpretation is unavailable because the model "
+            "request could not be completed."
         )
         st.caption(
             "Collected evidence remains available for review and the "

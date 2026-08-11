@@ -12240,7 +12240,7 @@ class TestStage50SingleModelInterpretation:
             "failed",
             "success",
         ]
-        assert results[1]["error_type"] == "LLMRequestError"
+        assert results[1]["error_type"] == "connection_error"
         assert results[1]["interpretation"] is None
         assert len(adapter.requests) == 3
         assert progress == [
@@ -12410,7 +12410,7 @@ class TestStage52DraftVariantReportV2:
             "model": failed["configured_model"],
             "prompt_version": failed["prompt_version"],
             "generated_at": failed["generated_at"],
-            "failure_type": "LLMTimeoutError",
+            "failure_type": "request_timeout",
         }
         assert any(
             "evidence remains reviewable" in limitation
@@ -15280,7 +15280,7 @@ class TestStage44EndToEndAcceptance:
             "success",
         ]
         assert interpretations[2]["interpretation"] is None
-        assert interpretations[2]["error_type"] == "LLMTimeoutError"
+        assert interpretations[2]["error_type"] == "request_timeout"
         draft_reports = analysis["draft_variant_reports"]
         assert [report["variant_index"] for report in draft_reports] == [
             0,
@@ -15587,7 +15587,7 @@ class TestStage60EndToEndAcceptanceV3:
             for item in interpretations
         )
         assert interpretations[7]["status"] == "failed"
-        assert interpretations[7]["error_type"] == "LLMTimeoutError"
+        assert interpretations[7]["error_type"] == "request_timeout"
         assert interpretations[9]["status"] == "success"
         assert len(interpretation_adapter.requests) == 10
         assert next(

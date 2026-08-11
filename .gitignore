@@ -33,3 +33,4 @@ data/cache/*
 !/docs/stage_85_document_editing.md
 !/docs/stage_86_report_lifecycle.md
 !/docs/stage_87_variant_integrity.md
+!/docs/stage_88_interpretation_diagnostics.md

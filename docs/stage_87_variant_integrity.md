@@ -65,4 +65,5 @@ Validated on 2026-08-11:
 - full repository suite: `988 passed, 4 skipped`;
 - Stage 60 release gate: passed at `85.78%` coverage.
 
-Stage 88 interpretation-error taxonomy work is not implemented here.
+Stage 88 subsequently added the interpretation-error taxonomy and structured
+failure observability; it did not alter this integrity gate.
