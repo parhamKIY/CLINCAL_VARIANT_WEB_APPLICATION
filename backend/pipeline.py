@@ -79,6 +79,11 @@ from backend.report import (
     EvidenceObjectError,
     build_evidence_objects,
 )
+from backend.report_lifecycle import (
+    ReportLifecycleError,
+    build_variant_report_records,
+    validate_variant_report_record,
+)
 from backend.variant_interpretation import (
     VariantInterpretationError,
     interpret_variants,
@@ -87,7 +92,6 @@ from backend.variant_interpretation import (
 from backend.variant_report import (
     DraftVariantReportError,
     build_draft_variant_reports,
-    select_included_draft_variant_reports,
     validate_draft_variant_report,
 )
 from backend.vcf_processing import (
@@ -96,7 +100,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "2.9"
+PIPELINE_SCHEMA_VERSION = "3.0"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -260,6 +264,7 @@ class PipelineResult(TypedDict):
     evidence_objects: list[dict[str, object]]
     variant_interpretation_results: list[dict[str, object]]
     draft_variant_reports: list[dict[str, object]]
+    variant_report_records: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
     reviewed_evidence_packages: list[dict[str, object]]
     llm_routing_results: list[dict[str, object]]
@@ -499,6 +504,7 @@ def create_pipeline_result() -> PipelineResult:
         "evidence_objects": [],
         "variant_interpretation_results": [],
         "draft_variant_reports": [],
+        "variant_report_records": [],
         "evidence_review_reports": [],
         "reviewed_evidence_packages": [],
         "llm_routing_results": [],
@@ -815,6 +821,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "evidence_objects",
         "variant_interpretation_results",
         "draft_variant_reports",
+        "variant_report_records",
         "evidence_review_reports",
         "llm_routing_results",
     ):
@@ -838,6 +845,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "evidence_objects",
                     "variant_interpretation_results",
                     "draft_variant_reports",
+                    "variant_report_records",
                     "evidence_review_reports",
                     "reviewed_evidence_packages",
                     "llm_routing_results",
@@ -951,6 +959,29 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 raise PipelineResultError(
                     "pipeline.draft_variant_reports is invalid."
                 ) from exc
+    variant_report_records = value["variant_report_records"]
+    if variant_report_records:
+        if len(variant_report_records) != len(draft_variant_reports):
+            raise PipelineResultError(
+                "pipeline.variant_report_records must match the Draft "
+                "Variant Report count."
+            )
+        try:
+            validated_lifecycle_records = [
+                validate_variant_report_record(record)
+                for record in variant_report_records
+            ]
+        except ReportLifecycleError as exc:
+            raise PipelineResultError(
+                "pipeline.variant_report_records is invalid."
+            ) from exc
+        if [
+            record["variant_index"] for record in validated_lifecycle_records
+        ] != list(range(len(validated_lifecycle_records))):
+            raise PipelineResultError(
+                "pipeline.variant_report_records must preserve original "
+                "input order."
+            )
     packages = value["reviewed_evidence_packages"]
     if (
         not isinstance(packages, list)
@@ -989,6 +1020,32 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "an unmodified Evidence Object."
                 )
             previous_index = index
+    if variant_report_records:
+        raw_final = value["final_clinical_report"]
+        finalized_at = (
+            raw_final.get("generated_at")
+            if value["workflow_state"] == "completed"
+            and isinstance(raw_final, dict)
+            else None
+        )
+        try:
+            expected_lifecycle_records = build_variant_report_records(
+                cast(list[Mapping[str, object]], draft_variant_reports),
+                analysis_id=cast(str | None, value["analysis_id"]),
+                confirmed_packages=cast(
+                    list[Mapping[str, object]], validated_packages
+                ),
+                finalized_at=cast(str | None, finalized_at),
+            )
+        except ReportLifecycleError as exc:
+            raise PipelineResultError(
+                "pipeline.variant_report_records could not be verified."
+            ) from exc
+        if variant_report_records != expected_lifecycle_records:
+            raise PipelineResultError(
+                "pipeline.variant_report_records do not match the current "
+                "review lifecycle."
+            )
     routing_results = value["llm_routing_results"]
     if (
         not isinstance(routing_results, list)
@@ -1057,7 +1114,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
     ):
         raise PipelineResultError(
             "pipeline.awaiting_final_review requires evidence, "
-            "interpretation, and one Draft Variant Report per variant."
+            "interpretation and one Draft Variant Report per variant."
         )
     if (
         workflow_state == "completed"
@@ -1352,6 +1409,7 @@ def _finish_failed_stage(
             "evidence_objects",
             "variant_interpretation_results",
             "draft_variant_reports",
+            "variant_report_records",
             "evidence_review_reports",
             "reviewed_evidence_packages",
             "llm_routing_results",
@@ -1434,6 +1492,7 @@ def _persist_terminal_result(
         result["analysis_id"] = None
         return
     result["analysis_id"] = record["analysis_id"]
+    _sync_variant_report_records(result)
     try:
         save_pipeline_state(result, database_path=database_path)
     except DatabaseError:
@@ -1444,6 +1503,45 @@ def _persist_terminal_result(
         )
         if result["status"] == "success":
             result["status"] = "partial"
+
+
+def _sync_variant_report_records(
+    result: PipelineResult,
+    *,
+    finalized_at: str | None = None,
+) -> None:
+    """Rebuild the primary records from current audited review state."""
+
+    if not result["draft_variant_reports"]:
+        result["variant_report_records"] = []
+        return
+    if (
+        finalized_at is None
+        and result["workflow_state"] == "completed"
+        and result["final_clinical_report"] is not None
+    ):
+        finalized_at = cast(
+            str,
+            result["final_clinical_report"]["generated_at"],
+        )
+    try:
+        records = build_variant_report_records(
+            cast(
+                list[Mapping[str, object]],
+                result["draft_variant_reports"],
+            ),
+            analysis_id=result["analysis_id"],
+            confirmed_packages=cast(
+                list[Mapping[str, object]],
+                result["reviewed_evidence_packages"],
+            ),
+            finalized_at=finalized_at,
+        )
+    except ReportLifecycleError as exc:
+        raise PipelineError(
+            "Per-variant report lifecycle records could not be synchronized."
+        ) from exc
+    result["variant_report_records"] = [dict(item) for item in records]
 
 
 def _process_filtered_variants(
@@ -2186,6 +2284,7 @@ def _build_evidence_and_report(
         dict(report)
         for report in draft_variant_reports
     ]
+    _sync_variant_report_records(result)
     review_reports = build_evidence_review_reports(evidence_objects)
     result["evidence_review_reports"] = [
         dict(report)
@@ -2702,6 +2801,7 @@ def confirm_reviewed_evidence(
             if working["variant_interpretation_results"]
             else "awaiting_confirmation"
         )
+        _sync_variant_report_records(working)
     return validate_pipeline_result(working)
 
 
@@ -2762,10 +2862,9 @@ def finalize_reviewed_analysis(
         item["status"] == "failed"
         for item in working["variant_interpretation_results"]
     )
-    selected_count = len(
-        select_included_draft_variant_reports(
-            list(working["draft_variant_reports"])
-        )
+    selected_count = sum(
+        bool(record["report_data"]["review_state"]["include_in_final_report"])
+        for record in working["variant_report_records"]
     )
     message = (
         "Final review confirmed with "
@@ -2806,6 +2905,13 @@ def finalize_reviewed_analysis(
             "Final Clinical Report could not be composed from the "
             "reviewer-approved state."
         ) from exc
+    _sync_variant_report_records(
+        working,
+        finalized_at=cast(
+            str,
+            working["final_clinical_report"]["generated_at"],
+        ),
+    )
     validated = validate_pipeline_result(working)
     _notify_progress(validated, progress_callback)
     return validated
@@ -2882,6 +2988,7 @@ def update_draft_variant_report(
         working["workflow_state"] = "awaiting_final_review"
         working["current_stage"] = "completed"
         working["progress_percent"] = 100
+    _sync_variant_report_records(working)
     LOGGER.info(
         "event=draft_variant_report_updated variant_index=%d "
         "edit_count=%d selection_count=%d confirmation_invalidated=%s",
@@ -2899,13 +3006,15 @@ def get_selected_draft_variant_reports(
     """Project included reports in immutable original variant order."""
 
     working = validate_pipeline_result(deepcopy(result))
-    try:
-        selected = select_included_draft_variant_reports(
-            list(working["draft_variant_reports"])
-        )
-    except DraftVariantReportError as exc:
-        raise PipelineError(str(exc)) from exc
-    return [dict(report) for report in selected]
+    selected_indexes = [
+        record["variant_index"]
+        for record in working["variant_report_records"]
+        if record["report_data"]["review_state"]["include_in_final_report"]
+    ]
+    return [
+        dict(working["draft_variant_reports"][index])
+        for index in selected_indexes
+    ]
 
 
 def generate_confirmed_interpretations(

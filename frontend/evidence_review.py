@@ -862,10 +862,21 @@ def _render_editable_docx_download(
     """Regenerate the editable Word artifact from current reviewed fields."""
 
     try:
-        report_data = build_report_data_from_draft(
-            report,
-            analysis_id=str(result.get("analysis_id") or "unpersisted-analysis"),
-        )
+        records = result["variant_report_records"]
+        if records:
+            record = records[report["variant_index"]]
+            if record["report_id"] != report["report_id"]:
+                raise ValueError(
+                    "Report lifecycle identity does not match the editor."
+                )
+            report_data = record["report_data"]
+        else:
+            report_data = build_report_data_from_draft(
+                report,
+                analysis_id=str(
+                    result.get("analysis_id") or "unpersisted-analysis"
+                ),
+            )
         docx_data = render_report_data_docx(report_data)
         filename = report_docx_filename(report_data)
     except (DraftVariantReportError, ReportDocxError, ValueError) as exc:

@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-85 implemented as recorded below
+**Implementation status:** Stages 0-86 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 86 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 87 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -63,7 +63,11 @@ editor for brief interpretation, variant interpretation, classification summary,
 reviewer notes. Saves retain field-level audit history, invalidate confirmation, and
 regenerate the editable professor-template Word report through a validated transient
 ReportData V4 projection.
-This declaration is the unified implementation record for Stages 0-85. The former
+Stage 86 makes that report projection a persisted, ordered per-variant lifecycle
+record. Each accepted variant retains one ReportData-backed DOCX draft record through
+editing, reporting-only selection, confirmation, and finalization; excluded variants
+remain analyzed, stored, and auditable in original input order.
+This declaration is the unified implementation record for Stages 0-86. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -342,12 +346,13 @@ flowchart LR
     AT --> AU["Stage 83: golden DOCX fidelity gate"]
     AU --> AV["Stage 84: in-app report preview"]
     AV --> AW["Stage 85: document-like editing"]
+    AW --> AX["Stage 86: per-variant report lifecycle"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW done
+    class AV,AW,AX done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -1192,6 +1197,26 @@ editable professor-template DOCX exposed by Download editable Word report. This 
 Stage 85 document-to-artifact continuity without prematurely creating the Stage 86
 persisted ReportData lifecycle.
 
+### Stage 86 per-variant report lifecycle
+
+`backend/report_lifecycle.py` defines the strict `VariantReportRecord V1` contract.
+Every accepted variant receives one record in original input order containing the
+validated `ReportData V4`, stable analysis/report/index identity, deterministic DOCX
+filename/hash/size/template metadata, and draft/confirmed/finalized timestamps. DOCX
+bytes remain regenerable and are not embedded in persisted JSON.
+
+`backend/pipeline.py` creates these records with the Draft Variant Reports, rebuilds
+them after audited edits and selection changes, advances them from draft through
+confirmation and finalization, and persists them in pipeline schema `3.0`.
+`backend/database.py` performs a bounded `2.8`/`2.9` migration without rerunning
+evidence collection or interpretation. `frontend/evidence_review.py` downloads the
+editable Word artifact from the primary record's ReportData.
+
+Exclusion changes only `include_in_final_report`. It never removes evidence,
+interpretation, report content, audit history, confirmation, or the lifecycle record.
+`backend/final_clinical_report.py` derives the selected subset from ordered lifecycle
+records, preserving original input order.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1202,12 +1227,13 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `2.9`.
+- Active pipeline schema: `3.0`.
 - SQLite schema: `3`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
+- Variant Report Lifecycle schema: `1.0`.
 - Final Clinical Report schema: `2.0`.
 - Recovery request schema: `3`.
 
@@ -1406,6 +1432,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 83 golden DOCX fidelity gate | `backend/report_docx.py`, `tests/fixtures/stage83_golden_report_data_v4.json`, `tests/golden/stage83/variant_001_report.docx`, `docs/stage_83_fidelity_gate.md`, `tests/test_stage83_docx_fidelity.py` |
 | Stage 84 in-app report preview | `frontend/report_preview.py`, `frontend/evidence_review.py`, `frontend/ui.py`, `docs/stage_84_report_preview.md`, `tests/test_stage84_report_preview.py` |
 | Stage 85 document-like editing and DOCX regeneration | `backend/report_data_projection.py`, `frontend/evidence_review.py`, `docs/stage_85_document_editing.md`, `tests/test_stage85_document_editor.py` |
+| Stage 86 per-variant report lifecycle | `backend/report_lifecycle.py`, `backend/pipeline.py`, `backend/database.py`, `backend/final_clinical_report.py`, `frontend/evidence_review.py`, `docs/stage_86_report_lifecycle.md`, `tests/test_stage86_report_lifecycle.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1516,4 +1543,7 @@ gate, professor review, and final visual sign-off remain pending. Stage 84 then 
 the report-first three-page HTML review surface and demoted provider dashboards from the
 default visual hierarchy. Stage 85 then added explicit document-region editing,
 field-level audit preservation, confirmation invalidation, and regenerated editable
-DOCX output through transient ReportData V4 projection; Stage 86 has not started.
+DOCX output through transient ReportData V4 projection.
+Stage 86 then persisted one ordered ReportData-backed lifecycle record per accepted
+variant, retained excluded variants as analyzed and auditable records, and made Final
+Clinical Report selection follow the original input order. Stage 87 has not started.

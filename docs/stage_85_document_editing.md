@@ -65,4 +65,5 @@ Validated on 2026-08-11:
   secrets audit, ten-variant acceptance, and the complete Testing V3 suite at `85.83%`
   coverage.
 
-Stage 86 lifecycle work is not implemented here.
+At Stage 85 completion, Stage 86 lifecycle work was not yet implemented. It is now
+implemented separately in `docs/stage_86_report_lifecycle.md`.

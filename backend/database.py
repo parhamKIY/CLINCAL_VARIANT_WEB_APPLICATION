@@ -1692,6 +1692,10 @@ def _bounded_stage56_pipeline_migration(
         PIPELINE_SCHEMA_VERSION,
         validate_pipeline_result,
     )
+    from backend.report_lifecycle import (
+        ReportLifecycleError,
+        build_variant_report_records,
+    )
 
     if not isinstance(raw, dict):
         return None
@@ -1701,7 +1705,8 @@ def _bounded_stage56_pipeline_migration(
             return validate_pipeline_result(candidate)
         except (TypeError, ValueError):
             return None
-    if candidate.get("schema_version") != "2.8":
+    source_version = candidate.get("schema_version")
+    if source_version not in {"2.8", "2.9"}:
         return None
     variant_count = candidate.get("variant_count")
     reports = candidate.get("draft_variant_reports")
@@ -1715,43 +1720,59 @@ def _bounded_stage56_pipeline_migration(
         or len(interpretations) != variant_count
     ):
         return None
-    accepted_hpo_terms: list[str] = []
-    if reports:
-        reviewed = reports[0].get("reviewed_report")
-        phenotype = (
-            reviewed.get("phenotype_context")
-            if isinstance(reviewed, dict)
-            else None
-        )
-        accepted = (
-            phenotype.get("accepted_hpo_terms")
-            if isinstance(phenotype, dict)
-            else None
-        )
-        if isinstance(accepted, list) and all(
-            isinstance(item, str) for item in accepted
-        ):
-            accepted_hpo_terms = list(accepted)
-    interpretation_model = None
-    if interpretations and isinstance(interpretations[0], dict):
-        model = interpretations[0].get("configured_model")
-        if isinstance(model, str) and model.strip():
-            interpretation_model = model
+    if source_version == "2.8":
+        accepted_hpo_terms: list[str] = []
+        if reports:
+            reviewed = reports[0].get("reviewed_report")
+            phenotype = (
+                reviewed.get("phenotype_context")
+                if isinstance(reviewed, dict)
+                else None
+            )
+            accepted = (
+                phenotype.get("accepted_hpo_terms")
+                if isinstance(phenotype, dict)
+                else None
+            )
+            if isinstance(accepted, list) and all(
+                isinstance(item, str) for item in accepted
+            ):
+                accepted_hpo_terms = list(accepted)
+        interpretation_model = None
+        if interpretations and isinstance(interpretations[0], dict):
+            model = interpretations[0].get("configured_model")
+            if isinstance(model, str) and model.strip():
+                interpretation_model = model
+        candidate["analysis_context"] = {
+            "input_type": None,
+            "accepted_hpo_terms": accepted_hpo_terms,
+            "phenotype_extraction_model": None,
+            "variant_interpretation_model": interpretation_model,
+            "phenotype_extraction_provenance": None,
+        }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
-    candidate["analysis_context"] = {
-        "input_type": None,
-        "accepted_hpo_terms": accepted_hpo_terms,
-        "phenotype_extraction_model": None,
-        "variant_interpretation_model": interpretation_model,
-        "phenotype_extraction_provenance": None,
-    }
     final_report = candidate.get("final_clinical_report")
-    if final_report is not None:
-        generated_at = (
-            final_report.get("generated_at")
-            if isinstance(final_report, dict)
-            else None
+    generated_at = (
+        final_report.get("generated_at")
+        if isinstance(final_report, dict)
+        else None
+    )
+    packages = candidate.get("reviewed_evidence_packages")
+    try:
+        candidate["variant_report_records"] = build_variant_report_records(
+            reports,
+            analysis_id=candidate.get("analysis_id"),
+            confirmed_packages=(packages if isinstance(packages, list) else []),
+            finalized_at=(
+                generated_at
+                if candidate.get("workflow_state") == "completed"
+                and final_report is not None
+                else None
+            ),
         )
+    except (ReportLifecycleError, TypeError, ValueError):
+        return None
+    if final_report is not None:
         candidate["final_clinical_report"] = None
         try:
             candidate["final_clinical_report"] = dict(

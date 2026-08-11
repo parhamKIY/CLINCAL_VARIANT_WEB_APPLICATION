@@ -19,6 +19,10 @@ from backend.references import (
     render_canonical_reference_markdown,
     validate_canonical_reference,
 )
+from backend.report_lifecycle import (
+    ReportLifecycleError,
+    validate_variant_report_record,
+)
 from backend.variant_report import (
     DraftVariantReportError,
     VariantReportContent,
@@ -175,6 +179,7 @@ def compose_final_clinical_report(
 
     variant_count = pipeline.get("variant_count")
     reports_value = pipeline.get("draft_variant_reports")
+    lifecycle_value = pipeline.get("variant_report_records", [])
     packages_value = pipeline.get("reviewed_evidence_packages")
     if (
         isinstance(variant_count, bool)
@@ -182,6 +187,8 @@ def compose_final_clinical_report(
         or variant_count < 0
         or not isinstance(reports_value, list)
         or len(reports_value) != variant_count
+        or not isinstance(lifecycle_value, list)
+        or (lifecycle_value and len(lifecycle_value) != variant_count)
         or not isinstance(packages_value, list)
         or len(packages_value) != variant_count
     ):
@@ -191,10 +198,17 @@ def compose_final_clinical_report(
         )
     try:
         reports = [validate_draft_variant_report(item) for item in reports_value]
-    except DraftVariantReportError as exc:
+        lifecycle_records = [
+            validate_variant_report_record(item) for item in lifecycle_value
+        ]
+    except (DraftVariantReportError, ReportLifecycleError) as exc:
         raise FinalClinicalReportError("Draft Variant Reports are invalid.") from exc
     if [item["variant_index"] for item in reports] != list(range(variant_count)):
         raise FinalClinicalReportError("Draft Variant Reports are out of order.")
+    if lifecycle_records and [
+        item["variant_index"] for item in lifecycle_records
+    ] != list(range(variant_count)):
+        raise FinalClinicalReportError("Report lifecycle records are out of order.")
     if any(not isinstance(item, Mapping) for item in packages_value):
         raise FinalClinicalReportError("Final confirmation packages are invalid.")
     packages = cast(list[Mapping[str, object]], packages_value)
@@ -205,7 +219,20 @@ def compose_final_clinical_report(
     packages_by_index = {
         cast(int, package["variant_index"]): package for package in packages
     }
-    selected = [item for item in reports if item["include_in_final_report"]]
+    selected_indexes = (
+        [
+            record["variant_index"]
+            for record in lifecycle_records
+            if record["report_data"]["review_state"]["include_in_final_report"]
+        ]
+        if lifecycle_records
+        else [
+            report["variant_index"]
+            for report in reports
+            if report["include_in_final_report"]
+        ]
+    )
+    selected = [reports[index] for index in selected_indexes]
     source_reports = selected or reports
     accepted_hpo = _unique_text(
         [
