@@ -42,4 +42,5 @@ Validated on 2026-08-11:
 - no production interpretation or report behavior was changed by this test-only
   stage.
 
-Stage 103 reference acceptance-suite work is not implemented here.
+Stage 103 reference acceptance is implemented separately in
+`docs/stage_103_reference_acceptance.md`.

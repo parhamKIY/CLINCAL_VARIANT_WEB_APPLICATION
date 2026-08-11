@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-102 implemented as recorded below
+**Implementation status:** Stages 0-103 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 103 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 104 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -115,7 +115,10 @@ Stage 102 adds a seven-scenario deterministic acceptance suite for normal, pheno
 non-concordant, partial-provider, conflicting, transient-failure, structured-repair,
 and total-failure interpretation paths. It verifies retained per-variant report state
 and an action-required reviewer outcome when interpretation is exhausted.
-This declaration is the unified implementation record for Stages 0-102. The former
+Stage 103 adds a deterministic acceptance gate for exact literature targets, strict
+literature/provenance separation, rejection of raw JSON and fabricated links,
+human-readable provider records, and clean missing-link behavior across HTML and DOCX.
+This declaration is the unified implementation record for Stages 0-103. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -411,12 +414,13 @@ flowchart LR
     BK --> BL["Stage 100: DOCX export and final package"]
     BL --> BM["Stage 101: visual regression harness"]
     BM --> BN["Stage 102: interpretation acceptance suite"]
+    BN --> BO["Stage 103: reference acceptance suite"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN,BO done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -532,6 +536,7 @@ their original order.
 | 100 | Added authoritative per-variant DOCX downloads and a deterministic selected-report ZIP package with artifact-integrity verification and no interpretation regeneration. | Complete |
 | 101 | Added six deterministic ReportData layout scenarios, exact DOCX/style snapshots, structural page/table/heading/overflow guards, and an optional real raster matrix. | Complete |
 | 102 | Added seven deterministic interpretation acceptance scenarios covering normal, phenotype non-concordant, partial-provider, conflicting, transient-recovery, structured-repair, and total-failure behavior with retained variant state. | Complete |
+| 103 | Added end-to-end reference acceptance checks for exact literature targets, category separation, raw/machine-link rejection, human provider pages, and clean missing stable links in HTML and DOCX. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1548,7 +1553,22 @@ constrained structured-output repair. When interpretation is completely exhauste
 the allele and Draft Variant Report remain available, the primary status becomes
 `Interpretation requires attention`, and warning semantics provide an `ACTION REQUIRED`
 notice telling the reviewer to inspect retained evidence and retry. The gate is fully
-offline and does not change production behavior. Stage 103 has not started.
+offline and does not change production behavior.
+
+### Stage 103 reference acceptance suite
+
+The deterministic reference gate carries canonical literature and source provenance
+from Evidence Object construction through Draft Variant Report, ReportData V4, HTML
+preview, and authoritative DOCX output. Every retained PMID, PMCID, and DOI is checked
+against its exact canonical human target and verified as a clickable artifact link.
+Numbered literature remains disjoint from unnumbered database and tool provenance.
+
+MyVariant.info raw JSON cannot masquerade as a normal reference and remains labelled
+as a programmatic annotation source. Invalid identifiers never generate URLs;
+available ClinVar, Ensembl, and GeneBe identities use validated human-readable pages;
+and a missing stable identifier produces clean unlinked provenance without an invented
+target. The gate is offline; Stage 94 remains the optional bounded live-reachability
+check. No new live-provider result is claimed. Stage 104 has not started.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1783,6 +1803,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 100 DOCX export and final package | `backend/final_docx_package.py`, `backend/report_docx.py`, `frontend/evidence_review.py`, `frontend/report_viewer.py`, `docs/stage_100_docx_export_package.md`, `tests/test_stage100_docx_export_package.py` |
 | Stage 101 visual regression harness | `tools/stage101_visual_regression.py`, `tests/fixtures/stage101_visual_scenarios.json`, `tests/golden/stage101/snapshots.json`, `tests/test_stage101_visual_regression.py`, `docs/stage_101_visual_regression.md` |
 | Stage 102 interpretation acceptance suite | `tests/test_stage102_interpretation_acceptance.py`, `docs/stage_102_interpretation_acceptance.md`, `pytest.ini` |
+| Stage 103 reference acceptance suite | `tests/test_stage103_reference_acceptance.py`, `docs/stage_103_reference_acceptance.md`, `pytest.ini` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1929,4 +1950,6 @@ checks and no hidden interpretation regeneration. Stage 101 then added six deter
 DOCX layout scenarios, exact binary/structural snapshots, and an optional real raster
 matrix. Stage 102 then added the seven-scenario corrected-interpretation acceptance
 gate, including bounded recovery and retained action-required report state after total
-model failure. Stage 103 has not started.
+model failure. Stage 103 then added end-to-end user-facing reference acceptance across
+canonical targets, category separation, safe link policy, HTML preview, and DOCX
+output. Stage 104 has not started.

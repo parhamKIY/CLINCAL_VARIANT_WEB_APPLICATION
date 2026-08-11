@@ -65,6 +65,8 @@ its original input order.
   offline-verified; real raster execution remains environment-gated.
 - Stage 102 corrected-interpretation acceptance suite is implemented and
   offline-verified across all seven required scenarios.
+- Stage 103 user-facing reference and provenance acceptance suite is implemented and
+  offline-verified across all required checks.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -83,7 +85,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1129 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
+- Current verified suite: **1138 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -337,6 +339,15 @@ interpretation failure. The gate verifies conservative evidence-grounded output,
 explicit phenotype non-concordance, unresolved-conflict wording, bounded recovery,
 retained allele/report state after failure, and the reviewer-facing action-required
 status. It performs no live model or provider calls.
+
+### Stage 103 reference acceptance suite
+
+The user-facing reference path is now protected from normalized evidence through the
+HTML preview and authoritative DOCX. The deterministic gate verifies exact PubMed,
+PMC, and DOI record targets; strict literature/data-source separation; rejection of
+raw JSON and fabricated links; human-readable ClinVar, Ensembl, and GeneBe pages; and
+clean unlinked provenance when no stable identifier exists. Optional live HTTP
+reachability remains separately gated by the Stage 94 live-provider check.
 
 ### Stage 56 Final Clinical Report composer
 
