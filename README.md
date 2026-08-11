@@ -486,6 +486,14 @@ The task-specific selector starts with the `.env` default. The user can load the
 provider `/models` catalog through a bounded five-minute cache or enter another
 provider-supported model ID; no speculative model list is hardcoded.
 
+Default-model promotion is governed by the Stage 91 seven-case quality gate. A
+recommendation requires at least two complete live-provider, human-reviewed
+candidates and measures groundedness, hallucination, clinical-style coherence,
+conflict handling, phenotype restraint, structured-output reliability, latency, and
+cost. Offline fixtures can validate the gate but cannot select a model, and the
+evaluator never changes `.env` automatically. See
+`docs/stage_91_interpretation_quality.md`.
+
 Only bounded, sanitized Evidence Objects can reach the model. Raw VCF content,
 sample data, and reviewer-entered drafts are excluded. Every variant uses the same
 selected model; conflict state changes prompt context, never model selection. A failed

@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "task": "variant_interpretation",
+  "cases": [
+    {
+      "case_id": "strong_phenotype_match",
+      "focus": "Strong phenotype concordance without overstating pathogenicity",
+      "required_review": ["groundedness", "clinical_style", "phenotype_restraint"]
+    },
+    {
+      "case_id": "partial_phenotype_match",
+      "focus": "Partial phenotype concordance with calibrated uncertainty",
+      "required_review": ["groundedness", "clinical_style", "phenotype_restraint"]
+    },
+    {
+      "case_id": "irrelevant_phenotype",
+      "focus": "Explicit non-concordance without treating phenotype as negative pathogenicity evidence",
+      "required_review": ["groundedness", "clinical_style", "phenotype_restraint"]
+    },
+    {
+      "case_id": "conflicting_clinvar_evidence",
+      "focus": "Source-attributed handling of conflicting ClinVar evidence",
+      "required_review": ["groundedness", "clinical_style", "conflict_handling"]
+    },
+    {
+      "case_id": "sparse_evidence",
+      "focus": "Restraint when the evidence object is sparse",
+      "required_review": ["groundedness", "clinical_style"]
+    },
+    {
+      "case_id": "rich_literature",
+      "focus": "Coherent synthesis of multiple bounded literature records",
+      "required_review": ["groundedness", "clinical_style"]
+    },
+    {
+      "case_id": "no_literature",
+      "focus": "Transparent missingness when no literature is available",
+      "required_review": ["groundedness", "clinical_style"]
+    }
+  ]
+}

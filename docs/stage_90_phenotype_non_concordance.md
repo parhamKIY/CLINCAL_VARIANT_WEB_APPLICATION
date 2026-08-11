@@ -64,4 +64,4 @@ Validated on 2026-08-11:
 - full repository suite: `1021 passed, 4 skipped`;
 - Stage 60 release gate: passed at `85.70%` coverage.
 
-Stage 91 interpretation quality benchmarking is not implemented here.
+Stage 91 subsequently added the interpretation-quality benchmark and evidence gate.
