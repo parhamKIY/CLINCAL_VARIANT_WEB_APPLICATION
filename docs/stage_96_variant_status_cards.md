@@ -38,4 +38,5 @@ Validated on 2026-08-11:
 - Stage 60 acceptance: `832 passed, 4 skipped, 244 deselected`, `85.26%`
   coverage.
 
-Stage 97 warning semantics V2 is not implemented here.
+Stage 97 subsequently added consequence-oriented severity notices without changing
+the Stage 96 card identity or status vocabulary.

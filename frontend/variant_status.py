@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal, TypedDict
 
+from frontend.warning_semantics import WarningNotice, build_warning_notices
+
 
 VariantCardStatus = Literal[
     "Report ready",
@@ -34,15 +36,11 @@ class VariantStatusCard(TypedDict):
     clinvar: str
     phenotype: str
     interpretation: str
-    warnings: list[str]
+    notices: list[WarningNotice]
     technical_details: list[TechnicalProviderDetail]
 
 
 _PARTIAL_STATUSES = frozenset({"no_match", "unsupported", "unavailable"})
-_DISCLAIMER_PREFIXES = (
-    "decision-support report only",
-    "decision support report only",
-)
 
 
 def _mapping(value: object) -> Mapping[str, object] | None:
@@ -105,25 +103,6 @@ def _heading(index: int, total: int, summary: Mapping[str, object] | None) -> st
     return f"Variant {index + 1} of {total} — {label}"
 
 
-def _warnings(content: Mapping[str, object]) -> list[str]:
-    interpretation = _mapping(content.get("variant_interpretation")) or {}
-    candidates = [
-        *_sequence(interpretation.get("warnings")),
-        *_sequence(content.get("limitations")),
-    ]
-    warnings: list[str] = []
-    for candidate in candidates:
-        warning = _text(candidate)
-        if (
-            warning is None
-            or warning.casefold().startswith(_DISCLAIMER_PREFIXES)
-            or warning in warnings
-        ):
-            continue
-        warnings.append(warning)
-    return warnings
-
-
 def _technical_details(sources: Sequence[object]) -> list[TechnicalProviderDetail]:
     details: list[TechnicalProviderDetail] = []
     for item in sources:
@@ -159,6 +138,10 @@ def build_variant_status_card(
     summary = _mapping(content.get("variant_summary")) if content is not None else None
     input_requires_attention = content is None or summary is None
     sources = _sequence(content.get("data_sources")) if content is not None else ()
+    notices = build_warning_notices(report)
+    input_requires_attention = input_requires_attention or any(
+        notice["severity"] == "BLOCKING" for notice in notices
+    )
 
     annotation, annotation_partial = _evidence_line(
         "Annotation",
@@ -184,7 +167,12 @@ def build_variant_status_card(
         if phenotype_context is not None
         else None
     )
-    if phenotype_status in {"supported", "strong_match", "partial_match", "partially_supported"}:
+    if phenotype_status in {
+        "supported",
+        "strong_match",
+        "partial_match",
+        "partially_supported",
+    }:
         phenotype = "Phenotype relationship supported"
         phenotype_partial = False
     elif phenotype_status in {"no_match", "not_supported", "unrelated"}:
@@ -236,9 +224,7 @@ def build_variant_status_card(
         "clinvar": clinvar,
         "phenotype": phenotype,
         "interpretation": interpretation,
-        "warnings": _warnings(content) if content is not None else [
-            "A draft report is not available for this variant."
-        ],
+        "notices": notices,
         "technical_details": _technical_details(sources),
     }
 

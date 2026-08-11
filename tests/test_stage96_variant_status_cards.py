@@ -111,8 +111,14 @@ def test_missing_report_uses_input_attention_status() -> None:
     card = build_variant_status_card(None, variant_index=1, total=2)
 
     assert card["status"] == "Input requires attention"
-    assert card["warnings"] == [
-        "A draft report is not available for this variant."
+    assert card["notices"] == [
+        {
+            "severity": "BLOCKING",
+            "message": (
+                "A valid normalized variant report is unavailable. Correct the "
+                "input before continuing."
+            ),
+        }
     ]
 
 
@@ -125,7 +131,7 @@ def test_all_declared_variants_receive_an_ordered_card() -> None:
     assert cards[1]["status"] == "Input requires attention"
 
 
-def test_warnings_remain_attached_to_their_own_variant() -> None:
+def test_notices_remain_attached_to_their_own_variant() -> None:
     first = _report(0)
     second = deepcopy(_report(1))
     first_content = first["reviewed_report"]
@@ -139,8 +145,8 @@ def test_warnings_remain_attached_to_their_own_variant() -> None:
         {"variant_count": 2, "draft_variant_reports": [first, second]}
     )
 
-    assert cards[0]["warnings"] == ["Variant one warning."]
-    assert cards[1]["warnings"] == ["Variant two warning."]
+    assert cards[0]["notices"][0]["message"].startswith("Some evidence")
+    assert cards[1]["notices"][0]["message"].startswith("Some evidence")
 
 
 def test_provider_details_are_variant_local_and_expandable_by_contract() -> None:
@@ -151,7 +157,7 @@ def test_provider_details_are_variant_local_and_expandable_by_contract() -> None
     assert "st.container(border=True)" in renderer
     assert '"Technical provider details"' in renderer
     assert "expanded=False" in renderer
-    assert "f\"Variant {card['variant_index'] + 1}: {warning}\"" in renderer
+    assert "_render_variant_notice(card[\"variant_index\"], notice)" in renderer
 
 
 def test_primary_status_vocabulary_is_exact_and_bounded() -> None:

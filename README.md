@@ -280,6 +280,14 @@ annotation, population, ClinVar, phenotype, and interpretation outcomes. Warning
 attached to their specific variant, while provider methods and raw source statuses
 remain in a collapsed `Technical provider details` expander.
 
+### Stage 97 warning semantics V2
+
+Variant-card notices now use four consequence levels: informational expected
+missingness, partial optional evidence, action-required interpretation failure, and
+blocking input/report invariants. No-match remains normal evidence absence rather
+than a provider failure. Compact severity badges replace raw exception and endpoint
+text in the reviewer workflow.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the

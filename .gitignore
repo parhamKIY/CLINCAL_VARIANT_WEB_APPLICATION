@@ -42,3 +42,4 @@ data/cache/*
 !/docs/stage_94_reference_validation.md
 !/docs/stage_95_analysis_summary.md
 !/docs/stage_96_variant_status_cards.md
+!/docs/stage_97_warning_semantics.md

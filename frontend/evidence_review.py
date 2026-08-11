@@ -41,6 +41,7 @@ from frontend.report_preview import (
 )
 from frontend.report_viewer import render_final_clinical_report_viewer
 from frontend.variant_status import build_variant_status_cards
+from frontend.warning_semantics import WarningNotice
 
 
 REVIEW_DRAFTS_KEY = "evidence_review_drafts"
@@ -49,6 +50,25 @@ REVIEW_VARIANT_KEY = "selected_evidence_review_variant"
 REVIEW_PACKAGES_KEY = "evidence_review_packages"
 REVIEW_NOTICE_KEY = "evidence_review_notice"
 _REVIEW_WIDGET_PREFIX = "evidence_review_"
+
+_NOTICE_STYLES = {
+    "INFO": ("Info", "blue", ":material/info:"),
+    "PARTIAL": ("Partial", "orange", ":material/warning:"),
+    "ACTION REQUIRED": ("Action required", "red", ":material/error:"),
+    "BLOCKING": ("Blocking", "red", ":material/block:"),
+}
+
+
+def _render_variant_notice(
+    variant_index: int,
+    notice: WarningNotice,
+) -> None:
+    """Render one Stage 97 consequence notice without crash-like raw output."""
+
+    label, color, icon = _NOTICE_STYLES[notice["severity"]]
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.badge(label, color=color, icon=icon)
+        st.write(f"Variant {variant_index + 1}: {notice['message']}")
 
 
 def _render_variant_status_cards(result: PipelineResult) -> None:
@@ -67,11 +87,8 @@ def _render_variant_status_cards(result: PipelineResult) -> None:
                 card["interpretation"],
             ):
                 st.write(line)
-            for warning in card["warnings"]:
-                st.warning(
-                    f"Variant {card['variant_index'] + 1}: {warning}",
-                    icon=":material/warning:",
-                )
+            for notice in card["notices"]:
+                _render_variant_notice(card["variant_index"], notice)
             with st.expander(
                 "Technical provider details",
                 expanded=False,
