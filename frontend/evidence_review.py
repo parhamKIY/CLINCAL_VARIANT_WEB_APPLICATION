@@ -40,6 +40,10 @@ from frontend.report_preview import (
     stable_allele_identity,
 )
 from frontend.report_viewer import render_final_clinical_report_viewer
+from frontend.technical_diagnostics import (
+    ProviderDiagnostic,
+    build_provider_diagnostics,
+)
 from frontend.variant_status import build_variant_status_cards
 from frontend.warning_semantics import WarningNotice
 
@@ -71,10 +75,69 @@ def _render_variant_notice(
         st.write(f"Variant {variant_index + 1}: {notice['message']}")
 
 
+def _render_technical_diagnostics(
+    variant_index: int,
+    diagnostics: list[ProviderDiagnostic],
+) -> None:
+    """Render the Stage 98 developer drawer collapsed by default."""
+
+    with st.expander(
+        "Show technical details",
+        expanded=False,
+        icon=":material/monitoring:",
+    ):
+        if not diagnostics:
+            st.caption("No provider diagnostic records are available.")
+            return
+        display_rows: list[dict[str, object]] = [
+            {
+                **diagnostic,
+                "attempt_count": (
+                    diagnostic["attempt_count"]
+                    if diagnostic["attempt_count"] is not None
+                    else "Not recorded"
+                ),
+                "latency_ms": (
+                    diagnostic["latency_ms"]
+                    if diagnostic["latency_ms"] is not None
+                    else "Not recorded"
+                ),
+            }
+            for diagnostic in diagnostics
+        ]
+        st.dataframe(
+            display_rows,
+            column_order=(
+                "provider",
+                "variant_identity",
+                "status",
+                "attempt_count",
+                "latency_ms",
+                "fallback_used",
+                "failure_category",
+                "provider_note",
+            ),
+            column_config={
+                "provider": "Provider",
+                "variant_identity": "Variant identity",
+                "status": "Status",
+                "attempt_count": "Attempt count",
+                "latency_ms": "Latency (ms)",
+                "fallback_used": "Fallback used",
+                "failure_category": "Failure category",
+                "provider_note": "Provider-specific note",
+            },
+            hide_index=True,
+            width="stretch",
+            key=f"variant_provider_diagnostics_{variant_index}",
+        )
+
+
 def _render_variant_status_cards(result: PipelineResult) -> None:
     """Render Stage 96 variant-first status and warning cards."""
 
     st.markdown("### Variant status")
+    diagnostics_by_variant = build_provider_diagnostics(result)
     for card in build_variant_status_cards(result):
         with st.container(border=True):
             st.markdown(f"**{card['heading']}**")
@@ -89,21 +152,10 @@ def _render_variant_status_cards(result: PipelineResult) -> None:
                 st.write(line)
             for notice in card["notices"]:
                 _render_variant_notice(card["variant_index"], notice)
-            with st.expander(
-                "Technical provider details",
-                expanded=False,
-                icon=":material/api:",
-            ):
-                if not card["technical_details"]:
-                    st.caption("No provider details are available.")
-                for detail in card["technical_details"]:
-                    method = (
-                        f" · {detail['method']}" if detail["method"] else ""
-                    )
-                    st.write(
-                        f"{detail['source']} · {detail['capability']} · "
-                        f"{detail['status']}{method}"
-                    )
+            _render_technical_diagnostics(
+                card["variant_index"],
+                diagnostics_by_variant.get(card["variant_index"], []),
+            )
 
 
 def _select_review_variant(index: int) -> None:

@@ -288,6 +288,14 @@ blocking input/report invariants. No-match remains normal evidence absence rathe
 than a provider failure. Compact severity badges replace raw exception and endpoint
 text in the reviewer workflow.
 
+### Stage 98 technical diagnostics drawer
+
+Every variant card now preserves developer observability under a collapsed
+`Show technical details` drawer. Provider rows include stable variant identity,
+status, retained attempt and latency telemetry, fallback use, failure category, and a
+safe provider-specific note. Unrecorded telemetry stays explicit instead of being
+guessed, and raw provider payloads never enter the drawer.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the

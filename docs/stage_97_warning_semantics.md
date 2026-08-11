@@ -38,4 +38,5 @@ Validated on 2026-08-11:
 - Stage 60 acceptance: `832 passed, 4 skipped, 258 deselected`, `85.26%`
   coverage.
 
-Stage 98 technical diagnostics drawer is not implemented here.
+Stage 98 subsequently added a collapsed technical diagnostics drawer without exposing
+its implementation-oriented fields in the primary reviewer workflow.

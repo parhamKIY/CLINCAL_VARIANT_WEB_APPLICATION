@@ -7,7 +7,10 @@ import inspect
 
 import pytest
 
-from frontend.evidence_review import _render_variant_status_cards
+from frontend.evidence_review import (
+    _render_technical_diagnostics,
+    _render_variant_status_cards,
+)
 from frontend.variant_status import (
     build_variant_status_card,
     build_variant_status_cards,
@@ -152,11 +155,12 @@ def test_notices_remain_attached_to_their_own_variant() -> None:
 def test_provider_details_are_variant_local_and_expandable_by_contract() -> None:
     card = build_variant_status_card(_report(), variant_index=0, total=1)
     renderer = inspect.getsource(_render_variant_status_cards)
+    diagnostics_renderer = inspect.getsource(_render_technical_diagnostics)
 
     assert len(card["technical_details"]) == 3
     assert "st.container(border=True)" in renderer
-    assert '"Technical provider details"' in renderer
-    assert "expanded=False" in renderer
+    assert '"Show technical details"' in diagnostics_renderer
+    assert "expanded=False" in diagnostics_renderer
     assert "_render_variant_notice(card[\"variant_index\"], notice)" in renderer
 
 

@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-97 implemented as recorded below
+**Implementation status:** Stages 0-98 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 98 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 99 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -103,7 +103,9 @@ Stage 96 adds one stable product-facing status card per input variant, keeps war
 within their owning variant, and places provider details in collapsed expanders.
 Stage 97 classifies those notices as informational, partial, action required, or
 blocking using consequence-oriented reviewer copy.
-This declaration is the unified implementation record for Stages 0-97. The former
+Stage 98 adds collapsed, variant-scoped provider diagnostics while keeping the primary
+reviewer workflow clean.
+This declaration is the unified implementation record for Stages 0-98. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -394,12 +396,13 @@ flowchart LR
     BF --> BG["Stage 95: user-facing analysis summary"]
     BG --> BH["Stage 96: variant-first status cards"]
     BH --> BI["Stage 97: warning semantics V2"]
+    BI --> BJ["Stage 98: technical diagnostics drawer"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -510,6 +513,7 @@ their original order.
 | 95 | Added an input-aware product-level completion summary with exact per-variant counts and collapsed technical provider details. | Complete |
 | 96 | Added one bordered status card per input variant with stable report labels, variant-local warnings, concise evidence outcomes, and collapsed provider details. | Complete |
 | 97 | Added four consequence-oriented notice severities, preserved no-match as expected absence, and removed implementation trivia from primary reviewer warnings. | Complete |
+| 98 | Added a collapsed per-variant provider diagnostics drawer with retained attempts, latency, fallback, failure-category, and safe provider-note fields. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1443,7 +1447,23 @@ successful fallback suppresses the corresponding source-availability notice. Pri
 messages describe the reviewer consequence without raw exceptions, endpoints, or
 implementation categories. Native compact severity badges keep informational states
 visually lighter than partial, action-required, or blocking states. Technical provider
-details remain collapsed. Stage 98 has not started.
+details remain collapsed. Stage 98 subsequently adds the diagnostic drawer described
+below.
+
+### Stage 98 technical diagnostics drawer
+
+Each variant status card now retains developer observability under a collapsed
+`Show technical details` expander. One bounded row per retained provider/capability
+record shows provider, assembly-qualified variant identity, operational status,
+attempt count, latency, fallback use, failure category, and a safe provider-specific
+note.
+
+Attempt and latency values are matched from retained evidence telemetry when present;
+unpersisted values are shown as `Not recorded` instead of being guessed. No-match has
+failure category `none`, while fallback records preserve the primary operational
+failure. The projection excludes raw responses, endpoint payloads, exception text,
+credentials, and patient data. It performs no provider calls and uses native Streamlit
+layout without custom CSS. Stage 99 has not started.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1673,6 +1693,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 95 user-facing analysis summary | `frontend/analysis_summary.py`, `frontend/ui.py`, `docs/stage_95_analysis_summary.md`, `tests/test_stage95_analysis_summary.py` |
 | Stage 96 variant-first status cards | `frontend/variant_status.py`, `frontend/evidence_review.py`, `docs/stage_96_variant_status_cards.md`, `tests/test_stage96_variant_status_cards.py` |
 | Stage 97 warning semantics V2 | `frontend/warning_semantics.py`, `frontend/variant_status.py`, `frontend/evidence_review.py`, `docs/stage_97_warning_semantics.md`, `tests/test_stage97_warning_semantics.py` |
+| Stage 98 technical diagnostics drawer | `frontend/technical_diagnostics.py`, `frontend/evidence_review.py`, `docs/stage_98_technical_diagnostics.md`, `tests/test_stage98_technical_diagnostics.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1692,10 +1713,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-97 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-98 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stages 98-106, professor feedback, and final visual sign-off remain pending.
+   Stages 99-106, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1808,5 +1829,7 @@ exact per-variant outcome counts, and collapsed provider diagnostics. Stage 96 t
 added stable variant-first status cards, variant-local warning attribution, and
 collapsed per-variant provider details. Stage 97 then added the four-level warning
 semantics model, preserved no-match as informational missingness, and replaced raw
-implementation warnings with consequence-oriented reviewer copy. Stage 98 has not
-started.
+implementation warnings with consequence-oriented reviewer copy. Stage 98 then added
+the collapsed per-variant provider diagnostics drawer,
+including retained attempt, latency, fallback, and failure-category telemetry without
+exposing raw provider payloads. Stage 99 has not started.
