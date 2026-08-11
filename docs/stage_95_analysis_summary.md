@@ -35,6 +35,9 @@ capabilities recorded as `not_assessed`, `not_applicable`, `not_triggered`, or
 Stage 96 subsequently added variant-first status cards without changing these
 analysis-level count semantics.
 
+Stage 104 subsequently added the explicit `reports_ready` count derived from those
+stable card states while retaining the distinct draft-report count.
+
 ## Validation
 
 Validated on 2026-08-11:

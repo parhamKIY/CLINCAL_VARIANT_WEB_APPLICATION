@@ -1397,6 +1397,7 @@ def _render_analysis_summary(result: PipelineResult) -> None:
     summary = build_analysis_summary(result)
     variant_count = summary["variants_analyzed"]
     report_count = summary["draft_reports_prepared"]
+    ready_count = summary["reports_ready"]
     partial_count = summary["partial_source_coverage"]
     attention_count = summary["interpretations_requiring_attention"]
     attention_label = (
@@ -1414,6 +1415,10 @@ def _render_analysis_summary(result: PipelineResult) -> None:
         st.write(
             f"**{report_count}** draft "
             f"{'report' if report_count == 1 else 'reports'} prepared"
+        )
+        st.write(
+            f"**{ready_count}** "
+            f"{'report' if ready_count == 1 else 'reports'} ready"
         )
         st.write(
             f"**{partial_count}** "

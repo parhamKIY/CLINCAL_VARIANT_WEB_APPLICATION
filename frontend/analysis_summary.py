@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TypedDict
 
+from frontend.variant_status import build_variant_status_cards
+
 
 AVAILABLE_SOURCE_STATUSES = frozenset(
     {"success", "available", "available_via_fallback"}
@@ -36,6 +38,7 @@ class AnalysisSummary(TypedDict):
     input_message: str
     variants_analyzed: int
     draft_reports_prepared: int
+    reports_ready: int
     partial_source_coverage: int
     interpretations_requiring_attention: int
 
@@ -118,12 +121,18 @@ def build_analysis_summary(result: Mapping[str, object]) -> AnalysisSummary:
         and not isinstance(interpretations, (str, bytes))
         else ()
     )
+    cards = build_variant_status_cards(result)
     return {
         "headline": headline,
         "input_message": input_validation_message(input_type),
         "variants_analyzed": _sequence_length(evidence_items),
         "draft_reports_prepared": _sequence_length(
             result.get("draft_variant_reports")
+        ),
+        "reports_ready": sum(
+            card["status"]
+            in {"Report ready", "Report ready with partial evidence"}
+            for card in cards
         ),
         "partial_source_coverage": sum(
             _has_partial_source_coverage(evidence) for evidence in evidence_items

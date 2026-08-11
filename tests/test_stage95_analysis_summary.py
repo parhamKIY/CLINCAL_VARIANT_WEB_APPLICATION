@@ -57,6 +57,7 @@ def test_summary_uses_exact_variant_report_and_attention_counts() -> None:
         "input_message": "Excel input validated",
         "variants_analyzed": 7,
         "draft_reports_prepared": 7,
+        "reports_ready": 0,
         "partial_source_coverage": 3,
         "interpretations_requiring_attention": 1,
     }
@@ -136,6 +137,7 @@ def test_completed_ui_leads_with_summary_and_collapses_provider_details(
     rendered = [item.value for item in app.markdown]
     assert "**2** variants analyzed" in rendered
     assert "**2** draft reports prepared" in rendered
+    assert "**0** reports ready" in rendered
     assert "**1** variant has partial source coverage" in rendered
     assert "**1** interpretation requires attention" in rendered
     assert "External API status" not in rendered

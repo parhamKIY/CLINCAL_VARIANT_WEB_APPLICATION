@@ -42,4 +42,5 @@ Validated on 2026-08-11:
 - no production reference or report behavior was changed by this acceptance-only
   stage.
 
-Stage 104 status and warning UX acceptance work is not implemented here.
+Stage 104 status and warning UX acceptance is implemented separately in
+`docs/stage_104_status_warning_acceptance.md`.

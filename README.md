@@ -67,6 +67,8 @@ its original input order.
   offline-verified across all seven required scenarios.
 - Stage 103 user-facing reference and provenance acceptance suite is implemented and
   offline-verified across all required checks.
+- Stage 104 primary status and warning UX acceptance suite is implemented and
+  offline-verified; the analysis summary now states the exact ready-report count.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -85,7 +87,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1138 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
+- Current verified suite: **1142 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -348,6 +350,14 @@ PMC, and DOI record targets; strict literature/data-source separation; rejection
 raw JSON and fabricated links; human-readable ClinVar, Ensembl, and GeneBe pages; and
 clean unlinked provenance when no stable identifier exists. Optional live HTTP
 reachability remains separately gated by the Stage 94 live-provider check.
+
+### Stage 104 status and warning UX acceptance suite
+
+The primary completion surface now directly states variants analyzed, draft reports
+prepared, reports ready, partial-source coverage, and interpretations requiring
+attention. Variant cards identify the affected allele and missing source, while
+`PARTIAL` and `ACTION REQUIRED` notices distinguish retained-evidence limitations from
+interpretation failure. All answers appear before the collapsed technical drawers.
 
 ### Stage 56 Final Clinical Report composer
 
