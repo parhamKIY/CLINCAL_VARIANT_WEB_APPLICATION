@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-101 implemented as recorded below
+**Implementation status:** Stages 0-102 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 102 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 103 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -111,7 +111,11 @@ Stage 100 makes the professor-template DOCX the authoritative editable artifact 
 packages only selected finalized reports in stable input order.
 Stage 101 adds six deterministic DOCX layout snapshots and an environment-gated real
 raster matrix for page-count, blank-page, and edge-overflow checks.
-This declaration is the unified implementation record for Stages 0-101. The former
+Stage 102 adds a seven-scenario deterministic acceptance suite for normal, phenotype
+non-concordant, partial-provider, conflicting, transient-failure, structured-repair,
+and total-failure interpretation paths. It verifies retained per-variant report state
+and an action-required reviewer outcome when interpretation is exhausted.
+This declaration is the unified implementation record for Stages 0-102. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -406,12 +410,13 @@ flowchart LR
     BJ --> BK["Stage 99: persistence and recovery V4"]
     BK --> BL["Stage 100: DOCX export and final package"]
     BL --> BM["Stage 101: visual regression harness"]
+    BM --> BN["Stage 102: interpretation acceptance suite"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -526,6 +531,7 @@ their original order.
 | 99 | Added SQLite schema V4 normalized report recovery rows, content-derived artifact identity, schema-3 migration/backfill, and fail-closed restart validation without interpretation regeneration. | Complete |
 | 100 | Added authoritative per-variant DOCX downloads and a deterministic selected-report ZIP package with artifact-integrity verification and no interpretation regeneration. | Complete |
 | 101 | Added six deterministic ReportData layout scenarios, exact DOCX/style snapshots, structural page/table/heading/overflow guards, and an optional real raster matrix. | Complete |
+| 102 | Added seven deterministic interpretation acceptance scenarios covering normal, phenotype non-concordant, partial-provider, conflicting, transient-recovery, structured-repair, and total-failure behavior with retained variant state. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1527,8 +1533,22 @@ controlled page segments, absence of exact-height rows, and absence of unresolve
 placeholders. Raster analysis checks page-count ranges, blank pages, content touching
 page edges, and bounded-tolerance image hashes. Real DOCX raster execution is optional
 and truthfully skipped when LibreOffice or Poppler is unavailable; the current
-environment has no LibreOffice, so no new visual-render pass is claimed. Stage 102 has
-not started.
+environment has no LibreOffice, so no new visual-render pass is claimed.
+
+### Stage 102 interpretation acceptance suite
+
+Seven deterministic scenarios validate the corrected interpretation architecture at
+its production boundaries. Normal and partial-provider evidence remain conservatively
+interpretable; irrelevant phenotype evidence produces explicit non-concordance without
+becoming negative pathogenicity evidence; and meaningful classification disagreement
+is acknowledged without forced resolution.
+
+The gate also verifies the bounded recovery sequence: one transient retry and one
+constrained structured-output repair. When interpretation is completely exhausted,
+the allele and Draft Variant Report remain available, the primary status becomes
+`Interpretation requires attention`, and warning semantics provide an `ACTION REQUIRED`
+notice telling the reviewer to inspect retained evidence and retry. The gate is fully
+offline and does not change production behavior. Stage 103 has not started.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1762,6 +1782,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 99 persistence and recovery V4 | `backend/database.py`, `docs/stage_99_persistence_recovery_v4.md`, `tests/test_stage99_persistence_recovery_v4.py` |
 | Stage 100 DOCX export and final package | `backend/final_docx_package.py`, `backend/report_docx.py`, `frontend/evidence_review.py`, `frontend/report_viewer.py`, `docs/stage_100_docx_export_package.md`, `tests/test_stage100_docx_export_package.py` |
 | Stage 101 visual regression harness | `tools/stage101_visual_regression.py`, `tests/fixtures/stage101_visual_scenarios.json`, `tests/golden/stage101/snapshots.json`, `tests/test_stage101_visual_regression.py`, `docs/stage_101_visual_regression.md` |
+| Stage 102 interpretation acceptance suite | `tests/test_stage102_interpretation_acceptance.py`, `docs/stage_102_interpretation_acceptance.md`, `pytest.ini` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1906,4 +1927,6 @@ interpretation. Stage 100 then made the professor-template DOCX authoritative fo
 variant and added deterministic selected-report packaging with artifact-integrity
 checks and no hidden interpretation regeneration. Stage 101 then added six deterministic
 DOCX layout scenarios, exact binary/structural snapshots, and an optional real raster
-matrix. Stage 102 has not started.
+matrix. Stage 102 then added the seven-scenario corrected-interpretation acceptance
+gate, including bounded recovery and retained action-required report state after total
+model failure. Stage 103 has not started.

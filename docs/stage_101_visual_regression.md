@@ -71,4 +71,5 @@ Validated on 2026-08-11:
 - Stage 60 acceptance: `832 passed, 4 skipped, 292 deselected`, `85.20%`
   coverage.
 
-Stage 102 interpretation acceptance-suite work is not implemented here.
+Stage 102 interpretation acceptance is implemented separately in
+`docs/stage_102_interpretation_acceptance.md`.

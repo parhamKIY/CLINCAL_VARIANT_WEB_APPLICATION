@@ -63,6 +63,8 @@ its original input order.
   offline-verified.
 - Stage 101 deterministic DOCX visual-regression harness is implemented and
   offline-verified; real raster execution remains environment-gated.
+- Stage 102 corrected-interpretation acceptance suite is implemented and
+  offline-verified across all seven required scenarios.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -81,7 +83,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1122 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
+- Current verified suite: **1129 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -325,6 +327,16 @@ format with exact binary snapshots, structural layout signatures, heading/label/
 contracts, controlled-page and overflow guards, and image-analysis checks. The harness
 can additionally render the six reports through local LibreOffice/Poppler to validate
 page-count ranges, blank pages, page-edge overflow, and tolerant image hashes.
+
+### Stage 102 interpretation acceptance suite
+
+Seven deterministic acceptance scenarios now protect the corrected interpretation
+architecture: normal evidence, irrelevant phenotype, partial provider coverage,
+conflicting evidence, transient model recovery, structured-output repair, and total
+interpretation failure. The gate verifies conservative evidence-grounded output,
+explicit phenotype non-concordance, unresolved-conflict wording, bounded recovery,
+retained allele/report state after failure, and the reviewer-facing action-required
+status. It performs no live model or provider calls.
 
 ### Stage 56 Final Clinical Report composer
 

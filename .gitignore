@@ -47,3 +47,4 @@ data/cache/*
 !/docs/stage_99_persistence_recovery_v4.md
 !/docs/stage_100_docx_export_package.md
 !/docs/stage_101_visual_regression.md
+!/docs/stage_102_interpretation_acceptance.md
