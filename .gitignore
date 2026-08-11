@@ -40,3 +40,4 @@ data/cache/*
 !/docs/stage_92_reference_model_v2.md
 !/docs/stage_93_human_link_resolver.md
 !/docs/stage_94_reference_validation.md
+!/docs/stage_95_analysis_summary.md

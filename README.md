@@ -264,6 +264,14 @@ suppression, missing identifiers, unsupported providers, and whole-model machine
 rejection. A separate `live_provider` test can probe representative human pages when
 `RUN_LIVE_PROVIDER_TESTS=1`; deterministic CI never performs those network calls.
 
+### Stage 95 user-facing analysis summary
+
+Completed results now lead with an input-aware `Analysis complete` summary showing
+exact per-variant counts for analyzed variants, prepared drafts, partial source
+coverage, and interpretations requiring attention. Provider statuses are no longer a
+default wall of technical output; they remain available in a collapsed technical
+section. Excel, manual, VCF, and compressed-VCF inputs use their actual terminology.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the

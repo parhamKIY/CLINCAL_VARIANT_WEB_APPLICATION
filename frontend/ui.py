@@ -41,6 +41,10 @@ from backend.vcf_processing import (
     normalize_primary_chromosome,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
+from frontend.analysis_summary import (
+    build_analysis_summary,
+    input_validation_message,
+)
 from frontend.execution import (
     AnalysisJob,
     FrontendExecutionError,
@@ -98,7 +102,7 @@ ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
 ANALYSIS_RESULT_QUERY_PARAM = "analysis"
 PIPELINE_STAGE_LABELS = {
     "input": "Input validation",
-    "vcf_processing": "VCF processing",
+    "vcf_processing": "Variant input processing",
     "annotation": "Variant annotation",
     "phenotype": "Phenotype and gene evidence",
     "evidence": "Evidence construction",
@@ -1294,12 +1298,28 @@ def _result_status(
     if result["status"] == "partial":
         return "Analysis stopped with partial results", "error", True
     if result["status"] == "error":
-        stage_label = PIPELINE_STAGE_LABELS.get(
-            result["current_stage"],
-            result["current_stage"].replace("_", " ").title(),
+        current_stage = result["current_stage"]
+        stage_label = (
+            _pipeline_stage_label(current_stage, result)
+            if current_stage in PIPELINE_STAGE_LABELS
+            else current_stage.replace("_", " ").title()
         )
         return f"Analysis failed during {stage_label}", "error", True
     return "Analysis in progress", "running", True
+
+
+def _pipeline_stage_label(stage: str, result: PipelineResult) -> str:
+    """Return an input-aware label without misnaming Excel as VCF."""
+
+    if stage == "vcf_processing":
+        input_type = result["analysis_context"]["input_type"]
+        return {
+            "excel": "Excel input",
+            "manual": "Manual variant input",
+            "vcf": "VCF input",
+            "vcf_gz": "Compressed VCF input",
+        }.get(input_type, PIPELINE_STAGE_LABELS[stage])
+    return PIPELINE_STAGE_LABELS[stage]
 
 
 def _write_stage_records(target: object, result: PipelineResult) -> None:
@@ -1308,19 +1328,26 @@ def _write_stage_records(target: object, result: PipelineResult) -> None:
     for record in result["stages"]:
         if record["status"] == "pending":
             continue
-        label = PIPELINE_STAGE_LABELS[record["stage"]]
+        label = _pipeline_stage_label(record["stage"], result)
         icon = PIPELINE_STATUS_ICONS[record["status"]]
         message = record["message"] or record["status"].title()
+        if record["stage"] == "input" and record["status"] == "success":
+            message = input_validation_message(
+                result["analysis_context"]["input_type"]
+            )
         target.write(f"{icon} **{label}:** {message}")
 
 
 def _render_api_statuses(result: PipelineResult) -> None:
-    """Show every external API state in a permanently visible panel."""
+    """Keep technical provider states available but collapsed by default."""
 
-    with st.container(border=True):
-        st.markdown("**External API status**")
+    with st.expander(
+        "Technical provider details",
+        expanded=False,
+        icon=":material/api:",
+    ):
         st.caption(
-            "This panel updates during analysis. Failed API attempts "
+            "This section updates during analysis. Failed API attempts "
             "are retried automatically; successful requests with "
             "missing evidence are not treated as failures."
         )
@@ -1362,6 +1389,41 @@ def _render_pipeline_status(result: PipelineResult) -> None:
     _write_stage_records(status, result)
     _render_api_statuses(result)
     _render_pipeline_issues(result)
+
+
+def _render_analysis_summary(result: PipelineResult) -> None:
+    """Render the concise product outcome before report/provider details."""
+
+    summary = build_analysis_summary(result)
+    variant_count = summary["variants_analyzed"]
+    report_count = summary["draft_reports_prepared"]
+    partial_count = summary["partial_source_coverage"]
+    attention_count = summary["interpretations_requiring_attention"]
+    attention_label = (
+        "interpretation requires"
+        if attention_count == 1
+        else "interpretations require"
+    )
+    with st.container(border=True):
+        st.subheader(summary["headline"])
+        st.caption(summary["input_message"])
+        st.write(
+            f"**{variant_count}** "
+            f"{'variant' if variant_count == 1 else 'variants'} analyzed"
+        )
+        st.write(
+            f"**{report_count}** draft "
+            f"{'report' if report_count == 1 else 'reports'} prepared"
+        )
+        st.write(
+            f"**{partial_count}** "
+            f"{'variant has' if partial_count == 1 else 'variants have'} "
+            "partial source coverage"
+        )
+        st.write(
+            f"**{attention_count}** "
+            f"{attention_label} attention"
+        )
 
 
 def _start_submission(
@@ -1581,6 +1643,7 @@ def render_app() -> None:
 
     if pipeline_result is not None:
         st.divider()
+        _render_analysis_summary(pipeline_result)
         report_tab, technical_tab = st.tabs(
             ["Clinical report review", "Analysis and provider details"]
         )

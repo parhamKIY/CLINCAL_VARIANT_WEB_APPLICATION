@@ -40,4 +40,5 @@ Validated on 2026-08-11:
 - complete repository suite: `1057 passed, 5 skipped`;
 - Stage 60 acceptance: `832 passed, 4 skipped, 226 deselected`, `85.15%` coverage.
 
-Stage 95 user-facing analysis-summary redesign is not implemented here.
+Stage 95 subsequently added the input-aware user-facing analysis summary without
+changing the Stage 94 reference-validation boundary.
