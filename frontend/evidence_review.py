@@ -1005,7 +1005,7 @@ def _render_editable_docx_download(
         st.warning(f"Editable Word report is unavailable: {exc}")
         return
     st.download_button(
-        "Download editable Word report",
+        "Download editable DOCX",
         data=docx_data,
         file_name=filename,
         mime=(

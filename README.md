@@ -59,6 +59,8 @@ its original input order.
   offline-verified.
 - Stage 99 report-first persistence and recovery V4 is implemented and
   offline-verified.
+- Stage 100 approved DOCX export and selected final Word packaging is implemented and
+  offline-verified.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -77,7 +79,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1106 passed, 5 skipped; 85.22% Stage 60 acceptance coverage**.
+- Current verified suite: **1111 passed, 5 skipped; 85.20% Stage 60 acceptance coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -305,6 +307,14 @@ ReportData, DOCX metadata, template and interpretation versions, resolved refere
 review edits, selection, confirmation, and warning state. Artifact identity combines
 analysis ID, assembly-qualified variant ID, and a content-derived report version.
 Restart recovery validates the projection and never reruns interpretation.
+
+### Stage 100 DOCX export and final package
+
+Every report provides an editable professor-template DOCX generated from its current
+validated ReportData. After final confirmation, the primary Word download is a
+deterministic ZIP containing only selected per-variant DOCX files in original input
+order plus an integrity manifest. Export verifies each artifact digest and never
+reruns interpretation; combined text, PDF, and Word summaries remain auxiliary.
 
 ### Stage 56 Final Clinical Report composer
 

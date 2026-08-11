@@ -116,7 +116,7 @@ def test_report_preview_edit_action_opens_document_editor() -> None:
     assert editor.proto.expanded is True
     assert not app.exception
     assert any(
-        button.label == "Download editable Word report"
+        button.label == "Download editable DOCX"
         for button in app.get("download_button")
     )
 

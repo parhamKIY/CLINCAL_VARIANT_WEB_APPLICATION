@@ -13,6 +13,10 @@ from backend.final_clinical_report import (
     render_final_clinical_report_markdown,
     validate_final_clinical_report,
 )
+from backend.final_docx_package import (
+    FinalDocxPackageError,
+    build_final_docx_package,
+)
 from backend.report import MAX_CLINICAL_REPORT_TEXT_BYTES
 from backend.report_exports import (
     ReportExportError,
@@ -196,9 +200,17 @@ def render_final_clinical_report_viewer(result: PipelineResult) -> None:
     filename_stem = f"{filename_stem}-final-clinical-report"
     with st.container(border=True):
         st.caption(
-            "Reviewer-approved content only. Finalization did not regenerate "
-            "the interpretation or make another LLM call."
+            "Reviewer-approved content only. The selected editable Word package "
+            "is authoritative; export does not regenerate interpretation or make "
+            "another LLM call."
         )
+        selected_count = report["metadata"]["selected_variant_count"]
+        package = None
+        if selected_count:
+            try:
+                package = build_final_docx_package(result)
+            except FinalDocxPackageError as exc:
+                st.warning(f"The selected Word report package is unavailable: {exc}")
         try:
             pdf_data = render_report_pdf(
                 report_text,
@@ -220,6 +232,17 @@ def render_final_clinical_report_viewer(result: PipelineResult) -> None:
             horizontal_alignment="left",
             gap="small",
         ):
+            if package is not None:
+                st.download_button(
+                    "Download selected Word report package",
+                    data=package["data"],
+                    file_name=package["filename"],
+                    mime="application/zip",
+                    key="download_final_selected_docx_package",
+                    icon=":material/folder_zip:",
+                    type="primary",
+                    on_click="ignore",
+                )
             st.download_button(
                 "Download final report text",
                 data=report_text.encode("utf-8"),
@@ -237,7 +260,6 @@ def render_final_clinical_report_viewer(result: PipelineResult) -> None:
                     mime="application/pdf",
                     key="download_final_clinical_report_pdf",
                     icon=":material/picture_as_pdf:",
-                    type="primary",
                     on_click="ignore",
                 )
             if docx_data is not None:

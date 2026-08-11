@@ -44,4 +44,5 @@ Validated on 2026-08-11:
 - Stage 60 acceptance: `832 passed, 4 skipped, 275 deselected`, `85.22%`
   coverage.
 
-Stage 100 DOCX export and final package work is not implemented here.
+Stage 100 subsequently added approved per-variant DOCX export and the selected final
+Word package without changing the Stage 99 recovery model.
