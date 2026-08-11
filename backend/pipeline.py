@@ -89,6 +89,13 @@ from backend.variant_interpretation import (
     interpret_variants,
     validate_variant_interpretation_result,
 )
+from backend.variant_integrity import (
+    VariantIntegrityError,
+    build_variant_integrity_records,
+    cardinality_counts,
+    index_input_variants,
+    validate_variant_integrity_record,
+)
 from backend.variant_report import (
     DraftVariantReportError,
     build_draft_variant_reports,
@@ -99,8 +106,8 @@ from backend.vcf_processing import (
     parse_manual_variants,
     process_vcf,
 )
-from config import MAX_VARIANTS_PER_ANALYSIS
-PIPELINE_SCHEMA_VERSION = "3.0"
+from config import MAX_VARIANTS_PER_ANALYSIS, settings
+PIPELINE_SCHEMA_VERSION = "3.1"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -259,6 +266,7 @@ class PipelineResult(TypedDict):
     analysis_context: AnalysisContext
     variant_count: int
     variants: list[dict[str, object]]
+    variant_integrity_records: list[dict[str, object]]
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
@@ -499,6 +507,7 @@ def create_pipeline_result() -> PipelineResult:
         },
         "variant_count": 0,
         "variants": [],
+        "variant_integrity_records": [],
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
@@ -816,6 +825,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         )
     for field in (
         "variants",
+        "variant_integrity_records",
         "annotations",
         "phenotype_results",
         "evidence_objects",
@@ -839,6 +849,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 field: value[field]
                 for field in (
                     "variants",
+                    "variant_integrity_records",
                     "analysis_context",
                     "annotations",
                     "phenotype_results",
@@ -863,6 +874,39 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "pipeline.variant_count must match the complete variant list."
         )
+    integrity_records = value["variant_integrity_records"]
+    if integrity_records:
+        for field in (
+            "annotations",
+            "phenotype_results",
+            "evidence_objects",
+        ):
+            collection = value[field]
+            if collection and len(collection) != variant_count:
+                raise PipelineResultError(
+                    f"pipeline.{field} must preserve accepted input "
+                    "cardinality."
+                )
+        if len(integrity_records) != variant_count:
+            raise PipelineResultError(
+                "pipeline.variant_integrity_records must match accepted "
+                "input cardinality."
+            )
+        try:
+            validated_integrity_records = [
+                validate_variant_integrity_record(record)
+                for record in integrity_records
+            ]
+        except VariantIntegrityError as exc:
+            raise PipelineResultError(
+                "pipeline.variant_integrity_records is invalid."
+            ) from exc
+        if [
+            record["input_index"] for record in validated_integrity_records
+        ] != list(range(variant_count)):
+            raise PipelineResultError(
+                "pipeline.variant_integrity_records must preserve input order."
+            )
     if analysis_context["accepted_hpo_terms"] and value[
         "phenotype_results"
     ]:
@@ -981,6 +1025,35 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             raise PipelineResultError(
                 "pipeline.variant_report_records must preserve original "
                 "input order."
+            )
+    if integrity_records:
+        try:
+            expected_integrity_records = build_variant_integrity_records(
+                cast(list[Mapping[str, object]], value["variants"]),
+                cast(list[Mapping[str, object]], value["variants"]),
+                assembly=(
+                    cast(str, value["evidence_objects"][0]["assembly"])
+                    if value["evidence_objects"]
+                    else settings.GENOME_ASSEMBLY
+                ),
+                evidence_objects=cast(
+                    list[Mapping[str, object]], value["evidence_objects"]
+                ),
+                draft_reports=cast(
+                    list[Mapping[str, object]], draft_variant_reports
+                ),
+                review_records=cast(
+                    list[Mapping[str, object]], variant_report_records
+                ),
+            )
+        except VariantIntegrityError as exc:
+            raise PipelineResultError(
+                "pipeline variant cardinality or allele identity is invalid."
+            ) from exc
+        if integrity_records != expected_integrity_records:
+            raise PipelineResultError(
+                "pipeline.variant_integrity_records do not match current "
+                "variant objects."
             )
     packages = value["reviewed_evidence_packages"]
     if (
@@ -1404,6 +1477,7 @@ def _finish_failed_stage(
         result[field]
         for field in (
             "variants",
+            "variant_integrity_records",
             "annotations",
             "phenotype_results",
             "evidence_objects",
@@ -1424,6 +1498,8 @@ def _finish_failed_stage(
     )
     result["workflow_state"] = "failed"
     result["current_stage"] = stage
+    if result["variants"]:
+        _sync_variant_integrity_records(result)
     validated = validate_pipeline_result(result)
     _notify_progress(validated, progress_callback)
     return validated
@@ -1544,6 +1620,38 @@ def _sync_variant_report_records(
     result["variant_report_records"] = [dict(item) for item in records]
 
 
+def _sync_variant_integrity_records(result: PipelineResult) -> None:
+    """Rebuild the Stage 87 count/order/allele lineage gate."""
+
+    if not result["variants"]:
+        result["variant_integrity_records"] = []
+        return
+    try:
+        records = build_variant_integrity_records(
+            cast(list[Mapping[str, object]], result["variants"]),
+            cast(list[Mapping[str, object]], result["variants"]),
+            assembly=(
+                cast(str, result["evidence_objects"][0]["assembly"])
+                if result["evidence_objects"]
+                else settings.GENOME_ASSEMBLY
+            ),
+            evidence_objects=cast(
+                list[Mapping[str, object]], result["evidence_objects"]
+            ),
+            draft_reports=cast(
+                list[Mapping[str, object]], result["draft_variant_reports"]
+            ),
+            review_records=cast(
+                list[Mapping[str, object]], result["variant_report_records"]
+            ),
+        )
+    except VariantIntegrityError as exc:
+        raise PipelineError(
+            "Variant cardinality or allele identity changed unexpectedly."
+        ) from exc
+    result["variant_integrity_records"] = [dict(record) for record in records]
+
+
 def _process_filtered_variants(
     request: AnalysisInput,
     result: PipelineResult,
@@ -1585,11 +1693,30 @@ def _process_filtered_variants(
             "Variant processing produced no variants."
         )
 
+    try:
+        indexed_variants = index_input_variants(raw_variants)
+    except VariantIntegrityError as exc:
+        raise PipelineError(
+            "Accepted input variant order could not be established."
+        ) from exc
     result["variants"] = [
         minimize_variant(variant)
-        for variant in raw_variants
+        for variant in indexed_variants
     ]
     result["variant_count"] = len(result["variants"])
+    try:
+        result["variant_integrity_records"] = [
+            dict(record)
+            for record in build_variant_integrity_records(
+                indexed_variants,
+                cast(list[Mapping[str, object]], result["variants"]),
+                assembly=settings.GENOME_ASSEMBLY,
+            )
+        ]
+    except VariantIntegrityError as exc:
+        raise PipelineError(
+            "Parser and normalized variant identity did not match."
+        ) from exc
     LOGGER.info(
         "event=filtered_variants_loaded variant_count=%d",
         result["variant_count"],
@@ -2146,6 +2273,7 @@ def _build_evidence_and_report(
         dict(evidence)
         for evidence in evidence_objects
     ]
+    _sync_variant_integrity_records(result)
     LOGGER.info(
         "event=evidence_build_finished evidence_object_count=%d",
         len(evidence_objects),
@@ -2285,6 +2413,10 @@ def _build_evidence_and_report(
         for report in draft_variant_reports
     ]
     _sync_variant_report_records(result)
+    _sync_variant_integrity_records(result)
+    integrity_counts = cardinality_counts(
+        result["variant_integrity_records"]
+    )
     review_reports = build_evidence_review_reports(evidence_objects)
     result["evidence_review_reports"] = [
         dict(report)
@@ -2293,6 +2425,10 @@ def _build_evidence_and_report(
     LOGGER.info(
         "event=draft_variant_reports_prepared report_count=%d",
         len(draft_variant_reports),
+    )
+    LOGGER.info(
+        "event=variant_integrity_gate_passed variant_count=%d",
+        integrity_counts["pipeline"],
     )
     _set_stage(
         result,

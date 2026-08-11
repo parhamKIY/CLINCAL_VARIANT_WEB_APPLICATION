@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-86 implemented as recorded below
+**Implementation status:** Stages 0-87 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 87 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 88 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -67,7 +67,10 @@ Stage 86 makes that report projection a persisted, ordered per-variant lifecycle
 record. Each accepted variant retains one ReportData-backed DOCX draft record through
 editing, reporting-only selection, confirmation, and finalization; excluded variants
 remain analyzed, stored, and auditable in original input order.
-This declaration is the unified implementation record for Stages 0-86. The former
+Stage 87 adds an input-indexed, allele-level integrity ledger that proves parser,
+normalized, pipeline, evidence, draft-report, and review-record cardinality and
+identity without collapsing same-gene variants.
+This declaration is the unified implementation record for Stages 0-87. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -347,12 +350,13 @@ flowchart LR
     AU --> AV["Stage 84: in-app report preview"]
     AV --> AW["Stage 85: document-like editing"]
     AW --> AX["Stage 86: per-variant report lifecycle"]
+    AX --> AY["Stage 87: variant cardinality and identity gate"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX done
+    class AV,AW,AX,AY done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -1217,6 +1221,25 @@ interpretation, report content, audit history, confirmation, or the lifecycle re
 `backend/final_clinical_report.py` derives the selected subset from ordered lifecycle
 records, preserving original input order.
 
+### Stage 87 variant cardinality and identity integrity gate
+
+`backend/variant_integrity.py` defines `VariantIntegrityRecord V1`. The parser assigns
+one immutable zero-based `input_index` per accepted allele before annotation. The
+record binds that index to parser, normalized, pipeline, Evidence Object, Draft
+Variant Report, and Stage 86 review-record identity.
+
+The gate uses an assembly-qualified digest of chromosome, position, reference, and
+alternate allele. Gene is deliberately excluded, so multiple alleles in one gene
+remain separate. Pipeline schema `3.1` validates non-empty stage cardinalities against
+the accepted input, rejects reordering or identity drift, and persists the ledger.
+Schemas `2.8`, `2.9`, and `3.0` receive a bounded order-preserving migration without
+provider or model reruns.
+
+`tests/test_stage87_variant_integrity.py` supplies seven variants, including repeated
+`SCN1A` annotations, and proves parser, normalized, pipeline, evidence, draft, and
+review counts remain seven after finalization, persistence, and reload. It separately
+proves a six-item normalized result cannot silently replace seven parser alleles.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1227,13 +1250,14 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.0`.
+- Active pipeline schema: `3.1`.
 - SQLite schema: `3`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.1`.
 - Variant Report Lifecycle schema: `1.0`.
+- Variant Integrity Record schema: `1.0`.
 - Final Clinical Report schema: `2.0`.
 - Recovery request schema: `3`.
 
@@ -1433,6 +1457,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 84 in-app report preview | `frontend/report_preview.py`, `frontend/evidence_review.py`, `frontend/ui.py`, `docs/stage_84_report_preview.md`, `tests/test_stage84_report_preview.py` |
 | Stage 85 document-like editing and DOCX regeneration | `backend/report_data_projection.py`, `frontend/evidence_review.py`, `docs/stage_85_document_editing.md`, `tests/test_stage85_document_editor.py` |
 | Stage 86 per-variant report lifecycle | `backend/report_lifecycle.py`, `backend/pipeline.py`, `backend/database.py`, `backend/final_clinical_report.py`, `frontend/evidence_review.py`, `docs/stage_86_report_lifecycle.md`, `tests/test_stage86_report_lifecycle.py` |
+| Stage 87 variant cardinality and identity gate | `backend/variant_integrity.py`, `backend/pipeline.py`, `backend/privacy.py`, `backend/database.py`, `docs/stage_87_variant_integrity.md`, `tests/test_stage87_variant_integrity.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1546,4 +1571,6 @@ field-level audit preservation, confirmation invalidation, and regenerated edita
 DOCX output through transient ReportData V4 projection.
 Stage 86 then persisted one ordered ReportData-backed lifecycle record per accepted
 variant, retained excluded variants as analyzed and auditable records, and made Final
-Clinical Report selection follow the original input order. Stage 87 has not started.
+Clinical Report selection follow the original input order. Stage 87 then added the
+persisted input-index and allele-digest integrity gate, including the dedicated
+seven-variant and duplicate-gene acceptance scenario. Stage 88 has not started.

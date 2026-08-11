@@ -54,6 +54,7 @@ _STORED_CANDIDATE_FIELDS = frozenset(
 _CANDIDATE_ALLOWED_FIELDS = frozenset(
     {
         "chrom",
+        "input_index",
         "pos",
         "ref",
         "alt",
@@ -911,6 +912,16 @@ def _sanitize_candidate(
             f"{', '.join(sorted(str(field) for field in extra))}."
         )
 
+    input_index = value.get("input_index", index)
+    if (
+        isinstance(input_index, bool)
+        or not isinstance(input_index, int)
+        or input_index != index
+    ):
+        raise DatabaseValidationError(
+            f"{path}.input_index must match accepted input order."
+        )
+
     position = value["pos"]
     if (
         isinstance(position, bool)
@@ -1696,6 +1707,11 @@ def _bounded_stage56_pipeline_migration(
         ReportLifecycleError,
         build_variant_report_records,
     )
+    from backend.variant_integrity import (
+        VariantIntegrityError,
+        build_variant_integrity_records,
+        index_input_variants,
+    )
 
     if not isinstance(raw, dict):
         return None
@@ -1706,7 +1722,7 @@ def _bounded_stage56_pipeline_migration(
         except (TypeError, ValueError):
             return None
     source_version = candidate.get("schema_version")
-    if source_version not in {"2.8", "2.9"}:
+    if source_version not in {"2.8", "2.9", "3.0"}:
         return None
     variant_count = candidate.get("variant_count")
     reports = candidate.get("draft_variant_reports")
@@ -1751,6 +1767,16 @@ def _bounded_stage56_pipeline_migration(
             "phenotype_extraction_provenance": None,
         }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
+    raw_variants = candidate.get("variants")
+    evidence_objects = candidate.get("evidence_objects")
+    if not isinstance(raw_variants, list) or not all(
+        isinstance(item, dict) for item in raw_variants
+    ):
+        return None
+    try:
+        candidate["variants"] = index_input_variants(raw_variants)
+    except VariantIntegrityError:
+        return None
     final_report = candidate.get("final_clinical_report")
     generated_at = (
         final_report.get("generated_at")
@@ -1771,6 +1797,29 @@ def _bounded_stage56_pipeline_migration(
             ),
         )
     except (ReportLifecycleError, TypeError, ValueError):
+        return None
+    try:
+        candidate["variant_integrity_records"] = (
+            build_variant_integrity_records(
+                candidate["variants"],
+                candidate["variants"],
+                assembly=(
+                    evidence_objects[0]["assembly"]
+                    if isinstance(evidence_objects, list)
+                    and evidence_objects
+                    and isinstance(evidence_objects[0], dict)
+                    else settings.GENOME_ASSEMBLY
+                ),
+                evidence_objects=(
+                    evidence_objects
+                    if isinstance(evidence_objects, list)
+                    else []
+                ),
+                draft_reports=reports,
+                review_records=candidate["variant_report_records"],
+            )
+        )
+    except (VariantIntegrityError, TypeError, ValueError):
         return None
     if final_report is not None:
         candidate["final_clinical_report"] = None

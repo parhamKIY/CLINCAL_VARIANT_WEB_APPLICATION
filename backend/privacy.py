@@ -8,6 +8,7 @@ from typing import Any
 
 
 PUBLIC_VARIANT_FIELDS = (
+    "input_index",
     "chrom",
     "pos",
     "ref",

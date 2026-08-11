@@ -69,4 +69,5 @@ Validated on 2026-08-11:
   secrets audit, ten-variant acceptance, and the complete Testing V3 suite at
   `85.88%` coverage.
 
-Stage 87 cardinality-gate work is not implemented here.
+At Stage 86 completion, Stage 87 cardinality-gate work was not yet implemented. It is
+now implemented separately in `docs/stage_87_variant_integrity.md`.

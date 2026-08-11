@@ -56,6 +56,11 @@ captured during Stage 79. It must not be described as a confirmed data-loss defe
 unless a test reproduces it. Existing Stage 60 and Stage 78 gates continue to prove
 their own fixture cardinality; Stage 87 must add the dedicated end-to-end invariant.
 
+Stage 87 resolution: no silent-loss defect was reproduced. A dedicated seven-variant
+end-to-end gate now proves parser, normalized, pipeline, evidence, draft-report, and
+review-record cardinality remain equal after persistence and reload. The same fixture
+proves multiple alleles annotated to one gene remain independent.
+
 ## 4. Frozen acceptance scenarios
 
 ### AF-01 - Report format mismatch
@@ -181,4 +186,3 @@ Stage 79 is complete when:
 - tests prevent accidental loss of defect IDs, section order, variant identity,
   literature/data-source separation, and non-PHI safeguards;
 - no Stage 80 or later production architecture has been implemented early.
-
