@@ -1578,14 +1578,18 @@ def render_app() -> None:
             PipelineResult,
             st.session_state[PIPELINE_RESULT_KEY],
         )
-        _render_pipeline_status(pipeline_result)
 
     if pipeline_result is not None:
         st.divider()
-        render_analysis_results(pipeline_result)
-        st.divider()
-        render_evidence_review(
-            pipeline_result,
-            light_model=variant_model,
-            strong_model=variant_model,
+        report_tab, technical_tab = st.tabs(
+            ["Clinical report review", "Analysis and provider details"]
         )
+        with report_tab:
+            render_evidence_review(
+                pipeline_result,
+                light_model=variant_model,
+                strong_model=variant_model,
+            )
+        with technical_tab:
+            _render_pipeline_status(pipeline_result)
+            render_analysis_results(pipeline_result)

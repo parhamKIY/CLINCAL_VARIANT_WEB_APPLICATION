@@ -1,0 +1,155 @@
+{
+  "fixture_version": "1.0",
+  "fixture_role": "stage79_design_and_acceptance_asset_only",
+  "synthetic_non_phi": true,
+  "production_schema": false,
+  "report_identity": {
+    "report_id": "stage79-synthetic-report-001",
+    "analysis_id": "stage79-synthetic-analysis",
+    "input_index": 1,
+    "template_reference": "professor_report_visual_family"
+  },
+  "expected_section_order": [
+    "ngs_result_report",
+    "clinical_features",
+    "conclusive_results",
+    "brief_interpretation",
+    "main_findings_in_detail",
+    "variant_interpretation",
+    "variant_classification",
+    "method",
+    "comments_and_scope",
+    "references",
+    "data_sources"
+  ],
+  "variant_identity": {
+    "assembly": "GRCh38",
+    "chromosome": "1",
+    "position": 100000,
+    "reference": "A",
+    "alternate": "G",
+    "gene": "GENE1",
+    "transcript": "NM_000000.0",
+    "coding_hgvs": "c.100A>G",
+    "protein_hgvs": "p.(Lys34Arg)",
+    "zygosity": "Heterozygous",
+    "identity_notice": "Synthetic layout value; not a real clinical allele"
+  },
+  "clinical_features": {
+    "summary": "De-identified synthetic neurological features for layout testing.",
+    "accepted_hpo_terms": [
+      {
+        "hpo_id": "HP:0000707",
+        "label": "Abnormality of the nervous system"
+      }
+    ],
+    "phenotype_concordance": "no_supported_association"
+  },
+  "conclusive_results": {
+    "variant_display": "GENE1:c.100A>G (p.(Lys34Arg))",
+    "zygosity": "Heterozygous",
+    "classification": "Uncertain significance",
+    "classification_qualifier": "Synthetic layout value; not an ACMG adjudication"
+  },
+  "brief_interpretation": "The available synthetic evidence is insufficient for a disease association, and no supported phenotype association was identified.",
+  "main_findings_in_detail": {
+    "columns": [
+      "Gene and transcript",
+      "Variant",
+      "Population frequency",
+      "Associated disease",
+      "Zygosity",
+      "Computational evidence",
+      "Stable variant ID",
+      "Classification",
+      "Inheritance"
+    ],
+    "rows": [
+      {
+        "gene_and_transcript": "GENE1 / NM_000000.0",
+        "variant": "c.100A>G / p.(Lys34Arg)",
+        "population_frequency": "No exact record",
+        "associated_disease": "No validated association found",
+        "zygosity": "Heterozygous",
+        "computational_evidence": "Not available",
+        "stable_variant_id": "Not available",
+        "classification": "Uncertain significance - synthetic layout value",
+        "inheritance": "Not available"
+      }
+    ]
+  },
+  "variant_interpretation": {
+    "status": "available",
+    "narrative": "This synthetic allele is included only to exercise the clinical-report structure. No exact population, clinical database, disease, computational, or literature evidence is asserted. The supplied synthetic phenotype has no supported association with the available gene or variant context. The allele therefore remains evidence-limited and must not be used for diagnosis or treatment.",
+    "conflict_assessment": "No evidence conflict can be assessed because the fixture intentionally contains no clinical assertions.",
+    "phenotype_statement": "No supported phenotype association was identified.",
+    "model": "synthetic-fixture-no-model-call",
+    "prompt_version": "not_applicable"
+  },
+  "variant_classification": {
+    "provider_reported": "Not available",
+    "clinvar": "No exact record",
+    "automated_annotation": "Not available",
+    "reviewer_confirmed_interpretation": "Not confirmed",
+    "scope_note": "No independent ACMG classification is performed by this fixture."
+  },
+  "method": "Synthetic report-layout fixture; no sequencing, provider query, or model request was performed.",
+  "comments_and_scope": [
+    "Educational and software-acceptance use only.",
+    "No diagnosis, treatment, reproductive recommendation, or clinical management instruction is generated."
+  ],
+  "literature_references": [
+    {
+      "reference_id": "L1",
+      "identifier_type": null,
+      "identifier": null,
+      "title": "Synthetic literature reference reserved for layout testing",
+      "canonical_url": null,
+      "link_status": "unavailable"
+    }
+  ],
+  "data_sources": [
+    {
+      "source": "NCBI ClinVar",
+      "status": "no_match",
+      "human_record_url": null,
+      "display_note": "No exact record"
+    },
+    {
+      "source": "MyVariant.info",
+      "status": "not_queried",
+      "human_record_url": null,
+      "display_note": "Programmatic annotation source; no raw endpoint is exposed"
+    },
+    {
+      "source": "gnomAD",
+      "status": "unavailable",
+      "human_record_url": null,
+      "display_note": "Population evidence unavailable"
+    }
+  ],
+  "warnings": [
+    {
+      "severity": "INFO",
+      "code": "phenotype_non_concordance",
+      "message": "No supported phenotype association was identified."
+    },
+    {
+      "severity": "PARTIAL",
+      "code": "population_evidence_unavailable",
+      "message": "The report remains available with missing optional population evidence."
+    }
+  ],
+  "review_state": {
+    "editable_regions": [
+      "brief_interpretation",
+      "variant_interpretation.narrative",
+      "variant_classification.reviewer_confirmed_interpretation",
+      "reviewer_notes"
+    ],
+    "included_in_final_report": true,
+    "confirmed": false,
+    "edit_history": []
+  }
+}
+

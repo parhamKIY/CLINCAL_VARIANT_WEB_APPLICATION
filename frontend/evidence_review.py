@@ -29,6 +29,10 @@ from backend.variant_report import (
     save_draft_variant_report,
     set_draft_variant_report_inclusion,
 )
+from frontend.report_preview import (
+    render_draft_report_preview_pages,
+    stable_allele_identity,
+)
 from frontend.report_viewer import render_final_clinical_report_viewer
 
 
@@ -38,6 +42,78 @@ REVIEW_VARIANT_KEY = "selected_evidence_review_variant"
 REVIEW_PACKAGES_KEY = "evidence_review_packages"
 REVIEW_NOTICE_KEY = "evidence_review_notice"
 _REVIEW_WIDGET_PREFIX = "evidence_review_"
+
+
+def _select_review_variant(index: int) -> None:
+    st.session_state[REVIEW_VARIANT_KEY] = index
+
+
+def _request_report_edit(report_id: str) -> None:
+    st.session_state[
+        f"{_REVIEW_WIDGET_PREFIX}edit_requested_{report_id}"
+    ] = True
+
+
+def _render_report_preview(
+    report: DraftVariantReport,
+    *,
+    selected: int,
+    total: int,
+) -> None:
+    """Render the report-first Stage 84 review surface."""
+
+    pages = render_draft_report_preview_pages(report)
+    identity = stable_allele_identity(report)
+    summary = report["reviewed_report"]["variant_summary"]
+    annotations = " · ".join(
+        item
+        for item in (
+            summary.get("gene"),
+            summary.get("hgvs_c"),
+            summary.get("hgvs_p"),
+        )
+        if item
+    )
+    st.markdown(f"### Variant {selected + 1} of {total}")
+    st.caption(identity + (f" · {annotations}" if annotations else ""))
+    page_number = st.pagination(
+        len(pages),
+        default=1,
+        max_visible_pages=len(pages),
+        width="content",
+        key=f"{_REVIEW_WIDGET_PREFIX}preview_page_{report['report_id']}",
+    )
+    st.caption(f"Report page {page_number} of {len(pages)}")
+    st.html(pages[page_number - 1], width="stretch")
+    with st.container(horizontal=True):
+        st.button(
+            "Previous",
+            icon=":material/arrow_back:",
+            disabled=selected == 0,
+            on_click=_select_review_variant,
+            args=(selected - 1,),
+            key=f"{_REVIEW_WIDGET_PREFIX}previous_variant",
+        )
+        st.button(
+            "Next",
+            icon=":material/arrow_forward:",
+            icon_position="right",
+            disabled=selected >= total - 1,
+            on_click=_select_review_variant,
+            args=(selected + 1,),
+            key=f"{_REVIEW_WIDGET_PREFIX}next_variant",
+        )
+        st.button(
+            "Edit",
+            icon=":material/edit:",
+            help="Use the Edit report tab in Technical details.",
+            on_click=_request_report_edit,
+            args=(report["report_id"],),
+            key=f"{_REVIEW_WIDGET_PREFIX}edit_preview_{report['report_id']}",
+        )
+    edit_key = f"{_REVIEW_WIDGET_PREFIX}edit_requested_{report['report_id']}"
+    if st.session_state.pop(edit_key, False):
+        st.info("Open the Edit report tab under Technical details.")
 
 
 def clear_evidence_review_state() -> None:
@@ -901,12 +977,15 @@ def render_evidence_review(
         st.info("No editable evidence review reports are available.")
         return
     drafts = _initialize_drafts(reports, result)
-    selected = st.selectbox(
-        "Variant evidence report",
-        options=list(range(len(drafts))),
-        format_func=lambda index: _variant_label(drafts[index]),
-        key=REVIEW_VARIANT_KEY,
+    selected_value = st.session_state.get(REVIEW_VARIANT_KEY, 0)
+    selected = (
+        selected_value
+        if isinstance(selected_value, int)
+        and not isinstance(selected_value, bool)
+        and 0 <= selected_value < len(drafts)
+        else 0
     )
+    st.session_state[REVIEW_VARIANT_KEY] = selected
     report = drafts[selected]
     draft_variant_report = next(
         (
@@ -916,8 +995,14 @@ def render_evidence_review(
         ),
         None,
     )
-    _render_conflict_status(report)
     if draft_variant_report is None:
+        st.selectbox(
+            "Variant evidence report",
+            options=list(range(len(drafts))),
+            format_func=lambda index: _variant_label(drafts[index]),
+            key=REVIEW_VARIANT_KEY,
+        )
+        _render_conflict_status(report)
         st.info(
             "Draft Variant Report V2 is unavailable for this legacy "
             "analysis state. Evidence remains readable."
@@ -940,6 +1025,11 @@ def render_evidence_review(
         DraftVariantReport,
         draft_variant_report,
     )
+    _render_report_preview(
+        draft_variant_report,
+        selected=selected,
+        total=len(drafts),
+    )
     st.caption(
         "Narrative fields and reviewer notes are editable with an "
         "append-only audit trail. Variant identity, provider evidence, "
@@ -954,6 +1044,8 @@ def render_evidence_review(
         f"{result['variant_count']} variants."
     )
     _render_inclusion_control(draft_variant_report, result)
+    st.markdown("### Technical details")
+    _render_conflict_status(report)
     (
         report_tab,
         report_editor_tab,

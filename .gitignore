@@ -22,3 +22,11 @@ data/cache/*
 !/docs/STAGE45_ARCHITECTURE_CONTRACT.md
 !/docs/STAGE62_DEMO_AND_REVIEW.md
 !/docs/PROVIDER_RESILIENCE_RUNBOOK.md
+!/docs/acceptance_failures_v1.md
+!/docs/stage_80_progress.md
+!/docs/professor_report_template_spec.md
+!/docs/report_style_spec.yaml
+!/docs/report_data_v4_contract.md
+!/docs/stage_82_template_contract.md
+!/docs/stage_83_fidelity_gate.md
+!/docs/stage_84_report_preview.md

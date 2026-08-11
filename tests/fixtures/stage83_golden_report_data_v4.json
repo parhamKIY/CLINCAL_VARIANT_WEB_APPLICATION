@@ -1,0 +1,363 @@
+{
+  "schema_version": "4.0",
+  "report_id": "stage83-golden-report-001",
+  "analysis_id": "stage83-golden-analysis",
+  "input_index": 0,
+  "variant_identity": {
+    "genome_build": "GRCh38",
+    "chromosome": "2",
+    "position": 100001,
+    "reference": "C",
+    "alternate": "T",
+    "gene": "GENE1",
+    "gene_id": "HGNC:1",
+    "transcript": "NM_000001.1",
+    "hgvs_c": "c.101C>T",
+    "hgvs_p": "p.(Arg34Trp)",
+    "zygosity": "heterozygous"
+  },
+  "phenotype_summary": {
+    "accepted_hpo_terms": [
+      {
+        "hpo_id": "HP:0000707",
+        "label": "Neurologic abnormality"
+      },
+      {
+        "hpo_id": "HP:0001250",
+        "label": "Seizure"
+      }
+    ],
+    "matched_hpo_terms": [
+      {
+        "hpo_id": "HP:0000707",
+        "label": "Neurologic abnormality"
+      }
+    ],
+    "concordance": "partially_supported",
+    "score": 0.68,
+    "summary": "One accepted synthetic feature has source-supported gene context; the remaining feature is not established by the retained evidence.",
+    "evidence_status": "available"
+  },
+  "conclusive_result": {
+    "gene": "GENE1",
+    "hgvs_c": "c.101C>T",
+    "hgvs_p": "p.(Arg34Trp)",
+    "zygosity": "heterozygous",
+    "classification": "uncertain significance",
+    "classification_source": "NCBI ClinVar",
+    "status": "available"
+  },
+  "main_findings": {
+    "population_frequencies": [
+      {
+        "source": "gnomAD",
+        "dataset": "gnomAD r4",
+        "frequency": 0.0000123,
+        "status": "available",
+        "provider_role": "primary",
+        "fallback_used": false
+      },
+      {
+        "source": "1000 Genomes",
+        "dataset": "Phase 3",
+        "frequency": null,
+        "status": "no_match",
+        "provider_role": "primary",
+        "fallback_used": false
+      },
+      {
+        "source": "Ensembl Variation",
+        "dataset": "GRCh38 variation",
+        "frequency": 0.00002,
+        "status": "available",
+        "provider_role": "fallback",
+        "fallback_used": true
+      }
+    ],
+    "disease_associations": [
+      {
+        "source": "ClinGen / GenCC",
+        "disease_name": "Synthetic neurodevelopmental condition",
+        "disease_id": "MONDO:0000001",
+        "inheritance": "autosomal dominant",
+        "relationship_scope": "gene_disease_context",
+        "status": "available"
+      }
+    ],
+    "computational_evidence": [
+      {
+        "source": "Ensembl VEP",
+        "tool": "SIFT",
+        "prediction": "deleterious",
+        "score": 0.01,
+        "status": "available"
+      },
+      {
+        "source": "Ensembl VEP",
+        "tool": "PolyPhen-2",
+        "prediction": "probably damaging",
+        "score": 0.97,
+        "status": "available"
+      },
+      {
+        "source": "GeneBe",
+        "tool": "CADD",
+        "prediction": "elevated score",
+        "score": 24.1,
+        "status": "available"
+      }
+    ],
+    "stable_variant_ids": [
+      {
+        "source": "Synthetic exact-map fixture",
+        "identifier_type": "fixture ID",
+        "identifier": "SYNTHETIC-VARIANT-001",
+        "status": "available"
+      }
+    ],
+    "classifications": [
+      {
+        "source": "NCBI ClinVar",
+        "classification": "uncertain significance",
+        "review_status": "criteria provided, single submitter",
+        "criteria": [],
+        "independent_evidence": true,
+        "status": "available"
+      },
+      {
+        "source": "GeneBe",
+        "classification": "automated uncertain significance",
+        "review_status": "automated annotation only",
+        "criteria": [
+          "PM2_supporting",
+          "PP3_supporting"
+        ],
+        "independent_evidence": false,
+        "status": "available"
+      }
+    ]
+  },
+  "interpretation": {
+    "original_model_interpretation": "This synthetic GENE1 allele is rendered to exercise the complete report pathway. The retained gene-disease record provides contextual support for a synthetic neurodevelopmental condition with autosomal dominant inheritance, but it does not establish that this allele is causal. The allele is rare in the primary population dataset, was not identified in the retained 1000 Genomes exact query, and has a source-preserving fallback population observation.\n\nNCBI ClinVar reports an uncertain-significance classification with single-submitter review context. GeneBe supplies an automated uncertain-significance annotation; this remains attributed automated evidence and is not adopted as an application classification. SIFT, PolyPhen-2, and CADD results provide concordant computational concern, but computational predictions do not independently establish pathogenicity.\n\nThe accepted phenotype is partially supported: one synthetic neurologic feature overlaps retained gene context, while the remaining feature is not established by the available evidence. The literature entries describe general interpretation standards and are not allele-specific proof. No material classification conflict is resolved by the application. Overall, the evidence remains insufficient for an independent ACMG/AMP conclusion and requires qualified human review.",
+    "current_reviewer_interpretation": "This synthetic GENE1 allele is rendered to exercise the complete report pathway. The retained gene-disease record provides contextual support for a synthetic neurodevelopmental condition with autosomal dominant inheritance, but it does not establish that this allele is causal. The allele is rare in the primary population dataset, was not identified in the retained 1000 Genomes exact query, and has a source-preserving fallback population observation.\n\nNCBI ClinVar reports an uncertain-significance classification with single-submitter review context. GeneBe supplies an automated uncertain-significance annotation; this remains attributed automated evidence and is not adopted as an application classification. SIFT, PolyPhen-2, and CADD results provide concordant computational concern, but computational predictions do not independently establish pathogenicity.\n\nThe accepted phenotype is partially supported: one synthetic neurologic feature overlaps retained gene context, while the remaining feature is not established by the available evidence. The literature entries describe general interpretation standards and are not allele-specific proof. No material classification conflict is resolved by the application. Overall, the evidence remains insufficient for an independent ACMG/AMP conclusion and requires qualified human review.",
+    "model": "synthetic-fixture-no-model-call",
+    "prompt_version": "not_applicable",
+    "generated_at": "2026-08-11T08:00:00+00:00",
+    "edit_history": [],
+    "interpretation_status": "available",
+    "failure_type": null,
+    "conflict_assessment": "No material classification conflict was identified; source roles remain distinct."
+  },
+  "classification_summary": {
+    "reviewer_confirmed_classification": null,
+    "clinvar_classification": "uncertain significance",
+    "automated_classification": "GeneBe automated uncertain significance",
+    "conflict_status": "none",
+    "conflict_severity": null,
+    "source_attributions": [
+      "NCBI ClinVar",
+      "GeneBe automated annotation"
+    ],
+    "independent_acmg_adjudication": false,
+    "summary": "The retained sources provide uncertain-significance context without an independently adjudicated application classification."
+  },
+  "literature_references": [
+    {
+      "reference_id": "R1",
+      "source": "PubMed",
+      "identifier_type": "PMID",
+      "identifier": "25741868",
+      "title": "Standards and guidelines for the interpretation of sequence variants",
+      "canonical_url": "https://pubmed.ncbi.nlm.nih.gov/25741868/",
+      "url_status": "validated"
+    },
+    {
+      "reference_id": "R2",
+      "source": "DOI",
+      "identifier_type": "DOI",
+      "identifier": "10.1038/gim.2015.30",
+      "title": "ACMG and AMP sequence variant interpretation guidance",
+      "canonical_url": "https://doi.org/10.1038/gim.2015.30",
+      "url_status": "validated"
+    },
+    {
+      "reference_id": "R3",
+      "source": "PubMed Central",
+      "identifier_type": "PMCID",
+      "identifier": "PMC4544753",
+      "title": "Sequence variant interpretation standards",
+      "canonical_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4544753/",
+      "url_status": "validated"
+    }
+  ],
+  "data_sources": [
+    {
+      "source": "Ensembl VEP",
+      "capability": "variant_consequence",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "exact_allele_query",
+      "record_identifier": "SYNTHETIC-VARIANT-001",
+      "dataset": "GRCh38",
+      "human_url": "https://www.ensembl.org/Homo_sapiens/Variation/Explore?v=rs123456",
+      "link_status": "validated",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:30:00+00:00"
+    },
+    {
+      "source": "NCBI ClinVar",
+      "capability": "clinical_classification",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "exact_allele_query",
+      "record_identifier": "synthetic-clinvar-context",
+      "dataset": "ClinVar",
+      "human_url": "https://www.ncbi.nlm.nih.gov/clinvar/variation/123456/",
+      "link_status": "validated",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:31:00+00:00"
+    },
+    {
+      "source": "GeneBe",
+      "capability": "automated_classification_context",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "exact_allele_query",
+      "record_identifier": "2-100001-C-T",
+      "dataset": "GeneBe public annotation",
+      "human_url": "https://genebe.net/variant/hg38/2-100001-C-T",
+      "link_status": "validated",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:32:00+00:00"
+    },
+    {
+      "source": "ClinGen / GenCC",
+      "capability": "gene_disease_context",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "gene_context_query",
+      "record_identifier": "MONDO:0000001",
+      "dataset": "GenCC",
+      "human_url": "https://search.clinicalgenome.org/kb/gene-validity",
+      "link_status": "validated",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:33:00+00:00"
+    },
+    {
+      "source": "ClinGen CSpec",
+      "capability": "specification_context",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "released_metadata_lookup",
+      "record_identifier": "synthetic-context-only",
+      "dataset": "CSpec Registry",
+      "human_url": "https://cspec.clinicalgenome.org/cspec/ui/svi/",
+      "link_status": "validated",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:34:00+00:00"
+    },
+    {
+      "source": "gnomAD",
+      "capability": "population_frequency",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "exact_allele_query",
+      "record_identifier": null,
+      "dataset": "gnomAD r4",
+      "human_url": null,
+      "link_status": "unavailable",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:35:00+00:00"
+    },
+    {
+      "source": "Ensembl Variation",
+      "capability": "population_frequency",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "fallback",
+      "method": "exact_overlap_query",
+      "record_identifier": "SYNTHETIC-VARIANT-001",
+      "dataset": "GRCh38 variation",
+      "human_url": "https://www.ensembl.org/Homo_sapiens/Variation/Explore?v=rs123456",
+      "link_status": "validated",
+      "fallback_used": true,
+      "primary_failure": "primary_population_timeout",
+      "retrieved_at": "2026-08-11T07:36:00+00:00"
+    },
+    {
+      "source": "Europe PMC",
+      "capability": "literature_retrieval",
+      "status": "available",
+      "operational_status": "success",
+      "provider_role": "primary",
+      "method": "identifier_lookup",
+      "record_identifier": "MED:25741868",
+      "dataset": "Europe PMC",
+      "human_url": "https://europepmc.org/article/MED/25741868",
+      "link_status": "validated",
+      "fallback_used": false,
+      "primary_failure": null,
+      "retrieved_at": "2026-08-11T07:37:00+00:00"
+    }
+  ],
+  "warnings": [
+    {
+      "severity": "INFO",
+      "code": "synthetic_fidelity_fixture",
+      "message": "All allele and phenotype values in this golden report are synthetic and reserved for layout validation.",
+      "capability": null
+    },
+    {
+      "severity": "PARTIAL",
+      "code": "population_fallback_used",
+      "message": "One population observation was supplied by the explicitly identified fallback source.",
+      "capability": "population_frequency"
+    }
+  ],
+  "provenance": {
+    "source_report_schema_version": "2.1",
+    "evidence_schema_version": "2.5",
+    "interpretation_schema_version": "1.1",
+    "providers": [
+      "Ensembl VEP",
+      "NCBI ClinVar",
+      "GeneBe",
+      "ClinGen / GenCC",
+      "ClinGen CSpec",
+      "gnomAD",
+      "Ensembl Variation",
+      "Europe PMC"
+    ],
+    "upstream_sources": [
+      "Ensembl",
+      "NCBI",
+      "ClinGen",
+      "GeneBe",
+      "Europe PMC"
+    ],
+    "generated_at": "2026-08-11T08:30:00+00:00"
+  },
+  "review_state": {
+    "review_status": "confirmed",
+    "include_in_final_report": true,
+    "confirmed_at": "2026-08-11T08:20:00+00:00",
+    "reviewer_summary": "The synthetic GENE1 c.101C>T allele has rare exact-allele population evidence, uncertain-significance ClinVar context, automated GeneBe context, and three source-attributed computational predictions. Phenotype support is partial rather than complete. The evidence does not support an independent application classification, and the report preserves source roles, missingness, and the fallback population record for qualified human review.",
+    "reviewer_notes": [
+      "The CSpec record is context only; no specification criteria were executed."
+    ],
+    "selection_history": []
+  },
+  "template_version": "professor-report-v1"
+}

@@ -1,0 +1,157 @@
+# Stage 80 presentation tokens only. This is not ReportData V4 or a DOCX template.
+spec_version: "1.0"
+authoritative_reference: "docs/TS-Final Report.pdf"
+authoritative_reference_sha256: "41DFE4F49925CE86E42E881897EC8E7A8662DA71EE693101DAB681333390CACC"
+reference_pages_inspected: 4
+
+page:
+  size:
+    value: "US Letter"
+    width_pt: 612
+    height_pt: 792
+    orientation: "portrait"
+    basis: "observed"
+  margins:
+    top_in: 1.0
+    right_in: 1.0
+    bottom_in: 1.0
+    left_in: 1.0
+    basis: "target_approximation_from_observed_72pt_content_edges"
+  repeating_header: false
+  repeating_footer: false
+  page_number: false
+  header_footer_basis: "observed"
+
+fonts:
+  primary:
+    value: "Times New Roman"
+    basis: "observed_embedded_font"
+  glyph_fallback:
+    value: "Arial"
+    basis: "target_approximation_for_missing_glyphs_only"
+  title:
+    size_pt: 18
+    bold: true
+    italic: true
+    alignment: "center"
+    basis: "observed"
+  major_heading:
+    size_pt: 12
+    bold: true
+    italic: false
+    alignment: "left"
+    keep_with_next: true
+    basis: "observed"
+  body:
+    size_pt: 11
+    size_pt_allowed_max: 12
+    alignment: "justified"
+    line_spacing_multiple: 1.08
+    spacing_before_pt: 0
+    spacing_after_pt: 0
+    basis: "size_observed_spacing_target_approximation"
+  table:
+    size_pt: 9.5
+    minimum_size_pt: 8.5
+    alignment: "center"
+    basis: "target_approximation_from_observed_9_to_10pt"
+  legend:
+    size_pt: 9
+    basis: "observed"
+  references:
+    size_pt: 7
+    hanging_indent_in: 0.2
+    basis: "size_observed_indent_target_approximation"
+
+spacing:
+  title_after_pt: 10
+  heading_before_pt: 8
+  heading_after_pt: 4
+  section_after_pt: 8
+  basis: "target_approximation"
+
+colors:
+  text: "#000000"
+  result_border:
+    value: "#C00000"
+    basis: "observed_extracted"
+  variant_emphasis:
+    value: "#2F5496"
+    basis: "observed_extracted"
+  classification_emphasis:
+    value: "#FFC000"
+    basis: "observed_extracted"
+  table_value_fill:
+    value: "#D9D9D9"
+    basis: "observed_extracted"
+  table_border:
+    value: "#A5A5A5"
+    basis: "observed_extracted"
+  unavailable_or_conflicting:
+    value: "#404040"
+    basis: "project_adaptation_to_avoid_false_certainty"
+
+result_block:
+  width_pt: 443
+  observed_height_pt: 65
+  minimum_height_pt: 65
+  border_width_pt: 2
+  fill: null
+  horizontal_alignment: "center"
+  text_alignment: "center"
+  padding_vertical_pt: 6
+  padding_horizontal_pt: 10
+  allow_height_growth: true
+  minimum_hgvs_font_size_pt: 10
+  basis: "geometry_observed_padding_and_growth_target_approximation"
+
+main_findings_table:
+  width_pt: 477.6
+  width_in: 6.63
+  horizontal_alignment: "center"
+  border_width_pt: 0.85
+  major_separator_width_pt: 1.2
+  header_fill: "#FFFFFF"
+  value_fill: "#D9D9D9"
+  header_vertical_alignment: "center"
+  value_vertical_alignment: "center"
+  prevent_row_split: true
+  repeat_header_on_page_break: true
+  cell_padding_horizontal_pt: 4
+  cell_padding_vertical_pt: 3
+  first_band_column_percent:
+    gene_transcript: 15.9
+    variant: 17.0
+    population_group: 30.2
+    associated_disease: 23.6
+    zygosity: 13.2
+  population_subcolumn_percent_of_total:
+    slot_1: 11.3
+    slot_2: 10.4
+    slot_3: 8.5
+  second_band_column_percent:
+    computational_slot_1: 15.9
+    computational_slot_2: 17.0
+    computational_slot_3: 16.0
+    stable_variant_id: 14.1
+    classification_context: 23.6
+    inheritance: 13.2
+  basis: "geometry_observed_behavior_target_approximation"
+
+pagination:
+  section_a_overview_page: true
+  section_b_start_new_page: true
+  section_c_start_new_page: "conditional"
+  allow_interpretation_continuation: true
+  repeat_interpretation_heading_on_continuation: false
+  keep_heading_with_minimum_body_lines: 2
+  keep_reference_entry_together: true
+  basis: "observed_with_project_adaptation"
+
+document_behavior:
+  editable_word_native_content: true
+  image_only_page_layout: false
+  shrink_hgvs_below_minimum: false
+  allow_clipped_or_overlapping_text: false
+  allow_blank_trailing_page: false
+  basis: "stage80_requirement"
