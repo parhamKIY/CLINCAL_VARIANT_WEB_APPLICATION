@@ -52,4 +52,5 @@ Validated on 2026-08-11:
 - visual rendering was unavailable because LibreOffice is not installed, so no new
   visual-render claim is made.
 
-Stage 101 visual regression harness work is not implemented here.
+Stage 101 subsequently added deterministic scenario snapshots and an optional real
+DOCX raster matrix without changing the Stage 100 export contract.

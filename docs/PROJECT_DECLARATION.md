@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-100 implemented as recorded below
+**Implementation status:** Stages 0-101 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 101 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 102 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -109,7 +109,9 @@ Stage 99 adds normalized report-first persistence and fail-closed restart recove
 SQLite schema V4 without regenerating interpretation.
 Stage 100 makes the professor-template DOCX the authoritative editable artifact and
 packages only selected finalized reports in stable input order.
-This declaration is the unified implementation record for Stages 0-100. The former
+Stage 101 adds six deterministic DOCX layout snapshots and an environment-gated real
+raster matrix for page-count, blank-page, and edge-overflow checks.
+This declaration is the unified implementation record for Stages 0-101. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -403,12 +405,13 @@ flowchart LR
     BI --> BJ["Stage 98: technical diagnostics drawer"]
     BJ --> BK["Stage 99: persistence and recovery V4"]
     BK --> BL["Stage 100: DOCX export and final package"]
+    BL --> BM["Stage 101: visual regression harness"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -522,6 +525,7 @@ their original order.
 | 98 | Added a collapsed per-variant provider diagnostics drawer with retained attempts, latency, fallback, failure-category, and safe provider-note fields. | Complete |
 | 99 | Added SQLite schema V4 normalized report recovery rows, content-derived artifact identity, schema-3 migration/backfill, and fail-closed restart validation without interpretation regeneration. | Complete |
 | 100 | Added authoritative per-variant DOCX downloads and a deterministic selected-report ZIP package with artifact-integrity verification and no interpretation regeneration. | Complete |
+| 101 | Added six deterministic ReportData layout scenarios, exact DOCX/style snapshots, structural page/table/heading/overflow guards, and an optional real raster matrix. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1507,7 +1511,24 @@ requires completed state, finalized lifecycle records, exact Final Clinical Repo
 selection agreement, and a regenerated DOCX matching its persisted artifact metadata.
 It uses reviewer-approved ReportData and performs no annotation, interpretation, or
 LLM request. The existing combined text, PDF, and Word summary exports remain
-auxiliary. Stage 101 has not started.
+auxiliary. Stage 101 adds the format-regression model below.
+
+### Stage 101 visual regression harness
+
+Six synthetic ReportData scenarios cover fully populated evidence, sparse evidence,
+long interpretation, many references, no phenotype match, and a complex indel. Each
+scenario renders through the production professor-template path and must match its
+committed deterministic DOCX hash, style hash, table geometry summary, hyperlink
+density, and structural layout signature.
+
+The always-on gate also fixes clinical heading order, required labels, US Letter
+geometry, one-inch margins, five-table structure, two controlled page breaks, nonempty
+controlled page segments, absence of exact-height rows, and absence of unresolved
+placeholders. Raster analysis checks page-count ranges, blank pages, content touching
+page edges, and bounded-tolerance image hashes. Real DOCX raster execution is optional
+and truthfully skipped when LibreOffice or Poppler is unavailable; the current
+environment has no LibreOffice, so no new visual-render pass is claimed. Stage 102 has
+not started.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1740,6 +1761,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 98 technical diagnostics drawer | `frontend/technical_diagnostics.py`, `frontend/evidence_review.py`, `docs/stage_98_technical_diagnostics.md`, `tests/test_stage98_technical_diagnostics.py` |
 | Stage 99 persistence and recovery V4 | `backend/database.py`, `docs/stage_99_persistence_recovery_v4.md`, `tests/test_stage99_persistence_recovery_v4.py` |
 | Stage 100 DOCX export and final package | `backend/final_docx_package.py`, `backend/report_docx.py`, `frontend/evidence_review.py`, `frontend/report_viewer.py`, `docs/stage_100_docx_export_package.md`, `tests/test_stage100_docx_export_package.py` |
+| Stage 101 visual regression harness | `tools/stage101_visual_regression.py`, `tests/fixtures/stage101_visual_scenarios.json`, `tests/golden/stage101/snapshots.json`, `tests/test_stage101_visual_regression.py`, `docs/stage_101_visual_regression.md` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1759,10 +1781,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-100 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-101 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stages 101-106, professor feedback, and final visual sign-off remain pending.
+   Stages 102-106, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1882,4 +1904,6 @@ payloads. Stage 99 then added SQLite schema V4 report-first persistence, determi
 artifact identity, and fail-closed refresh/restart recovery without regenerating
 interpretation. Stage 100 then made the professor-template DOCX authoritative for each
 variant and added deterministic selected-report packaging with artifact-integrity
-checks and no hidden interpretation regeneration. Stage 101 has not started.
+checks and no hidden interpretation regeneration. Stage 101 then added six deterministic
+DOCX layout scenarios, exact binary/structural snapshots, and an optional real raster
+matrix. Stage 102 has not started.

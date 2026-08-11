@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "base_fixture": "stage83_golden_report_data_v4.json",
+  "scenarios": [
+    {
+      "name": "fully_populated",
+      "expected_page_range": [3, 8]
+    },
+    {
+      "name": "sparse_evidence",
+      "expected_page_range": [3, 7]
+    },
+    {
+      "name": "long_interpretation",
+      "expected_page_range": [4, 14]
+    },
+    {
+      "name": "many_references",
+      "expected_page_range": [4, 14]
+    },
+    {
+      "name": "no_phenotype_match",
+      "expected_page_range": [3, 8]
+    },
+    {
+      "name": "complex_indel",
+      "expected_page_range": [3, 8]
+    }
+  ]
+}

@@ -61,6 +61,8 @@ its original input order.
   offline-verified.
 - Stage 100 approved DOCX export and selected final Word packaging is implemented and
   offline-verified.
+- Stage 101 deterministic DOCX visual-regression harness is implemented and
+  offline-verified; real raster execution remains environment-gated.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -79,7 +81,7 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1111 passed, 5 skipped; 85.20% Stage 60 acceptance coverage**.
+- Current verified suite: **1122 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -315,6 +317,14 @@ validated ReportData. After final confirmation, the primary Word download is a
 deterministic ZIP containing only selected per-variant DOCX files in original input
 order plus an integrity manifest. Export verifies each artifact digest and never
 reruns interpretation; combined text, PDF, and Word summaries remain auxiliary.
+
+### Stage 101 visual regression harness
+
+Six deterministic synthetic ReportData scenarios protect the professor-family DOCX
+format with exact binary snapshots, structural layout signatures, heading/label/table
+contracts, controlled-page and overflow guards, and image-analysis checks. The harness
+can additionally render the six reports through local LibreOffice/Poppler to validate
+page-count ranges, blank pages, page-edge overflow, and tolerant image hashes.
 
 ### Stage 56 Final Clinical Report composer
 
