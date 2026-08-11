@@ -256,6 +256,14 @@ targets cannot become ordinary report links. MyVariant.info remains visible as a
 `Programmatic annotation source`, and sources without a validated human record keep
 provenance with an unavailable link instead of receiving a fabricated URL.
 
+### Stage 94 reference validation tests
+
+The Stage 93 policy is protected by a dedicated offline matrix covering PMID, PMCID,
+DOI, ClinVar VCV/RCV/SCV records, supported GeneBe alleles, MyVariant.info raw-data
+suppression, missing identifiers, unsupported providers, and whole-model machine-link
+rejection. A separate `live_provider` test can probe representative human pages when
+`RUN_LIVE_PROVIDER_TESTS=1`; deterministic CI never performs those network calls.
+
 ### Stage 56 Final Clinical Report composer
 
 `backend/final_clinical_report.py` deterministically composes schema `2.0` from the

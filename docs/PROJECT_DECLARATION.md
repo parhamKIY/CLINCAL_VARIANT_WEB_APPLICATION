@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-93 implemented as recorded below
+**Implementation status:** Stages 0-94 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 94 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 95 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -93,7 +93,10 @@ source provenance.
 Stage 93 adds one canonical human-link resolver so stable PubMed, PMC, DOI, ClinVar,
 GeneBe, and Ensembl identities open human-readable records, while raw provider APIs
 remain explicit provenance and MyVariant.info is labelled as a programmatic source.
-This declaration is the unified implementation record for Stages 0-93. The former
+Stage 94 adds deterministic regression coverage for every required reference-mapping,
+missing-identifier, unsupported-provider, and raw-machine-link boundary, plus a
+separately gated optional live human-page reachability check.
+This declaration is the unified implementation record for Stages 0-94. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -380,12 +383,13 @@ flowchart LR
     BB --> BC["Stage 91: interpretation quality gate"]
     BC --> BD["Stage 92: Reference Model V2"]
     BD --> BE["Stage 93: canonical human-link resolver"]
+    BE --> BF["Stage 94: reference validation tests"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -492,6 +496,7 @@ their original order.
 | 91 | Added the fixed seven-case interpretation-model benchmark, strict live/human-review eligibility thresholds, deterministic comparison, and a no-promotion outcome when evidence is incomplete. | Complete; live comparison pending |
 | 92 | Added Reference Model V2 with numbered literature-only citations, unnumbered database/tool provenance, deterministic persistence, and separated reviewer/report rendering. | Complete |
 | 93 | Added deterministic provider-specific human-page resolution, blocked raw machine endpoints from normal reviewer links, and labelled MyVariant.info as programmatic provenance. | Complete |
+| 94 | Added the exhaustive deterministic human-link regression matrix and a separately gated optional live reachability/content-type check. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1363,8 +1368,21 @@ cannot become ordinary reviewer links. MyVariant.info remains visible as a
 `Programmatic annotation source`, with its exact identifier retained when available.
 If no stable human page can be validated, the report keeps provenance and an explicit
 unavailable link state without fabricating a URL. Streamlit review, HTML preview,
-Final Clinical Report Markdown, and DOCX rendering apply the same policy. Exhaustive
-Stage 94 link validation and optional live checks have not started.
+Final Clinical Report Markdown, and DOCX rendering apply the same policy.
+
+### Stage 94 reference validation tests
+
+The canonical human-link policy now has a dedicated deterministic regression matrix.
+It covers PMID, PMCID, DOI, ClinVar VCV/RCV/SCV accessions, supported GRCh37/GRCh38
+GeneBe alleles, MyVariant.info raw-JSON suppression, absent Ensembl identifiers,
+unsupported-provider provenance, and a whole-model assertion that no retained human
+link is machine-readable.
+
+The offline gate is registered as `stage94_reference_validation` and makes no network
+calls. A separate `live_provider` test may probe a bounded PubMed, PMC, DOI, ClinVar,
+and GeneBe sample only when `RUN_LIVE_PROVIDER_TESTS=1`; it checks reachability and
+rejects JSON content types. This optional diagnostic is excluded from deterministic
+CI. Stage 95 has not started.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1590,6 +1608,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 91 interpretation quality gate | `backend/interpretation_quality.py`, `data/benchmarks/stage91_cases.json`, `tools/evaluate_stage91_models.py`, `docs/stage_91_interpretation_quality.md`, `tests/test_stage91_interpretation_quality.py` |
 | Stage 92 Reference Model V2 | `backend/reference_model.py`, `backend/variant_interpretation.py`, `backend/variant_report.py`, `backend/report_data_projection.py`, `backend/final_clinical_report.py`, `frontend/report_preview.py`, `frontend/evidence_review.py`, `docs/stage_92_reference_model_v2.md`, `tests/test_stage92_reference_model.py` |
 | Stage 93 canonical human-link resolver | `backend/human_links.py`, `backend/references.py`, `backend/reference_model.py`, `backend/report_data.py`, `backend/final_clinical_report.py`, `backend/report_docx.py`, `frontend/report_preview.py`, `frontend/evidence_review.py`, `docs/stage_93_human_link_resolver.md`, `tests/test_stage93_human_links.py` |
+| Stage 94 reference validation tests | `tests/test_stage94_reference_validation.py`, `tests/test_stage94_reference_validation_live.py`, `docs/stage_94_reference_validation.md`, `pytest.ini` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1609,10 +1628,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-93 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-94 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stages 94-106, professor feedback, and final visual sign-off remain pending.
+   Stages 95-106, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1718,5 +1737,6 @@ live model recommendation or changing the configured default. Stage 92 then sepa
 numbered scientific literature from unnumbered database and tool provenance across
 the active interpretation and report path. Stage 93 then added stable human-facing
 record resolution, rejected raw machine endpoints from normal reviewer links, and
-kept MyVariant.info as explicitly labelled programmatic provenance. Stage 94 has not
-started.
+kept MyVariant.info as explicitly labelled programmatic provenance. Stage 94 then
+added exhaustive deterministic reference-mapping regressions and a separately gated
+optional live human-page check. Stage 95 has not started.

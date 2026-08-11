@@ -34,8 +34,8 @@ provenance only and cannot be promoted to ordinary report links.
   DOCX output expose only validated human links and label MyVariant.info as
   programmatic provenance.
 
-Stage 94 exhaustive link-validation tests and optional live checks are not included
-in this stage.
+Stage 94 subsequently added the dedicated deterministic regression matrix and a
+separately gated optional live reachability check.
 
 ## Validation
 
