@@ -23,6 +23,12 @@ from backend.pipeline import (
     finalize_reviewed_analysis,
     update_draft_variant_report,
 )
+from backend.report_data_projection import build_report_data_from_draft
+from backend.report_docx import (
+    ReportDocxError,
+    render_report_data_docx,
+    report_docx_filename,
+)
 from backend.variant_report import (
     DraftVariantReport,
     DraftVariantReportError,
@@ -52,6 +58,18 @@ def _request_report_edit(report_id: str) -> None:
     st.session_state[
         f"{_REVIEW_WIDGET_PREFIX}edit_requested_{report_id}"
     ] = True
+
+
+def _close_report_edit(report_id: str) -> None:
+    st.session_state[
+        f"{_REVIEW_WIDGET_PREFIX}edit_requested_{report_id}"
+    ] = False
+    generation_key = (
+        f"{_REVIEW_WIDGET_PREFIX}editor_generation_{report_id}"
+    )
+    st.session_state[generation_key] = (
+        int(st.session_state.get(generation_key, 0)) + 1
+    )
 
 
 def _render_report_preview(
@@ -106,14 +124,11 @@ def _render_report_preview(
         st.button(
             "Edit",
             icon=":material/edit:",
-            help="Use the Edit report tab in Technical details.",
+            help="Open the document-like report editor.",
             on_click=_request_report_edit,
             args=(report["report_id"],),
             key=f"{_REVIEW_WIDGET_PREFIX}edit_preview_{report['report_id']}",
         )
-    edit_key = f"{_REVIEW_WIDGET_PREFIX}edit_requested_{report['report_id']}"
-    if st.session_state.pop(edit_key, False):
-        st.info("Open the Edit report tab under Technical details.")
 
 
 def clear_evidence_review_state() -> None:
@@ -585,43 +600,109 @@ def _render_report_editor(
     report: DraftVariantReport,
     result: PipelineResult,
 ) -> None:
+    report_id = report["report_id"]
+    edit_key = f"{_REVIEW_WIDGET_PREFIX}edit_requested_{report_id}"
+    generation_key = f"{_REVIEW_WIDGET_PREFIX}editor_generation_{report_id}"
+    generation = int(st.session_state.get(generation_key, 0))
     content = report["reviewed_report"]
     interpretation = content["variant_interpretation"]
-    with st.form(f"{_REVIEW_WIDGET_PREFIX}report_form_{report['report_id']}"):
-        reviewer_summary = st.text_area(
-            "Reviewer summary",
-            value=content["reviewer_summary"] or "",
-            height=100,
-            help=(
-                "Optional reviewer-authored finding summary. Do not enter "
-                "protected health information."
-            ),
+    expanded = bool(st.session_state.get(edit_key, False))
+    with st.expander(
+        "Edit clinical report",
+        expanded=expanded,
+        key=f"{_REVIEW_WIDGET_PREFIX}document_editor_{report_id}_{expanded}",
+        icon=":material/edit_document:",
+    ):
+        st.caption(
+            "Only the four reviewer-owned report regions below are editable. "
+            "Allele identity, generated evidence, source attribution, and the "
+            "machine original remain read-only."
         )
-        narrative = st.text_area(
-            "Variant interpretation narrative",
-            value=interpretation["narrative"] or "",
-            height=240,
-        )
-        conflict_assessment = st.text_area(
-            "Conflict assessment wording",
-            value=interpretation["conflict_assessment"] or "",
-            height=140,
-        )
-        notes_text = st.text_area(
-            "Reviewer notes (one note per line)",
-            value="\n".join(content["reviewer_notes"]),
-            height=120,
-        )
-        with st.container(horizontal=True):
-            save = st.form_submit_button(
-                "Save report edits",
-                type="primary",
-                icon=":material/save:",
-            )
-            reset = st.form_submit_button(
-                "Reset editable fields",
-                icon=":material/restart_alt:",
-            )
+        with st.form(
+            f"{_REVIEW_WIDGET_PREFIX}report_form_{report_id}_{generation}",
+            border=False,
+        ):
+            with st.container(border=True):
+                st.caption("Page 1 · Brief Interpretation(s)")
+                st.markdown("#### Brief interpretation")
+                st.caption(
+                    "Edit the concise reviewer-facing summary shown below the "
+                    "prominent result block."
+                )
+                reviewer_summary = st.text_area(
+                    "Reviewer summary",
+                    value=content["reviewer_summary"] or "",
+                    height=120,
+                    help=(
+                        "Optional reviewer-authored finding summary. Do not enter "
+                        "protected health information."
+                    ),
+                    key=(
+                        f"{_REVIEW_WIDGET_PREFIX}summary_{report_id}_{generation}"
+                    ),
+                )
+            with st.container(border=True):
+                st.caption("Page 2 · Variant interpretation")
+                st.markdown("#### Variant interpretation")
+                st.caption(
+                    "Revise the evidence-grounded narrative. Generated evidence "
+                    "and citations are not changed by this edit."
+                )
+                narrative = st.text_area(
+                    "Variant interpretation narrative",
+                    value=interpretation["narrative"] or "",
+                    height=300,
+                    key=(
+                        f"{_REVIEW_WIDGET_PREFIX}narrative_{report_id}_{generation}"
+                    ),
+                )
+            with st.container(border=True):
+                st.caption("Page 3 · Variant(s) classification")
+                st.markdown("#### Classification summary")
+                st.caption(
+                    "Edit the reviewer wording about conflicts. Provider "
+                    "classifications remain immutable and source-attributed."
+                )
+                conflict_assessment = st.text_area(
+                    "Conflict assessment wording",
+                    value=interpretation["conflict_assessment"] or "",
+                    height=160,
+                    key=(
+                        f"{_REVIEW_WIDGET_PREFIX}classification_"
+                        f"{report_id}_{generation}"
+                    ),
+                )
+            with st.container(border=True):
+                st.caption("Page 3 · Comments and scope")
+                st.markdown("#### Reviewer notes")
+                notes_text = st.text_area(
+                    "Reviewer notes (one note per line)",
+                    value="\n".join(content["reviewer_notes"]),
+                    height=140,
+                    key=(
+                        f"{_REVIEW_WIDGET_PREFIX}notes_{report_id}_{generation}"
+                    ),
+                )
+            with st.container(
+                horizontal=True,
+                horizontal_alignment="right",
+            ):
+                cancel = st.form_submit_button(
+                    "Cancel",
+                    icon=":material/close:",
+                )
+                reset = st.form_submit_button(
+                    "Reset editable fields",
+                    icon=":material/restart_alt:",
+                )
+                save = st.form_submit_button(
+                    "Save report edits",
+                    type="primary",
+                    icon=":material/save:",
+                )
+    if cancel:
+        _close_report_edit(report_id)
+        st.rerun()
     if not save and not reset:
         return
     original = report["machine_original_report"]
@@ -699,6 +780,7 @@ def _render_report_editor(
             "warning",
             f"Report {action} in this session, but persistence failed.",
         )
+    _close_report_edit(report_id)
     st.rerun()
 
 
@@ -771,6 +853,39 @@ def _render_inclusion_control(
             f"Variant {decision} in this session, but persistence failed.",
         )
     st.rerun()
+
+
+def _render_editable_docx_download(
+    report: DraftVariantReport,
+    result: PipelineResult,
+) -> None:
+    """Regenerate the editable Word artifact from current reviewed fields."""
+
+    try:
+        report_data = build_report_data_from_draft(
+            report,
+            analysis_id=str(result.get("analysis_id") or "unpersisted-analysis"),
+        )
+        docx_data = render_report_data_docx(report_data)
+        filename = report_docx_filename(report_data)
+    except (DraftVariantReportError, ReportDocxError, ValueError) as exc:
+        st.warning(f"Editable Word report is unavailable: {exc}")
+        return
+    st.download_button(
+        "Download editable Word report",
+        data=docx_data,
+        file_name=filename,
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+        icon=":material/download:",
+        key=f"{_REVIEW_WIDGET_PREFIX}download_docx_{report['report_id']}",
+    )
+    st.caption(
+        "Regenerated from the current reviewed report. Saving a material edit "
+        "invalidates prior confirmation before this artifact is rebuilt."
+    )
 
 
 def _render_report_comparison(report: DraftVariantReport) -> None:
@@ -1044,11 +1159,12 @@ def render_evidence_review(
         f"{result['variant_count']} variants."
     )
     _render_inclusion_control(draft_variant_report, result)
+    _render_report_editor(draft_variant_report, result)
+    _render_editable_docx_download(draft_variant_report, result)
     st.markdown("### Technical details")
     _render_conflict_status(report)
     (
         report_tab,
-        report_editor_tab,
         compare_tab,
         evidence_editor_tab,
         original_evidence_tab,
@@ -1057,7 +1173,6 @@ def render_evidence_review(
     ) = st.tabs(
         [
             "Draft Variant Report",
-            "Edit report",
             "Compare report",
             "Edit evidence draft",
             "Original evidence",
@@ -1067,8 +1182,6 @@ def render_evidence_review(
     )
     with report_tab:
         _render_draft_variant_report(result, report["variant_index"])
-    with report_editor_tab:
-        _render_report_editor(draft_variant_report, result)
     with compare_tab:
         _render_report_comparison(draft_variant_report)
     with evidence_editor_tab:

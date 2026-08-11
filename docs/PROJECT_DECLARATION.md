@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-84 implemented as recorded below
+**Implementation status:** Stages 0-85 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 85 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 86 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -58,7 +58,12 @@ Stage 84 makes the report the default completed-analysis review surface with a
 deterministic three-page professor-family HTML preview, explicit page/variant
 navigation, stable assembly-qualified allele identity, existing audited inclusion and
 editing access, and provider/API detail demoted to a secondary tab.
-This declaration is the unified implementation record for Stages 0-84. The former
+Stage 85 replaces generic form-first report editing with an explicit document-region
+editor for brief interpretation, variant interpretation, classification summary, and
+reviewer notes. Saves retain field-level audit history, invalidate confirmation, and
+regenerate the editable professor-template Word report through a validated transient
+ReportData V4 projection.
+This declaration is the unified implementation record for Stages 0-85. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -336,12 +341,13 @@ flowchart LR
     AS --> AT["Stage 82: authoritative DOCX template"]
     AT --> AU["Stage 83: golden DOCX fidelity gate"]
     AU --> AV["Stage 84: in-app report preview"]
+    AV --> AW["Stage 85: document-like editing"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV done
+    class AV,AW done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -439,6 +445,7 @@ their original order.
 | 82 | Added the authoritative editable per-allele DOCX template with Stage 80 visual tokens, fixed Word-native table geometry, variable-length placeholders, separate literature/provenance regions, privacy-safe metadata, reproducible offline construction, and per-variant artifact naming. | Implemented; manual Word/LibreOffice visual check pending |
 | 83 | Added the deterministic ReportData V4-to-template DOCX production path, rich synthetic golden allele, committed per-variant artifact, template-drift rejection, and structural fidelity gate for the professor report family. | Implemented; manual Word/LibreOffice visual fidelity comparison pending |
 | 84 | Made the report the default completed-analysis surface with a deterministic three-page professor-family HTML preview, explicit page and variant navigation, stable assembly-qualified allele labels, existing audited inclusion/edit access, and provider/API detail in a secondary tab. | Complete |
+| 85 | Added explicit document-region editing for brief interpretation, variant interpretation, classification summary, and reviewer notes; retained immutable generated evidence and append-only audit history; invalidated prior confirmation after material edits; and regenerated the professor-template Word artifact from a validated transient ReportData V4 projection. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1161,7 +1168,29 @@ the secondary Analysis and provider details tab.
 
 Stage 84 intentionally does not create a new persisted report record. The active UI
 uses the validated Draft Variant Report until Stage 86 performs the planned ReportData
-lifecycle refactor. Stage 85 document-like editing is also not implemented.
+lifecycle refactor.
+
+### Stage 85 document-like editing workflow
+
+`frontend/evidence_review.py` keeps the high-fidelity report preview as the default and
+opens editing only after the reviewer selects Edit or explicitly expands Edit clinical
+report. The single batched form follows the rendered document: page-one Brief
+Interpretation(s), page-two Variant interpretation, page-three classification-summary
+wording, and page-three reviewer notes. Cancel discards unsaved widget state; reset
+restores the machine-original editable values. The former generic Edit report technical
+tab is removed.
+
+The established Draft Variant Report mutation boundary remains authoritative. Only the
+four reviewer-owned regions can change. Every material edit records old/new values,
+timestamp, and reviewer context, while identity, generated evidence, citations,
+provenance, and the machine original remain immutable. Saving a material edit clears
+prior evidence confirmation and returns the workflow to awaiting final review.
+
+`backend/report_data_projection.py` creates a validated transient ReportData V4 view of
+the current reviewed Draft Variant Report. The Stage 83 renderer then regenerates the
+editable professor-template DOCX exposed by Download editable Word report. This gives
+Stage 85 document-to-artifact continuity without prematurely creating the Stage 86
+persisted ReportData lifecycle.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1373,6 +1402,10 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 79 acceptance defect freeze and synthetic asset | `docs/acceptance_failures_v1.md`, `tests/fixtures/stage79_synthetic_report_fixture.json`, `tests/test_stage79_acceptance_assets.py` |
 | Stage 80 professor report specification | `docs/professor_report_template_spec.md`, `docs/report_style_spec.yaml`, `docs/stage_80_progress.md`, `tests/test_stage80_specification.py` |
 | Stage 81 ReportData V4 contract | `backend/report_data.py`, `docs/report_data_v4_contract.md`, `tests/test_report_data.py` |
+| Stage 82 authoritative DOCX template | `templates/clinical_variant_report_v1.docx`, `tools/build_stage82_template.py`, `docs/stage_82_template_contract.md`, `tests/test_stage82_docx_template.py` |
+| Stage 83 golden DOCX fidelity gate | `backend/report_docx.py`, `tests/fixtures/stage83_golden_report_data_v4.json`, `tests/golden/stage83/variant_001_report.docx`, `docs/stage_83_fidelity_gate.md`, `tests/test_stage83_docx_fidelity.py` |
+| Stage 84 in-app report preview | `frontend/report_preview.py`, `frontend/evidence_review.py`, `frontend/ui.py`, `docs/stage_84_report_preview.md`, `tests/test_stage84_report_preview.py` |
+| Stage 85 document-like editing and DOCX regeneration | `backend/report_data_projection.py`, `frontend/evidence_review.py`, `docs/stage_85_document_editing.md`, `tests/test_stage85_document_editor.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1392,10 +1425,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-81 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-85 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
-   the professor-report template specification. Stage 81 defines ReportData V4;
-   Stages 82-106, professor feedback, and final visual sign-off remain pending.
+   the professor-report template specification. Stage 83 manual DOCX visual fidelity,
+   Stages 86-106, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1481,4 +1514,6 @@ template population, a rich synthetic golden record, the committed per-variant D
 and automated structural fidelity checks. The Word/LibreOffice side-by-side visual
 gate, professor review, and final visual sign-off remain pending. Stage 84 then added
 the report-first three-page HTML review surface and demoted provider dashboards from the
-default visual hierarchy; Stage 85 has not started.
+default visual hierarchy. Stage 85 then added explicit document-region editing,
+field-level audit preservation, confirmation invalidation, and regenerated editable
+DOCX output through transient ReportData V4 projection; Stage 86 has not started.
