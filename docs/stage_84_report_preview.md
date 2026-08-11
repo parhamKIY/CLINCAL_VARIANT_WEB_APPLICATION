@@ -54,5 +54,9 @@ The gate checks three-page document structure, professor-family presentation mar
 stable allele identity, HTML escaping and link safety, source-attributed findings, and
 report-first application hierarchy.
 
+A local headless Chrome render of all three synthetic pages was also inspected at a
+`1000 x 3400` viewport. Page boundaries, typography, result emphasis, tables,
+references, and source rows rendered without clipping or overlap.
+
 Stage 85 document-like editing and Stage 86 ReportData lifecycle integration are not
 implemented here.
