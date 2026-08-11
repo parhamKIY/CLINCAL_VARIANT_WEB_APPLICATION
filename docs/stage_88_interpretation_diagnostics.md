@@ -68,4 +68,5 @@ Validated on 2026-08-11:
 - full repository suite: `1003 passed, 4 skipped`;
 - Stage 60 release gate: passed at `85.75%` coverage.
 
-Stage 89 retry and recovery work is not implemented here.
+Stage 89 subsequently added bounded retry, structured-output repair, and optional
+operational fallback while retaining this diagnostic taxonomy.

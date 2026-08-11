@@ -34,3 +34,4 @@ data/cache/*
 !/docs/stage_86_report_lifecycle.md
 !/docs/stage_87_variant_integrity.md
 !/docs/stage_88_interpretation_diagnostics.md
+!/docs/stage_89_interpretation_recovery.md

@@ -527,6 +527,8 @@ LLM_API_KEY=your-real-api-key
 LLM_MODEL=your-default-model
 PHENOTYPE_EXTRACTION_MODEL=your-phenotype-model
 VARIANT_INTERPRETATION_MODEL=your-interpretation-model
+VARIANT_INTERPRETATION_FALLBACK_MODEL=
+VARIANT_INTERPRETATION_MAX_RETRIES=1
 PHENOTYPE_EXTRACTION_MAX_TOKENS=800
 ```
 
@@ -544,7 +546,11 @@ ENABLE_LITERATURE_ENRICHMENT=true
 CONDITIONAL_ENRICHMENT_MAX_VARIANTS=10
 CONDITIONAL_ENRICHMENT_MAX_ARTICLES=10
 ANNOTATION_CACHE_TTL_SECONDS=3600
+VARIANT_INTERPRETATION_FALLBACK_MODEL=your-operational-backup-model
 ```
+
+The interpretation fallback is operational recovery only. It never routes variants
+by conflict, difficulty, phenotype, or evidence strength.
 
 GeneBe credentials are optional but must be provided as a complete email/API
 key pair when used.

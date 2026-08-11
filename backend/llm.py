@@ -93,6 +93,15 @@ def _llm_error_outcome(error: LLMError) -> str:
     return "llm_error"
 
 
+def _is_retryable_request_error(error: LLMRequestError) -> bool:
+    if error.failure_type == "internal_conversion_failure":
+        return False
+    status = error.http_status
+    if status is None:
+        return True
+    return status == 429 or 500 <= status <= 599
+
+
 def _log_llm_call(
     request: LLMRequest,
     *,
@@ -808,6 +817,9 @@ def call_llm(
         ):
             raise
         except LLMRequestError as exc:
+            if not _is_retryable_request_error(exc):
+                exc.attempt = attempt + 1
+                raise
             if attempt >= resolved_retries:
                 exc.attempt = attempt + 1
                 raise

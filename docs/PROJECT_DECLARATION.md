@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-87 implemented as recorded below
+**Implementation status:** Stages 0-89 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 88 not started
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 90 not started
 **Document date:** 2026-08-11
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -70,7 +70,14 @@ remain analyzed, stored, and auditable in original input order.
 Stage 87 adds an input-indexed, allele-level integrity ledger that proves parser,
 normalized, pipeline, evidence, draft-report, and review-record cardinality and
 identity without collapsing same-gene variants.
-This declaration is the unified implementation record for Stages 0-87. The former
+Stage 88 replaces opaque interpretation exception names with a stable twelve-category
+failure taxonomy and secret-free per-variant structured diagnostics while retaining a
+concise reviewer message.
+Stage 89 adds one transient retry, one constrained structured-output repair, and an
+optional operational-only fallback model. The user-selected model remains primary for
+every conflict and no-conflict variant, and fallback receives the same normalized
+evidence.
+This declaration is the unified implementation record for Stages 0-89. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -351,12 +358,14 @@ flowchart LR
     AV --> AW["Stage 85: document-like editing"]
     AW --> AX["Stage 86: per-variant report lifecycle"]
     AX --> AY["Stage 87: variant cardinality and identity gate"]
+    AY --> AZ["Stage 88: interpretation failure diagnostics"]
+    AZ --> BA["Stage 89: interpretation recovery policy"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY done
+    class AV,AW,AX,AY,AZ,BA done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -455,6 +464,10 @@ their original order.
 | 83 | Added the deterministic ReportData V4-to-template DOCX production path, rich synthetic golden allele, committed per-variant artifact, template-drift rejection, and structural fidelity gate for the professor report family. | Implemented; manual Word/LibreOffice visual fidelity comparison pending |
 | 84 | Made the report the default completed-analysis surface with a deterministic three-page professor-family HTML preview, explicit page and variant navigation, stable assembly-qualified allele labels, existing audited inclusion/edit access, and provider/API detail in a secondary tab. | Complete |
 | 85 | Added explicit document-region editing for brief interpretation, variant interpretation, classification summary, and reviewer notes; retained immutable generated evidence and append-only audit history; invalidated prior confirmation after material edits; and regenerated the professor-template Word artifact from a validated transient ReportData V4 projection. | Complete |
+| 86 | Persisted one ordered ReportData-backed lifecycle record and regenerable DOCX identity for every accepted allele through editing, selection, confirmation, and finalization. | Complete |
+| 87 | Added immutable input indexes, assembly-qualified allele digests, cross-stage cardinality validation, and persisted report-lineage integrity records. | Complete |
+| 88 | Replaced internal interpretation exception names with a bounded twelve-category failure taxonomy, secret-free structured diagnostics, and concise reviewer messages. | Complete |
+| 89 | Added one transient interpretation retry, one constrained structured-output repair, and optional operational-only fallback using the unchanged normalized evidence. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -471,8 +484,11 @@ flowchart TD
     C1 --> CE{"Conditional enrichment needed?"}
     CE -- Yes --> X["gnomAD to Ensembl and LitVar2 to Europe PMC to PubMed"]
     CE -- No --> VI
-    X --> VI["One Variant Interpretation Model per variant"]
-    VI --> D["Evidence and interpretation review state"]
+    X --> VI["Selected primary interpretation model per variant"]
+    VI --> VR{"Operational or output failure?"}
+    VR -- No --> D["Evidence and interpretation review state"]
+    VR -- Yes --> VX["One retry, one repair, optional operational fallback"]
+    VX --> D
     D --> H["Human edit, compare, include/exclude, and final confirmation"]
     H --> F["Model-free selected-only Final Clinical Report"]
     E --> DB["SQLite draft snapshot"]
@@ -1240,6 +1256,30 @@ provider or model reruns.
 review counts remain seven after finalization, persistence, and reload. It separately
 proves a six-item normalized result cannot silently replace seven parser alleles.
 
+### Stage 88 interpretation error taxonomy and observability
+
+`backend/variant_interpretation.py` maps interpretation failures to twelve bounded
+categories covering request, HTTP, authentication, response, schema, parse, finish,
+conversion, and unknown failures. The persisted compatibility field now carries the
+stable category rather than a Python exception class name.
+
+Each failed variant emits a secret-free diagnostic with its allele digest, model,
+prompt version, attempt, category, bounded HTTP/finish/schema metadata, and fallback
+state. Reviewer-facing UI keeps these internal details hidden by default.
+
+### Stage 89 interpretation recovery policy
+
+The selected Variant Interpretation Model receives every first attempt. Transient
+timeouts, connections, HTTP 429, and HTTP 5xx responses receive at most one retry.
+Successful requests that fail output parsing or schema validation receive one
+constrained repair request to the same model using the same sanitized evidence.
+
+An optional `VARIANT_INTERPRETATION_FALLBACK_MODEL` activates only after an eligible
+operational failure. It never activates for conflict, difficulty, authentication,
+invalid requests, non-retryable HTTP 4xx, or internal conversion failures. The actual
+fallback model and a concise operational warning remain in result provenance, and
+structured logs identify the recovery without storing prompts, responses, or secrets.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1458,6 +1498,8 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 85 document-like editing and DOCX regeneration | `backend/report_data_projection.py`, `frontend/evidence_review.py`, `docs/stage_85_document_editing.md`, `tests/test_stage85_document_editor.py` |
 | Stage 86 per-variant report lifecycle | `backend/report_lifecycle.py`, `backend/pipeline.py`, `backend/database.py`, `backend/final_clinical_report.py`, `frontend/evidence_review.py`, `docs/stage_86_report_lifecycle.md`, `tests/test_stage86_report_lifecycle.py` |
 | Stage 87 variant cardinality and identity gate | `backend/variant_integrity.py`, `backend/pipeline.py`, `backend/privacy.py`, `backend/database.py`, `docs/stage_87_variant_integrity.md`, `tests/test_stage87_variant_integrity.py` |
+| Stage 88 interpretation failure diagnostics | `backend/llm.py`, `backend/variant_interpretation.py`, `frontend/evidence_review.py`, `docs/stage_88_interpretation_diagnostics.md`, `tests/test_stage88_interpretation_diagnostics.py` |
+| Stage 89 interpretation recovery policy | `backend/llm.py`, `backend/variant_interpretation.py`, `config.py`, `.env.example`, `docs/stage_89_interpretation_recovery.md`, `tests/test_stage89_interpretation_recovery.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1477,7 +1519,7 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-85 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-89 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
    Stages 86-106, professor feedback, and final visual sign-off remain pending.
@@ -1576,4 +1618,7 @@ persisted input-index and allele-digest integrity gate, including the dedicated
 seven-variant and duplicate-gene acceptance scenario. Stage 88 then replaced opaque
 interpretation exception names with a stable twelve-category failure taxonomy, added
 secret-free per-variant structured diagnostics, and kept reviewer-facing failures
-concise. Retry, repair, and fallback recovery remain Stage 89 work.
+concise. Stage 89 then added one bounded transient retry, one constrained
+structured-output repair, and an optional operational-only fallback model while
+preserving the selected model as the primary for every variant. Stage 90 phenotype
+non-concordance work has not started.

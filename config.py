@@ -194,6 +194,16 @@ class Settings:
         LLM_MODEL_STRONG,
     ).strip()
 
+    VARIANT_INTERPRETATION_FALLBACK_MODEL: str | None = (
+        os.getenv("VARIANT_INTERPRETATION_FALLBACK_MODEL", "").strip()
+        or None
+    )
+
+    VARIANT_INTERPRETATION_MAX_RETRIES: int = _get_non_negative_int(
+        "VARIANT_INTERPRETATION_MAX_RETRIES",
+        1,
+    )
+
     PHENOTYPE_EXTRACTION_MAX_TOKENS: int = _get_positive_int(
         "PHENOTYPE_EXTRACTION_MAX_TOKENS",
         800,
@@ -660,6 +670,20 @@ class Settings:
             raise RuntimeError(
                 "PHENOTYPE_EXTRACTION_MODEL and "
                 "VARIANT_INTERPRETATION_MODEL cannot be empty."
+            )
+
+        if (
+            cls.VARIANT_INTERPRETATION_FALLBACK_MODEL
+            == cls.VARIANT_INTERPRETATION_MODEL
+        ):
+            raise RuntimeError(
+                "VARIANT_INTERPRETATION_FALLBACK_MODEL must differ from "
+                "VARIANT_INTERPRETATION_MODEL."
+            )
+
+        if cls.VARIANT_INTERPRETATION_MAX_RETRIES > 1:
+            raise RuntimeError(
+                "VARIANT_INTERPRETATION_MAX_RETRIES cannot exceed 1."
             )
 
         if cls.PHENOTYPE_EXTRACTION_MAX_TOKENS > 4_000:

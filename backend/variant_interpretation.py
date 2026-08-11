@@ -102,6 +102,27 @@ SAFE_SCHEMA_ERRORS = frozenset(
         "unknown_citation",
     }
 )
+STRUCTURED_REPAIR_FAILURE_TYPES = frozenset(
+    {"output_schema_failure", "output_parse_failure"}
+)
+OPERATIONAL_FALLBACK_FAILURE_TYPES = frozenset(
+    {
+        "request_timeout",
+        "connection_error",
+        "http_429",
+        "http_5xx",
+        "empty_response",
+        "output_schema_failure",
+        "output_parse_failure",
+        "safety_or_finish_failure",
+    }
+)
+STRUCTURED_REPAIR_INSTRUCTION = (
+    "\n\nRECOVERY INSTRUCTION:\n"
+    "The previous response did not satisfy the strict output contract. "
+    "Re-evaluate the same validated evidence and return only one JSON object "
+    "that exactly matches the required schema. Do not add URLs or new evidence."
+)
 InterpretationProgressCallback = Callable[
     [int, int, InterpretationStatus | Literal["running"]],
     None,
@@ -594,6 +615,7 @@ def build_interpretation_failure_diagnostic(
     *,
     model: str,
     error: Exception,
+    fallback_used: bool = False,
 ) -> InterpretationFailureDiagnostic:
     """Build one bounded diagnostic without prompt, response, or secret data."""
 
@@ -630,7 +652,7 @@ def build_interpretation_failure_diagnostic(
             getattr(error, "schema_error", None),
             allowed=SAFE_SCHEMA_ERRORS,
         ),
-        "fallback_used": False,
+        "fallback_used": fallback_used,
     }
 
 
@@ -653,12 +675,113 @@ def _log_interpretation_failure(
     )
 
 
+def _recovery_retry_count(
+    *,
+    client: LLMClient | None,
+    max_retries: int | None,
+) -> int | None:
+    if max_retries is not None or client is not None:
+        return max_retries
+    return settings.VARIANT_INTERPRETATION_MAX_RETRIES
+
+
+def _execute_interpretation_request(
+    evidence: EvidenceObject,
+    *,
+    user_prompt: str,
+    model: str,
+    client: LLMClient | None,
+    max_retries: int | None,
+) -> tuple[LLMResponse, tuple[str, str, list[str], list[str]], bool]:
+    """Execute one model with one bounded structured-output repair."""
+
+    allowed_reference_ids = {
+        reference["reference_id"]
+        for reference in build_canonical_references(evidence)
+    }
+    repair_used = False
+    for repair_index in range(2):
+        prompt = (
+            user_prompt
+            if repair_index == 0
+            else user_prompt + STRUCTURED_REPAIR_INSTRUCTION
+        )
+        try:
+            response = call_llm(
+                VARIANT_INTERPRETATION_SYSTEM_PROMPT,
+                prompt,
+                temperature=0.0,
+                max_tokens=settings.VARIANT_INTERPRETATION_MAX_TOKENS,
+                client=client,
+                model=None if client is not None else model,
+                max_retries=_recovery_retry_count(
+                    client=client,
+                    max_retries=max_retries,
+                ),
+                response_format=VARIANT_INTERPRETATION_RESPONSE_SCHEMA,
+            )
+            parsed = _parse_response(
+                response,
+                allowed_reference_ids=allowed_reference_ids,
+            )
+            return response, parsed, repair_used
+        except (LLMError, VariantInterpretationError) as exc:
+            failure_type = classify_interpretation_failure(exc)
+            if (
+                repair_index == 0
+                and failure_type in STRUCTURED_REPAIR_FAILURE_TYPES
+            ):
+                repair_used = True
+                LOGGER.warning(
+                    "event=variant_interpretation_recovery action=repair "
+                    "variant_id=%s model=%s failure_type=%s attempt=1",
+                    stable_allele_identity(
+                        evidence["variant"],
+                        assembly=evidence["assembly"],
+                    ),
+                    model,
+                    failure_type,
+                )
+                continue
+            raise
+    raise VariantInterpretationError(
+        "Structured output repair was exhausted.",
+        failure_type="output_schema_failure",
+        schema_error="invalid_fields",
+    )
+
+
+def _fallback_model(
+    *,
+    primary_client: LLMClient | None,
+    fallback_client: LLMClient | None,
+    fallback_model: str | None,
+) -> str | None:
+    if fallback_client is not None and fallback_model is None:
+        raise VariantInterpretationError(
+            "fallback_model is required with fallback_client."
+        )
+    if fallback_model is not None:
+        selected = _configured_model(fallback_model)
+    elif primary_client is None:
+        selected = settings.VARIANT_INTERPRETATION_FALLBACK_MODEL
+    else:
+        selected = None
+    if selected is not None and any(
+        ord(character) < 32 for character in selected
+    ):
+        raise VariantInterpretationError("Fallback model is invalid.")
+    return selected
+
+
 def interpret_variant(
     evidence_object: Mapping[str, object],
     *,
     variant_index: int = 0,
     model: str | None = None,
     client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
     max_retries: int | None = None,
     timestamp: str | None = None,
 ) -> VariantInterpretationResult:
@@ -691,27 +814,76 @@ def interpret_variant(
             "Evidence contains data prohibited from LLM processing."
         ) from exc
     configured_model = _configured_model(model)
+    configured_fallback_model = _fallback_model(
+        primary_client=client,
+        fallback_client=fallback_client,
+        fallback_model=fallback_model,
+    )
+    if configured_fallback_model == configured_model:
+        if fallback_model is None and fallback_client is None:
+            configured_fallback_model = None
+        else:
+            raise VariantInterpretationError(
+                "Fallback model must differ from the primary model."
+            )
     conflict_status, conflict_severity, prompt_mode = _conflict_context(
         evidence
     )
     user_prompt = _build_prompt(evidence, prompt_mode=prompt_mode)
-    response = call_llm(
-        VARIANT_INTERPRETATION_SYSTEM_PROMPT,
-        user_prompt,
-        temperature=0.0,
-        max_tokens=settings.VARIANT_INTERPRETATION_MAX_TOKENS,
-        client=client,
-        model=None if client is not None else configured_model,
-        max_retries=max_retries,
-        response_format=VARIANT_INTERPRETATION_RESPONSE_SCHEMA,
-    )
-    allowed_references = build_canonical_references(evidence)
-    interpretation, conflict_assessment, warnings, citations = _parse_response(
-        response,
-        allowed_reference_ids={
-            reference["reference_id"] for reference in allowed_references
-        },
-    )
+    active_model = configured_model
+    fallback_used = False
+    try:
+        response, parsed, _ = _execute_interpretation_request(
+            evidence,
+            user_prompt=user_prompt,
+            model=configured_model,
+            client=client,
+            max_retries=max_retries,
+        )
+    except (LLMError, VariantInterpretationError) as primary_error:
+        failure_type = classify_interpretation_failure(primary_error)
+        if (
+            configured_fallback_model is None
+            or failure_type not in OPERATIONAL_FALLBACK_FAILURE_TYPES
+        ):
+            raise
+        fallback_used = True
+        active_model = configured_fallback_model
+        LOGGER.warning(
+            "event=variant_interpretation_recovery action=fallback "
+            "variant_id=%s primary_model=%s fallback_model=%s "
+            "failure_type=%s fallback_used=true",
+            stable_allele_identity(
+                evidence["variant"],
+                assembly=evidence["assembly"],
+            ),
+            configured_model,
+            configured_fallback_model,
+            failure_type,
+        )
+        try:
+            response, parsed, _ = _execute_interpretation_request(
+                evidence,
+                user_prompt=user_prompt,
+                model=configured_fallback_model,
+                client=fallback_client,
+                max_retries=max_retries,
+            )
+        except (LLMError, VariantInterpretationError) as fallback_error:
+            fallback_error.fallback_used = True
+            fallback_error.diagnostic_model = configured_fallback_model
+            raise
+    interpretation, conflict_assessment, warnings, citations = parsed
+    if fallback_used:
+        recovery_warning = (
+            "Operational recovery used the configured fallback "
+            "interpretation model."
+        )
+        if recovery_warning not in warnings:
+            warnings = [
+                *warnings[: MAX_INTERPRETATION_WARNINGS - 1],
+                recovery_warning,
+            ]
     result: VariantInterpretationResult = {
         "schema_version": VARIANT_INTERPRETATION_SCHEMA_VERSION,
         "variant_index": variant_index,
@@ -722,7 +894,7 @@ def interpret_variant(
         "conflict_status": conflict_status,
         "conflict_severity": conflict_severity,
         "provider": settings.LLM_PROVIDER,
-        "configured_model": configured_model,
+        "configured_model": active_model,
         "response_model": response.model,
         "interpretation": interpretation,
         "conflict_assessment": conflict_assessment,
@@ -748,8 +920,9 @@ def _failed_result(
     )
     diagnostic = build_interpretation_failure_diagnostic(
         evidence,
-        model=model,
+        model=cast(str, getattr(error, "diagnostic_model", model)),
         error=error,
+        fallback_used=bool(getattr(error, "fallback_used", False)),
     )
     _log_interpretation_failure(diagnostic)
     result: VariantInterpretationResult = {
@@ -780,6 +953,8 @@ def interpret_variants(
     *,
     model: str | None = None,
     client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
     max_retries: int | None = None,
     timestamp: str | None = None,
     progress_callback: InterpretationProgressCallback | None = None,
@@ -823,6 +998,8 @@ def interpret_variants(
                 variant_index=variant_index,
                 model=model,
                 client=client,
+                fallback_model=fallback_model,
+                fallback_client=fallback_client,
                 max_retries=max_retries,
                 timestamp=timestamp,
             )

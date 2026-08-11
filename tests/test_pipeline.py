@@ -569,6 +569,16 @@ class TestConfiguration:
                 "cannot exceed 8000",
             ),
             (
+                "VARIANT_INTERPRETATION_FALLBACK_MODEL",
+                settings.VARIANT_INTERPRETATION_MODEL,
+                "must differ",
+            ),
+            (
+                "VARIANT_INTERPRETATION_MAX_RETRIES",
+                2,
+                "cannot exceed 1",
+            ),
+            (
                 "GENOME_ASSEMBLY",
                 "hg38",
                 "must be GRCh37 or GRCh38",
