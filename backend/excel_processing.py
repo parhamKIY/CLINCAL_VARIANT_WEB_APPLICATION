@@ -7,6 +7,9 @@ from math import isfinite
 from typing import Final
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
+import io
+import xml.etree.ElementTree as ET
+import zipfile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -153,11 +156,89 @@ def _manual_row_from_excel(
     }
 
 
+_SPREADSHEETML_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def _sanitize_dot_numeric_cells(payload: bytes) -> bytes:
+    """Rewrite xlsx XML to fix cells where '.' is mistyped as numeric.
+
+    VCF-exported Excel files commonly use '.' for missing values.  When the
+    export tool writes these into the XML as ``<c t="n"><v>.</v></c>``,
+    openpyxl's ``_cast_number`` calls ``float('.')`` and raises ValueError.
+
+    This pre-processor rewrites such cells to inline-string type so openpyxl
+    sees them as the text ``'.'`` instead of crashing.
+    """
+
+    try:
+        zin = zipfile.ZipFile(io.BytesIO(payload), "r")
+    except (BadZipFile, OSError):
+        return payload  # not a valid zip; let openpyxl report the real error
+
+    needs_rewrite = False
+    ns = _SPREADSHEETML_NS
+    ET.register_namespace("", ns)
+
+    try:
+        for name in zin.namelist():
+            if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
+                continue
+            tree = ET.parse(io.BytesIO(zin.read(name)))
+            for c in tree.getroot().iter(f"{{{ns}}}c"):
+                if c.get("t", "n") != "n":
+                    continue
+                v = c.find(f"{{{ns}}}v")
+                if v is not None and v.text == ".":
+                    needs_rewrite = True
+                    break
+            if needs_rewrite:
+                break
+    except (ET.ParseError, KeyError, OSError):
+        zin.close()
+        return payload
+
+    if not needs_rewrite:
+        zin.close()
+        return payload
+
+    buf = io.BytesIO()
+    try:
+        with zipfile.ZipFile(buf, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if (
+                    item.filename.startswith("xl/worksheets/")
+                    and item.filename.endswith(".xml")
+                ):
+                    tree = ET.parse(io.BytesIO(data))
+                    root = tree.getroot()
+                    for c in root.iter(f"{{{ns}}}c"):
+                        if c.get("t", "n") != "n":
+                            continue
+                        v = c.find(f"{{{ns}}}v")
+                        if v is not None and v.text == ".":
+                            c.set("t", "inlineStr")
+                            c.remove(v)
+                            is_el = ET.SubElement(c, f"{{{ns}}}is")
+                            t_el = ET.SubElement(is_el, f"{{{ns}}}t")
+                            t_el.text = "."
+                    out = io.BytesIO()
+                    tree.write(out, xml_declaration=True, encoding="UTF-8")
+                    data = out.getvalue()
+                zout.writestr(item, data)
+    finally:
+        zin.close()
+
+    return buf.getvalue()
+
+
 def parse_excel_variants(payload: bytes) -> list[VariantData]:
     """Read only worksheet 1 and return the shared normalized variant form."""
 
     if not isinstance(payload, bytes) or not payload:
         raise ExcelProcessingError("The Excel upload is empty or invalid.")
+
+    payload = _sanitize_dot_numeric_cells(payload)
 
     workbook = None
     try:
