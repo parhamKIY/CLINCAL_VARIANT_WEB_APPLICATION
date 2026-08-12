@@ -1,10 +1,10 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-104 implemented as recorded below
+**Implementation status:** Stages 0-105 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 105 not started
-**Document date:** 2026-08-11
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 106 not started
+**Document date:** 2026-08-12
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
@@ -121,7 +121,10 @@ human-readable provider records, and clean missing-link behavior across HTML and
 Stage 104 adds an explicit ready-report count and verifies that primary summaries,
 variant cards, and consequence notices answer all required status questions while
 technical provider details remain collapsed.
-This declaration is the unified implementation record for Stages 0-104. The former
+Stage 105 executes the deterministic offline acceptance suite verifying 7-variant
+cardinality, preservation of input order, same-gene separation, phenotype non-concordance
+handling, and provider degradation scenarios.
+This declaration is the unified implementation record for Stages 0-105. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -419,12 +422,13 @@ flowchart LR
     BM --> BN["Stage 102: interpretation acceptance suite"]
     BN --> BO["Stage 103: reference acceptance suite"]
     BO --> BP["Stage 104: status and warning UX acceptance"]
+    BP --> BQ["Stage 105: professor testcase E2E"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN,BO,BP done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN,BO,BP,BQ done
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -542,6 +546,7 @@ their original order.
 | 102 | Added seven deterministic interpretation acceptance scenarios covering normal, phenotype non-concordant, partial-provider, conflicting, transient-recovery, structured-repair, and total-failure behavior with retained variant state. | Complete |
 | 103 | Added end-to-end reference acceptance checks for exact literature targets, category separation, raw/machine-link rejection, human provider pages, and clean missing stable links in HTML and DOCX. | Complete |
 | 104 | Added an exact ready-report summary count and verified that primary status cards identify attention variants, missing sources, and the distinction between partial evidence and action-required interpretation failure. | Complete |
+| 105 | Added the deterministic offline acceptance suite verifying 7-variant cardinality, preservation of input order, same-gene separation, phenotype non-concordance handling, and provider degradation scenarios. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -1586,8 +1591,13 @@ Variant cards identify the affected input position and allele, name missing sour
 the primary evidence lines, and distinguish retained-evidence limitations (`PARTIAL`)
 from exhausted interpretation (`ACTION REQUIRED`). The four-scenario deterministic
 gate exercises the rendered Streamlit surface and proves these answers appear before
-the collapsed technical drawers without internal exception names. Stage 105 has not
-started.
+the collapsed technical drawers without internal exception names.
+
+### Stage 105 professor testcase end-to-end acceptance
+
+The deterministic offline acceptance suite runs the complete report-first workflow using a 7-variant synthetic fixture that mirrors the structure of the professor-provided Excel testcase. It validates that the overall variant count is exactly 7, that the original input order is preserved at all pipeline and reporting stages, and that same-gene variants remain separate distinct report records.
+
+An irrelevant phenotype (abdominal pain) successfully completes interpretation while stating phenotype non-concordance explicitly without fabricating a disease relation or causing an application failure. A degraded provider scenario where ClinVar is unavailable still produces all 7 reports, maps the ClinVar card status to `"ClinVar: no exact record"`, hides the technical failure from the primary UX (not blocking), and generates all Word documents successfully.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1686,7 +1696,7 @@ and formal privacy/regulatory review.
 
 The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
 unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **971 passed, 4 skipped**,
+consume external API quotas. The current recorded baseline is **1133 passed, 6 skipped**,
 with **85.83% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
 Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
 Recovery/Retry groups before running the complete V3 marker and enforcing at least
@@ -1824,6 +1834,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 102 interpretation acceptance suite | `tests/test_stage102_interpretation_acceptance.py`, `docs/stage_102_interpretation_acceptance.md`, `pytest.ini` |
 | Stage 103 reference acceptance suite | `tests/test_stage103_reference_acceptance.py`, `docs/stage_103_reference_acceptance.md`, `pytest.ini` |
 | Stage 104 status and warning UX acceptance suite | `frontend/analysis_summary.py`, `frontend/ui.py`, `tests/test_stage104_status_warning_acceptance.py`, `docs/stage_104_status_warning_acceptance.md`, `pytest.ini` |
+| Stage 105 professor testcase end-to-end acceptance | `tests/test_stage105_professor_testcase.py`, `docs/stage_105_professor_testcase.md`, `pytest.ini` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1843,10 +1854,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-101 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-105 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stages 102-106, professor feedback, and final visual sign-off remain pending.
+   Stage 106, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1974,4 +1985,7 @@ model failure. Stage 103 then added end-to-end user-facing reference acceptance 
 canonical targets, category separation, safe link policy, HTML preview, and DOCX
 output. Stage 104 then added the exact ready-report count and validated that primary
 status cards and consequence notices answer the reviewer questions without opening
-technical details. Stage 105 has not started.
+technical details. Stage 105 then added the deterministic offline acceptance suite,
+verifying 7-variant cardinality, preservation of input order, same-gene separation,
+phenotype non-concordance handling, and provider degradation scenarios. Stage 106
+is the final visual sign-off gate.
