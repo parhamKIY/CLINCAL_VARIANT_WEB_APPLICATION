@@ -9,6 +9,7 @@ from backend.llm import (
     LLMAuthenticationError,
     LLMConfigurationError,
     LLMError,
+    LLMQuotaError,
     LLMRateLimitError,
     LLMRequestError,
     LLMResponseError,
@@ -105,6 +106,15 @@ def map_pipeline_exception(
             ),
             "recoverable": True,
         }
+    elif isinstance(error, LLMQuotaError):
+        public_error = {
+            "code": "llm_interpretation_failed",
+            "message": (
+                "The LLM provider has insufficient quota or credit. Add "
+                "provider credit or select another model."
+            ),
+            "recoverable": True,
+        }
     elif isinstance(error, LLMRateLimitError):
         public_error = {
             "code": "llm_interpretation_failed",
@@ -196,30 +206,41 @@ def safe_ui_error_message(
 ) -> str:
     """Return a fixed UI message without exposing exception text."""
 
-    messages = {
-        "hpo_update": (
-            "HPO data could not be updated. The previously installed "
-            "data remains available."
-        ),
-        "phenotype_search": (
-            "Phenotype search could not be completed. Verify the local "
-            "HPO data and try again."
-        ),
-        "phenotype_extraction": (
-            "Phenotype candidates could not be extracted safely. Manual "
-            "HPO selection remains available."
-        ),
-        "phenotype_acceptance": (
-            "The edited candidates could not be accepted. Correct or "
-            "remove invalid HPO identifiers and try again."
-        ),
-    }
+    if (
+        context == "phenotype_extraction"
+        and isinstance(error, LLMQuotaError)
+    ):
+        message = (
+            "The LLM provider has insufficient quota or credit. Add "
+            "provider credit or select another model. Manual HPO "
+            "selection remains available."
+        )
+    else:
+        messages = {
+            "hpo_update": (
+                "HPO data could not be updated. The previously installed "
+                "data remains available."
+            ),
+            "phenotype_search": (
+                "Phenotype search could not be completed. Verify the local "
+                "HPO data and try again."
+            ),
+            "phenotype_extraction": (
+                "Phenotype candidates could not be extracted safely. "
+                "Manual HPO selection remains available."
+            ),
+            "phenotype_acceptance": (
+                "The edited candidates could not be accepted. Correct or "
+                "remove invalid HPO identifiers and try again."
+            ),
+        }
+        message = messages[context]
     LOGGER.warning(
         "event=user_safe_ui_error context=%s error_type=%s",
         context,
         type(error).__name__,
     )
-    return messages[context]
+    return message
 
 
 __all__ = [

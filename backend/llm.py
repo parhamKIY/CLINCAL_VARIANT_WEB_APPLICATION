@@ -57,6 +57,10 @@ class LLMRequestError(LLMError):
     """Raised when an LLM provider request cannot be completed."""
 
 
+class LLMQuotaError(LLMRequestError):
+    """Raised when provider quota or account credit is insufficient."""
+
+
 class LLMAuthenticationError(LLMRequestError):
     """Raised when the provider rejects the configured credentials."""
 
@@ -78,6 +82,8 @@ def _llm_error_outcome(error: LLMError) -> str:
 
     if isinstance(error, LLMAuthenticationError):
         return "authentication_error"
+    if isinstance(error, LLMQuotaError):
+        return "quota_exhausted"
     if isinstance(error, LLMRateLimitError):
         return "rate_limited"
     if isinstance(error, LLMTimeoutError):
@@ -94,6 +100,8 @@ def _llm_error_outcome(error: LLMError) -> str:
 
 
 def _is_retryable_request_error(error: LLMRequestError) -> bool:
+    if isinstance(error, LLMQuotaError):
+        return False
     if error.failure_type == "internal_conversion_failure":
         return False
     status = error.http_status
@@ -554,6 +562,20 @@ class OpenAICompatibleAdapter:
 
         if 200 <= status_code < 300:
             return
+        provider_error_code = OpenAICompatibleAdapter._provider_error_code(
+            response
+        )
+        if provider_error_code in {
+            "billing_hard_limit_reached",
+            "billing_not_active",
+            "credit_balance_too_low",
+            "insufficient_quota",
+        }:
+            raise LLMQuotaError(
+                "The LLM provider quota or credit is insufficient.",
+                http_status=status_code,
+                failure_type="insufficient_quota",
+            )
         if status_code in {401, 403}:
             raise LLMAuthenticationError(
                 "The LLM provider rejected the configured credentials "
@@ -570,6 +592,25 @@ class OpenAICompatibleAdapter:
             f"The LLM provider returned HTTP {status_code}.",
             http_status=status_code,
         )
+
+    @staticmethod
+    def _provider_error_code(response: requests.Response) -> str | None:
+        """Read one bounded provider error token without retaining its text."""
+
+        try:
+            payload = response.json()
+        except (requests.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        error = payload.get("error")
+        if not isinstance(error, Mapping):
+            return None
+        for field in ("code", "type"):
+            value = error.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip().casefold()
+        return None
 
     def _parse_response(
         self,
@@ -844,6 +885,7 @@ __all__ = [
     "LLMError",
     "LLMMessage",
     "LLMJSONSchema",
+    "LLMQuotaError",
     "LLMRateLimitError",
     "LLMRequest",
     "LLMRequestError",

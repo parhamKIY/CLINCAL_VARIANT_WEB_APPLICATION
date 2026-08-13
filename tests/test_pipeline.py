@@ -117,6 +117,7 @@ from backend.llm import (
     LLMClient,
     LLMConfigurationError,
     LLMJSONSchema,
+    LLMQuotaError,
     LLMRateLimitError,
     LLMRequest,
     LLMRequestError,
@@ -12118,6 +12119,43 @@ class TestLLMContract:
         assert "test-secret" not in str(exc_info.value)
         assert "clinical data" not in str(exc_info.value)
 
+    def test_insufficient_quota_is_not_misreported_as_rate_limit(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    429,
+                    {
+                        "error": {
+                            "message": "private account balance",
+                            "type": "insufficient_quota",
+                            "code": "insufficient_quota",
+                        }
+                    },
+                )
+            ]
+        )
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1",
+                api_key="test-secret",
+                model="test-model",
+                timeout=10,
+                session=session,
+            )
+        )
+
+        with pytest.raises(LLMQuotaError, match="quota or credit"):
+            call_llm(
+                "System",
+                "Evidence",
+                client=client,
+                max_retries=2,
+            )
+
+        assert len(session.post_calls) == 1
+
     @pytest.mark.parametrize(
         ("failure", "error_type", "message"),
         [
@@ -20294,6 +20332,11 @@ class TestSafeErrorHandling:
                 True,
             ),
             (
+                LLMQuotaError("secret provider balance"),
+                "llm_interpretation_failed",
+                True,
+            ),
+            (
                 LLMTimeoutError("secret provider timeout"),
                 "llm_interpretation_failed",
                 True,
@@ -20404,6 +20447,19 @@ class TestSafeErrorHandling:
         )
 
         assert message == expected
+        assert "secret" not in message.casefold()
+
+    def test_phenotype_quota_error_is_actionable_and_safe(self) -> None:
+        message = safe_ui_error_message(
+            LLMQuotaError("secret provider balance and account data"),
+            context="phenotype_extraction",
+        )
+
+        assert message == (
+            "The LLM provider has insufficient quota or credit. Add "
+            "provider credit or select another model. Manual HPO "
+            "selection remains available."
+        )
         assert "secret" not in message.casefold()
 
 
