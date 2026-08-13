@@ -4200,6 +4200,9 @@ class TestAnnotation:
         variation_id: str = "123",
         assembly: str = "GRCh38",
         spdi: str = "NC_000001.11:99:A:G",
+        chromosome: str = "1",
+        start: int = 100,
+        stop: int = 100,
         significance: str = "Pathogenic",
         review_status: str = (
             "criteria provided, multiple submitters, no conflicts"
@@ -4220,9 +4223,9 @@ class TestAnnotation:
                     "variation_loc": [
                         {
                             "assembly_name": assembly,
-                            "chr": "1",
-                            "start": "100",
-                            "stop": "100",
+                            "chr": chromosome,
+                            "start": str(start),
+                            "stop": str(stop),
                         }
                     ],
                 }
@@ -4581,7 +4584,7 @@ class TestAnnotation:
         assert second[0]["sources"] == first[0]["sources"]
         assert second[0]["variant"]["genotype"] == "1/1"
 
-    def test_failed_clinvar_variant_is_retried_automatically(
+    def test_clinvar_rejected_candidate_uses_next_strategy_without_retry(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -4620,17 +4623,13 @@ class TestAnnotation:
             "did not return exactly one record" in warning
             for warning in annotation["warnings"]
         )
-        assert any(
+        assert annotation["sources"]["clinvar"][
+            "selected_query_strategy"
+        ] == "genomic_hgvs"
+        assert not any(
             source == "clinvar"
-            and status == "running"
-            and "automatically retrying 1 failed variant" in message
-            for source, status, message in events
-        )
-        assert any(
-            source == "clinvar"
-            and status == "success"
-            and "after 1 automatic retry" in message
-            for source, status, message in events
+            and "automatically retrying" in message
+            for source, _status, message in events
         )
 
     def test_successful_myvariant_response_is_standardized(self) -> None:
@@ -5204,6 +5203,30 @@ class TestAnnotation:
             "source_type": "direct",
             "assembly": "GRCh38",
             "query_hgvs": "NC_000001.11:g.100A>G",
+            "selected_query_strategy": "canonical_spdi",
+            "query_strategies": [
+                {
+                    "sequence": 1,
+                    "strategy": "canonical_spdi",
+                    "identifier_type": "canonical_spdi",
+                    "identifier": "NC_000001.11:99:A:G",
+                    "search_field": "cspdi",
+                    "result_count": 1,
+                    "candidate_ids": ["123"],
+                    "results_truncated": False,
+                    "candidates_rejected": 0,
+                    "outcome": "verified",
+                }
+            ],
+            "identifiers_used": [
+                {
+                    "type": "canonical_spdi",
+                    "value": "NC_000001.11:99:A:G",
+                }
+            ],
+            "candidate_count": 1,
+            "candidates_rejected": 0,
+            "candidate_rejections": [],
             "variation_id": "123",
             "accession": "VCV000000123",
             "accession_version": "VCV000000123.4",
@@ -5246,7 +5269,7 @@ class TestAnnotation:
         assert session.clinvar_get_calls[0]["params"] == {
             "tool": "clinical_variant_app",
             "db": "clinvar",
-            "term": '"NC_000001.11:g.100A>G"[varnam]',
+            "term": '"NC_000001.11:99:A:G"[cspdi]',
             "retmode": "json",
             "retmax": 20,
         }
@@ -5305,6 +5328,276 @@ class TestAnnotation:
             '"NC_000001.10:g.100A>G"[varnam]'
         )
 
+    def test_clinvar_hgvs_recovers_after_spdi_no_match(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "success"
+        assert clinvar["selected_query_strategy"] == "genomic_hgvs"
+        assert [
+            attempt["strategy"]
+            for attempt in clinvar["query_strategies"]
+        ] == ["canonical_spdi", "genomic_hgvs"]
+        assert session.clinvar_get_calls[0]["params"]["term"] == (
+            '"NC_000001.11:99:A:G"[cspdi]'
+        )
+
+    def test_clinvar_rsid_recovers_after_name_queries_miss(self) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "success"
+        assert clinvar["selected_query_strategy"] == "rsid"
+        assert session.clinvar_get_calls[-2]["params"]["term"] == (
+            '"rs123"'
+        )
+        assert clinvar["candidate_rejections"] == []
+
+    def test_clinvar_variation_id_recovers_after_other_queries_miss(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_clinvar_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, self._clinvar_summary_response()),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "success"
+        assert clinvar["selected_query_strategy"] == "variation_id"
+        assert session.clinvar_get_calls[-2]["params"]["term"] == (
+            '"123"[uid]'
+        )
+
+    def test_clinvar_rejected_candidate_is_diagnostic_no_match(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(
+                        spdi="NC_000001.11:99:T:G",
+                    ),
+                ),
+                FakeResponse(200, self._clinvar_search_response([])),
+                FakeResponse(200, self._clinvar_search_response([])),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "not_found"
+        assert clinvar["direct_verification_status"] == "no_record"
+        assert clinvar["candidate_rejections"] == [
+            {
+                "variation_id": "123",
+                "strategy": "canonical_spdi",
+                "reason_codes": ["ref_mismatch"],
+            }
+        ]
+        assert clinvar["candidate_count"] == 1
+        assert clinvar["candidates_rejected"] == 1
+        assert clinvar["retrieval_assessment"]["cause"] == (
+            "NORMALIZATION_MISMATCH"
+        )
+
+    def test_clinvar_canonical_spdi_supports_indel(self) -> None:
+        variant = {
+            **self._variant(position=100),
+            "ref": "AT",
+            "alt": "A",
+        }
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(
+                    200,
+                    self._clinvar_summary_response(
+                        spdi="NC_000001.11:100:T:",
+                        start=101,
+                        stop=101,
+                    ),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [variant],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "success"
+        assert clinvar["selected_query_strategy"] == "canonical_spdi"
+        assert session.clinvar_get_calls[0]["params"]["term"] == (
+            '"NC_000001.11:100:T:"[cspdi]'
+        )
+
+    @pytest.mark.parametrize(
+        ("mutation", "expected_reason"),
+        [
+            ("assembly", "assembly_mismatch"),
+            ("coordinate", "coordinate_mismatch"),
+            ("ref", "ref_mismatch"),
+            ("alt", "alt_mismatch"),
+            ("location", "representation_unresolved"),
+            ("spdi", "candidate_identity_unresolved"),
+        ],
+    )
+    def test_clinvar_candidate_rejection_reason_codes(
+        self,
+        mutation: str,
+        expected_reason: str,
+    ) -> None:
+        summary = self._clinvar_summary_response()
+        record = summary["result"]["123"]  # type: ignore[index]
+        measure = record["variation_set"][0]  # type: ignore[index]
+        location = measure["variation_loc"][0]
+        if mutation == "assembly":
+            location["assembly_name"] = "GRCh37"
+        elif mutation == "coordinate":
+            location["start"] = "101"
+        elif mutation == "ref":
+            measure["canonical_spdi"] = "NC_000001.11:99:T:G"
+        elif mutation == "alt":
+            measure["canonical_spdi"] = "NC_000001.11:99:A:T"
+        elif mutation == "location":
+            measure.pop("variation_loc")
+        else:
+            measure.pop("canonical_spdi")
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response()),
+                FakeResponse(200, summary),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        rejection = annotation["sources"]["clinvar"][
+            "candidate_rejections"
+        ][0]
+        assert rejection["reason_codes"] == [expected_reason]
+
+    def test_clinvar_search_paginates_bounded_exact_candidates(
+        self,
+    ) -> None:
+        identifiers = [str(value) for value in range(1, 26)]
+        summary_result: dict[str, object] = {"uids": identifiers}
+        for index, identifier in enumerate(identifiers):
+            spdi = (
+                "NC_000001.11:99:A:G"
+                if index == 0
+                else f"NC_000001.11:{100 + index}:A:G"
+            )
+            payload = self._clinvar_summary_response(
+                variation_id=identifier,
+                spdi=spdi,
+            )
+            summary_result[identifier] = payload["result"][identifier]  # type: ignore[index]
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            clinvar_responses=[
+                FakeResponse(
+                    200,
+                    {
+                        "esearchresult": {
+                            "count": "25",
+                            "idlist": identifiers[:20],
+                        }
+                    },
+                ),
+                FakeResponse(
+                    200,
+                    {
+                        "esearchresult": {
+                            "count": "25",
+                            "idlist": identifiers[20:],
+                        }
+                    },
+                ),
+                FakeResponse(200, {"result": summary_result}),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "success"
+        assert clinvar["candidate_count"] == 25
+        assert clinvar["candidates_rejected"] == 24
+        assert clinvar["query_strategies"][0]["result_count"] == 25
+        assert clinvar["query_strategies"][0][
+            "results_truncated"
+        ] is False
+        assert session.clinvar_get_calls[1]["params"]["retstart"] == 20
+        assert session.clinvar_get_calls[1]["params"]["retmax"] == 5
+
     def test_clinvar_rejects_non_exact_summary(self) -> None:
         session = FakeSession(
             [FakeResponse(200, [self._vep_response()])],
@@ -5330,20 +5623,15 @@ class TestAnnotation:
 
         assert annotation["sources"]["vep"]["status"] == "success"
         assert annotation["sources"]["myvariant"]["status"] == "success"
-        assert (
-            annotation["sources"]["clinvar"]["status"]
-            == "invalid_response"
-        )
-        assert (
-            annotation["sources"]["clinvar"][
-                "direct_verification_status"
-            ]
-            == "invalid_response"
-        )
-        assert any(
-            "did not return exactly one record" in warning
-            for warning in annotation["warnings"]
-        )
+        clinvar = annotation["sources"]["clinvar"]
+        assert clinvar["status"] == "not_found"
+        assert clinvar["direct_verification_status"] == "no_record"
+        assert clinvar["candidate_rejections"][0] == {
+            "variation_id": "123",
+            "strategy": "canonical_spdi",
+            "reason_codes": ["alt_mismatch"],
+        }
+        assert "primary_failure" not in clinvar
 
     @pytest.mark.parametrize(
         ("payload", "expected_warning"),
@@ -5778,23 +6066,28 @@ class TestAnnotation:
         evidence = build_evidence_object(annotation)
 
         assert clinvar["status"] == "not_found"
-        assert assessment["cause"] == "QUERY_WEAKNESS"
-        assert assessment["query_strategy"] == "genomic_hgvs_varnam"
+        assert assessment["cause"] == "TRUE_SOURCE_ABSENCE"
+        assert assessment["query_strategy"] == (
+            "deterministic_identifier_hierarchy"
+        )
         assert assessment["identifiers_used"] == [
+            {
+                "type": "canonical_spdi",
+                "value": "NC_000001.11:99:A:G",
+            },
             {
                 "type": "genomic_hgvs",
                 "value": "NC_000001.11:g.100A>G",
-            }
-        ]
-        assert assessment["unused_eligible_identifiers"] == [
-            {"type": "rsid", "value": "rs123"},
-            {"type": "clinvar_variation_id", "value": "123"},
-            {"type": "rcv_accession", "value": "RCV000000001"},
+            },
             {
                 "type": "transcript_hgvs",
                 "value": "ENST000001:c.100A>G",
             },
+            {"type": "rsid", "value": "rs123"},
+            {"type": "clinvar_variation_id", "value": "123"},
+            {"type": "rcv_accession", "value": "RCV000000001"},
         ]
+        assert assessment["unused_eligible_identifiers"] == []
         assert assessment["live_verification_required"] is False
         capability = evidence["capability_results"]["clinvar_evidence"]
         assert capability["status"] == "no_match"
@@ -5934,7 +6227,7 @@ class TestAnnotation:
             annotation["sources"]["clinvar"]["clinical_significance"]
             is None
         )
-        assert len(session.clinvar_get_calls) == 1
+        assert len(session.clinvar_get_calls) == 3
         rescue = annotation["sources"]["clinvar"]["evidence_rescue"]
         assert rescue["eligible"] is True
         assert rescue["attempted"] is True
@@ -7050,7 +7343,7 @@ class TestAnnotation:
         assert len(session.post_calls) == 1
         assert len(session.genebe_post_calls) == 1
         assert len(session.myvariant_get_calls) == 2
-        assert len(session.clinvar_get_calls) == 2
+        assert len(session.clinvar_get_calls) == 6
         assert len(session.clingen_get_calls) == 2
         request_json = session.post_calls[0]["json"]
         assert isinstance(request_json, dict)

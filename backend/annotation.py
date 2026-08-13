@@ -55,6 +55,9 @@ MAX_STORED_TRANSCRIPTS = 10
 MAX_GENEBE_CONSEQUENCES = 10
 MAX_GENEBE_ACMG_CRITERIA = 50
 MAX_CLINVAR_SEARCH_RESULTS = 20
+MAX_CLINVAR_TOTAL_CANDIDATES = 100
+MAX_CLINVAR_QUERY_STRATEGIES = 20
+MAX_CLINVAR_CANDIDATE_REJECTIONS = 50
 MAX_CLINVAR_CONDITIONS = 10
 MAX_CLINVAR_ACCESSIONS = 20
 MAX_CLINGEN_CURATIONS = 25
@@ -1209,57 +1212,97 @@ def _get_clinvar_json(
 
 def _search_clinvar_ids(
     session: requests.Session,
-    hgvs: str,
+    identifier: str,
+    search_field: str | None,
     max_retries: int,
-) -> list[str]:
-    """Find ClinVar Variation IDs using one exact HGVS variant name."""
-    payload = _get_clinvar_json(
-        session,
-        "esearch.fcgi",
-        {
+) -> tuple[list[str], int, bool]:
+    """Find bounded paginated ClinVar Variation IDs for one exact term."""
+    term = f'"{identifier}"'
+    if search_field is not None:
+        term = f"{term}[{search_field}]"
+
+    def fetch_page(retstart: int, retmax: int) -> dict[str, Any]:
+        params: dict[str, Any] = {
             "db": "clinvar",
-            "term": f'"{hgvs}"[varnam]',
+            "term": term,
             "retmode": "json",
-            "retmax": MAX_CLINVAR_SEARCH_RESULTS,
-        },
-        max_retries,
+            "retmax": retmax,
+        }
+        if retstart:
+            params["retstart"] = retstart
+        return _get_clinvar_json(
+            session,
+            "esearch.fcgi",
+            params,
+            max_retries,
+        )
+
+    def parse_page(
+        payload: dict[str, Any],
+        *,
+        retstart: int,
+        retmax: int,
+        expected_count: int | None = None,
+    ) -> tuple[int, list[str]]:
+        result = payload.get("esearchresult")
+        if not isinstance(result, dict):
+            raise ClinVarResponseError(
+                "NCBI ClinVar search returned an unexpected response "
+                "structure."
+            )
+        try:
+            count = int(result.get("count"))
+        except (TypeError, ValueError) as exc:
+            raise ClinVarResponseError(
+                "NCBI ClinVar search returned an invalid result count."
+            ) from exc
+        if count < 0 or (
+            expected_count is not None and count != expected_count
+        ):
+            raise ClinVarResponseError(
+                "NCBI ClinVar search returned an inconsistent result count."
+            )
+        page_ids = result.get("idlist")
+        expected_length = min(max(count - retstart, 0), retmax)
+        if (
+            not isinstance(page_ids, list)
+            or len(page_ids) != expected_length
+            or any(
+                not isinstance(value, str) or not value
+                for value in page_ids
+            )
+        ):
+            raise ClinVarResponseError(
+                "NCBI ClinVar search returned invalid Variation IDs."
+            )
+        return count, page_ids
+
+    first_payload = fetch_page(0, MAX_CLINVAR_SEARCH_RESULTS)
+    count, identifiers = parse_page(
+        first_payload,
+        retstart=0,
+        retmax=MAX_CLINVAR_SEARCH_RESULTS,
     )
-    result = payload.get("esearchresult")
-    if not isinstance(result, dict):
-        raise ClinVarResponseError(
-            "NCBI ClinVar search returned an unexpected response structure."
-        )
-
-    raw_count = result.get("count")
-    identifiers = result.get("idlist")
-    try:
-        count = int(raw_count)
-    except (TypeError, ValueError) as exc:
-        raise ClinVarResponseError(
-            "NCBI ClinVar search returned an invalid result count."
-        ) from exc
-
     if count == 0:
-        return []
+        return [], 0, False
 
-    if count > MAX_CLINVAR_SEARCH_RESULTS:
-        raise ClinVarResponseError(
-            "NCBI ClinVar returned too many records for one exact variant."
+    target_count = min(count, MAX_CLINVAR_TOTAL_CANDIDATES)
+    while len(identifiers) < target_count:
+        retstart = len(identifiers)
+        retmax = min(
+            MAX_CLINVAR_SEARCH_RESULTS,
+            target_count - retstart,
         )
+        payload = fetch_page(retstart, retmax)
+        _, page_ids = parse_page(
+            payload,
+            retstart=retstart,
+            retmax=retmax,
+            expected_count=count,
+        )
+        identifiers.extend(page_ids)
 
-    if (
-        not isinstance(identifiers, list)
-        or len(identifiers) != count
-        or any(
-            not isinstance(identifier, str) or not identifier
-            for identifier in identifiers
-        )
-    ):
-        raise ClinVarResponseError(
-            "NCBI ClinVar search returned invalid Variation IDs."
-        )
-
-    return identifiers
+    return identifiers, count, count > len(identifiers)
 
 
 def _get_clinvar_summaries(
@@ -1300,23 +1343,198 @@ def _get_clinvar_summaries(
     return summaries
 
 
-def _clinvar_location_matches(
+def _clinvar_identifier_is_allele_validated(
+    bundle: VariantIdentifierBundle,
+    identifier_type: str,
+    identifier: str,
+) -> bool:
+    """Return whether upstream provenance binds an identifier to this allele."""
+    return any(
+        item.get("identifier_type") == identifier_type
+        and item.get("value", "").casefold() == identifier.casefold()
+        and item.get("scope") == "allele"
+        and item.get("validation") == "provider_exact_allele"
+        for item in bundle["provenance"]
+    )
+
+
+def _clinvar_query_strategies(
+    annotation: AnnotationData,
+    hgvs: str,
+    spdi: str,
+) -> list[dict[str, Any]]:
+    """Build a deterministic, bounded hierarchy from validated identifiers."""
+    raw_bundle = annotation.get("identifier_bundle")
+    bundle: VariantIdentifierBundle = (
+        raw_bundle  # type: ignore[assignment]
+        if isinstance(raw_bundle, dict)
+        else {}
+    )
+    strategies: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+
+    def add(
+        strategy: str,
+        identifier_type: str,
+        identifier: object,
+        search_field: str | None,
+        *,
+        allele_validated: bool = False,
+    ) -> None:
+        if not isinstance(identifier, str) or not identifier.strip():
+            return
+        value = identifier.strip()
+        key = (search_field, value.casefold())
+        if key in seen or len(strategies) >= MAX_CLINVAR_QUERY_STRATEGIES:
+            return
+        seen.add(key)
+        strategies.append(
+            {
+                "strategy": strategy,
+                "identifier_type": identifier_type,
+                "identifier": value,
+                "search_field": search_field,
+                "allele_validated": allele_validated,
+            }
+        )
+
+    # ClinVar canonical SPDI is on the current GRCh38 reference assembly.
+    if settings.GENOME_ASSEMBLY == "GRCh38":
+        add("canonical_spdi", "canonical_spdi", spdi, "cspdi")
+    add("genomic_hgvs", "genomic_hgvs", hgvs, "varnam")
+
+    if isinstance(raw_bundle, dict):
+        for value in bundle["transcript_hgvs"]:
+            add(
+                "transcript_hgvs",
+                "transcript_hgvs",
+                value,
+                "varnam",
+                allele_validated=True,
+            )
+        for value in bundle["rsids"]:
+            add(
+                "rsid",
+                "rsid",
+                value,
+                None,
+                allele_validated=_clinvar_identifier_is_allele_validated(
+                    bundle, "rsids", value
+                ),
+            )
+        for value in bundle["clinvar_variation_ids"]:
+            add(
+                "variation_id",
+                "clinvar_variation_id",
+                value,
+                "uid",
+                allele_validated=_clinvar_identifier_is_allele_validated(
+                    bundle, "clinvar_variation_ids", value
+                ),
+            )
+        for value in bundle["vcv_accessions"]:
+            add(
+                "vcv_accession",
+                "vcv_accession",
+                value,
+                "varacc",
+                allele_validated=_clinvar_identifier_is_allele_validated(
+                    bundle, "vcv_accessions", value
+                ),
+            )
+        for value in bundle["rcv_accessions"]:
+            add(
+                "rcv_accession",
+                "rcv_accession",
+                value,
+                "clv_acc",
+            )
+    return strategies
+
+
+def _clinvar_spdi_rejection_reasons(
+    expected_spdi: str,
+    actual_spdi: object,
+) -> list[str]:
+    """Explain allele-level differences in one returned canonical SPDI."""
+    if not isinstance(actual_spdi, str):
+        return ["candidate_identity_unresolved"]
+    expected = expected_spdi.split(":", 3)
+    actual = actual_spdi.split(":", 3)
+    if len(expected) != 4 or len(actual) != 4:
+        return ["representation_unresolved"]
+    reasons: list[str] = []
+    if actual[0] != expected[0] or actual[1] != expected[1]:
+        reasons.append("coordinate_mismatch")
+    if actual[2].upper() != expected[2].upper():
+        reasons.append("ref_mismatch")
+    if actual[3].upper() != expected[3].upper():
+        reasons.append("alt_mismatch")
+    return reasons
+
+
+def _clinvar_measure_rejection_reasons(
     measure: dict[str, Any],
+    *,
+    expected_spdi: str,
     chromosome: str,
     start: int,
-) -> bool:
-    """Validate the configured assembly, chromosome, and start coordinate."""
-    locations = measure.get("variation_loc")
-    if not isinstance(locations, list):
-        return False
+    reference: str,
+    alternate: str,
+    strategy: dict[str, Any],
+) -> list[str]:
+    """Return deterministic reason codes when one measure is not exact."""
+    raw_locations = measure.get("variation_loc")
+    if not isinstance(raw_locations, list):
+        return ["representation_unresolved"]
+    locations = [
+        item for item in raw_locations if isinstance(item, dict)
+    ]
+    if not locations:
+        return ["representation_unresolved"]
+    assembly_locations = [
+        item
+        for item in locations
+        if item.get("assembly_name") == settings.GENOME_ASSEMBLY
+    ]
+    if not assembly_locations:
+        return ["assembly_mismatch"]
+    coordinate_locations = [
+        item
+        for item in assembly_locations
+        if _normalize_chromosome(item.get("chr")) == chromosome
+        and str(item.get("start", "")) == str(start)
+    ]
+    if not coordinate_locations:
+        return ["coordinate_mismatch"]
 
-    return any(
-        isinstance(location, dict)
-        and location.get("assembly_name") == settings.GENOME_ASSEMBLY
-        and str(location.get("chr", "")).upper() == chromosome
-        and str(location.get("start", "")) == str(start)
-        for location in locations
-    )
+    location = coordinate_locations[0]
+    reasons: list[str] = []
+    returned_ref = location.get("ref")
+    returned_alt = location.get("alt")
+    if isinstance(returned_ref, str) and returned_ref:
+        if returned_ref.upper() != reference.upper():
+            reasons.append("ref_mismatch")
+    if isinstance(returned_alt, str) and returned_alt:
+        if returned_alt.upper() != alternate.upper():
+            reasons.append("alt_mismatch")
+    if reasons:
+        return reasons
+
+    if settings.GENOME_ASSEMBLY == "GRCh38":
+        return _clinvar_spdi_rejection_reasons(
+            expected_spdi,
+            measure.get("canonical_spdi"),
+        )
+
+    # GRCh37 ESummary does not expose an assembly-specific SPDI. Exact HGVS
+    # terms, or exact-allele identifiers retained from an upstream provider,
+    # remain allele-bound after assembly and coordinate validation.
+    if strategy["strategy"] in {"genomic_hgvs", "transcript_hgvs"}:
+        return []
+    if strategy.get("allele_validated") is True:
+        return []
+    return ["candidate_identity_unresolved"]
 
 
 def _select_exact_clinvar_record(
@@ -1324,49 +1542,75 @@ def _select_exact_clinvar_record(
     expected_spdi: str,
     chromosome: str,
     start: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Select exactly one summary measure matching the requested variant."""
+    reference: str,
+    alternate: str,
+    strategy: dict[str, Any],
+) -> tuple[
+    tuple[dict[str, Any], dict[str, Any]] | None,
+    list[dict[str, Any]],
+]:
+    """Select one exact record or return bounded rejection diagnostics."""
     matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    rejections: list[dict[str, Any]] = []
 
     for summary in summaries:
         measures = summary.get("variation_set")
-        if not isinstance(measures, list):
-            continue
+        candidate_reasons: list[str] = []
+        candidate_match: tuple[dict[str, Any], dict[str, Any]] | None = None
+        if not isinstance(measures, list) or not measures:
+            candidate_reasons.append("representation_unresolved")
+            measures = []
 
         for measure in measures:
-            if (
-                not isinstance(measure, dict)
-                or not _clinvar_location_matches(
-                    measure,
-                    chromosome,
-                    start,
-                )
-            ):
+            if not isinstance(measure, dict):
+                if "representation_unresolved" not in candidate_reasons:
+                    candidate_reasons.append("representation_unresolved")
                 continue
+            reasons = _clinvar_measure_rejection_reasons(
+                measure,
+                expected_spdi=expected_spdi,
+                chromosome=chromosome,
+                start=start,
+                reference=reference,
+                alternate=alternate,
+                strategy=strategy,
+            )
+            if not reasons:
+                candidate_match = (summary, measure)
+                break
+            for reason in reasons:
+                if reason not in candidate_reasons:
+                    candidate_reasons.append(reason)
 
-            # ClinVar reports canonical SPDI on GRCh38. GRCh37 allele
-            # exactness is guaranteed by the exact assembly-specific HGVS
-            # ESearch term and coordinate validation above.
-            if (
-                settings.GENOME_ASSEMBLY == "GRCh38"
-                and measure.get("canonical_spdi") != expected_spdi
-            ):
-                continue
+        if candidate_match is not None:
+            matches.append(candidate_match)
+        else:
+            rejections.append(
+                {
+                    "variation_id": str(summary.get("uid", "")) or None,
+                    "strategy": strategy["strategy"],
+                    "reason_codes": candidate_reasons
+                    or ["candidate_identity_unresolved"],
+                }
+            )
 
-            matches.append((summary, measure))
-
-    if len(matches) != 1:
-        raise ClinVarResponseError(
-            "NCBI ClinVar did not return exactly one record matching the "
-            "requested assembly, chromosome, position, REF, and ALT."
+    if len(matches) == 1:
+        return matches[0], rejections
+    if len(matches) > 1:
+        rejections.extend(
+            {
+                "variation_id": str(summary.get("uid", "")) or None,
+                "strategy": strategy["strategy"],
+                "reason_codes": ["candidate_identity_unresolved"],
+            }
+            for summary, _measure in matches
         )
-
-    return matches[0]
+    return None, rejections
 
 
 def _get_clinvar(
     session: requests.Session,
-    variant: VariantData,
+    annotation: AnnotationData,
     max_retries: int,
 ) -> tuple[
     dict[str, Any] | None,
@@ -1374,7 +1618,9 @@ def _get_clinvar(
     str | None,
     str | None,
 ]:
-    """Retrieve one exact direct ClinVar record and its matching measure."""
+    """Retrieve one exact direct record through a bounded lookup hierarchy."""
+    variant = annotation["variant"]
+    source = annotation["sources"]["clinvar"]
     identifiers = _to_clinvar_identifiers(variant)
     if identifiers is None:
         return None, None, None, (
@@ -1383,26 +1629,100 @@ def _get_clinvar(
         )
 
     hgvs, spdi, chromosome, start = identifiers
-    variation_ids = _search_clinvar_ids(
-        session,
-        hgvs,
-        max_retries,
-    )
-    if not variation_ids:
+    edit = _normalize_variant_edit(variant)
+    if edit is None:
         return None, None, hgvs, None
+    _, _, reference, alternate = edit
+    query_trace: list[dict[str, Any]] = []
+    candidate_rejections: list[dict[str, Any]] = []
+    identifiers_used: list[IdentifierReference] = []
+    candidate_ids: set[str] = set()
+    rejected_candidate_ids: set[str | None] = set()
 
-    summaries = _get_clinvar_summaries(
-        session,
-        variation_ids,
-        max_retries,
+    for sequence, strategy in enumerate(
+        _clinvar_query_strategies(annotation, hgvs, spdi),
+        start=1,
+    ):
+        reference_record: IdentifierReference = {
+            "type": strategy["identifier_type"],
+            "value": strategy["identifier"],
+        }
+        if reference_record not in identifiers_used:
+            identifiers_used.append(reference_record)
+        variation_ids, result_count, truncated = _search_clinvar_ids(
+            session,
+            strategy["identifier"],
+            strategy["search_field"],
+            max_retries,
+        )
+        attempt = {
+            "sequence": sequence,
+            "strategy": strategy["strategy"],
+            "identifier_type": strategy["identifier_type"],
+            "identifier": strategy["identifier"],
+            "search_field": strategy["search_field"] or "all",
+            "result_count": result_count,
+            "candidate_ids": list(variation_ids),
+            "results_truncated": truncated,
+            "candidates_rejected": 0,
+            "outcome": "no_candidates",
+        }
+        query_trace.append(attempt)
+        if not variation_ids:
+            continue
+        candidate_ids.update(variation_ids)
+        summaries = _get_clinvar_summaries(
+            session,
+            variation_ids,
+            max_retries,
+        )
+        selected, rejections = _select_exact_clinvar_record(
+            summaries,
+            spdi,
+            chromosome,
+            start,
+            reference,
+            alternate,
+            strategy,
+        )
+        attempt["candidates_rejected"] = len(rejections)
+        rejected_candidate_ids.update(
+            item.get("variation_id") for item in rejections
+        )
+        candidate_rejections.extend(
+            rejections[: max(
+                0,
+                MAX_CLINVAR_CANDIDATE_REJECTIONS
+                - len(candidate_rejections),
+            )]
+        )
+        if selected is None:
+            attempt["outcome"] = "candidates_rejected"
+            continue
+        attempt["outcome"] = "verified"
+        source.update(
+            {
+                "selected_query_strategy": strategy["strategy"],
+                "query_strategies": query_trace,
+                "identifiers_used": identifiers_used,
+                "candidate_count": len(candidate_ids),
+                "candidates_rejected": len(rejected_candidate_ids),
+                "candidate_rejections": candidate_rejections,
+            }
+        )
+        return selected[0], selected[1], hgvs, None
+
+    source.update(
+        {
+            "selected_query_strategy": None,
+            "query_strategies": query_trace,
+            "identifiers_used": identifiers_used,
+            "candidate_count": len(candidate_ids),
+            "candidates_rejected": len(rejected_candidate_ids),
+            "candidate_rejections": candidate_rejections,
+        }
     )
-    summary, measure = _select_exact_clinvar_record(
-        summaries,
-        spdi,
-        chromosome,
-        start,
-    )
-    return summary, measure, hgvs, None
+    return None, None, hgvs, None
 
 
 # ---------------------------------------------------------------------------
@@ -1999,6 +2319,12 @@ def _base_annotation(
                 "retrieved_at": None,
                 "assembly": settings.GENOME_ASSEMBLY,
                 "query_hgvs": None,
+                "selected_query_strategy": None,
+                "query_strategies": [],
+                "identifiers_used": [],
+                "candidate_count": 0,
+                "candidates_rejected": 0,
+                "candidate_rejections": [],
                 "variation_id": None,
                 "accession": None,
                 "accession_version": None,
@@ -3368,7 +3694,7 @@ def _annotate_with_clinvar(
     try:
         summary, _, hgvs, unsupported_warning = _get_clinvar(
             session,
-            annotation["variant"],
+            annotation,
             max_retries,
         )
     except AnnotationServiceError as exc:
@@ -4776,6 +5102,53 @@ def _record_retrieval_assessments(
         raise AnnotationError("Identifier bundle is missing.")
     bundle: VariantIdentifierBundle = raw_bundle  # type: ignore[assignment]
     sources = annotation["sources"]
+    clinvar_source = sources["clinvar"]
+    raw_clinvar_used = clinvar_source.get("identifiers_used")
+    clinvar_used: list[IdentifierReference] = (
+        [
+            {"type": item["type"], "value": item["value"]}
+            for item in raw_clinvar_used
+            if isinstance(item, dict)
+            and isinstance(item.get("type"), str)
+            and isinstance(item.get("value"), str)
+        ]
+        if isinstance(raw_clinvar_used, list)
+        else []
+    )
+    clinvar_eligible = [
+        *[
+            item
+            for item in [
+                _identifier_reference(
+                    "genomic_hgvs",
+                    clinvar_source.get("query_hgvs"),
+                )
+            ]
+            if item is not None
+        ],
+        *_bundle_references(bundle, "transcript_hgvs", "transcript_hgvs"),
+        *_bundle_references(bundle, "rsids", "rsid"),
+        *_bundle_references(
+            bundle,
+            "clinvar_variation_ids",
+            "clinvar_variation_id",
+        ),
+        *_bundle_references(bundle, "vcv_accessions", "vcv_accession"),
+        *_bundle_references(bundle, "rcv_accessions", "rcv_accession"),
+    ]
+    clinvar_unused = [
+        item for item in clinvar_eligible if item not in clinvar_used
+    ]
+    raw_rejections = clinvar_source.get("candidate_rejections")
+    rejection_reasons = {
+        reason
+        for rejection in (
+            raw_rejections if isinstance(raw_rejections, list) else []
+        )
+        if isinstance(rejection, dict)
+        for reason in rejection.get("reason_codes", [])
+        if isinstance(reason, str)
+    }
     allele_value = (
         f"{bundle['genome_build']}:{bundle['chromosome']}:"
         f"{bundle['position']}:{bundle['reference']}:"
@@ -4815,40 +5188,28 @@ def _record_retrieval_assessments(
         },
         "clinvar": {
             "provider": "ncbi_clinvar",
-            "strategy": "genomic_hgvs_varnam",
-            "used": [
-                item
-                for item in [
-                    _identifier_reference(
-                        "genomic_hgvs",
-                        sources["clinvar"].get("query_hgvs"),
-                    )
-                ]
-                if item is not None
-            ],
-            "unused": [
-                *_bundle_references(bundle, "rsids", "rsid"),
-                *_bundle_references(
-                    bundle,
-                    "clinvar_variation_ids",
-                    "clinvar_variation_id",
-                ),
-                *_bundle_references(
-                    bundle,
-                    "vcv_accessions",
-                    "vcv_accession",
-                ),
-                *_bundle_references(
-                    bundle,
-                    "rcv_accessions",
-                    "rcv_accession",
-                ),
-                *_bundle_references(
-                    bundle,
-                    "transcript_hgvs",
-                    "transcript_hgvs",
-                ),
-            ],
+            "strategy": "deterministic_identifier_hierarchy",
+            "used": clinvar_used,
+            "unused": clinvar_unused,
+            "candidates_returned": clinvar_source.get("candidate_count"),
+            "candidates_rejected": clinvar_source.get(
+                "candidates_rejected"
+            ),
+            "normalization_mismatch": bool(
+                rejection_reasons
+                & {
+                    "assembly_mismatch",
+                    "coordinate_mismatch",
+                    "ref_mismatch",
+                    "alt_mismatch",
+                    "representation_unresolved",
+                }
+            ),
+            "source_absence_confirmed": bool(
+                clinvar_source.get("query_strategies")
+                and not clinvar_unused
+                and clinvar_source.get("candidate_count") == 0
+            ),
         },
         "clingen": {
             "provider": "ucsc_gencc",
@@ -4901,12 +5262,18 @@ def _record_retrieval_assessments(
             "unavailable",
             "invalid_response",
         }
-        normalization_mismatch = raw_status == "unsupported"
+        normalization_mismatch = (
+            raw_status == "unsupported"
+            or bool(definition.get("normalization_mismatch"))
+        )
         identifier_gap = raw_status == "not_applicable"
         source_absence_confirmed = (
-            source_name == "cspec"
-            and raw_status == "not_found"
-            and source.get("no_match_stage") == "gene_entity_absent"
+            bool(definition.get("source_absence_confirmed"))
+            or (
+                source_name == "cspec"
+                and raw_status == "not_found"
+                and source.get("no_match_stage") == "gene_entity_absent"
+            )
         )
         source["retrieval_assessment"] = build_retrieval_assessment(
             provider=definition["provider"],
@@ -4918,6 +5285,8 @@ def _record_retrieval_assessments(
             identifier_gap=identifier_gap,
             normalization_mismatch=normalization_mismatch,
             source_absence_confirmed=source_absence_confirmed,
+            candidates_returned=definition.get("candidates_returned"),
+            candidates_rejected=definition.get("candidates_rejected"),
         )
 
 
