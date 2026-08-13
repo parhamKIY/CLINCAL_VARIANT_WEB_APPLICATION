@@ -18,6 +18,11 @@ from backend.cspec_cache import (
     load_cspec_lkg,
     store_cspec_lkg,
 )
+from backend.evidence_rescue import (
+    EvidenceRescueAttempt,
+    EvidenceRescueIdentifier,
+    build_evidence_rescue_trace,
+)
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
     ProviderCircuitState,
@@ -3198,6 +3203,97 @@ def _activate_myvariant_clinvar_fallback(
     return True
 
 
+def _record_myvariant_clinvar_rescue(
+    annotation: AnnotationData,
+) -> bool:
+    """Trace retained MyVariant ClinVar evidence after a direct no-match."""
+
+    source = annotation["sources"]["clinvar"]
+    myvariant = annotation["sources"]["myvariant"]
+    derived = myvariant.get("clinvar_derived")
+    variant_id = _optional_text(myvariant.get("variant_id"))
+    if variant_id is None:
+        variant_id = _to_myvariant_hgvs(annotation["variant"])
+
+    alternate_identifiers: list[EvidenceRescueIdentifier] = []
+    if variant_id is not None:
+        alternate_identifiers.append(
+            {
+                "type": "myvariant_variant_id",
+                "value": variant_id,
+            }
+        )
+
+    recovered = (
+        myvariant.get("status") == "success"
+        and isinstance(derived, dict)
+        and derived.get("status") == "available"
+    )
+    attempts: list[EvidenceRescueAttempt] = []
+    if variant_id is not None:
+        raw_status = myvariant.get("status")
+        attempt_status: Literal[
+            "success",
+            "no_match",
+            "unavailable",
+            "invalid_response",
+            "not_applicable",
+        ]
+        if recovered:
+            attempt_status = "success"
+        elif raw_status in {"success", "not_found"}:
+            attempt_status = "no_match"
+        elif raw_status == "invalid_response":
+            attempt_status = "invalid_response"
+        elif raw_status == "unsupported":
+            attempt_status = "not_applicable"
+        else:
+            attempt_status = "unavailable"
+        attempts.append(
+            {
+                "sequence": 1,
+                "provider": "myvariant",
+                "method": "reuse_exact_myvariant_clinvar_derivation",
+                "identifier_type": "myvariant_variant_id",
+                "identifier_value": variant_id,
+                "status": attempt_status,
+                "evidence_recovered": recovered,
+                "evidence_path": (
+                    "annotations.population.clinvar_derived"
+                    if recovered
+                    else None
+                ),
+                "independent_evidence": False,
+            }
+        )
+
+    if recovered:
+        stop_reason = "evidence_recovered"
+    elif variant_id is None:
+        stop_reason = "missing_identifier"
+    elif myvariant.get("status") in {"success", "not_found"}:
+        stop_reason = "no_secondary_evidence"
+    else:
+        stop_reason = "secondary_unavailable"
+
+    source["evidence_rescue"] = build_evidence_rescue_trace(
+        capability="clinvar_evidence",
+        trigger="primary_no_match",
+        primary_provider="ncbi_clinvar",
+        primary_status="no_match",
+        alternate_identifiers=alternate_identifiers,
+        attempts=attempts,
+        stop_reason=stop_reason,
+    )
+    if recovered:
+        annotation["warnings"].append(
+            "Direct NCBI ClinVar returned no exact result; existing "
+            "ClinVar-derived evidence from MyVariant.info was retained "
+            "as non-independent evidence rescue."
+        )
+    return recovered
+
+
 def _annotate_with_clinvar(
     annotation: AnnotationData,
     session: requests.Session,
@@ -3257,6 +3353,7 @@ def _annotate_with_clinvar(
         annotation["warnings"].append(
             "NCBI ClinVar returned no exact result for this variant."
         )
+        _record_myvariant_clinvar_rescue(annotation)
         return
 
     _standardize_clinvar_response(

@@ -18,6 +18,10 @@ from backend.conflict_auditor import (
     ConflictAuditResult,
     audit_evidence_conflicts,
 )
+from backend.evidence_rescue import (
+    EvidenceRescueContractError,
+    validate_evidence_rescue_trace,
+)
 from backend.llm import LLMClient, LLMResponse, call_llm
 from backend.privacy import (
     ClinicalDataPrivacyError,
@@ -3639,6 +3643,33 @@ def _build_evidence_lineage(
                 ),
             )
         )
+        rescue = clinvar.get("evidence_rescue")
+        clinvar_derived = _candidate_mapping(
+            myvariant.get("clinvar_derived")
+        )
+        if (
+            isinstance(rescue, dict)
+            and rescue.get("recovered") is True
+            and clinvar_derived.get("status") == "available"
+        ):
+            records.append(
+                _lineage_record(
+                    "annotations.population.clinvar_derived",
+                    {
+                        **clinvar_derived,
+                        "provider": "MyVariant.info",
+                        "provider_version": myvariant.get(
+                            "provider_version"
+                        ),
+                        "retrieved_at": myvariant.get("retrieved_at"),
+                        "status": "success",
+                    },
+                    default_provider="MyVariant.info",
+                    default_upstream_sources=("ClinVar",),
+                    derivation="derived",
+                    evidence_present=True,
+                )
+            )
     if clinvar:
         records.append(
             _lineage_record(
@@ -3998,6 +4029,17 @@ def _capability_result(
         )
         if key in payload and payload[key] is not None
     }
+    if "evidence_rescue" in payload:
+        try:
+            provenance["evidence_rescue"] = (
+                validate_evidence_rescue_trace(
+                    payload["evidence_rescue"]
+                )
+            )
+        except EvidenceRescueContractError as exc:
+            raise EvidenceObjectError(
+                f"Invalid {capability} evidence rescue trace: {exc}"
+            ) from exc
     try:
         selected_method = (
             payload.get("method")
@@ -4151,6 +4193,12 @@ def _build_v2_sections(
     )
     conditional_enrichment = _compact_conditional_enrichment(
         candidate.get("conditional_enrichment")
+    )
+    rescue = clinvar.get("evidence_rescue")
+    rescued_myvariant_clinvar = (
+        _candidate_mapping(myvariant.get("clinvar_derived"))
+        if isinstance(rescue, dict) and rescue.get("recovered") is True
+        else {}
     )
     allele = {
         "chrom": variant.get("chrom"),
@@ -4354,6 +4402,15 @@ def _build_v2_sections(
                         "max_population_frequency",
                         "ensembl_variation",
                     ),
+                ),
+                **(
+                    {
+                        "clinvar_derived": deepcopy(
+                            rescued_myvariant_clinvar
+                        )
+                    }
+                    if rescued_myvariant_clinvar
+                    else {}
                 ),
                 "genebe": deepcopy(
                     genebe.get("population_annotations", {})

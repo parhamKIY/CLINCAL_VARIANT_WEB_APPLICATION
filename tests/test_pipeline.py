@@ -5463,6 +5463,10 @@ class TestAnnotation:
             "independent_evidence"
         ] is False
         assert "fallback_used" not in annotation["sources"]["clinvar"]
+        assert "evidence_rescue" not in annotation["sources"]["clinvar"]
+        assert "clinvar_derived" not in evidence["annotations"][
+            "population"
+        ]
         assert len(clinvar_lineage) == 1
         assert clinvar_lineage[0]["provider"] == "NCBI ClinVar"
         assert evidence["provenance"]["shared_upstream_groups"] == []
@@ -5507,6 +5511,10 @@ class TestAnnotation:
         assert clinvar["source_type"] == "derived_fallback"
         assert clinvar["provider_role"] == "fallback"
         assert clinvar["fallback_used"] is True
+        assert "evidence_rescue" not in clinvar
+        assert "clinvar_derived" not in evidence["annotations"][
+            "population"
+        ]
         assert clinvar["fallback_for"] == "ncbi_clinvar"
         assert clinvar["primary_failure"] == "server_error"
         assert clinvar["independent_evidence"] is False
@@ -5552,10 +5560,66 @@ class TestAnnotation:
         )[0]
 
         clinvar = annotation["sources"]["clinvar"]
+        evidence = build_evidence_object(annotation)
+        rescue = clinvar["evidence_rescue"]
         assert clinvar["status"] == "not_found"
         assert clinvar["provider"] == "NCBI ClinVar"
         assert "fallback_used" not in clinvar
         assert clinvar["clinical_significance"] is None
+        assert rescue == {
+            "schema_version": "1.0",
+            "capability": "clinvar_evidence",
+            "trigger": "primary_no_match",
+            "primary_provider": "ncbi_clinvar",
+            "primary_status": "no_match",
+            "eligible": True,
+            "attempted": True,
+            "alternate_identifiers": [
+                {
+                    "type": "myvariant_variant_id",
+                    "value": "chr1:g.100A>G",
+                }
+            ],
+            "attempts": [
+                {
+                    "sequence": 1,
+                    "provider": "myvariant",
+                    "method": (
+                        "reuse_exact_myvariant_clinvar_derivation"
+                    ),
+                    "identifier_type": "myvariant_variant_id",
+                    "identifier_value": "chr1:g.100A>G",
+                    "status": "success",
+                    "evidence_recovered": True,
+                    "evidence_path": (
+                        "annotations.population.clinvar_derived"
+                    ),
+                    "independent_evidence": False,
+                }
+            ],
+            "recovered": True,
+            "recovered_provider": "myvariant",
+            "stop_reason": "evidence_recovered",
+        }
+        capability = evidence["capability_results"]["clinvar_evidence"]
+        assert capability["status"] == "no_match"
+        assert capability["fallback_used"] is False
+        assert capability["provenance"]["evidence_rescue"] == rescue
+        assert evidence["clinvar_significance"] is None
+        assert evidence["annotations"]["population"][
+            "clinvar_derived"
+        ]["clinical_significance"] == "Pathogenic"
+        rescued_lineage = next(
+            record
+            for record in evidence["provenance"]["lineage"]
+            if record["evidence_path"]
+            == "annotations.population.clinvar_derived"
+        )
+        assert rescued_lineage["provider"] == "MyVariant.info"
+        assert rescued_lineage["upstream_sources"] == ["ClinVar"]
+        assert rescued_lineage["derivation"] == "derived"
+        assert rescued_lineage["evidence_present"] is True
+        assert evidence["provenance"]["shared_upstream_groups"] == []
 
     def test_stage_67_both_clinvar_paths_unavailable_are_explicit(
         self,
@@ -5608,6 +5672,39 @@ class TestAnnotation:
             is None
         )
         assert len(session.clinvar_get_calls) == 1
+        rescue = annotation["sources"]["clinvar"]["evidence_rescue"]
+        assert rescue["eligible"] is True
+        assert rescue["attempted"] is True
+        assert rescue["recovered"] is False
+        assert rescue["attempts"][0]["status"] == "no_match"
+        assert rescue["stop_reason"] == "no_secondary_evidence"
+
+    def test_malformed_clinvar_rescue_trace_is_rejected(self) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                get_responses=[
+                    FakeResponse(
+                        200,
+                        self._myvariant_clinvar_response(),
+                    )
+                ],
+                clinvar_responses=[
+                    FakeResponse(200, self._clinvar_search_response([]))
+                ],
+            ),
+            max_retries=0,
+        )[0]
+        annotation["sources"]["clinvar"]["evidence_rescue"][
+            "attempted"
+        ] = False
+
+        with pytest.raises(
+            EvidenceObjectError,
+            match="Invalid clinvar_evidence evidence rescue trace",
+        ):
+            build_evidence_object(annotation)
 
     def test_clinvar_conflict_is_explicit_and_does_not_overwrite_genebe(
         self,
