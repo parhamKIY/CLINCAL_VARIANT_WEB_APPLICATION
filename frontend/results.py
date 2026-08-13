@@ -7,6 +7,7 @@ import streamlit as st
 from backend.fallback_transparency import build_fallback_notices
 from backend.pipeline import PipelineResult
 from backend.references import build_canonical_references
+from frontend.source_status import build_reviewer_source_status
 
 
 SOURCE_LABELS = {
@@ -15,6 +16,12 @@ SOURCE_LABELS = {
     "myvariant": "MyVariant.info",
     "clinvar": "ClinVar",
     "clingen": "ClinGen/GenCC",
+}
+SOURCE_CAPABILITIES = {
+    "vep": "variant_annotation",
+    "myvariant": "variant_context",
+    "clinvar": "clinvar_evidence",
+    "clingen": "gene_disease_validity",
 }
 
 
@@ -583,9 +590,20 @@ def _render_source_statuses(evidence: dict[str, object]) -> None:
     with st.container(horizontal=True):
         for source in ("vep", "myvariant", "clinvar", "clingen"):
             value = str(statuses.get(source, "not available"))
+            presented = build_reviewer_source_status(
+                {
+                    "source": SOURCE_LABELS[source],
+                    "capability": SOURCE_CAPABILITIES[source],
+                    "status": value,
+                    "operational_status": value,
+                    "provider_role": "primary",
+                    "fallback_used": False,
+                }
+            )
             st.metric(
                 SOURCE_LABELS[source],
-                value.replace("_", " ").title(),
+                presented["category"],
+                help=presented["message"],
                 border=True,
             )
 

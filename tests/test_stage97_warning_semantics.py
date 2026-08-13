@@ -71,7 +71,9 @@ def test_no_match_is_info_and_never_a_provider_failure() -> None:
     assert notices == [
         {
             "severity": "INFO",
-            "message": "ClinVar evidence: No exact record was found for this variant.",
+            "message": (
+                "No exact ClinVar allele record was found by the primary lookup."
+            ),
         }
     ]
 
@@ -84,7 +86,10 @@ def test_no_literature_is_expected_absence_info() -> None:
     assert notices == [
         {
             "severity": "INFO",
-            "message": "No literature was found for this variant.",
+            "message": (
+                "No qualifying variant-specific literature was found after the "
+                "configured search strategy."
+            ),
         }
     ]
 

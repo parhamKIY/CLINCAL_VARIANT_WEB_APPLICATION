@@ -23868,10 +23868,10 @@ class TestFrontendFoundation:
             "Gene": "SCN1A",
             "Population frequency": "1e-05",
             "Phenotype score": "50%",
-            "VEP": "Success",
-            "MyVariant.info": "Success",
-            "ClinVar": "Success",
-            "ClinGen/GenCC": "Success",
+            "VEP": "Evidence available",
+            "MyVariant.info": "Evidence available",
+            "ClinVar": "Evidence available",
+            "ClinGen/GenCC": "Evidence available",
         }
         assert len(app.dataframe) == 6
         assert any(

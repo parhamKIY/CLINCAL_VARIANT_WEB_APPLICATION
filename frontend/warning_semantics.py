@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal, TypedDict
 
+from frontend.source_status import build_reviewer_source_status
 
 WarningSeverity = Literal["INFO", "PARTIAL", "ACTION REQUIRED", "BLOCKING"]
 
@@ -86,7 +87,7 @@ def _notice(
 
 
 def _source_notices(sources: Sequence[object]) -> list[WarningNotice]:
-    by_capability: dict[str, set[str]] = {}
+    by_capability: dict[str, list[Mapping[str, object]]] = {}
     for item in sources:
         source = _mapping(item)
         if source is None:
@@ -94,10 +95,11 @@ def _source_notices(sources: Sequence[object]) -> list[WarningNotice]:
         capability = _normalized(source.get("capability"))
         status = _normalized(source.get("status"))
         if capability and status:
-            by_capability.setdefault(capability, set()).add(status)
+            by_capability.setdefault(capability, []).append(source)
 
     notices: list[WarningNotice] = []
-    for capability, statuses in by_capability.items():
+    for capability, records in by_capability.items():
+        statuses = {_normalized(record.get("status")) for record in records}
         if statuses & _AVAILABLE_STATES:
             continue
         label = _CAPABILITY_LABELS.get(
@@ -113,12 +115,17 @@ def _source_notices(sources: Sequence[object]) -> list[WarningNotice]:
                 )
             )
         elif statuses & _EXPECTED_ABSENCE:
-            message = (
-                "No literature was found for this variant."
-                if capability == "literature"
-                else f"{label}: No exact record was found for this variant."
+            no_match_record = next(
+                record
+                for record in records
+                if _normalized(record.get("status")) == "no_match"
             )
-            notices.append(_notice("INFO", message))
+            notices.append(
+                _notice(
+                    "INFO",
+                    build_reviewer_source_status(no_match_record)["message"],
+                )
+            )
     return notices
 
 

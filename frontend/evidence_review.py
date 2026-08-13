@@ -33,6 +33,7 @@ from backend.report_docx import (
 from backend.variant_report import (
     DraftVariantReport,
     DraftVariantReportError,
+    VariantReportContent,
     save_draft_variant_report,
     set_draft_variant_report_inclusion,
 )
@@ -41,6 +42,10 @@ from frontend.report_preview import (
     stable_allele_identity,
 )
 from frontend.report_viewer import render_final_clinical_report_viewer
+from frontend.source_status import (
+    build_reviewer_section_status,
+    build_reviewer_source_status,
+)
 from frontend.technical_diagnostics import (
     ProviderDiagnostic,
     build_provider_diagnostics,
@@ -571,6 +576,39 @@ def _render_package_summary(
         )
 
 
+def _render_evidence_sections(content: VariantReportContent) -> None:
+    """Render source findings with reviewer wording and retained provenance."""
+
+    for section in content["evidence_sections"]:
+        presented = build_reviewer_section_status(
+            source=section["source"],
+            status=section["status"],
+            data_sources=content["data_sources"],
+        )
+        with st.expander(
+            f"{section['source']} — {presented['category']}",
+            expanded=presented["category"] in {
+                "Evidence available",
+                "Evidence rescue completed",
+            },
+        ):
+            st.caption(presented["message"])
+            if presented["recovery"]:
+                st.caption(f"Recovery: {presented['recovery']}")
+            if section["items"]:
+                st.table(
+                    [
+                        {
+                            "Finding": item["label"],
+                            "Value": item["value"],
+                        }
+                        for item in section["items"]
+                    ]
+                )
+            else:
+                st.caption("No source finding was available.")
+
+
 def _render_draft_variant_report(
     result: PipelineResult,
     variant_index: int,
@@ -639,26 +677,7 @@ def _render_draft_variant_report(
                 st.write(f"- {message}")
 
     st.markdown("#### Evidence")
-    for section in content["evidence_sections"]:
-        with st.expander(
-            f"{section['source']} — {section['status']}",
-            expanded=section["status"] in {
-                "success",
-                "available via fallback",
-            },
-        ):
-            if section["items"]:
-                st.table(
-                    [
-                        {
-                            "Finding": item["label"],
-                            "Value": item["value"],
-                        }
-                        for item in section["items"]
-                    ]
-                )
-            else:
-                st.caption("No source finding was available.")
+    _render_evidence_sections(content)
 
     conflict = content["conflict_summary"]
     st.markdown("#### Conflict summary")
@@ -725,7 +744,8 @@ def _render_draft_variant_report(
     if not content["data_sources"]:
         st.caption("No database or tool provenance was recorded.")
     for source in content["data_sources"]:
-        label = f"{source['source']} — {source['status']}"
+        presented = build_reviewer_source_status(source)
+        label = f"{source['source']} — {presented['category']}"
         if source["record_identifier"]:
             label += f" — {source['record_identifier']}"
         if source["source"] == "MyVariant.info":
@@ -734,6 +754,9 @@ def _render_draft_variant_report(
             st.link_button(f"{label} — Open human record", source["human_url"])
         else:
             st.write(f"- {label}")
+        st.caption(presented["message"])
+        if presented["recovery"]:
+            st.caption(f"Recovery: {presented['recovery']}")
 
     with st.expander("Provenance and limitations"):
         provenance = content["provenance"]

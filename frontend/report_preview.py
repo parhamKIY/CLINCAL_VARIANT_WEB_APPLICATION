@@ -10,6 +10,10 @@ from backend.variant_report import (
     DraftVariantReport,
     validate_draft_variant_report,
 )
+from frontend.source_status import (
+    build_reviewer_section_status,
+    build_reviewer_source_status,
+)
 
 
 _PAGE_STYLE = """
@@ -96,6 +100,20 @@ def _items(values: Iterable[str]) -> str:
     if not retained:
         return "<li>Not available</li>"
     return "".join(f"<li>{_text(value)}</li>" for value in retained)
+
+
+def _status_html(category: str, message: str) -> str:
+    return f"<b>{_text(category)}</b><br>{_text(message)}"
+
+
+def _provider_names(values: Iterable[str]) -> str:
+    names: list[str] = []
+    for value in values:
+        if value.startswith("Fallback: "):
+            names.append(value.removeprefix("Fallback: "))
+        else:
+            names.append(value.split(": ", 1)[0])
+    return ", ".join(names) or "None recorded"
 
 
 def stable_allele_identity(value: object) -> str:
@@ -215,6 +233,16 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     gene_hgvs = f"{variant['gene'] or 'Gene not available'}: {hgvs}"
     accepted_hpo = ", ".join(phenotype["accepted_hpo_terms"]) or "None recorded"
     matched_hpo = ", ".join(phenotype["matched_hpo_terms"]) or "None recorded"
+    phenotype_status = build_reviewer_source_status(
+        {
+            "source": "Phenotype evidence",
+            "capability": "phenotype_gene",
+            "status": phenotype["phenotype_status"],
+            "operational_status": phenotype["phenotype_status"],
+            "provider_role": "primary",
+            "fallback_used": False,
+        }
+    )
 
     page_one = _page(
         f"""
@@ -228,7 +256,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <h2>Clinical Features</h2>
 <p><b>Accepted HPO terms:</b> {_text(accepted_hpo)}</p>
 <p><b>Matched HPO terms:</b> {_text(matched_hpo)}</p>
-<p><b>Phenotype evidence:</b> {_text(phenotype['phenotype_status'].replace('_', ' '))}</p>
+<p><b>Phenotype evidence:</b> {_text(phenotype_status['message'])}</p>
 <h2>Method</h2>
 <p>Allele-level evidence synthesis for an already filtered variant. The application did not perform sequencing or genome-wide prioritization.</p>
 <div class="cv-result">
@@ -244,17 +272,24 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
         page=1,
     )
 
-    evidence_rows = "".join(
-        "<tr>"
-        f'<td class="cv-source">{_text(section["source"])}</td>'
-        f"<td>{_text(section['status'].replace('_', ' '))}</td>"
-        "<td><ul class=\"cv-list\">"
-        + _items(
-            f"{item['label']}: {item['value']}" for item in section["items"]
+    evidence_rows_list: list[str] = []
+    for section in content["evidence_sections"]:
+        presented = build_reviewer_section_status(
+            source=section["source"],
+            status=section["status"],
+            data_sources=content["data_sources"],
         )
-        + "</ul></td></tr>"
-        for section in content["evidence_sections"]
-    )
+        evidence_rows_list.append(
+            "<tr>"
+            f'<td class="cv-source">{_text(section["source"])}</td>'
+            f"<td>{_status_html(presented['category'], presented['message'])}</td>"
+            "<td><ul class=\"cv-list\">"
+            + _items(
+                f"{item['label']}: {item['value']}" for item in section["items"]
+            )
+            + "</ul></td></tr>"
+        )
+    evidence_rows = "".join(evidence_rows_list)
     narrative = (
         interpretation["narrative"]
         or "Interpretation is not available and requires human review."
@@ -295,6 +330,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
             reference_rows.append(f'<p class="cv-ref">{_text(label)}</p>')
     source_rows: list[str] = []
     for source in content["data_sources"]:
+        presented = build_reviewer_source_status(source)
         source_label = source["source"]
         if source_label == "MyVariant.info":
             source_label += " (Programmatic annotation source)"
@@ -308,7 +344,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
             rendered_source = _text(source_label)
         source_rows.append(
             f"<tr><td>{rendered_source}</td>"
-            f"<td>{_text(source['status'].replace('_', ' '))}</td></tr>"
+            f"<td>{_status_html(presented['category'], presented['message'])}</td></tr>"
         )
     sources = "".join(source_rows)
     page_three = _page(
@@ -324,7 +360,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 {''.join(reference_rows) or '<p>No trusted literature reference is available.</p>'}
 <h2>Data Sources</h2>
 <table aria-label="Data sources"><thead><tr><th>Source</th><th>Status</th></tr></thead><tbody>{sources}</tbody></table>
-<p class="cv-notice">Providers: {_text(', '.join(content['provenance']['providers']) or 'None recorded')}</p>
+<p class="cv-notice">Providers: {_text(_provider_names(content['provenance']['providers']))}</p>
 """,
         page=3,
     )
