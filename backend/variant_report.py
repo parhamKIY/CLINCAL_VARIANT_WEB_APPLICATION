@@ -336,6 +336,18 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
     literature = _mapping(enrichment.get("literature"))
     cspec = pathogenicity["cspec_context"]
     cspec_metadata = _mapping(cspec[0]) if cspec else {}
+    cspec_capability = evidence["capability_results"]["cspec_context"]
+    cspec_provenance = _mapping(cspec_capability.get("provenance"))
+    cspec_query_scope = _mapping(cspec_provenance.get("query_scope"))
+    cspec_status = _capability_status(evidence, "cspec_context")
+    if (
+        cspec_status == "no_match"
+        and cspec_provenance.get("applicability_status")
+        == "no_applicable_specification"
+    ):
+        cspec_status = (
+            "No applicable specification for current gene/disease scope"
+        )
     clingen = pathogenicity["clingen_context"]
     clinvar_provider = _provider_record(evidence, "clinvar")
     cspec_provider = _provider_record(evidence, "cspec")
@@ -423,7 +435,7 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
         },
         {
             "source": source_label("ClinGen CSpec", "cspec_context"),
-            "status": _capability_status(evidence, "cspec_context"),
+            "status": cspec_status,
             "items": _items(
                 _item("Matching specifications", len(cspec)),
                 _item(
@@ -431,6 +443,18 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
                     [record.get("title") for record in cspec],
                 ),
                 _item("Provider", cspec_provider.get("provider")),
+                _item(
+                    "Scope explanation",
+                    cspec_provenance.get("applicability_message"),
+                ),
+                _item(
+                    "Query gene",
+                    cspec_query_scope.get("gene_symbol"),
+                ),
+                _item(
+                    "Query MONDO scope",
+                    cspec_query_scope.get("mondo_ids"),
+                ),
                 _item(
                     "Primary provider failure",
                     cspec_provider.get("primary_failure"),

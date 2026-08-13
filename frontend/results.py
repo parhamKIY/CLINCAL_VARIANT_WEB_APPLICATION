@@ -116,7 +116,32 @@ def _cspec_fields(
 
     sources = _dictionary(annotation.get("sources"))
     cspec = _dictionary(sources.get("cspec"))
-    return cspec.get("status"), cspec.get("specification_count", 0)
+    if not cspec:
+        return None, 0
+    applicability = cspec.get("applicability_status")
+    labels = {
+        "no_applicable_specification": (
+            "No applicable specification for current gene/disease scope"
+        ),
+        "released_gene_and_disease_specification": (
+            "Released gene/disease specification available"
+        ),
+        "released_gene_specification_disease_unmatched": (
+            "Released gene specification; disease scope not established"
+        ),
+        "released_gene_specification": (
+            "Released gene specification; disease scope unavailable"
+        ),
+        "cached_released_specification": (
+            "Cached released specification available"
+        ),
+        "gene_scope_unavailable": "Gene scope unavailable",
+        "verification_unavailable": "Applicability verification unavailable",
+    }
+    return labels.get(applicability, cspec.get("status")), cspec.get(
+        "specification_count",
+        0,
+    )
 
 
 def build_annotation_rows(
@@ -148,7 +173,7 @@ def build_annotation_rows(
                 ),
                 "ClinVar accession": accession,
                 "ClinVar significance": significance,
-                "CSpec status": cspec_status,
+                "CSpec applicability": cspec_status,
                 "CSpec specifications": cspec_count,
                 "Warnings": (
                     len(warnings) if isinstance(warnings, list) else 0
@@ -421,7 +446,7 @@ def _render_annotation_table(result: PipelineResult) -> None:
             "Population frequency",
             "ClinVar accession",
             "ClinVar significance",
-            "CSpec status",
+            "CSpec applicability",
             "CSpec specifications",
             "Warnings",
         ),

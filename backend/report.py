@@ -4039,6 +4039,11 @@ def _capability_result(
             "dataset",
             "dataset_version",
             "dataset_date",
+            "applicability_status",
+            "applicability_message",
+            "no_match_reason",
+            "query_scope",
+            "scope_audit",
         )
         if key in payload and payload[key] is not None
     }

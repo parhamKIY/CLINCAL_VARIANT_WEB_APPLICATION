@@ -6695,6 +6695,243 @@ class TestAnnotation:
             encoding="utf-8"
         ).casefold()
 
+    def test_known_tp53_cspec_scope_has_auditable_applicability(
+        self,
+    ) -> None:
+        vep = self._vep_response()
+        transcript = vep["transcript_consequences"][0]  # type: ignore[index]
+        transcript["gene_symbol"] = "TP53"
+        transcript["gene_id"] = "ENSG00000141510"
+        genebe = self._genebe_variant_response()
+        genebe["gene_symbol"] = "TP53"
+        genebe["gene_hgnc_id"] = 11998
+        for consequence in genebe["consequences"]:  # type: ignore[union-attr]
+            consequence["gene_symbol"] = "TP53"
+            consequence["gene_hgnc_id"] = 11998
+        specification = self._cspec_specification(
+            identifier="GN009",
+            gene="TP53",
+            disease="MONDO:0018875",
+        )
+        session = FakeSession(
+            [FakeResponse(200, [vep])],
+            genebe_responses=[
+                FakeResponse(
+                    200,
+                    {"variants": [genebe], "message": None},
+                )
+            ],
+            clingen_responses=[
+                FakeResponse(
+                    200,
+                    self._clingen_response(
+                        gene="TP53",
+                        records=[
+                            {
+                                **self._clingen_response(
+                                    gene="TP53"
+                                )["genCC"][0],  # type: ignore[index]
+                                "gene_curie": "HGNC:11998",
+                                "disease_curie": "MONDO:0018875",
+                            }
+                        ],
+                    ),
+                )
+            ],
+            cspec_responses=[
+                FakeResponse(
+                    200,
+                    self._cspec_gene_response(
+                        gene="TP53",
+                        specifications=[specification],
+                    ),
+                ),
+                FakeResponse(
+                    200,
+                    self._cspec_disease_response(
+                        disease="MONDO:0018875",
+                        specifications=[specification],
+                    ),
+                ),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "success"
+        assert cspec["applicability_status"] == (
+            "released_gene_and_disease_specification"
+        )
+        assert cspec["applicability_message"] == (
+            "Released ClinGen CSpec context was identified for the "
+            "current gene/disease scope."
+        )
+        assert cspec["query_scope"] == {
+            "gene_symbol": "TP53",
+            "hgnc_id": "HGNC:11998",
+            "mondo_ids": ["MONDO:0018875"],
+            "omim_ids": [],
+            "medgen_ids": [],
+            "disease_query_policy": "mondo_exact_only",
+        }
+        assert cspec["scope_audit"] == {
+            "gene_entity_found": True,
+            "gene_linked_specification_count": 1,
+            "released_specification_count": 1,
+            "unreleased_specification_count": 0,
+            "disease_entities_queried": 1,
+            "disease_entities_found": 1,
+            "disease_linked_specification_count": 1,
+            "cache_policy": "operational_failure_only",
+        }
+
+    def test_cspec_gene_without_links_explains_coverage_limitation(
+        self,
+    ) -> None:
+        events: list[tuple[str, str, str]] = []
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                cspec_responses=[
+                    FakeResponse(
+                        200,
+                        self._cspec_gene_response(specifications=[]),
+                    )
+                ],
+            ),
+            max_retries=0,
+            progress_callback=lambda source, status, message: (
+                events.append((source, status, message))
+            ),
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "not_found"
+        assert cspec["no_match_reason"] == (
+            "gene_present_no_linked_specifications"
+        )
+        assert cspec["applicability_status"] == (
+            "no_applicable_specification"
+        )
+        assert cspec["applicability_message"] == (
+            "No applicable ClinGen CSpec specification was identified "
+            "for the current gene/disease scope."
+        )
+        assert cspec["scope_audit"]["gene_entity_found"] is True
+        assert cspec["scope_audit"][
+            "gene_linked_specification_count"
+        ] == 0
+        assert any(
+            source == "cspec"
+            and status == "success"
+            and "no applicable specification" in message.casefold()
+            for source, status, message in events
+        )
+
+    def test_cspec_only_unreleased_links_are_explained(self) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                cspec_responses=[
+                    FakeResponse(
+                        200,
+                        self._cspec_gene_response(
+                            specifications=[
+                                self._cspec_specification(
+                                    status="Pilot Rules In Prep"
+                                )
+                            ]
+                        ),
+                    )
+                ],
+            ),
+            max_retries=0,
+        )[0]
+
+        cspec = annotation["sources"]["cspec"]
+        assert cspec["status"] == "not_found"
+        assert cspec["no_match_reason"] == (
+            "gene_present_only_unreleased_specifications"
+        )
+        assert cspec["scope_audit"]["released_specification_count"] == 0
+        assert cspec["scope_audit"]["unreleased_specification_count"] == 1
+
+    def test_cspec_parses_current_serialized_vcep_metadata(self) -> None:
+        specification = self._cspec_specification()
+        specification["entContent"]["doi"]["authors"] = [  # type: ignore[index]
+            {
+                "role": "@{id=researchgroup}",
+                "person_or_org": (
+                    "@{name=GENE1 Variant Curation Expert Panel; "
+                    "type=organizational}"
+                ),
+            }
+        ]
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                cspec_responses=[
+                    FakeResponse(
+                        200,
+                        self._cspec_gene_response(
+                            specifications=[specification]
+                        ),
+                    )
+                ],
+            ),
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["cspec"]["specifications"][0][
+            "vcep"
+        ] == "GENE1 Variant Curation Expert Panel"
+
+    def test_cspec_missingness_is_scope_specific_in_ui_and_report(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                cspec_responses=[
+                    FakeResponse(
+                        200,
+                        self._cspec_gene_response(specifications=[]),
+                    )
+                ],
+            ),
+            max_retries=0,
+        )[0]
+        row = build_annotation_rows([annotation])[0]
+        evidence = build_evidence_object(annotation)
+        section = next(
+            item
+            for item in _evidence_sections(evidence)
+            if item["source"] == "ClinGen CSpec"
+        )
+
+        assert "CSpec status" not in row
+        assert row["CSpec applicability"] == (
+            "No applicable specification for current gene/disease scope"
+        )
+        assert section["status"] == (
+            "No applicable specification for current gene/disease scope"
+        )
+        assert {item["label"]: item["value"] for item in section["items"]}[
+            "Scope explanation"
+        ] == (
+            "No applicable ClinGen CSpec specification was identified "
+            "for the current gene/disease scope."
+        )
+
     def test_cspec_gene_only_scope_does_not_claim_disease_match(
         self,
     ) -> None:
@@ -21076,7 +21313,7 @@ class TestFrontendResults:
         assert annotation_rows[0]["ClinVar accession"] == (
             "VCV000012345.1"
         )
-        assert annotation_rows[0]["CSpec status"] is None
+        assert annotation_rows[0]["CSpec applicability"] is None
         assert annotation_rows[0]["CSpec specifications"] == 0
         assert phenotype_rows[0]["Phenotype score"] == 0.5
         assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"

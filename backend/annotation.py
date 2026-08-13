@@ -2386,6 +2386,27 @@ def _base_annotation(
                 "query_gene": None,
                 "query_disease_ids": [],
                 "disease_queries_truncated": False,
+                "query_scope": {
+                    "gene_symbol": None,
+                    "hgnc_id": None,
+                    "mondo_ids": [],
+                    "omim_ids": [],
+                    "medgen_ids": [],
+                    "disease_query_policy": "mondo_exact_only",
+                },
+                "scope_audit": {
+                    "gene_entity_found": None,
+                    "gene_linked_specification_count": 0,
+                    "released_specification_count": 0,
+                    "unreleased_specification_count": 0,
+                    "disease_entities_queried": 0,
+                    "disease_entities_found": 0,
+                    "disease_linked_specification_count": 0,
+                    "cache_policy": "operational_failure_only",
+                },
+                "applicability_status": "pending",
+                "applicability_message": None,
+                "no_match_reason": None,
                 "specification_available": False,
                 "specifications": [],
                 "specification_count": 0,
@@ -3995,6 +4016,57 @@ def _collect_cspec_disease_ids(
     )
 
 
+def _cspec_query_scope(
+    annotation: AnnotationData,
+    *,
+    gene: str,
+    mondo_ids: list[str],
+) -> dict[str, Any]:
+    """Describe exact queryable and context-only disease identifiers."""
+    bundle = annotation.get("identifier_bundle")
+    if not isinstance(bundle, dict):
+        bundle = {}
+
+    def identifiers(field: str) -> list[str]:
+        values = bundle.get(field)
+        if not isinstance(values, list):
+            return []
+        return [
+            value
+            for value in values
+            if isinstance(value, str) and value.strip()
+        ]
+
+    hgnc_id = bundle.get("hgnc_id")
+    return {
+        "gene_symbol": gene,
+        "hgnc_id": (
+            hgnc_id.strip()
+            if isinstance(hgnc_id, str) and hgnc_id.strip()
+            else None
+        ),
+        "mondo_ids": list(mondo_ids),
+        # The public CSpec Disease endpoint is MONDO-keyed. OMIM and MedGen
+        # identifiers remain useful context but are not sent as if supported.
+        "omim_ids": identifiers("omim_ids"),
+        "medgen_ids": identifiers("medgen_ids"),
+        "disease_query_policy": "mondo_exact_only",
+    }
+
+
+def _set_cspec_applicability(
+    source: dict[str, Any],
+    *,
+    status: str,
+    message: str,
+    no_match_reason: str | None = None,
+) -> None:
+    """Record a source-specific CSpec scope outcome."""
+    source["applicability_status"] = status
+    source["applicability_message"] = message
+    source["no_match_reason"] = no_match_reason
+
+
 def _current_cspec_state(content: dict[str, Any]) -> str | None:
     """Return the explicitly current CSpec workflow state."""
     states = content.get("states")
@@ -4024,14 +4096,32 @@ def _cspec_vcep_name(content: dict[str, Any]) -> str | None:
             continue
         role = author.get("role")
         person_or_org = author.get("person_or_org")
-        if (
-            isinstance(role, dict)
-            and role.get("id") == "researchgroup"
-            and isinstance(person_or_org, dict)
-        ):
+        role_id = (
+            role.get("id")
+            if isinstance(role, dict)
+            else None
+        )
+        if isinstance(role, str):
+            match = re.search(
+                r"(?:^|[;{])\s*id=([^;}]+)",
+                role,
+                flags=re.IGNORECASE,
+            )
+            role_id = match.group(1).strip() if match else None
+        if role_id != "researchgroup":
+            continue
+        if isinstance(person_or_org, dict):
             return _optional_clingen_string(
                 person_or_org.get("name")
             )
+        if isinstance(person_or_org, str):
+            match = re.search(
+                r"(?:^|[;{])\s*name=([^;}]+)",
+                person_or_org,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return _optional_clingen_string(match.group(1))
     return None
 
 
@@ -4215,6 +4305,15 @@ def _annotate_with_cspec(
     gene = _select_clingen_gene(annotation)
     if gene is None:
         source["status"] = "not_applicable"
+        _set_cspec_applicability(
+            source,
+            status="gene_scope_unavailable",
+            message=(
+                "ClinGen CSpec applicability could not be assessed because "
+                "no unambiguous gene symbol was available."
+            ),
+            no_match_reason="missing_unambiguous_gene_symbol",
+        )
         annotation["warnings"].append(
             "ClinGen CSpec was not queried because no unambiguous gene "
             "symbol was available."
@@ -4227,6 +4326,14 @@ def _annotate_with_cspec(
     source["query_gene"] = gene
     source["query_disease_ids"] = disease_ids
     source["disease_queries_truncated"] = disease_queries_truncated
+    source["query_scope"] = _cspec_query_scope(
+        annotation,
+        gene=gene,
+        mondo_ids=disease_ids,
+    )
+    source["scope_audit"]["disease_entities_queried"] = len(
+        disease_ids
+    )
 
     try:
         gene_entity = _get_cspec_entity(
@@ -4238,9 +4345,20 @@ def _annotate_with_cspec(
         if gene_entity is None:
             source["status"] = "not_found"
             source["no_match_stage"] = "gene_entity_absent"
+            source["scope_audit"]["gene_entity_found"] = False
+            _set_cspec_applicability(
+                source,
+                status="no_applicable_specification",
+                message=(
+                    "No applicable ClinGen CSpec specification was "
+                    "identified for the current gene/disease scope."
+                ),
+                no_match_reason="gene_entity_absent",
+            )
             return
 
         disease_links: dict[str, set[str]] = {}
+        disease_entities_found = 0
         for disease_id in disease_ids:
             disease_entity = _get_cspec_entity(
                 session,
@@ -4253,9 +4371,24 @@ def _annotate_with_cspec(
                 if disease_entity is not None
                 else set()
             )
+            if disease_entity is not None:
+                disease_entities_found += 1
 
         raw_records = _linked_cspec_records(gene_entity)
+        source["scope_audit"].update(
+            {
+                "gene_entity_found": True,
+                "gene_linked_specification_count": len(raw_records),
+                "disease_entities_found": disease_entities_found,
+                "disease_linked_specification_count": len(
+                    set().union(*disease_links.values())
+                    if disease_links
+                    else set()
+                ),
+            }
+        )
         specifications: list[dict[str, Any]] = []
+        unreleased_count = 0
         for record in raw_records:
             identifier = record.get("entId")
             disease_matches = [
@@ -4271,10 +4404,33 @@ def _annotate_with_cspec(
             )
             if standardized is not None:
                 specifications.append(standardized)
+            else:
+                unreleased_count += 1
+
+        source["scope_audit"].update(
+            {
+                "released_specification_count": len(specifications),
+                "unreleased_specification_count": unreleased_count,
+            }
+        )
 
         if not specifications:
             source["status"] = "not_found"
             source["no_match_stage"] = "no_released_specifications"
+            reason = (
+                "gene_present_no_linked_specifications"
+                if not raw_records
+                else "gene_present_only_unreleased_specifications"
+            )
+            _set_cspec_applicability(
+                source,
+                status="no_applicable_specification",
+                message=(
+                    "No applicable ClinGen CSpec specification was "
+                    "identified for the current gene/disease scope."
+                ),
+                no_match_reason=reason,
+            )
             return
 
         retained = specifications[:MAX_CSPEC_SPECIFICATIONS]
@@ -4290,6 +4446,39 @@ def _annotate_with_cspec(
                 ),
             }
         )
+        has_disease_match = any(
+            bool(item["matched_disease_ids"])
+            for item in specifications
+        )
+        if has_disease_match:
+            _set_cspec_applicability(
+                source,
+                status="released_gene_and_disease_specification",
+                message=(
+                    "Released ClinGen CSpec context was identified for "
+                    "the current gene/disease scope."
+                ),
+            )
+        elif disease_ids:
+            _set_cspec_applicability(
+                source,
+                status="released_gene_specification_disease_unmatched",
+                message=(
+                    "Released ClinGen CSpec context was identified for "
+                    "the gene, but applicability to the current disease "
+                    "scope was not established."
+                ),
+            )
+        else:
+            _set_cspec_applicability(
+                source,
+                status="released_gene_specification",
+                message=(
+                    "Released ClinGen CSpec context was identified for "
+                    "the current gene scope; no MONDO disease scope was "
+                    "available to assess."
+                ),
+            )
         cache_warning = _cache_cspec_last_known_good(
             source,
             gene=gene,
@@ -4326,6 +4515,14 @@ def _annotate_with_cspec(
             else "unavailable"
         )
         annotation["warnings"].append(str(exc))
+        _set_cspec_applicability(
+            source,
+            status="verification_unavailable",
+            message=(
+                "ClinGen CSpec applicability could not be verified because "
+                "the registry response was unavailable or invalid."
+            ),
+        )
 
 
 def _apply_cspec_lkg_fallback(annotation: AnnotationData) -> None:
@@ -4395,6 +4592,15 @@ def _apply_cspec_lkg_fallback(annotation: AnnotationData) -> None:
             "specification_count": len(specifications),
             "specifications_truncated": False,
         }
+    )
+    _set_cspec_applicability(
+        source,
+        status="cached_released_specification",
+        message=(
+            "Released ClinGen CSpec context was recovered from the exact "
+            "last-known-good gene/disease cache after a live operational "
+            "failure."
+        ),
     )
     for specification in specifications:
         annotation["references"].append(
@@ -4487,7 +4693,14 @@ def _source_progress_summary(
     if partial:
         details.append(f"{partial} using validation/mapping fallback")
     if not_found:
-        details.append(f"{not_found} with no exact record")
+        details.append(
+            (
+                f"{not_found} with no applicable specification for the "
+                "current gene/disease scope"
+                if source == "cspec"
+                else f"{not_found} with no exact record"
+            )
+        )
 
     if details:
         return (
@@ -5272,7 +5485,11 @@ def _record_retrieval_assessments(
             or (
                 source_name == "cspec"
                 and raw_status == "not_found"
-                and source.get("no_match_stage") == "gene_entity_absent"
+                and source.get("no_match_reason") in {
+                    "gene_entity_absent",
+                    "gene_present_no_linked_specifications",
+                    "gene_present_only_unreleased_specifications",
+                }
             )
         )
         source["retrieval_assessment"] = build_retrieval_assessment(
