@@ -68,7 +68,14 @@ def _status_text(status: str, *, no_match: str = "No exact record") -> str:
 def _sentence_case(value: str | None, fallback: str = "Not available") -> str:
     if not value:
         return fallback
-    return value[:1].upper() + value[1:]
+    cleaned = value.replace("_", " ").strip()
+    if cleaned.lower() in {
+        "vus",
+        "uncertain significance",
+        "variant of uncertain significance",
+    }:
+        return "Uncertain significance (VUS)"
+    return cleaned[:1].upper() + cleaned[1:]
 
 
 def _variant_display(report: ReportData) -> str:
@@ -255,10 +262,20 @@ def _placeholder_map(report: ReportData) -> dict[str, str]:
     computational, computational_values = _computational_slots(report)
     disease, inheritance = _disease_text(report)
     conclusive = report["conclusive_result"]
+    classification_summary = report["classification_summary"]
+    independent_classification = (
+        classification_summary["independent_acmg_adjudication"]
+        or classification_summary["reviewer_confirmed_classification"] is not None
+    )
     classification = (
         _sentence_case(conclusive["classification"])
-        if conclusive["status"] == "available"
-        else _status_text(conclusive["status"])
+        if independent_classification and conclusive["status"] == "available"
+        else "Not independently determined"
+    )
+    classification_source = (
+        conclusive["classification_source"]
+        if independent_classification and conclusive["classification_source"]
+        else "No independent application classification"
     )
     interpretation = report["interpretation"]["current_reviewer_interpretation"]
     if not interpretation:
@@ -280,7 +297,7 @@ def _placeholder_map(report: ReportData) -> dict[str, str]:
         "{{VARIANT_DISPLAY}}": _variant_display(report),
         "{{ZYGOSITY}}": _sentence_case(conclusive["zygosity"]),
         "{{CLASSIFICATION}}": classification,
-        "{{CLASSIFICATION_SOURCE}}": conclusive["classification_source"] or "Not available",
+        "{{CLASSIFICATION_SOURCE}}": classification_source,
         "{{BRIEF_INTERPRETATION}}": _brief_interpretation(report),
         "{{DECISION_SUPPORT_NOTICE}}": (
             "Decision-support output for educational and research use; qualified "

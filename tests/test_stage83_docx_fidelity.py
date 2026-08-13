@@ -115,7 +115,10 @@ def test_generated_document_has_professor_family_structure_and_density() -> None
     assert len(document.tables) == 5
     assert [len(table.rows) for table in document.tables] == [3, 1, 3, 2, 9]
     assert "GENE1:c.101C>T" in document.tables[1].cell(0, 0).text
-    assert "Uncertain significance" in document.tables[1].cell(0, 0).text
+    assert "Not independently determined" in document.tables[1].cell(0, 0).text
+    assert "No independent application classification" in (
+        document.tables[1].cell(0, 0).text
+    )
     assert "gnomAD" in document.tables[2].cell(1, 2).text
     assert "SIFT" in document.tables[3].cell(0, 0).text
     references = [

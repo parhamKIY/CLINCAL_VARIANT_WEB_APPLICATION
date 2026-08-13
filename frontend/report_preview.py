@@ -129,7 +129,10 @@ def stable_allele_identity(value: object) -> str:
 
 def _result_classification(report: DraftVariantReport) -> tuple[str, str]:
     def sentence_case(value: str) -> str:
-        return value[:1].upper() + value[1:]
+        cleaned = value.replace("_", " ").strip()
+        if normalize_classification_label(cleaned) == "VUS":
+            return "Uncertain significance (VUS)"
+        return cleaned[:1].upper() + cleaned[1:]
 
     clinvar: tuple[str, str] | None = None
     genebe: tuple[str, str] | None = None
@@ -178,15 +181,20 @@ def _result_classification(report: DraftVariantReport) -> tuple[str, str]:
             )
         return "Classification conflict", "; ".join(labels)
     if clinvar:
-        return f"ClinVar exact classification: {clinvar[0]}", clinvar[1]
+        return (
+            f"ClinVar exact classification: {sentence_case(clinvar[0])}",
+            clinvar[1],
+        )
     if genebe:
         return (
-            f"GeneBe automated classification: {genebe[0]}",
+            "GeneBe automated classification: "
+            f"{sentence_case(genebe[0])}",
             "Direct ClinVar exact classification: not available",
         )
     if myvariant_derived:
         return (
-            f"MyVariant ClinVar-derived classification: {myvariant_derived[0]}",
+            "MyVariant ClinVar-derived classification: "
+            f"{sentence_case(myvariant_derived[0])}",
             "Non-independent rescue evidence; direct ClinVar exact classification: not available",
         )
     if audit_state == "NO_CLASSIFICATION_AFTER_RESCUE":
@@ -225,7 +233,9 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     variant = content["variant_summary"]
     phenotype = content["phenotype_context"]
     interpretation = content["variant_interpretation"]
-    classification, classification_source = _result_classification(report)
+    source_classification, source_classification_detail = (
+        _result_classification(report)
+    )
     allele = stable_allele_identity(report)
     hgvs = " / ".join(
         item for item in (variant["hgvs_c"], variant["hgvs_p"]) if item
@@ -262,8 +272,9 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <div class="cv-result">
   <div class="cv-result-allele">{_text(gene_hgvs)}</div>
   <div>{_text(allele)}</div>
-  <div class="cv-result-class">{_text(classification)}</div>
-  <div>Source: {_text(classification_source)}</div>
+  <div class="cv-result-class">System classification: Not independently determined</div>
+  <div>Source classification context: {_text(source_classification)}</div>
+  <div>{_text(source_classification_detail)}</div>
 </div>
 <h2>Brief Interpretation(s)</h2>
 <p class="cv-prose">{_text(_brief_interpretation(report))}</p>
@@ -350,7 +361,8 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     page_three = _page(
         f"""
 <h1>Variant(s) classification</h1>
-<p><b>Source-attributed result:</b> {_text(classification)} ({_text(classification_source)})</p>
+<p><b>System classification:</b> Not independently determined</p>
+<p><b>Source-attributed result:</b> {_text(source_classification)} ({_text(source_classification_detail)})</p>
 <p><b>Conflict status:</b> {_text(conflict['status'].replace('_', ' '))}; severity: {_text(conflict['severity'])}.</p>
 <ul class="cv-list">{_items(conflict['findings'])}</ul>
 <p>The application has not independently adjudicated an ACMG/AMP classification.</p>

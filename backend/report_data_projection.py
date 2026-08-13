@@ -198,8 +198,8 @@ def build_report_data_from_draft(
         clinvar,
         automated,
         _derived,
-        conclusive,
-        conclusive_source,
+        source_result,
+        _source_result_source,
     ) = (
         _classifications(report)
     )
@@ -342,9 +342,9 @@ def build_report_data_from_draft(
             "hgvs_c": variant["hgvs_c"],
             "hgvs_p": variant["hgvs_p"],
             "zygosity": None,
-            "classification": conclusive,
-            "classification_source": conclusive_source,
-            "status": "available" if conclusive else "not_assessed",
+            "classification": None,
+            "classification_source": None,
+            "status": "not_assessed",
         },
         "main_findings": {
             "population_frequencies": population_findings,
@@ -375,7 +375,7 @@ def build_report_data_from_draft(
             "conflict_status": (
                 "conflict"
                 if conflict["detected"]
-                or conclusive == "Classification conflict"
+                or source_result == "Classification conflict"
                 else "none"
             ),
             "conflict_severity": conflict["severity"],

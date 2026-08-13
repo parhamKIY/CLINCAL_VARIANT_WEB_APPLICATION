@@ -102,7 +102,11 @@ def test_non_concordance_survives_report_projection_without_reclassification() -
     assert report_data["phenotype_summary"]["concordance"] == (
         "no_supported_association"
     )
-    assert report_data["conclusive_result"]["classification"] == "Pathogenic"
+    assert report_data["conclusive_result"]["classification"] is None
+    assert report_data["conclusive_result"]["status"] == "not_assessed"
+    assert report_data["classification_summary"]["clinvar_classification"] == (
+        "Pathogenic"
+    )
     assert report_data["interpretation"]["interpretation_status"] == "available"
 
 

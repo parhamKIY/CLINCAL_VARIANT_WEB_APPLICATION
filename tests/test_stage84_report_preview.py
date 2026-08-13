@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 import streamlit as st
+from docx import Document
 from streamlit.testing.v1 import AppTest
 
 from backend.pipeline import create_pipeline_result
 from backend.report_data_projection import build_report_data_from_draft
+from backend.report_docx import render_report_data_docx
 import frontend.ui as frontend_ui
 from frontend.report_preview import (
     render_draft_report_preview_pages,
@@ -211,7 +214,7 @@ def test_preview_exposes_source_findings_without_raw_json() -> None:
     assert "reviewed_user_report" not in page
 
 
-def test_preview_uses_genebe_when_direct_clinvar_classification_is_missing() -> None:
+def test_genebe_only_remains_source_context_not_system_classification() -> None:
     report = _draft_report()
     sections = report["reviewed_report"]["evidence_sections"]
     clinvar = next(section for section in sections if "ClinVar" in section["source"])
@@ -232,11 +235,42 @@ def test_preview_uses_genebe_when_direct_clinvar_classification_is_missing() -> 
     )
     _accept_machine_evidence_change(report)
 
-    page = render_draft_report_preview_pages(report)[0]
+    pages = render_draft_report_preview_pages(report)
+    report_data = build_report_data_from_draft(
+        report,
+        analysis_id=f"analysis-{'c' * 32}",
+    )
 
-    assert "GeneBe automated classification: VUS" in page
-    assert "Direct ClinVar exact classification: not available" in page
-    assert "Classification not available" not in page
+    assert "System classification: Not independently determined" in pages[0]
+    assert "GeneBe automated classification: Uncertain significance (VUS)" in (
+        pages[0]
+    )
+    assert "Direct ClinVar exact classification: not available" in pages[0]
+    assert report_data["conclusive_result"] == {
+        "gene": "GENE<1>",
+        "hgvs_c": "c.101C>T",
+        "hgvs_p": "p.(Arg34Trp)",
+        "zygosity": None,
+        "classification": None,
+        "classification_source": None,
+        "status": "not_assessed",
+    }
+    assert report_data["classification_summary"][
+        "independent_acmg_adjudication"
+    ] is False
+
+    document = Document(BytesIO(render_report_data_docx(report_data)))
+    rendered_text = "\n".join(
+        [paragraph.text for paragraph in document.paragraphs]
+        + [
+            cell.text
+            for table in document.tables
+            for row in table.rows
+            for cell in row.cells
+        ]
+    )
+    assert "Not independently determined" in rendered_text
+    assert "GeneBe: Uncertain significance (VUS)" in rendered_text
 
 
 def test_preview_does_not_force_consensus_for_classification_conflict() -> None:
@@ -264,9 +298,8 @@ def test_preview_does_not_force_consensus_for_classification_conflict() -> None:
         report,
         analysis_id=f"analysis-{'a' * 32}",
     )
-    assert report_data["conclusive_result"]["classification"] == (
-        "Classification conflict"
-    )
+    assert report_data["conclusive_result"]["classification"] is None
+    assert report_data["conclusive_result"]["status"] == "not_assessed"
     assert [
         item["classification"]
         for item in report_data["main_findings"]["classifications"]
@@ -309,13 +342,30 @@ def test_projection_retains_myvariant_clinvar_derived_rescue() -> None:
         "hgvs_c": "c.101C>T",
         "hgvs_p": "p.(Arg34Trp)",
         "zygosity": None,
-        "classification": "Pathogenic",
-        "classification_source": "MyVariant.info (ClinVar-derived rescue)",
-        "status": "available",
+        "classification": None,
+        "classification_source": None,
+        "status": "not_assessed",
     }
     assert report_data["main_findings"]["classifications"][-1][
         "independent_evidence"
     ] is False
+
+
+def test_direct_clinvar_remains_source_context_not_system_classification() -> None:
+    report_data = build_report_data_from_draft(
+        _draft_report(),
+        analysis_id=f"analysis-{'d' * 32}",
+    )
+
+    assert report_data["conclusive_result"]["classification"] is None
+    assert report_data["conclusive_result"]["classification_source"] is None
+    assert report_data["conclusive_result"]["status"] == "not_assessed"
+    assert report_data["classification_summary"]["clinvar_classification"] == (
+        "uncertain significance"
+    )
+    assert report_data["main_findings"]["classifications"][0]["source"] == (
+        "NCBI ClinVar"
+    )
 
 
 def test_completed_analysis_opens_report_before_provider_details(
