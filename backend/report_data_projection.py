@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import cast
 
+from backend.conflict_auditor import normalize_classification_label
 from backend.report_data import ReportData, validate_report_data
 from backend.variant_report import (
     DraftVariantReport,
@@ -68,10 +69,18 @@ def _hpo_terms(values: list[str]) -> list[dict[str, str | None]]:
 
 def _classifications(
     report: DraftVariantReport,
-) -> tuple[list[dict[str, object]], str | None, str | None, str | None]:
+) -> tuple[
+    list[dict[str, object]],
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]:
     findings: list[dict[str, object]] = []
     clinvar_value: str | None = None
     automated_value: str | None = None
+    derived_value: str | None = None
     conclusive_source: str | None = None
     clinvar = _section(report, "ClinVar")
     if clinvar is not None:
@@ -123,9 +132,51 @@ def _classifications(
                 "status": status,
             }
         )
-    conclusive = clinvar_value or automated_value
-    return findings, clinvar_value, automated_value, (
-        conclusive_source if conclusive else None
+    audit = _section(report, "Classification evidence audit")
+    audit_state: str | None = None
+    if audit is not None:
+        values = _section_values(audit)
+        audit_state = values.get("State")
+        derived_value = values.get(
+            "MyVariant ClinVar-derived classification"
+        )
+        if derived_value:
+            findings.append(
+                {
+                    "source": "MyVariant.info (ClinVar-derived rescue)",
+                    "classification": derived_value,
+                    "review_status": "Non-independent derived evidence",
+                    "criteria": [],
+                    "independent_evidence": False,
+                    "status": "available",
+                }
+            )
+            if conclusive_source is None:
+                conclusive_source = (
+                    "MyVariant.info (ClinVar-derived rescue)"
+                )
+    normalized = {
+        normalized
+        for value in (clinvar_value, automated_value, derived_value)
+        if (normalized := normalize_classification_label(value)) is not None
+    }
+    if audit_state == "CONFLICTING_CLASSIFICATIONS" or len(normalized) > 1:
+        return (
+            findings,
+            clinvar_value,
+            automated_value,
+            derived_value,
+            "Classification conflict",
+            "Multiple source-attributed classifications",
+        )
+    conclusive = clinvar_value or automated_value or derived_value
+    return (
+        findings,
+        clinvar_value,
+        automated_value,
+        derived_value,
+        conclusive,
+        conclusive_source if conclusive else None,
     )
 
 
@@ -142,10 +193,16 @@ def build_report_data_from_draft(
     variant = content["variant_summary"]
     phenotype = content["phenotype_context"]
     interpretation = content["variant_interpretation"]
-    classification_findings, clinvar, automated, conclusive_source = (
+    (
+        classification_findings,
+        clinvar,
+        automated,
+        _derived,
+        conclusive,
+        conclusive_source,
+    ) = (
         _classifications(report)
     )
-    conclusive = clinvar or automated
 
     accepted = _hpo_terms(phenotype["accepted_hpo_terms"])
     matched_ids = {
@@ -315,7 +372,12 @@ def build_report_data_from_draft(
             "reviewer_confirmed_classification": None,
             "clinvar_classification": clinvar,
             "automated_classification": automated,
-            "conflict_status": "conflict" if conflict["detected"] else "none",
+            "conflict_status": (
+                "conflict"
+                if conflict["detected"]
+                or conclusive == "Classification conflict"
+                else "none"
+            ),
             "conflict_severity": conflict["severity"],
             "source_attributions": source_attributions,
             "independent_acmg_adjudication": False,

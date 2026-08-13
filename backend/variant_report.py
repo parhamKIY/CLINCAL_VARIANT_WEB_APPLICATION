@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Literal, TypedDict, cast
 
+from backend.classification_evidence import build_classification_evidence_audit
 from backend.fallback_transparency import build_fallback_notices
 from backend.privacy import (
     ClinicalDataPrivacyError,
@@ -357,6 +358,36 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
             evidence["capability_results"]
         )
     }
+    classification_audit = build_classification_evidence_audit(evidence)
+
+    classification_items: list[EvidenceItem | None] = [
+        _item("State", classification_audit["state"]),
+    ]
+    role_labels = {
+        "direct": "Direct ClinVar exact classification",
+        "automated": "GeneBe automated classification",
+        "derived": "MyVariant ClinVar-derived classification",
+    }
+    classification_items.extend(
+        _item(role_labels[finding["evidence_role"]], finding["classification"])
+        for finding in classification_audit["classifications"]
+    )
+    classification_items.extend(
+        (
+            _item("Sources queried", classification_audit["sources_queried"]),
+            _item("Identifiers used", classification_audit["identifiers_used"]),
+            _item("Rescue attempted", classification_audit["rescue_attempted"]),
+            _item("Rescue outcome", classification_audit["rescue_outcome"]),
+            _item("Candidates returned", classification_audit["candidates_returned"]),
+            _item("Candidates rejected", classification_audit["candidates_rejected"]),
+            _item("Retrieval exhausted", classification_audit["retrieval_exhausted"]),
+            _item("Why no usable classification remained", classification_audit["unavailable_reasons"]),
+            _item(
+                "Independent application ACMG adjudication",
+                classification_audit["independent_acmg_adjudication"],
+            ),
+        )
+    )
 
     def source_label(primary: str, capability: str) -> str:
         notice = fallback_notices.get(capability)
@@ -368,6 +399,11 @@ def _evidence_sections(evidence: EvidenceObject) -> list[EvidenceSection]:
         )
 
     sections: list[EvidenceSection] = [
+        {
+            "source": "Classification evidence audit",
+            "status": classification_audit["state"],
+            "items": _items(*classification_items),
+        },
         {
             "source": source_label("Ensembl VEP", "variant_annotation"),
             "status": _capability_status(evidence, "variant_annotation"),

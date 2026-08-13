@@ -88,6 +88,8 @@ def normalize_classification_label(value: object) -> str | None:
         "variant of uncertain significance": "VUS",
         "likely pathogenic": "Likely Pathogenic",
         "pathogenic": "Pathogenic",
+        "conflicting classifications of pathogenicity": "Conflicting",
+        "conflicting interpretations of pathogenicity": "Conflicting",
     }
     return aliases.get(key)
 
@@ -114,8 +116,10 @@ def _classification_records(
 ) -> list[NormalizedClassification]:
     annotations = _mapping(evidence.get("annotations"))
     genebe = _mapping(annotations.get("genebe"))
+    population = _mapping(annotations.get("population"))
     pathogenicity = _mapping(evidence.get("pathogenicity"))
     derived = _mapping(genebe.get("clinvar_derived"))
+    myvariant_derived = _mapping(population.get("clinvar_derived"))
     candidates = (
         (
             "pathogenicity.automated_acmg_classification",
@@ -137,6 +141,13 @@ def _classification_records(
             derived.get("classification"),
             derived.get("review_status"),
             "GeneBe",
+        ),
+        (
+            "annotations.population.clinvar_derived.clinical_significance",
+            "annotations.population.clinvar_derived",
+            myvariant_derived.get("clinical_significance"),
+            myvariant_derived.get("review_status"),
+            "MyVariant.info",
         ),
     )
     records: list[NormalizedClassification] = []

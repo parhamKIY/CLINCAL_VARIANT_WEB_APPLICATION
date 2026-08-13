@@ -12,6 +12,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from backend.pipeline import create_pipeline_result
+from backend.report_data_projection import build_report_data_from_draft
 import frontend.ui as frontend_ui
 from frontend.report_preview import (
     render_draft_report_preview_pages,
@@ -154,6 +155,20 @@ def _draft_report() -> dict[str, object]:
     }
 
 
+def _accept_machine_evidence_change(report: dict[str, object]) -> None:
+    content = deepcopy(report["reviewed_report"])
+    report["machine_original_report"] = content
+    digest = hashlib.sha256(
+        json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    report["report_id"] = f"dvr-{report['variant_index']}-{digest}"
+
+
 def test_preview_has_three_clear_professor_family_pages() -> None:
     pages = render_draft_report_preview_pages(_draft_report())
 
@@ -194,6 +209,113 @@ def test_preview_exposes_source_findings_without_raw_json() -> None:
     assert "NCBI ClinVar" in page
     assert "uncertain significance" in page
     assert "reviewed_user_report" not in page
+
+
+def test_preview_uses_genebe_when_direct_clinvar_classification_is_missing() -> None:
+    report = _draft_report()
+    sections = report["reviewed_report"]["evidence_sections"]
+    clinvar = next(section for section in sections if "ClinVar" in section["source"])
+    clinvar["items"] = [
+        item for item in clinvar["items"] if item["label"] != "Significance"
+    ]
+    sections.append(
+        {
+            "source": "GeneBe",
+            "status": "success",
+            "items": [
+                {
+                    "label": "Automated ACMG classification",
+                    "value": "VUS",
+                }
+            ],
+        }
+    )
+    _accept_machine_evidence_change(report)
+
+    page = render_draft_report_preview_pages(report)[0]
+
+    assert "GeneBe automated classification: VUS" in page
+    assert "Direct ClinVar exact classification: not available" in page
+    assert "Classification not available" not in page
+
+
+def test_preview_does_not_force_consensus_for_classification_conflict() -> None:
+    report = _draft_report()
+    report["reviewed_report"]["evidence_sections"].append(
+        {
+            "source": "GeneBe",
+            "status": "success",
+            "items": [
+                {
+                    "label": "Automated ACMG classification",
+                    "value": "Likely Pathogenic",
+                }
+            ],
+        }
+    )
+    _accept_machine_evidence_change(report)
+
+    pages = render_draft_report_preview_pages(report)
+
+    assert "Classification conflict" in pages[0]
+    assert "ClinVar: Uncertain significance" in pages[0]
+    assert "GeneBe automated: Likely Pathogenic" in pages[0]
+    report_data = build_report_data_from_draft(
+        report,
+        analysis_id=f"analysis-{'a' * 32}",
+    )
+    assert report_data["conclusive_result"]["classification"] == (
+        "Classification conflict"
+    )
+    assert [
+        item["classification"]
+        for item in report_data["main_findings"]["classifications"]
+    ] == ["uncertain significance", "Likely Pathogenic"]
+
+
+def test_projection_retains_myvariant_clinvar_derived_rescue() -> None:
+    report = _draft_report()
+    sections = report["reviewed_report"]["evidence_sections"]
+    clinvar = next(section for section in sections if "ClinVar" in section["source"])
+    clinvar["status"] = "no_match"
+    clinvar["items"] = [
+        item for item in clinvar["items"] if item["label"] != "Significance"
+    ]
+    sections.append(
+        {
+            "source": "Classification evidence audit",
+            "status": "SECONDARY_CLASSIFICATION_EVIDENCE_AVAILABLE",
+            "items": [
+                {
+                    "label": "State",
+                    "value": "SECONDARY_CLASSIFICATION_EVIDENCE_AVAILABLE",
+                },
+                {
+                    "label": "MyVariant ClinVar-derived classification",
+                    "value": "Pathogenic",
+                },
+            ],
+        }
+    )
+    _accept_machine_evidence_change(report)
+
+    report_data = build_report_data_from_draft(
+        report,
+        analysis_id=f"analysis-{'b' * 32}",
+    )
+
+    assert report_data["conclusive_result"] == {
+        "gene": "GENE<1>",
+        "hgvs_c": "c.101C>T",
+        "hgvs_p": "p.(Arg34Trp)",
+        "zygosity": None,
+        "classification": "Pathogenic",
+        "classification_source": "MyVariant.info (ClinVar-derived rescue)",
+        "status": "available",
+    }
+    assert report_data["main_findings"]["classifications"][-1][
+        "independent_evidence"
+    ] is False
 
 
 def test_completed_analysis_opens_report_before_provider_details(

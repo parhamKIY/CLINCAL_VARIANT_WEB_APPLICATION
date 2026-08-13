@@ -5,6 +5,7 @@ from __future__ import annotations
 from html import escape
 from typing import Iterable
 
+from backend.conflict_auditor import normalize_classification_label
 from backend.variant_report import (
     DraftVariantReport,
     validate_draft_variant_report,
@@ -109,14 +110,73 @@ def stable_allele_identity(value: object) -> str:
 
 
 def _result_classification(report: DraftVariantReport) -> tuple[str, str]:
+    def sentence_case(value: str) -> str:
+        return value[:1].upper() + value[1:]
+
+    clinvar: tuple[str, str] | None = None
+    genebe: tuple[str, str] | None = None
+    myvariant_derived: tuple[str, str] | None = None
+    audit_state: str | None = None
     for section in report["reviewed_report"]["evidence_sections"]:
-        if "ClinVar" not in section["source"]:
-            continue
         values = {item["label"]: item["value"] for item in section["items"]}
-        classification = values.get("Significance")
-        if classification:
-            return classification, section["source"]
-    return "Classification not available", "No exact classification source"
+        if section["source"] == "Classification evidence audit":
+            audit_state = values.get("State")
+            if values.get("Direct ClinVar exact classification"):
+                clinvar = (
+                    values["Direct ClinVar exact classification"],
+                    "NCBI ClinVar",
+                )
+            if values.get("GeneBe automated classification"):
+                genebe = (values["GeneBe automated classification"], "GeneBe")
+            if values.get("MyVariant ClinVar-derived classification"):
+                myvariant_derived = (
+                    values["MyVariant ClinVar-derived classification"],
+                    "MyVariant.info",
+                )
+            continue
+        if "ClinVar" in section["source"] and values.get("Significance"):
+            clinvar = (values["Significance"], section["source"])
+        if "GeneBe" in section["source"] and values.get(
+            "Automated ACMG classification"
+        ):
+            genebe = (values["Automated ACMG classification"], section["source"])
+
+    retained = [item for item in (clinvar, genebe, myvariant_derived) if item]
+    normalized = {
+        normalized
+        for value, _source in retained
+        if (normalized := normalize_classification_label(value)) is not None
+    }
+    if audit_state == "CONFLICTING_CLASSIFICATIONS" or len(normalized) > 1:
+        labels: list[str] = []
+        if clinvar:
+            labels.append(f"ClinVar: {sentence_case(clinvar[0])}")
+        if genebe:
+            labels.append(f"GeneBe automated: {sentence_case(genebe[0])}")
+        if myvariant_derived:
+            labels.append(
+                "MyVariant ClinVar-derived: "
+                f"{sentence_case(myvariant_derived[0])}"
+            )
+        return "Classification conflict", "; ".join(labels)
+    if clinvar:
+        return f"ClinVar exact classification: {clinvar[0]}", clinvar[1]
+    if genebe:
+        return (
+            f"GeneBe automated classification: {genebe[0]}",
+            "Direct ClinVar exact classification: not available",
+        )
+    if myvariant_derived:
+        return (
+            f"MyVariant ClinVar-derived classification: {myvariant_derived[0]}",
+            "Non-independent rescue evidence; direct ClinVar exact classification: not available",
+        )
+    if audit_state == "NO_CLASSIFICATION_AFTER_RESCUE":
+        return (
+            "Classification not available",
+            "Configured classification retrieval and rescue routes exhausted",
+        )
+    return "Classification not assessed", "Classification retrieval is incomplete"
 
 
 def _brief_interpretation(report: DraftVariantReport) -> str:

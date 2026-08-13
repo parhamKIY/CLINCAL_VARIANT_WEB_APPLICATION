@@ -5916,6 +5916,27 @@ class TestAnnotation:
         assert rescued_lineage["derivation"] == "derived"
         assert rescued_lineage["evidence_present"] is True
         assert evidence["provenance"]["shared_upstream_groups"] == []
+        rescued_classification = evidence["conflict_audit"]["pre_review"][
+            "normalized_classifications"
+        ][0]
+        assert rescued_classification["evidence_path"] == (
+            "annotations.population.clinvar_derived.clinical_significance"
+        )
+        classification_section = next(
+            section
+            for section in _evidence_sections(evidence)
+            if section["source"] == "Classification evidence audit"
+        )
+        classification_values = {
+            item["label"]: item["value"]
+            for item in classification_section["items"]
+        }
+        assert classification_values["State"] == (
+            "SECONDARY_CLASSIFICATION_EVIDENCE_AVAILABLE"
+        )
+        assert classification_values[
+            "MyVariant ClinVar-derived classification"
+        ] == "Pathogenic"
 
     def test_identifier_bundle_retains_cross_provider_identifiers(
         self,
