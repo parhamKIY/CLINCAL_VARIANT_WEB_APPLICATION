@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -12,6 +13,7 @@ from backend.phenotype import (
     PhenotypeError,
     lookup_hpo_term,
     normalize_phenotypes,
+    search_hpo_terms,
     validate_hpo_id,
 )
 from backend.phenotype_llm import MAX_PHENOTYPE_CANDIDATES
@@ -24,6 +26,7 @@ CandidateRejectionReason = Literal[
     "invalid_hpo_id",
     "not_found",
     "duplicate",
+    "label_mismatch",
     "invalid_source_phrase",
     "prohibited_content",
 ]
@@ -61,6 +64,12 @@ def _candidate_id(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()[:32]
+
+
+def _normalized_ontology_label(value: str) -> str:
+    """Normalize one English ontology label for exact local comparison."""
+
+    return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
 
 
 def _source_phrase(value: object) -> tuple[str | None, CandidateRejectionReason | None]:
@@ -138,6 +147,45 @@ def validate_hpo_candidates(
                 {"hpo_id": normalized_id, "reason": "not_found"}
             )
             continue
+        raw_label = candidate.get("label")
+        if (
+            not isinstance(raw_label, str)
+            or not raw_label.strip()
+            or len(raw_label.strip()) > 200
+        ):
+            rejected.append(
+                {"hpo_id": normalized_id, "reason": "label_mismatch"}
+            )
+            continue
+        try:
+            label_matches = search_hpo_terms(
+                raw_label.strip(),
+                limit=50,
+                ontology_path=ontology_path,
+            )
+        except PhenotypeError:
+            label_matches = []
+        normalized_label = _normalized_ontology_label(raw_label)
+        exact_label_ids = {
+            match["id"]
+            for match in label_matches
+            if _normalized_ontology_label(match["matched_label"])
+            == normalized_label
+        }
+        if term["id"] not in exact_label_ids:
+            if len(exact_label_ids) != 1:
+                rejected.append(
+                    {
+                        "hpo_id": normalized_id,
+                        "reason": "label_mismatch",
+                    }
+                )
+                continue
+            corrected_id = next(iter(exact_label_ids))
+            term = lookup_hpo_term(
+                corrected_id,
+                ontology_path=ontology_path,
+            )
         if term["id"] in seen_canonical_ids:
             rejected.append(
                 {"hpo_id": normalized_id, "reason": "duplicate"}

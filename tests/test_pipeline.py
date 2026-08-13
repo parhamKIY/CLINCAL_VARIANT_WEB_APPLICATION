@@ -11537,6 +11537,14 @@ class TestStage47PhenotypeExtractionLLM:
         *,
         finish_reason: str | None = "stop",
     ) -> LLMResponse:
+        if isinstance(payload, dict) and set(payload) == {"candidates"}:
+            payload = {
+                "phenotype_candidates": payload["candidates"],
+                "disease_mentions": [],
+                "negated_phenotype_mentions": [],
+                "uncertain_phenotype_mentions": [],
+                "unmapped_clinical_phrases": [],
+            }
         return LLMResponse(
             content=(
                 payload
@@ -11579,7 +11587,7 @@ class TestStage47PhenotypeExtractionLLM:
             "task": PHENOTYPE_EXTRACTION_TASK,
             "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
             "model": "phenotype-model",
-            "candidates": [
+            "phenotype_candidates": [
                 {
                     "hpo_id": "HP:0001250",
                     "label": "Seizure",
@@ -11591,6 +11599,10 @@ class TestStage47PhenotypeExtractionLLM:
                     "source_phrase_fa": "تاخیر تکاملی",
                 },
             ],
+            "disease_mentions": [],
+            "negated_phenotype_mentions": [],
+            "uncertain_phenotype_mentions": [],
+            "unmapped_clinical_phrases": [],
         }
         request = adapter.requests[0]
         assert request.temperature == 0.0
@@ -11608,7 +11620,7 @@ class TestStage47PhenotypeExtractionLLM:
             "do not invent hpo identifiers",
             "do not interpret genetic variants",
             "recommend treatment",
-            "return an empty candidates list",
+            "return an empty phenotype_candidates list",
         ):
             assert constraint in system_prompt
 
@@ -11620,7 +11632,7 @@ class TestStage47PhenotypeExtractionLLM:
             ),
         )
 
-        assert result["candidates"] == []
+        assert result["phenotype_candidates"] == []
 
     @pytest.mark.parametrize(
         ("payload", "message"),
@@ -11813,9 +11825,15 @@ class TestStage48HPOCandidateAcceptance:
     def _candidate(
         hpo_id: object,
         *,
-        label: object = "Untrusted model label",
+        label: object | None = None,
         source_phrase_fa: object = "تشنج",
     ) -> dict[str, object]:
+        if label is None:
+            label = {
+                "HP:0001250": "Seizure",
+                "HP:0001275": "Seizure",
+                "HP:0001263": "Global developmental delay",
+            }.get(str(hpo_id), "Untrusted model label")
         return {
             "hpo_id": hpo_id,
             "label": label,
@@ -15428,10 +15446,10 @@ class TestStage60EndToEndAcceptanceV3:
             LLMResponse(
                 content=json.dumps(
                     {
-                        "candidates": [
+                        "phenotype_candidates": [
                             {
                                 "hpo_id": "HP:0001275",
-                                "label": "Seizure alias",
+                                "label": "Seizure",
                                 "source_phrase_fa": "حملات تشنج",
                             },
                             {
@@ -15439,7 +15457,11 @@ class TestStage60EndToEndAcceptanceV3:
                                 "label": "Unverified suggestion",
                                 "source_phrase_fa": "تاخیر تکاملی",
                             },
-                        ]
+                        ],
+                        "disease_mentions": [],
+                        "negated_phenotype_mentions": [],
+                        "uncertain_phenotype_mentions": [],
+                        "unmapped_clinical_phrases": [],
                     },
                     ensure_ascii=False,
                 ),
@@ -15452,7 +15474,7 @@ class TestStage60EndToEndAcceptanceV3:
             client=LLMClient(phenotype_adapter),
         )
         initial_validation = validate_hpo_candidates(
-            phenotype_result["candidates"],
+            phenotype_result["phenotype_candidates"],
             ontology_path=ontology_path,
         )
         assert initial_validation["validated_candidates"][0][
@@ -15555,7 +15577,9 @@ class TestStage60EndToEndAcceptanceV3:
             "model": phenotype_result["model"],
             "candidate_hpo_ids": [
                 candidate["hpo_id"]
-                for candidate in phenotype_result["candidates"]
+                for candidate in phenotype_result[
+                    "phenotype_candidates"
+                ]
             ],
         }
         analysis = run_analysis(
@@ -21842,13 +21866,19 @@ class TestFrontendFoundation:
                 "task": PHENOTYPE_EXTRACTION_TASK,
                 "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
                 "model": model,
-                "candidates": [
+                "phenotype_candidates": [
                     {
                         "hpo_id": "HP:0001250",
                         "label": "Untrusted label",
                         "source_phrase_fa": "تشنج",
                     }
-                ]
+                ],
+                "disease_mentions": [
+                    {"source_phrase_fa": "سندرم نمونه"}
+                ],
+                "negated_phenotype_mentions": [],
+                "uncertain_phenotype_mentions": [],
+                "unmapped_clinical_phrases": [],
             }
 
         def fake_validate(_: object) -> dict[str, object]:
@@ -21917,6 +21947,10 @@ class TestFrontendFoundation:
             button.label == "Accept HPO candidates"
             for button in app.button
         )
+        assert any(
+            "Disease or syndrome mentions: سندرم نمونه" in message.value
+            for message in app.info
+        )
 
         next(
             button
@@ -21942,13 +21976,17 @@ class TestFrontendFoundation:
                 "task": PHENOTYPE_EXTRACTION_TASK,
                 "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
                 "model": settings.PHENOTYPE_EXTRACTION_MODEL,
-                "candidates": [
+                "phenotype_candidates": [
                     {
                         "hpo_id": "HP:9999999",
                         "label": "Invented",
                         "source_phrase_fa": "نشانه",
                     }
-                ]
+                ],
+                "disease_mentions": [],
+                "negated_phenotype_mentions": [],
+                "uncertain_phenotype_mentions": [],
+                "unmapped_clinical_phrases": [],
             },
         )
         monkeypatch.setattr(

@@ -87,6 +87,7 @@ SELECTED_HPO_KEY = "selected_hpo_terms"
 HPO_RESULTS_KEY = "hpo_search_results"
 HPO_MODEL_CANDIDATES_KEY = "hpo_model_candidates"
 HPO_MODEL_REJECTIONS_KEY = "hpo_model_rejections"
+PHENOTYPE_NON_HPO_MENTIONS_KEY = "phenotype_non_hpo_mentions"
 PHENOTYPE_EXTRACTION_PROVENANCE_KEY = "phenotype_extraction_provenance"
 HPO_CANDIDATE_EDITOR_KEY = "hpo_candidate_editor"
 PIPELINE_RESULT_KEY = "pipeline_result"
@@ -288,6 +289,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(HPO_RESULTS_KEY, [])
     st.session_state.setdefault(HPO_MODEL_CANDIDATES_KEY, [])
     st.session_state.setdefault(HPO_MODEL_REJECTIONS_KEY, [])
+    st.session_state.setdefault(PHENOTYPE_NON_HPO_MENTIONS_KEY, {})
     st.session_state.setdefault(PHENOTYPE_EXTRACTION_PROVENANCE_KEY, None)
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
@@ -449,6 +451,7 @@ def _clear_hpo_candidate_draft() -> None:
 
     st.session_state[HPO_MODEL_CANDIDATES_KEY] = []
     st.session_state[HPO_MODEL_REJECTIONS_KEY] = []
+    st.session_state[PHENOTYPE_NON_HPO_MENTIONS_KEY] = {}
     st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = None
     st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
 
@@ -484,7 +487,7 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                     model=phenotype_model,
                 )
                 validation = validate_hpo_candidates(
-                    extraction["candidates"]
+                    extraction["phenotype_candidates"]
                 )
         except (
             ClinicalDataPrivacyError,
@@ -509,7 +512,21 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 "model": extraction["model"],
                 "candidate_hpo_ids": [
                     candidate["hpo_id"]
-                    for candidate in extraction["candidates"]
+                    for candidate in extraction["phenotype_candidates"]
+                ],
+            }
+            st.session_state[PHENOTYPE_NON_HPO_MENTIONS_KEY] = {
+                "Disease or syndrome mentions": extraction[
+                    "disease_mentions"
+                ],
+                "Negated phenotype mentions": extraction[
+                    "negated_phenotype_mentions"
+                ],
+                "Uncertain phenotype mentions": extraction[
+                    "uncertain_phenotype_mentions"
+                ],
+                "Unmapped clinical phrases": extraction[
+                    "unmapped_clinical_phrases"
                 ],
             }
             st.session_state[HPO_MODEL_CANDIDATES_KEY] = [
@@ -528,6 +545,17 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                     "No supported HPO candidates were returned. Manual HPO "
                     "selection remains available."
                 )
+
+    for label, mentions in st.session_state[
+        PHENOTYPE_NON_HPO_MENTIONS_KEY
+    ].items():
+        if mentions:
+            st.info(
+                f"{label}: "
+                + " | ".join(
+                    mention["source_phrase_fa"] for mention in mentions
+                )
+            )
 
     rejected_candidates = st.session_state[HPO_MODEL_REJECTIONS_KEY]
     if rejected_candidates:
