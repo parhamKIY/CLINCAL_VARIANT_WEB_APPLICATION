@@ -36,6 +36,12 @@ from backend.provider_resilience import (
     classify_request_exception,
     should_trigger_fallback,
 )
+from backend.retrieval_intelligence import (
+    IdentifierReference,
+    VariantIdentifierBundle,
+    build_retrieval_assessment,
+    build_variant_identifier_bundle,
+)
 from backend.vcf_processing import VariantData
 from config import settings
 
@@ -1015,6 +1021,47 @@ def _to_clinvar_identifiers(
     return hgvs, spdi, chromosome, start
 
 
+def _refresh_identifier_bundle(
+    annotation: AnnotationData,
+    *,
+    input_index: int | None = None,
+) -> None:
+    """Rebuild bounded cross-provider identity after a provider stage."""
+
+    existing = annotation.get("identifier_bundle")
+    if input_index is None and isinstance(existing, dict):
+        stored_index = existing.get("input_index")
+        if isinstance(stored_index, int) and not isinstance(
+            stored_index,
+            bool,
+        ):
+            input_index = stored_index
+    if input_index is None:
+        raise AnnotationError("Identifier bundle input index is missing.")
+    clinvar_identifiers = _to_clinvar_identifiers(annotation["variant"])
+    annotation["identifier_bundle"] = build_variant_identifier_bundle(
+        annotation,
+        input_index=input_index,
+        normalized_genomic_hgvs=(
+            clinvar_identifiers[0]
+            if clinvar_identifiers is not None
+            else None
+        ),
+    )
+
+
+def _refresh_identifier_bundles(
+    annotations: list[AnnotationData],
+    *,
+    initialize: bool = False,
+) -> None:
+    for input_index, annotation in enumerate(annotations):
+        _refresh_identifier_bundle(
+            annotation,
+            input_index=input_index if initialize else None,
+        )
+
+
 def _wait_for_clinvar_request_slot(
     session: requests.Session,
 ) -> None:
@@ -1364,7 +1411,14 @@ def _get_clinvar(
 
 def _select_clingen_gene(annotation: AnnotationData) -> str | None:
     """Select one unambiguous gene symbol from standardized source fields."""
+    bundle = annotation.get("identifier_bundle")
+    bundled_gene = (
+        bundle.get("gene_symbol")
+        if isinstance(bundle, dict)
+        else None
+    )
     candidates = (
+        bundled_gene,
         annotation.get("gene"),
         annotation.get("sources", {}).get("myvariant", {}).get("gene"),
         annotation.get("sources", {}).get("clinvar", {}).get("gene"),
@@ -2872,7 +2926,12 @@ def _annotate_with_myvariant(
         return
 
     if payload is None or variant_id is None:
-        annotation["sources"]["myvariant"]["status"] = "not_found"
+        annotation["sources"]["myvariant"].update(
+            {
+                "status": "not_found",
+                "variant_id": variant_id,
+            }
+        )
         annotation["warnings"].append(
             "MyVariant.info returned no exact result for this variant."
         )
@@ -3546,6 +3605,21 @@ def _collect_cspec_disease_ids(
     """Collect bounded MONDO context from direct clinical sources."""
     disease_ids: list[str] = []
 
+    bundle = annotation.get("identifier_bundle")
+    bundled_mondo_ids = (
+        bundle.get("mondo_ids")
+        if isinstance(bundle, dict)
+        else None
+    )
+    if isinstance(bundled_mondo_ids, list):
+        for disease_id in bundled_mondo_ids:
+            if (
+                isinstance(disease_id, str)
+                and MONDO_IDENTIFIER_PATTERN.fullmatch(disease_id)
+                and disease_id not in disease_ids
+            ):
+                disease_ids.append(disease_id)
+
     clingen_curations = (
         annotation.get("sources", {})
         .get("clingen", {})
@@ -3837,6 +3911,7 @@ def _annotate_with_cspec(
         )
         if gene_entity is None:
             source["status"] = "not_found"
+            source["no_match_stage"] = "gene_entity_absent"
             return
 
         disease_links: dict[str, set[str]] = {}
@@ -3873,6 +3948,7 @@ def _annotate_with_cspec(
 
         if not specifications:
             source["status"] = "not_found"
+            source["no_match_stage"] = "no_released_specifications"
             return
 
         retained = specifications[:MAX_CSPEC_SPECIFICATIONS]
@@ -4661,6 +4737,190 @@ def _apply_vep_fallback(
     )
 
 
+def _identifier_reference(
+    identifier_type: str,
+    value: object,
+) -> IdentifierReference | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return {"type": identifier_type, "value": value.strip()}
+
+
+def _bundle_references(
+    bundle: VariantIdentifierBundle,
+    field: str,
+    identifier_type: str,
+) -> list[IdentifierReference]:
+    values = bundle.get(field)
+    if not isinstance(values, list):
+        return []
+    return [
+        reference
+        for value in values
+        if (
+            reference := _identifier_reference(
+                identifier_type,
+                value,
+            )
+        )
+    ]
+
+
+def _record_retrieval_assessments(
+    annotation: AnnotationData,
+) -> None:
+    """Classify sparse provider outcomes without generic no-match loss."""
+
+    raw_bundle = annotation.get("identifier_bundle")
+    if not isinstance(raw_bundle, dict):
+        raise AnnotationError("Identifier bundle is missing.")
+    bundle: VariantIdentifierBundle = raw_bundle  # type: ignore[assignment]
+    sources = annotation["sources"]
+    allele_value = (
+        f"{bundle['genome_build']}:{bundle['chromosome']}:"
+        f"{bundle['position']}:{bundle['reference']}:"
+        f"{bundle['alternate']}"
+    )
+
+    definitions = {
+        "vep": {
+            "provider": "ensembl_vep",
+            "strategy": "normalized_genomic_allele",
+            "used": [
+                {
+                    "type": "normalized_allele",
+                    "value": allele_value,
+                }
+            ],
+            "unused": [],
+        },
+        "myvariant": {
+            "provider": "myvariant",
+            "strategy": "normalized_genomic_hgvs",
+            "used": [
+                item
+                for item in [
+                    _identifier_reference(
+                        "genomic_hgvs",
+                        sources["myvariant"].get("variant_id"),
+                    )
+                ]
+                if item is not None
+            ],
+            "unused": _bundle_references(
+                bundle,
+                "transcript_hgvs",
+                "transcript_hgvs",
+            ),
+        },
+        "clinvar": {
+            "provider": "ncbi_clinvar",
+            "strategy": "genomic_hgvs_varnam",
+            "used": [
+                item
+                for item in [
+                    _identifier_reference(
+                        "genomic_hgvs",
+                        sources["clinvar"].get("query_hgvs"),
+                    )
+                ]
+                if item is not None
+            ],
+            "unused": [
+                *_bundle_references(bundle, "rsids", "rsid"),
+                *_bundle_references(
+                    bundle,
+                    "clinvar_variation_ids",
+                    "clinvar_variation_id",
+                ),
+                *_bundle_references(
+                    bundle,
+                    "vcv_accessions",
+                    "vcv_accession",
+                ),
+                *_bundle_references(
+                    bundle,
+                    "rcv_accessions",
+                    "rcv_accession",
+                ),
+                *_bundle_references(
+                    bundle,
+                    "transcript_hgvs",
+                    "transcript_hgvs",
+                ),
+            ],
+        },
+        "clingen": {
+            "provider": "ucsc_gencc",
+            "strategy": "locus_then_gene_symbol",
+            "used": [
+                item
+                for item in [
+                    _identifier_reference(
+                        "gene_symbol",
+                        sources["clingen"].get("query_gene"),
+                    )
+                ]
+                if item is not None
+            ],
+            "unused": [],
+        },
+        "cspec": {
+            "provider": "clingen_cspec",
+            "strategy": "gene_then_disease_scope",
+            "used": [
+                item
+                for item in [
+                    _identifier_reference(
+                        "gene_symbol",
+                        sources["cspec"].get("query_gene"),
+                    ),
+                    *[
+                        _identifier_reference("mondo_id", value)
+                        for value in sources["cspec"].get(
+                            "query_disease_ids",
+                            [],
+                        )
+                    ],
+                ]
+                if item is not None
+            ],
+            "unused": [],
+        },
+    }
+
+    for source_name, definition in definitions.items():
+        source = sources[source_name]
+        raw_status = source.get("status")
+        if raw_status in {"pending", "success", "partial"}:
+            source.pop("retrieval_assessment", None)
+            continue
+        status = "no_match" if raw_status == "not_found" else str(raw_status)
+        operational_failure = raw_status in {
+            "error",
+            "unavailable",
+            "invalid_response",
+        }
+        normalization_mismatch = raw_status == "unsupported"
+        identifier_gap = raw_status == "not_applicable"
+        source_absence_confirmed = (
+            source_name == "cspec"
+            and raw_status == "not_found"
+            and source.get("no_match_stage") == "gene_entity_absent"
+        )
+        source["retrieval_assessment"] = build_retrieval_assessment(
+            provider=definition["provider"],
+            status=status,
+            query_strategy=definition["strategy"],
+            identifiers_used=definition["used"],
+            unused_eligible_identifiers=definition["unused"],
+            operational_failure=operational_failure,
+            identifier_gap=identifier_gap,
+            normalization_mismatch=normalization_mismatch,
+            source_absence_confirmed=source_absence_confirmed,
+        )
+
+
 def _retry_annotation_copy(
     baseline: AnnotationData,
     annotate: Callable[[AnnotationData], None],
@@ -4887,6 +5147,7 @@ def annotate_variants(
             vep_status,
             vep_message,
         )
+        _refresh_identifier_bundles(annotations, initialize=True)
         _notify_annotation_progress(
             progress_callback,
             "genebe",
@@ -4960,6 +5221,7 @@ def annotate_variants(
                     active_session,
                     ensembl_variation_circuit,
                 )
+        _refresh_identifier_bundles(annotations)
         myvariant_status, myvariant_message = _source_progress_summary(
             annotations,
             "myvariant",
@@ -5038,6 +5300,7 @@ def annotate_variants(
             ),
             progress_callback=progress_callback,
         )
+        _refresh_identifier_bundles(annotations)
         clingen_status, clingen_message = _source_progress_summary(
             annotations,
             "clingen",
@@ -5080,6 +5343,9 @@ def annotate_variants(
         for annotation in annotations:
             if _source_failed(annotation, "cspec"):
                 _apply_cspec_lkg_fallback(annotation)
+        _refresh_identifier_bundles(annotations)
+        for annotation in annotations:
+            _record_retrieval_assessments(annotation)
         cspec_status, cspec_message = _source_progress_summary(
             annotations,
             "cspec",

@@ -39,6 +39,11 @@ from backend.references import (
     build_canonical_references,
     validated_reference_url,
 )
+from backend.retrieval_intelligence import (
+    RetrievalIntelligenceError,
+    build_retrieval_assessment,
+    validate_retrieval_assessment,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -3317,6 +3322,7 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             "upstream_sources",
             "retrieved_at",
             "query_basis",
+            "query_identifier",
             "warnings",
             "failure_reason",
         ),
@@ -4015,6 +4021,13 @@ def _capability_result(
     selected_fallback_for = payload.get("fallback_for")
     if not isinstance(selected_fallback_for, str):
         selected_fallback_for = primary_provider
+    selected_method = (
+        payload.get("method")
+        or payload.get("fallback_method")
+        or (payload.get("source_type") if is_fallback else None)
+        or (fallback_method if is_fallback else primary_method)
+    )
+    capability_status = _capability_status(payload)
     provenance = {
         key: deepcopy(payload[key])
         for key in (
@@ -4040,16 +4053,70 @@ def _capability_result(
             raise EvidenceObjectError(
                 f"Invalid {capability} evidence rescue trace: {exc}"
             ) from exc
-    try:
-        selected_method = (
-            payload.get("method")
-            or payload.get("fallback_method")
-            or (payload.get("source_type") if is_fallback else None)
-            or (fallback_method if is_fallback else primary_method)
+    if "retrieval_assessment" in payload:
+        try:
+            provenance["retrieval_assessment"] = (
+                validate_retrieval_assessment(
+                    payload["retrieval_assessment"]
+                )
+            )
+        except RetrievalIntelligenceError as exc:
+            raise EvidenceObjectError(
+                f"Invalid {capability} retrieval assessment: {exc}"
+            ) from exc
+    elif capability_status == "no_match":
+        query_identifier = payload.get("query_identifier")
+        identifiers_used: list[dict[str, str]] = []
+        if (
+            isinstance(query_identifier, str)
+            and query_identifier.strip()
+        ):
+            identifiers_used.append(
+                {
+                    "type": "query_identifier",
+                    "value": query_identifier,
+                }
+            )
+        query_basis = payload.get("query_basis")
+        if isinstance(query_basis, list):
+            for item in query_basis:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                reference = {
+                    "type": "query_term",
+                    "value": item.strip(),
+                }
+                if reference not in identifiers_used:
+                    identifiers_used.append(reference)
+        failure_reason = payload.get("failure_reason")
+        provenance["retrieval_assessment"] = (
+            build_retrieval_assessment(
+                provider=selected_provider,
+                status="no_match",
+                query_strategy=(
+                    selected_method
+                    if isinstance(selected_method, str)
+                    else primary_method
+                ),
+                identifiers_used=identifiers_used,
+                unused_eligible_identifiers=[],
+                identifier_gap=failure_reason in {
+                    "insufficient_query_identifiers",
+                    "missing_identifier",
+                },
+                normalization_mismatch=failure_reason in {
+                    "invalid_variant_identity",
+                    "variant_identity_mismatch",
+                },
+                provider_semantic_mismatch=(
+                    failure_reason == "provider_semantic_mismatch"
+                ),
+            )
         )
+    try:
         return build_capability_result(
             capability=capability,
-            status=cast(Any, _capability_status(payload)),
+            status=cast(Any, capability_status),
             provider=selected_provider,
             provider_role="fallback" if is_fallback else "primary",
             fallback_for=selected_fallback_for if is_fallback else None,
@@ -4259,6 +4326,19 @@ def _build_v2_sections(
             "provider": provider_name,
             "status": status if isinstance(status, str) else None,
         }
+        assessment = payload.get("retrieval_assessment")
+        if isinstance(assessment, dict):
+            try:
+                validated_assessment = validate_retrieval_assessment(
+                    assessment
+                )
+            except RetrievalIntelligenceError as exc:
+                raise EvidenceObjectError(
+                    f"Invalid {source_name} retrieval assessment: {exc}"
+                ) from exc
+            provider_record["retrieval_cause"] = (
+                validated_assessment["cause"]
+            )
         if payload.get("provider_role") == "fallback":
             for field in (
                 "provider_role",

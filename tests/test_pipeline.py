@@ -72,6 +72,11 @@ from backend.provider_resilience import (
     ProviderCircuitState,
     build_capability_result,
 )
+from backend.retrieval_intelligence import (
+    RetrievalIntelligenceError,
+    build_retrieval_assessment,
+    validate_variant_identifier_bundle,
+)
 from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
@@ -5621,6 +5626,264 @@ class TestAnnotation:
         assert rescued_lineage["evidence_present"] is True
         assert evidence["provenance"]["shared_upstream_groups"] == []
 
+    def test_identifier_bundle_retains_cross_provider_identifiers(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                genebe_responses=[
+                    FakeResponse(
+                        200,
+                        {
+                            "variants": [
+                                self._genebe_variant_response()
+                            ],
+                            "message": None,
+                        },
+                    )
+                ],
+                get_responses=[
+                    FakeResponse(
+                        200,
+                        self._myvariant_clinvar_response(),
+                    )
+                ],
+                clinvar_responses=[
+                    FakeResponse(200, self._clinvar_search_response()),
+                    FakeResponse(200, self._clinvar_summary_response()),
+                ],
+                clingen_responses=[
+                    FakeResponse(200, self._clingen_response())
+                ],
+            ),
+            max_retries=0,
+        )[0]
+
+        bundle = validate_variant_identifier_bundle(
+            annotation["identifier_bundle"]
+        )
+        assert bundle["input_index"] == 0
+        assert bundle["genome_build"] == "GRCh38"
+        assert bundle["chromosome"] == "1"
+        assert bundle["position"] == 100
+        assert bundle["reference"] == "A"
+        assert bundle["alternate"] == "G"
+        assert "NC_000001.11:g.100A>G" in bundle["genomic_hgvs"]
+        assert "chr1:g.100A>G" in bundle["genomic_hgvs"]
+        assert "ENST000001:c.100A>G" in bundle["transcript_hgvs"]
+        assert "ENSP000001:p.Lys34Arg" in bundle["protein_hgvs"]
+        assert bundle["gene_symbol"] == "GENE1"
+        assert bundle["hgnc_id"] == "HGNC:1"
+        assert bundle["rsids"] == ["rs123"]
+        assert bundle["clinvar_variation_ids"] == ["123"]
+        assert bundle["vcv_accessions"] == ["VCV000000123.4"]
+        assert bundle["rcv_accessions"] == ["RCV000000001"]
+        assert bundle["mondo_ids"] == ["MONDO:0000001"]
+        assert bundle["medgen_ids"] == ["C0000001"]
+        assert bundle["omim_ids"] == []
+        assert any(
+            item["identifier_type"] == "clinvar_variation_id"
+            and item["value"] == "123"
+            and item["source"] == "NCBI ClinVar"
+            and item["scope"] == "allele"
+            for item in bundle["provenance"]
+        )
+
+    def test_identifier_bundle_rejects_unvalidated_identifier_shape(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                get_responses=[
+                    FakeResponse(200, self._myvariant_response())
+                ],
+            ),
+            max_retries=0,
+        )[0]
+        invalid = deepcopy(annotation["identifier_bundle"])
+        invalid["rsids"] = ["invented-rsid"]
+
+        with pytest.raises(
+            RetrievalIntelligenceError,
+            match="rsids contains an invalid identifier",
+        ):
+            validate_variant_identifier_bundle(invalid)
+
+    def test_identifier_bundle_marks_indel_left_normalization_unverified(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [
+                {
+                    **self._variant(position=100),
+                    "ref": "AT",
+                    "alt": "A",
+                }
+            ],
+            session=FakeSession(  # type: ignore[arg-type]
+                [
+                    FakeResponse(
+                        200,
+                        [self._vep_response()],
+                    )
+                ],
+            ),
+            max_retries=0,
+        )[0]
+
+        bundle = annotation["identifier_bundle"]
+        assert bundle["minimal_representation_status"] == "applied"
+        assert bundle["left_normalization_status"] == (
+            "unverified_without_reference"
+        )
+
+    def test_identifier_bundle_normalizes_mixed_case_chr_prefix(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [{**self._variant(), "chrom": "Chr1"}],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+            ),
+            max_retries=0,
+        )[0]
+
+        assert annotation["identifier_bundle"]["chromosome"] == "1"
+
+    def test_clinvar_no_match_classifies_unused_identifier_query_weakness(
+        self,
+    ) -> None:
+        annotation = annotate_variants(
+            [self._variant()],
+            session=FakeSession(  # type: ignore[arg-type]
+                [FakeResponse(200, [self._vep_response()])],
+                get_responses=[
+                    FakeResponse(
+                        200,
+                        self._myvariant_clinvar_response(),
+                    )
+                ],
+                clinvar_responses=[
+                    FakeResponse(200, self._clinvar_search_response([]))
+                ],
+            ),
+            max_retries=0,
+        )[0]
+        clinvar = annotation["sources"]["clinvar"]
+        assessment = clinvar["retrieval_assessment"]
+        evidence = build_evidence_object(annotation)
+
+        assert clinvar["status"] == "not_found"
+        assert assessment["cause"] == "QUERY_WEAKNESS"
+        assert assessment["query_strategy"] == "genomic_hgvs_varnam"
+        assert assessment["identifiers_used"] == [
+            {
+                "type": "genomic_hgvs",
+                "value": "NC_000001.11:g.100A>G",
+            }
+        ]
+        assert assessment["unused_eligible_identifiers"] == [
+            {"type": "rsid", "value": "rs123"},
+            {"type": "clinvar_variation_id", "value": "123"},
+            {"type": "rcv_accession", "value": "RCV000000001"},
+            {
+                "type": "transcript_hgvs",
+                "value": "ENST000001:c.100A>G",
+            },
+        ]
+        assert assessment["live_verification_required"] is False
+        capability = evidence["capability_results"]["clinvar_evidence"]
+        assert capability["status"] == "no_match"
+        assert capability["provenance"]["retrieval_assessment"] == (
+            assessment
+        )
+
+    def test_rescued_mondo_identifier_improves_later_cspec_query(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[
+                FakeResponse(200, self._myvariant_clinvar_response())
+            ],
+            clinvar_responses=[
+                FakeResponse(200, self._clinvar_search_response([]))
+            ],
+            cspec_responses=[
+                FakeResponse(200, self._cspec_gene_response()),
+                FakeResponse(404, {}),
+            ],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        assert annotation["sources"]["cspec"][
+            "query_disease_ids"
+        ] == ["MONDO:0000001"]
+        assert session.cspec_get_calls[1]["url"].endswith(
+            "/Disease/id/MONDO%3A0000001"
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "kwargs", "expected_cause"),
+        [
+            ("unavailable", {"operational_failure": True},
+             "OPERATIONAL_FAILURE"),
+            ("no_match", {"normalization_mismatch": True},
+             "NORMALIZATION_MISMATCH"),
+            ("not_applicable", {"identifier_gap": True},
+             "IDENTIFIER_GAP"),
+            ("no_match",
+             {"candidates_returned": 2, "candidates_rejected": 2},
+             "OVERSTRICT_FILTERING"),
+            ("no_match", {"provider_semantic_mismatch": True},
+             "PROVIDER_SEMANTIC_MISMATCH"),
+            ("no_match", {"source_absence_confirmed": True},
+             "TRUE_SOURCE_ABSENCE"),
+            ("no_match", {}, "LIVE_VERIFICATION_REQUIRED"),
+        ],
+    )
+    def test_retrieval_assessment_classifies_distinct_failure_causes(
+        self,
+        status: str,
+        kwargs: dict[str, object],
+        expected_cause: str,
+    ) -> None:
+        assessment = build_retrieval_assessment(
+            provider="test_provider",
+            status=status,
+            query_strategy="exact_allele",
+            identifiers_used=[],
+            unused_eligible_identifiers=[],
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+        assert assessment["cause"] == expected_cause
+
+    def test_no_match_cannot_be_relabelled_as_operational_failure(
+        self,
+    ) -> None:
+        with pytest.raises(
+            RetrievalIntelligenceError,
+            match="no_match cannot be an operational failure",
+        ):
+            build_retrieval_assessment(
+                provider="test_provider",
+                status="no_match",
+                query_strategy="exact_allele",
+                identifiers_used=[],
+                unused_eligible_identifiers=[],
+                operational_failure=True,
+            )
+
     def test_stage_67_both_clinvar_paths_unavailable_are_explicit(
         self,
     ) -> None:
@@ -6469,6 +6732,7 @@ class TestAnnotation:
             "mane_plus_clinical",
             "predictors",
             "population_frequency",
+            "identifier_bundle",
             "sources",
             "references",
             "warnings",
@@ -8931,6 +9195,7 @@ class TestEvidenceObject:
     def test_stage_32_valid_litvar_no_match_does_not_fallback(
         self,
     ) -> None:
+        candidate = self._candidate_with_rsid()
         session = FakeConditionalSession(
             get_responses=[
                 FakeResponse(
@@ -8942,7 +9207,7 @@ class TestEvidenceObject:
         )
 
         result = fetch_literature_evidence(
-            self._candidate_with_rsid(),
+            candidate,
             session=session,  # type: ignore[arg-type]
         )
 
@@ -8954,6 +9219,71 @@ class TestEvidenceObject:
         assert result["providers"]["pubmed"]["status"] == "not_triggered"
         assert result["articles"] == []
         assert len(session.get_calls) == 1
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["literature_evidence_need"],
+            "population_frequency": {
+                "status": "not_triggered",
+                "provider": "gnomAD",
+                "populations": [],
+            },
+            "literature": result,
+            "myvariant_fallback": {
+                "used": False,
+                "status": "not_needed",
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+        evidence = build_evidence_object(candidate)
+        assessment = evidence["capability_results"]["literature"][
+            "provenance"
+        ]["retrieval_assessment"]
+        assert assessment["identifiers_used"] == [
+            {"type": "query_term", "value": "SCN1A"},
+            {"type": "query_term", "value": "rs121913529"},
+            {
+                "type": "query_term",
+                "value": "ENSP00000303540:p.Arg1645Cys",
+            },
+        ]
+
+    def test_literature_no_match_receives_retrieval_cause(self) -> None:
+        candidate = self._candidate_with_rsid()
+        candidate["conditional_enrichment"] = {
+            "triggered": True,
+            "triggers": ["literature_evidence_need"],
+            "population_frequency": {
+                "status": "not_triggered",
+                "provider": "gnomAD",
+                "populations": [],
+            },
+            "literature": {
+                "status": "no_match",
+                "provider": "LitVar2",
+                "query_identifier": "rs121913529",
+                "articles": [],
+                "providers": {},
+            },
+            "myvariant_fallback": {
+                "used": False,
+                "status": "not_needed",
+                "independent_evidence": False,
+            },
+            "warnings": [],
+        }
+
+        evidence = build_evidence_object(candidate)
+        capability = evidence["capability_results"]["literature"]
+        assessment = capability["provenance"][
+            "retrieval_assessment"
+        ]
+
+        assert capability["status"] == "no_match"
+        assert assessment["cause"] == "LIVE_VERIFICATION_REQUIRED"
+        assert assessment["identifiers_used"] == [
+            {"type": "query_identifier", "value": "rs121913529"}
+        ]
 
     def test_stage_68_litvar_failure_records_europe_fallback(
         self,
