@@ -1241,6 +1241,8 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         "insufficient_evidence",
         "population_evidence_ambiguity",
         "literature_evidence_need",
+        "readiness_population_deficit",
+        "readiness_context_deficit",
     }
     if not set(triggers).issubset(allowed_triggers):
         raise EvidenceObjectError(

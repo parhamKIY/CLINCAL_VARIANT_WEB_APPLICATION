@@ -90,6 +90,9 @@ from backend.evidence_confirmation import (
     confirm_evidence_review,
     validate_reviewed_evidence_package,
 )
+from backend.evidence_readiness import (
+    build_evidence_readiness_audit,
+)
 from backend.evidence_review import (
     EvidenceReviewError,
     build_evidence_review_reports,
@@ -8683,6 +8686,88 @@ class TestEvidenceObject:
 
         assert determine_enrichment_triggers(evidence, candidate) == []
 
+    def test_stage106_disease_deficit_routes_only_context_rescue(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        clingen = sources["clingen"]
+        assert isinstance(clinvar, dict)
+        assert isinstance(clingen, dict)
+        clinvar["conditions"] = []
+        clingen["curations"] = []
+        evidence = build_evidence_object(candidate)
+        readiness = build_evidence_readiness_audit(
+            evidence,
+            variant_index=0,
+        )
+
+        assert readiness["readiness_before_rescue"] == "RESCUE_REQUIRED"
+        assert readiness["rescue_actions"] == [
+            {
+                "action": "literature_context_rescue",
+                "targets": ["gene_disease_context_missing"],
+                "status": "planned",
+            }
+        ]
+        assert determine_enrichment_triggers(
+            evidence,
+            candidate,
+            readiness,
+        ) == ["readiness_context_deficit"]
+
+    def test_stage106_invalid_identity_stops_at_minimum_gate(self) -> None:
+        evidence = self._complete_evidence_object()
+        evidence["variant"]["pos"] = 0
+
+        readiness = build_evidence_readiness_audit(
+            evidence,
+            variant_index=0,
+        )
+
+        assert readiness["readiness_before_rescue"] == (
+            "MINIMUM_IDENTITY_FAILURE"
+        )
+        assert readiness["readiness_after_rescue"] == (
+            "MINIMUM_IDENTITY_FAILURE"
+        )
+
+    def test_stage106_classification_deficit_does_not_rerun_population(
+        self,
+    ) -> None:
+        candidate = self._complete_candidate()
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        assert isinstance(clinvar, dict)
+        clinvar["clinical_significance"] = None
+        preliminary = build_evidence_object(candidate)
+        readiness = build_evidence_readiness_audit(
+            preliminary,
+            variant_index=0,
+        )
+        population_session = FakeConditionalSession()
+        literature_session = FakeConditionalSession(
+            get_responses=[FakeResponse(200, [])]
+        )
+
+        result = enrich_conditionally(
+            [candidate],
+            [preliminary],
+            population_session=population_session,  # type: ignore[arg-type]
+            literature_session=literature_session,  # type: ignore[arg-type]
+            readiness_audits=[readiness],
+        )
+
+        enrichment = result["variants"][0]["conditional_enrichment"]
+        assert population_session.post_calls == []
+        assert enrichment["population_frequency"]["status"] == (
+            "not_triggered"
+        )
+        assert len(literature_session.get_calls) == 1
+
     def test_stage_32_vus_and_population_ambiguity_trigger_sources(
         self,
     ) -> None:
@@ -13054,6 +13139,45 @@ class TestStage50SingleModelInterpretation:
         assert "BEGIN_VALIDATED_EVIDENCE_OBJECT" in (
             request.messages[1].content
         )
+        assert "BEGIN_EVIDENCE_READINESS_AUDIT" in (
+            request.messages[1].content
+        )
+
+    def test_stage106_pre_rescue_state_cannot_reach_model(self) -> None:
+        candidate = TestEvidenceObject._complete_candidate()
+        candidate["population_frequency"] = None
+        sources = candidate["sources"]
+        assert isinstance(sources, dict)
+        clinvar = sources["clinvar"]
+        clingen = sources["clingen"]
+        assert isinstance(clinvar, dict)
+        assert isinstance(clingen, dict)
+        clinvar.update(
+            {
+                "status": "not_found",
+                "clinical_significance": None,
+                "conditions": [],
+            }
+        )
+        clingen["curations"] = []
+        evidence = build_evidence_object(candidate)
+        readiness = build_evidence_readiness_audit(
+            evidence,
+            variant_index=0,
+        )
+        adapter = FakeLLMAdapter(self._response(self._payload()))
+
+        with pytest.raises(
+            VariantInterpretationError,
+            match="not ready for interpretation",
+        ):
+            interpret_variant(
+                evidence,
+                client=LLMClient(adapter),
+                readiness_audit=readiness,
+            )
+
+        assert adapter.requests == []
 
     def test_conflict_and_no_conflict_use_exact_same_selected_model(
         self,
@@ -15483,6 +15607,45 @@ class TestStage39ReviewStatePersistence:
             "workflow_state": "awaiting_confirmation",
         }
 
+    def test_stage106_schema31_snapshot_gains_readiness_audit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        draft, _ = self._stored_draft(database_path)
+        legacy = deepcopy(draft)
+        legacy["schema_version"] = "3.1"
+        legacy.pop("evidence_readiness")
+        connection = connect_database(database_path)
+        try:
+            connection.execute(
+                """
+                UPDATE pipeline_states
+                SET pipeline_schema_version = '3.1', pipeline_json = ?
+                WHERE analysis_id = ?
+                """,
+                (
+                    json.dumps(legacy, ensure_ascii=False),
+                    draft["analysis_id"],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        restored = load_pipeline_state(
+            draft["analysis_id"],
+            database_path=database_path,
+        )
+
+        assert restored["schema_version"] == PIPELINE_SCHEMA_VERSION
+        assert len(restored["evidence_readiness"]) == len(
+            restored["evidence_objects"]
+        )
+        assert restored["evidence_readiness"][0][
+            "readiness_after_rescue"
+        ] in {"READY", "READY_WITH_LIMITATIONS"}
+
     def test_saved_draft_resumes_and_is_replaced_by_confirmed_state(
         self,
         tmp_path: Path,
@@ -15596,6 +15759,16 @@ class TestStage40FrontendReviewWorkflow:
     def _draft_result() -> PipelineResult:
         result = TestStage35TwoLayerLLMRouting._confirmed_result()
         evidence = result["evidence_objects"][0]
+        before_readiness = build_evidence_readiness_audit(
+            evidence,
+            variant_index=0,
+        )
+        readiness = build_evidence_readiness_audit(
+            evidence,
+            variant_index=0,
+            before_rescue=before_readiness,
+        )
+        result["evidence_readiness"] = [dict(readiness)]
         result["variant_interpretation_results"] = [
             dict(
                 interpret_variant(
@@ -15606,6 +15779,7 @@ class TestStage40FrontendReviewWorkflow:
                         )
                     ),
                     timestamp="2026-08-09T08:00:00Z",
+                    readiness_audit=readiness,
                 )
             )
         ]
@@ -18306,6 +18480,13 @@ class TestClinicalDataPrivacy:
 class TestPipelineContract:
     """Verify the Stage 10 public input and result boundaries."""
 
+    def test_stage106_pipeline_contract_reserves_readiness_audits(
+        self,
+    ) -> None:
+        result = create_pipeline_result()
+
+        assert result["evidence_readiness"] == []
+
     def test_vcf_analysis_input_is_normalized(self) -> None:
         result = validate_analysis_input(
             vcf_path=Path("samples/patient.vcf"),
@@ -19206,6 +19387,20 @@ class TestCompletePipelineHappyPath:
         assert result["current_stage"] == "completed"
         assert result["progress_percent"] == 100
         assert len(result["evidence_objects"]) == 2
+        assert len(result["evidence_readiness"]) == 2
+        for audit in result["evidence_readiness"]:
+            assert set(audit) >= {
+                "readiness_before_rescue",
+                "identified_deficits",
+                "rescue_actions",
+                "readiness_after_rescue",
+            }
+            assert audit["readiness_before_rescue"] == (
+                "READY_WITH_LIMITATIONS"
+            )
+            assert audit["readiness_after_rescue"] == (
+                "READY_WITH_LIMITATIONS"
+            )
         assert result["evidence_objects"][0]["variant"] == {
             "chrom": "2",
             "pos": 166848215,
@@ -19243,6 +19438,81 @@ class TestCompletePipelineHappyPath:
             for stage, status in stage_statuses.items()
         )
         json.dumps(result, allow_nan=False)
+
+    def test_stage106_sparse_evidence_is_reassessed_before_interpretation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_annotate(
+            variants: object,
+            **_: object,
+        ) -> list[dict[str, object]]:
+            annotations: list[dict[str, object]] = []
+            for variant in variants:  # type: ignore[union-attr]
+                candidate = TestEvidenceObject._pipeline_candidate()
+                candidate["variant"] = dict(variant)
+                candidate["population_frequency"] = None
+                sources = candidate["sources"]
+                assert isinstance(sources, dict)
+                clinvar = sources["clinvar"]
+                clingen = sources["clingen"]
+                assert isinstance(clinvar, dict)
+                assert isinstance(clingen, dict)
+                clinvar.update(
+                    {
+                        "status": "not_found",
+                        "accession": None,
+                        "accession_version": None,
+                        "clinical_significance": None,
+                        "review_status": None,
+                        "conditions": [],
+                    }
+                )
+                clingen.update(
+                    {
+                        "status": "not_found",
+                        "curations": [],
+                    }
+                )
+                annotations.append(candidate)
+            return annotations
+
+        monkeypatch.setattr(
+            "backend.pipeline.annotate_variants",
+            fake_annotate,
+        )
+        adapter = FakeLLMAdapter(
+            _variant_interpretation_response()
+        )
+
+        result = run_analysis(
+            vcf_path=None,
+            manual_variants=_manual_rows("2:166848215:C:T"),
+            phenotypes=[],
+            llm_client=LLMClient(adapter),
+            persist_analysis=False,
+        )
+
+        audit = result["evidence_readiness"][0]
+        assert audit["readiness_before_rescue"] == "RESCUE_REQUIRED"
+        assert {
+            "classification_evidence_missing",
+            "population_evidence_missing",
+            "gene_disease_context_missing",
+        }.issubset(audit["identified_deficits"])
+        assert {
+            action["action"] for action in audit["rescue_actions"]
+        } == {
+            "population_evidence_rescue",
+            "literature_context_rescue",
+        }
+        assert audit["readiness_after_rescue"] == (
+            "READY_WITH_LIMITATIONS"
+        )
+        assert len(adapter.requests) == 1
+        prompt = adapter.requests[0].messages[-1].content
+        assert "BEGIN_EVIDENCE_READINESS_AUDIT" in prompt
+        assert '"readiness_before_rescue":"RESCUE_REQUIRED"' in prompt
 
     def test_analysis_phase_isolates_variant_interpretation_failure(
         self,

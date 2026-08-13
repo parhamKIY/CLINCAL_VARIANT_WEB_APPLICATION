@@ -35,6 +35,11 @@ from backend.evidence_confirmation import (
     confirm_evidence_review,
     validate_reviewed_evidence_package,
 )
+from backend.evidence_readiness import (
+    EvidenceReadinessError,
+    build_evidence_readiness_audit,
+    validate_evidence_readiness_audit,
+)
 from backend.evidence_review import (
     EvidenceReviewError,
     build_evidence_review_reports,
@@ -107,7 +112,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.1"
+PIPELINE_SCHEMA_VERSION = "3.2"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -270,6 +275,7 @@ class PipelineResult(TypedDict):
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
+    evidence_readiness: list[dict[str, object]]
     variant_interpretation_results: list[dict[str, object]]
     draft_variant_reports: list[dict[str, object]]
     variant_report_records: list[dict[str, object]]
@@ -511,6 +517,7 @@ def create_pipeline_result() -> PipelineResult:
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
+        "evidence_readiness": [],
         "variant_interpretation_results": [],
         "draft_variant_reports": [],
         "variant_report_records": [],
@@ -829,6 +836,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "annotations",
         "phenotype_results",
         "evidence_objects",
+        "evidence_readiness",
         "variant_interpretation_results",
         "draft_variant_reports",
         "variant_report_records",
@@ -854,6 +862,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
+                    "evidence_readiness",
                     "variant_interpretation_results",
                     "draft_variant_reports",
                     "variant_report_records",
@@ -925,6 +934,28 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                         "not match phenotype results."
                     )
     review_reports = value["evidence_review_reports"]
+    readiness_audits = value["evidence_readiness"]
+    if readiness_audits:
+        if len(readiness_audits) != len(value["evidence_objects"]):
+            raise PipelineResultError(
+                "pipeline.evidence_readiness must match the Evidence "
+                "Object count."
+            )
+        try:
+            validated_readiness = [
+                validate_evidence_readiness_audit(audit)
+                for audit in readiness_audits
+            ]
+        except EvidenceReadinessError as exc:
+            raise PipelineResultError(
+                "pipeline.evidence_readiness is invalid."
+            ) from exc
+        if [
+            audit["variant_index"] for audit in validated_readiness
+        ] != list(range(len(validated_readiness))):
+            raise PipelineResultError(
+                "pipeline.evidence_readiness must preserve variant order."
+            )
     if review_reports:
         if len(review_reports) != len(value["evidence_objects"]):
             raise PipelineResultError(
@@ -952,6 +983,18 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 )
     interpretation_results = value["variant_interpretation_results"]
     if interpretation_results:
+        if len(readiness_audits) != len(interpretation_results):
+            raise PipelineResultError(
+                "Every interpretation requires an evidence-readiness audit."
+            )
+        if any(
+            audit.get("readiness_after_rescue")
+            not in {"READY", "READY_WITH_LIMITATIONS"}
+            for audit in readiness_audits
+        ):
+            raise PipelineResultError(
+                "Interpretation cannot precede the final readiness decision."
+            )
         if len(interpretation_results) != len(value["evidence_objects"]):
             raise PipelineResultError(
                 "pipeline.variant_interpretation_results must match the "
@@ -2229,6 +2272,13 @@ def _build_evidence_and_report(
     preliminary_evidence = build_evidence_objects(
         result["phenotype_results"]
     )
+    preliminary_readiness = [
+        build_evidence_readiness_audit(
+            evidence,
+            variant_index=index,
+        )
+        for index, evidence in enumerate(preliminary_evidence)
+    ]
 
     def notify_enrichment_progress(
         step: int,
@@ -2255,6 +2305,7 @@ def _build_evidence_and_report(
         preliminary_evidence,
         population_session=population_session,
         literature_session=literature_session,
+        readiness_audits=preliminary_readiness,
         progress_callback=notify_enrichment_progress,
     )
     result["phenotype_results"] = conditional_result["variants"]
@@ -2272,6 +2323,25 @@ def _build_evidence_and_report(
     result["evidence_objects"] = [
         dict(evidence)
         for evidence in evidence_objects
+    ]
+    readiness_audits = [
+        build_evidence_readiness_audit(
+            evidence,
+            variant_index=index,
+            before_rescue=preliminary_readiness[index],
+        )
+        for index, evidence in enumerate(evidence_objects)
+    ]
+    if any(
+        audit["readiness_after_rescue"]
+        not in {"READY", "READY_WITH_LIMITATIONS"}
+        for audit in readiness_audits
+    ):
+        raise PipelineError(
+            "Evidence readiness did not establish minimum allele identity."
+        )
+    result["evidence_readiness"] = [
+        dict(audit) for audit in readiness_audits
     ]
     _sync_variant_integrity_records(result)
     LOGGER.info(
@@ -2336,6 +2406,7 @@ def _build_evidence_and_report(
         evidence_objects,
         model=llm_model,
         client=llm_client,
+        readiness_audits=readiness_audits,
         progress_callback=notify_interpretation_progress,
     )
     result["variant_interpretation_results"] = [

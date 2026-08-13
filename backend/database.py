@@ -1935,6 +1935,10 @@ def _bounded_stage56_pipeline_migration(
         PIPELINE_SCHEMA_VERSION,
         validate_pipeline_result,
     )
+    from backend.evidence_readiness import (
+        EvidenceReadinessError,
+        build_evidence_readiness_audit,
+    )
     from backend.report_lifecycle import (
         ReportLifecycleError,
         build_variant_report_records,
@@ -1954,6 +1958,34 @@ def _bounded_stage56_pipeline_migration(
         except (TypeError, ValueError):
             return None
     source_version = candidate.get("schema_version")
+    if source_version == "3.1":
+        evidence_objects = candidate.get("evidence_objects")
+        if not isinstance(evidence_objects, list) or not all(
+            isinstance(item, dict) for item in evidence_objects
+        ):
+            return None
+        try:
+            readiness = []
+            for index, evidence in enumerate(evidence_objects):
+                before = build_evidence_readiness_audit(
+                    evidence,
+                    variant_index=index,
+                )
+                readiness.append(
+                    build_evidence_readiness_audit(
+                        evidence,
+                        variant_index=index,
+                        before_rescue=before,
+                    )
+                )
+        except EvidenceReadinessError:
+            return None
+        candidate["evidence_readiness"] = readiness
+        candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
+        try:
+            return validate_pipeline_result(candidate)
+        except (TypeError, ValueError):
+            return None
     if source_version not in {"2.8", "2.9", "3.0"}:
         return None
     variant_count = candidate.get("variant_count")
@@ -2063,6 +2095,27 @@ def _bounded_stage56_pipeline_migration(
                 )
             )
         except FinalClinicalReportError:
+            return None
+    if "evidence_readiness" not in candidate:
+        if not isinstance(evidence_objects, list):
+            return None
+        try:
+            candidate["evidence_readiness"] = []
+            for index, evidence in enumerate(evidence_objects):
+                if not isinstance(evidence, dict):
+                    return None
+                before = build_evidence_readiness_audit(
+                    evidence,
+                    variant_index=index,
+                )
+                candidate["evidence_readiness"].append(
+                    build_evidence_readiness_audit(
+                        evidence,
+                        variant_index=index,
+                        before_rescue=before,
+                    )
+                )
+        except EvidenceReadinessError:
             return None
     try:
         return validate_pipeline_result(candidate)
@@ -2276,8 +2329,17 @@ def load_pipeline_state(
         or len(raw_json.encode("utf-8")) > MAX_PIPELINE_STATE_JSON_BYTES
     ):
         raise DatabaseReadError("The stored pipeline state is invalid.")
+    migrated_from_schema31 = False
     try:
         raw = json.loads(raw_json)
+        if isinstance(raw, dict) and raw.get("schema_version") == "3.1":
+            migrated = _bounded_stage56_pipeline_migration(raw)
+            if migrated is None:
+                raise DatabaseReadError(
+                    "The stored pipeline state is invalid."
+                )
+            raw = migrated
+            migrated_from_schema31 = True
         if (
             isinstance(raw, dict)
             and raw.get("schema_version") != PIPELINE_SCHEMA_VERSION
@@ -2301,7 +2363,13 @@ def load_pipeline_state(
     if (
         validated["analysis_id"] != normalized_id
         or validated["workflow_state"] != row["workflow_state"]
-        or validated["schema_version"] != row["pipeline_schema_version"]
+        or (
+            validated["schema_version"] != row["pipeline_schema_version"]
+            and not (
+                migrated_from_schema31
+                and row["pipeline_schema_version"] == "3.1"
+            )
+        )
         or _derive_review_state(validated) != row["review_state"]
     ):
         raise DatabaseReadError("The stored pipeline state is invalid.")

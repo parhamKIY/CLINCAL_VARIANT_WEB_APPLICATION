@@ -17,6 +17,10 @@ from urllib.parse import quote, urlencode
 
 import requests
 
+from backend.evidence_readiness import (
+    EvidenceReadinessError,
+    validate_evidence_readiness_audit,
+)
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
     ProviderCircuitState,
@@ -2225,6 +2229,7 @@ def _frequency_values(candidate: Mapping[str, object]) -> list[float]:
 def determine_enrichment_triggers(
     evidence: Mapping[str, object],
     candidate: Mapping[str, object],
+    readiness_audit: Mapping[str, object] | None = None,
 ) -> list[str]:
     """Return conservative deterministic Stage 32 trigger reasons."""
 
@@ -2264,6 +2269,28 @@ def determine_enrichment_triggers(
         & {"meaningful_conflict", "vus", "insufficient_evidence"}
     ):
         triggers.append("literature_evidence_need")
+    if readiness_audit is not None:
+        try:
+            readiness = validate_evidence_readiness_audit(readiness_audit)
+        except EvidenceReadinessError as exc:
+            raise ConditionalEnrichmentError(
+                "Evidence readiness audit is invalid."
+            ) from exc
+        planned_actions = {
+            action["action"]
+            for action in readiness["rescue_actions"]
+            if action["status"] == "planned"
+        }
+        if (
+            "population_evidence_rescue" in planned_actions
+            and "readiness_population_deficit" not in triggers
+        ):
+            triggers.append("readiness_population_deficit")
+        if (
+            "literature_context_rescue" in planned_actions
+            and "readiness_context_deficit" not in triggers
+        ):
+            triggers.append("readiness_context_deficit")
     return triggers
 
 
@@ -2337,6 +2364,7 @@ def enrich_conditionally(
     *,
     population_session: requests.Session | None = None,
     literature_session: requests.Session | None = None,
+    readiness_audits: Iterable[Mapping[str, object]] | None = None,
     progress_callback: EnrichmentProgressCallback | None = None,
 ) -> ConditionalEnrichmentResult:
     """Enrich only triggered variants without changing their order."""
@@ -2348,9 +2376,18 @@ def enrich_conditionally(
         raise ConditionalEnrichmentError("Inputs must be iterables.")
     candidate_items = list(candidates)
     evidence_items = list(preliminary_evidence)
+    readiness_items = (
+        list(readiness_audits)
+        if readiness_audits is not None
+        else [None] * len(candidate_items)
+    )
     if len(candidate_items) != len(evidence_items):
         raise ConditionalEnrichmentError(
             "Candidate and evidence counts must match."
+        )
+    if len(candidate_items) != len(readiness_items):
+        raise ConditionalEnrichmentError(
+            "Candidate and readiness-audit counts must match."
         )
 
     enriched: list[dict[str, Any]] = []
@@ -2361,8 +2398,13 @@ def enrich_conditionally(
     pubmed_statuses: list[str] = []
     total_steps = max(1, len(candidate_items) * 4)
     population_circuit = ProviderCircuitState()
-    for index, (candidate, evidence) in enumerate(
-        zip(candidate_items, evidence_items, strict=True)
+    for index, (candidate, evidence, readiness_audit) in enumerate(
+        zip(
+            candidate_items,
+            evidence_items,
+            readiness_items,
+            strict=True,
+        )
     ):
         if not isinstance(candidate, dict) or not isinstance(
             evidence,
@@ -2372,7 +2414,11 @@ def enrich_conditionally(
                 "Conditional enrichment items must be mappings."
             )
         item = deepcopy(candidate)
-        triggers = determine_enrichment_triggers(evidence, item)
+        triggers = determine_enrichment_triggers(
+            evidence,
+            item,
+            readiness_audit,
+        )
         within_limit = (
             triggered_count
             < settings.CONDITIONAL_ENRICHMENT_MAX_VARIANTS
@@ -2381,11 +2427,17 @@ def enrich_conditionally(
             set(triggers)
             & {
                 "vus",
-                "insufficient_evidence",
                 "population_evidence_ambiguity",
+                "readiness_population_deficit",
             }
         )
-        literature_triggered = "literature_evidence_need" in triggers
+        literature_triggered = bool(
+            set(triggers)
+            & {
+                "literature_evidence_need",
+                "readiness_context_deficit",
+            }
+        )
         population_needed = (
             population_triggered
             and settings.ENABLE_GNOMAD_DEEP_LOOKUP

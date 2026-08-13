@@ -23,6 +23,11 @@ from backend.llm import (
     LLMValidationError,
     call_llm,
 )
+from backend.evidence_readiness import (
+    EvidenceReadinessError,
+    build_evidence_readiness_audit,
+    validate_evidence_readiness_audit,
+)
 from backend.logging_config import get_logger
 from backend.privacy import (
     VARIANT_INTERPRETATION_TASK,
@@ -373,6 +378,7 @@ def _build_prompt(
     evidence: EvidenceObject,
     *,
     prompt_mode: InterpretationPromptMode,
+    readiness_audit: Mapping[str, object],
 ) -> str:
     try:
         validate_llm_payload(evidence)
@@ -391,6 +397,19 @@ def _build_prompt(
     except (TypeError, ValueError) as exc:
         raise VariantInterpretationError(
             "Evidence cannot be serialized safely."
+        ) from exc
+    try:
+        readiness = validate_evidence_readiness_audit(readiness_audit)
+        serialized_readiness = json.dumps(
+            readiness,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (EvidenceReadinessError, TypeError, ValueError) as exc:
+        raise VariantInterpretationError(
+            "Evidence readiness audit is invalid."
         ) from exc
     if len(serialized.encode("utf-8")) > MAX_INTERPRETATION_EVIDENCE_BYTES:
         raise VariantInterpretationError(
@@ -438,11 +457,13 @@ def _build_prompt(
     )
     if (
         len(serialized.encode("utf-8"))
+        + len(serialized_readiness.encode("utf-8"))
         + len(serialized_references.encode("utf-8"))
         > MAX_INTERPRETATION_EVIDENCE_BYTES
     ):
         raise VariantInterpretationError(
-            "Evidence and reference catalog exceed the prompt size limit."
+            "Evidence, readiness audit, and reference catalog exceed the "
+            "prompt size limit."
         )
     return (
         f"Prompt version: {VARIANT_INTERPRETATION_PROMPT_VERSION}\n"
@@ -456,6 +477,9 @@ def _build_prompt(
         "BEGIN_VALIDATED_EVIDENCE_OBJECT\n"
         f"{serialized}\n"
         "END_VALIDATED_EVIDENCE_OBJECT\n"
+        "BEGIN_EVIDENCE_READINESS_AUDIT\n"
+        f"{serialized_readiness}\n"
+        "END_EVIDENCE_READINESS_AUDIT\n"
         "BEGIN_ALLOWED_REFERENCE_CATALOG\n"
         f"{serialized_references}\n"
         "END_ALLOWED_REFERENCE_CATALOG"
@@ -886,6 +910,7 @@ def interpret_variant(
     fallback_client: LLMClient | None = None,
     max_retries: int | None = None,
     timestamp: str | None = None,
+    readiness_audit: Mapping[str, object] | None = None,
 ) -> VariantInterpretationResult:
     """Interpret one validated Evidence Object with one selected model."""
 
@@ -915,6 +940,34 @@ def interpret_variant(
         raise VariantInterpretationError(
             "Evidence contains data prohibited from LLM processing."
         ) from exc
+    try:
+        if readiness_audit is None:
+            preliminary_readiness = build_evidence_readiness_audit(
+                evidence,
+                variant_index=variant_index,
+            )
+            readiness = build_evidence_readiness_audit(
+                evidence,
+                variant_index=variant_index,
+                before_rescue=preliminary_readiness,
+            )
+        else:
+            readiness = validate_evidence_readiness_audit(readiness_audit)
+    except EvidenceReadinessError as exc:
+        raise VariantInterpretationError(
+            "Evidence readiness audit is invalid."
+        ) from exc
+    if readiness["variant_index"] != variant_index:
+        raise VariantInterpretationError(
+            "Evidence readiness audit does not match the variant index."
+        )
+    if readiness["readiness_after_rescue"] not in {
+        "READY",
+        "READY_WITH_LIMITATIONS",
+    }:
+        raise VariantInterpretationError(
+            "Evidence is not ready for interpretation."
+        )
     configured_model = _configured_model(model)
     configured_fallback_model = _fallback_model(
         primary_client=client,
@@ -931,7 +984,11 @@ def interpret_variant(
     conflict_status, conflict_severity, prompt_mode = _conflict_context(
         evidence
     )
-    user_prompt = _build_prompt(evidence, prompt_mode=prompt_mode)
+    user_prompt = _build_prompt(
+        evidence,
+        prompt_mode=prompt_mode,
+        readiness_audit=readiness,
+    )
     active_model = configured_model
     fallback_used = False
     try:
@@ -1059,6 +1116,7 @@ def interpret_variants(
     fallback_client: LLMClient | None = None,
     max_retries: int | None = None,
     timestamp: str | None = None,
+    readiness_audits: Iterable[Mapping[str, object]] | None = None,
     progress_callback: InterpretationProgressCallback | None = None,
 ) -> list[VariantInterpretationResult]:
     """Interpret evidence independently, preserving order and one model."""
@@ -1089,6 +1147,15 @@ def interpret_variants(
             "Evidence Object collection is invalid or unsafe."
         ) from exc
     configured_model = _configured_model(model)
+    readiness_list = (
+        list(readiness_audits)
+        if readiness_audits is not None
+        else [None] * len(evidence_list)
+    )
+    if len(readiness_list) != len(evidence_list):
+        raise VariantInterpretationError(
+            "Readiness-audit and Evidence Object counts must match."
+        )
     results: list[VariantInterpretationResult] = []
     total = len(evidence_list)
     for variant_index, evidence in enumerate(evidence_list):
@@ -1104,6 +1171,7 @@ def interpret_variants(
                 fallback_client=fallback_client,
                 max_retries=max_retries,
                 timestamp=timestamp,
+                readiness_audit=readiness_list[variant_index],
             )
         except (LLMError, VariantInterpretationError) as exc:
             result = _failed_result(
