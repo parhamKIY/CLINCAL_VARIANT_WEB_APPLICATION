@@ -21,6 +21,7 @@ from backend.pipeline import (
     PipelineResult,
     confirm_reviewed_evidence,
     finalize_reviewed_analysis,
+    retry_failed_variant_interpretation,
     update_draft_variant_report,
 )
 from backend.report_data_projection import build_report_data_from_draft
@@ -61,6 +62,38 @@ _NOTICE_STYLES = {
     "ACTION REQUIRED": ("Action required", "red", ":material/error:"),
     "BLOCKING": ("Blocking", "red", ":material/block:"),
 }
+
+
+def interpretation_failure_message(failure_type: object) -> str:
+    """Return reviewer-safe wording for a persisted model failure category."""
+
+    if failure_type in {
+        "request_timeout",
+        "connection_error",
+        "http_429",
+        "http_5xx",
+        "empty_response",
+    }:
+        return (
+            "The interpretation service remained temporarily unavailable "
+            "after bounded recovery."
+        )
+    if failure_type in {"output_schema_failure", "output_parse_failure"}:
+        return (
+            "The model returned a response, but no valid structured response "
+            "remained after the repair attempt."
+        )
+    if failure_type in {"authentication_error", "configuration_error"}:
+        return (
+            "Interpretation could not run because the model provider "
+            "configuration requires attention."
+        )
+    if failure_type == "safety_or_finish_failure":
+        return "The model stopped before a usable interpretation was produced."
+    return (
+        "Interpretation could not be produced because the model workflow "
+        "requires attention."
+    )
 
 
 def _render_variant_notice(
@@ -643,8 +676,9 @@ def _render_draft_variant_report(
     st.markdown("#### Variant interpretation")
     if interpretation["status"] == "failed":
         st.error(
-            "Interpretation is unavailable because the model "
-            "request could not be completed."
+            interpretation_failure_message(
+                interpretation["failure_type"]
+            )
         )
         st.caption(
             "Collected evidence remains available for review and the "
@@ -716,6 +750,67 @@ def _render_draft_variant_report(
         )
         for limitation in content["limitations"]:
             st.write(f"- {limitation}")
+
+
+def _render_interpretation_retry(
+    report: DraftVariantReport,
+    result: PipelineResult,
+    *,
+    model: str | None,
+) -> None:
+    """Offer a selected-variant retry from persisted evidence only."""
+
+    interpretation = report["reviewed_report"]["variant_interpretation"]
+    if interpretation["status"] != "failed":
+        return
+    has_reviewer_decisions = bool(
+        report["edit_history"]
+        or report["selection_history"]
+        or report["review_status"] != "draft"
+        or any(
+            package["variant_index"] == report["variant_index"]
+            for package in result["reviewed_evidence_packages"]
+        )
+    )
+    st.caption(
+        "Retry uses the persisted Evidence Object for this variant. "
+        "Annotation, ClinVar, population, and phenotype providers are not rerun."
+    )
+    if st.button(
+        "Retry interpretation",
+        type="primary",
+        icon=":material/refresh:",
+        disabled=has_reviewer_decisions,
+        key=f"{_REVIEW_WIDGET_PREFIX}retry_{report['report_id']}",
+    ):
+        try:
+            with st.spinner("Retrying interpretation from persisted evidence..."):
+                updated = retry_failed_variant_interpretation(
+                    result,
+                    variant_index=report["variant_index"],
+                    model=model,
+                )
+        except PipelineError as exc:
+            st.error(f"Interpretation retry was not completed: {exc}")
+            return
+        result.clear()
+        result.update(updated)
+        st.session_state["pipeline_result"] = result
+        persisted = _persist_review_state(result)
+        _set_notice(
+            "success" if persisted else "warning",
+            (
+                "Interpretation retry completed."
+                if persisted
+                else "Interpretation retry completed, but persistence failed."
+            ),
+        )
+        st.rerun()
+    if has_reviewer_decisions:
+        st.caption(
+            "Retry is disabled because reviewer decisions already exist for "
+            "this report."
+        )
 
 
 def _render_report_editor(
@@ -1217,7 +1312,7 @@ def render_evidence_review(
 ) -> None:
     """Render pre-interpreted drafts and final review controls."""
 
-    _ = (light_model, strong_model)
+    retry_model = strong_model or light_model
     st.subheader("Draft Variant Review — Evidence and interpretation")
     _render_notice()
     reports = result.get("evidence_review_reports", [])
@@ -1279,6 +1374,11 @@ def render_evidence_review(
         selected=selected,
         total=len(drafts),
     )
+    _render_interpretation_retry(
+        draft_variant_report,
+        result,
+        model=retry_model,
+    )
     st.caption(
         "Narrative fields and reviewer notes are editable with an "
         "append-only audit trail. Variant identity, provider evidence, "
@@ -1335,5 +1435,6 @@ __all__ = [
     "REVIEW_DRAFTS_KEY",
     "REVIEW_PACKAGES_KEY",
     "clear_evidence_review_state",
+    "interpretation_failure_message",
     "render_evidence_review",
 ]

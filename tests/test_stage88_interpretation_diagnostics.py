@@ -1,7 +1,6 @@
 """Stage 88 interpretation failure taxonomy and observability checks."""
 
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -22,13 +21,13 @@ from backend.variant_interpretation import (
     classify_interpretation_failure,
     interpret_variants,
 )
+from frontend.evidence_review import interpretation_failure_message
 from test_pipeline import (
     SequenceLLMAdapter,
     TestEvidenceObject as EvidenceFactory,
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.stage88_interpretation_diagnostics
 
 
@@ -163,8 +162,7 @@ def test_parse_and_finish_failures_keep_safe_metadata() -> None:
 
 
 def test_user_message_does_not_expose_internal_failure_type() -> None:
-    source = (PROJECT_ROOT / "frontend" / "evidence_review.py").read_text(
-        encoding="utf-8"
-    )
-    assert "failed ({interpretation['failure_type']" not in source
-    assert "Interpretation is unavailable" in source
+    message = interpretation_failure_message("output_schema_failure")
+
+    assert "output_schema_failure" not in message
+    assert "structured response" in message

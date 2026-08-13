@@ -15949,6 +15949,7 @@ class TestStage40FrontendReviewWorkflow:
 
     def test_failed_interpretation_remains_reviewable(
         self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         result = self._draft_result()
         result["variant_interpretation_results"] = [
@@ -15973,21 +15974,36 @@ class TestStage40FrontendReviewWorkflow:
             )
         ]
         result = validate_pipeline_result(result)
+        monkeypatch.setattr(
+            "backend.variant_interpretation.call_llm",
+            lambda *_args, **_kwargs: _variant_interpretation_response(
+                model="reviewer-retry-model"
+            ),
+        )
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
 
         assert any(
-            "Interpretation is unavailable" in error.value
+            "temporarily unavailable" in error.value
             for error in app.error
         )
         assert any(
             area.label == "Reviewed evidence report (JSON)"
             for area in app.text_area
         )
-        assert not any(
-            button.label == "Retry failed interpretations"
+        retry = next(
+            button
             for button in app.button
+            if button.label == "Retry interpretation"
+        )
+        retry.click().run(timeout=10)
+
+        retried = app.session_state["pipeline_result"]
+        assert retried["evidence_objects"] == result["evidence_objects"]
+        assert retried["annotations"] == result["annotations"]
+        assert retried["variant_interpretation_results"][0]["status"] == (
+            "success"
         )
 
     def test_report_edit_is_audited_and_invalidates_confirmation(

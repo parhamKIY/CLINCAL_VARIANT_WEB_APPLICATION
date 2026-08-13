@@ -92,6 +92,7 @@ from backend.report_lifecycle import (
 from backend.variant_interpretation import (
     VariantInterpretationError,
     interpret_variants,
+    retry_variant_interpretation,
     validate_variant_interpretation_result,
 )
 from backend.variant_integrity import (
@@ -103,6 +104,7 @@ from backend.variant_integrity import (
 )
 from backend.variant_report import (
     DraftVariantReportError,
+    build_draft_variant_report,
     build_draft_variant_reports,
     validate_draft_variant_report,
 )
@@ -3207,6 +3209,130 @@ def update_draft_variant_report(
     return validate_pipeline_result(working)
 
 
+def retry_failed_variant_interpretation(
+    result: PipelineResult,
+    *,
+    variant_index: int,
+    model: str | None = None,
+    client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
+    max_retries: int | None = None,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Retry one failed draft interpretation without rerunning providers."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if (
+        isinstance(variant_index, bool)
+        or not isinstance(variant_index, int)
+        or variant_index < 0
+        or variant_index >= working["variant_count"]
+    ):
+        raise PipelineError("Interpretation retry variant index is invalid.")
+    prior = working["variant_interpretation_results"][variant_index]
+    if prior["status"] != "failed":
+        raise PipelineError("Only failed interpretations can be retried.")
+    report = working["draft_variant_reports"][variant_index]
+    if (
+        report["edit_history"]
+        or report["selection_history"]
+        or report["review_status"] != "draft"
+        or any(
+            package["variant_index"] == variant_index
+            for package in working["reviewed_evidence_packages"]
+        )
+    ):
+        raise PipelineError(
+            "Interpretation retry cannot overwrite existing reviewer decisions."
+        )
+    try:
+        retried = retry_variant_interpretation(
+            working["evidence_objects"][variant_index],
+            prior,
+            model=model,
+            client=client,
+            fallback_model=fallback_model,
+            fallback_client=fallback_client,
+            max_retries=max_retries,
+            timestamp=timestamp,
+            readiness_audit=working["evidence_readiness"][variant_index],
+        )
+        rebuilt = build_draft_variant_report(
+            working["evidence_objects"][variant_index],
+            retried,
+            variant_index=variant_index,
+        )
+    except (VariantInterpretationError, DraftVariantReportError) as exc:
+        raise PipelineError("Interpretation retry could not be completed.") from exc
+
+    working["variant_interpretation_results"][variant_index] = dict(retried)
+    working["draft_variant_reports"][variant_index] = dict(rebuilt)
+    working["reviewed_evidence_packages"] = [
+        package
+        for package in working["reviewed_evidence_packages"]
+        if package["variant_index"] != variant_index
+    ]
+    working["llm_routing_results"] = []
+    working["final_interpretation_report"] = None
+    working["final_clinical_report"] = None
+    working["warnings"] = [
+        warning
+        for warning in working["warnings"]
+        if not (
+            (
+                warning.startswith("Interpretation completed with ")
+                and warning.endswith(
+                    "explicit variant failure(s); collected evidence was preserved."
+                )
+            )
+            or (
+                warning.startswith("Interpretation retry completed with ")
+                and warning.endswith(
+                    "failed variant interpretation(s); collected evidence was preserved."
+                )
+            )
+        )
+    ]
+    failed_count = sum(
+        item["status"] == "failed"
+        for item in working["variant_interpretation_results"]
+    )
+    if failed_count:
+        message = (
+            f"Interpretation retry completed with {failed_count} failed "
+            "variant interpretation(s); collected evidence was preserved."
+        )
+        _append_warning(working, message)
+        stage_status: PipelineStageStatus = "warning"
+    else:
+        message = (
+            "Interpretation retry succeeded using the persisted Evidence Object; "
+            "upstream providers were not rerun."
+        )
+        stage_status = "success"
+    _set_stage(
+        working,
+        "llm",
+        stage_status,
+        progress_percent=100,
+        message=message,
+    )
+    _set_api_status(working, "llm", stage_status, message)
+    working["workflow_state"] = "awaiting_final_review"
+    working["current_stage"] = "completed"
+    working["progress_percent"] = 100
+    working["status"] = (
+        "partial"
+        if failed_count or working["warnings"] or working["errors"]
+        else "success"
+    )
+    _sync_variant_report_records(working)
+    if working["variant_integrity_records"]:
+        _sync_variant_integrity_records(working)
+    return validate_pipeline_result(working)
+
+
 def get_selected_draft_variant_reports(
     result: PipelineResult,
 ) -> list[dict[str, object]]:
@@ -3610,6 +3736,7 @@ __all__ = [
     "get_selected_draft_variant_reports",
     "resume_confirmed_analysis",
     "resume_saved_analysis",
+    "retry_failed_variant_interpretation",
     "create_pipeline_result",
     "run_analysis",
     "update_draft_variant_report",

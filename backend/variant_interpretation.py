@@ -90,6 +90,7 @@ InterpretationFailureType = Literal[
     "output_parse_failure",
     "safety_or_finish_failure",
     "internal_conversion_failure",
+    "configuration_error",
     "unknown_failure",
 ]
 INTERPRETATION_FAILURE_TYPES = frozenset(
@@ -724,7 +725,9 @@ def classify_interpretation_failure(
         if isinstance(status, int):
             return "invalid_request"
         return "connection_error"
-    if isinstance(error, (LLMConfigurationError, LLMValidationError)):
+    if isinstance(error, LLMConfigurationError):
+        return "configuration_error"
+    if isinstance(error, LLMValidationError):
         return "invalid_request"
     if isinstance(error, LLMResponseError):
         return "empty_response"
@@ -1191,6 +1194,61 @@ def interpret_variants(
     return results
 
 
+def retry_variant_interpretation(
+    evidence_object: Mapping[str, object],
+    failed_result: Mapping[str, object],
+    *,
+    model: str | None = None,
+    client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
+    max_retries: int | None = None,
+    timestamp: str | None = None,
+    readiness_audit: Mapping[str, object] | None = None,
+) -> VariantInterpretationResult:
+    """Retry one failed interpretation from the retained Evidence Object."""
+
+    try:
+        evidence = sanitize_evidence_object(deepcopy(evidence_object))
+        prior = validate_variant_interpretation_result(
+            deepcopy(failed_result),
+            evidence=evidence,
+        )
+    except (EvidenceObjectError, VariantInterpretationError) as exc:
+        raise VariantInterpretationError(
+            "Failed interpretation retry inputs are invalid."
+        ) from exc
+    if prior["status"] != "failed":
+        raise VariantInterpretationError(
+            "Only a failed interpretation can be retried."
+        )
+    try:
+        return interpret_variant(
+            evidence,
+            variant_index=prior["variant_index"],
+            model=model,
+            client=client,
+            fallback_model=fallback_model,
+            fallback_client=fallback_client,
+            max_retries=max_retries,
+            timestamp=timestamp,
+            readiness_audit=readiness_audit,
+        )
+    except (LLMError, VariantInterpretationError) as exc:
+        diagnostic_model = (
+            model.strip()
+            if isinstance(model, str) and model.strip()
+            else prior["configured_model"]
+        )
+        return _failed_result(
+            evidence,
+            variant_index=prior["variant_index"],
+            model=diagnostic_model,
+            error=exc,
+            timestamp=timestamp,
+        )
+
+
 def validate_variant_interpretation_result(
     value: object,
     *,
@@ -1423,5 +1481,6 @@ __all__ = [
     "classify_interpretation_failure",
     "interpret_variant",
     "interpret_variants",
+    "retry_variant_interpretation",
     "validate_variant_interpretation_result",
 ]
