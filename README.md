@@ -5,10 +5,10 @@
 Evidence-centered germline variant review with an accepted post-professor-review
 redesign contract.
 
-[![Status](https://img.shields.io/badge/status-Stage_78_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
+[![Status](https://img.shields.io/badge/status-Stage_114_complete-2e7d32?style=for-the-badge)](docs/PROJECT_DECLARATION.md#4-stage-register)
 [![Python](https://img.shields.io/badge/Python-3.13_verified-3776ab?style=for-the-badge&logo=python&logoColor=white)](#requirements)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit&logoColor=white)](#run-the-application)
-[![Tests](https://img.shields.io/badge/tests-935_passed%2C_4_skipped-2e7d32?style=for-the-badge)](#verification)
+[![Tests](https://img.shields.io/badge/tests-1225_passed%2C_6_skipped-2e7d32?style=for-the-badge)](#verification)
 [![Coverage](https://img.shields.io/badge/coverage-85.81%25-2e7d32?style=for-the-badge)](#verification)
 
 </div>
@@ -69,6 +69,13 @@ its original input order.
   offline-verified across all required checks.
 - Stage 104 primary status and warning UX acceptance suite is implemented and
   offline-verified; the analysis summary now states the exact ready-report count.
+- Stage 105 professor testcase end-to-end acceptance is implemented and
+  offline-verified.
+- Stages 106-114 resolve the nine post-acceptance defects: Persian multi-concept
+  phenotype extraction, valid no-match rescue, cross-provider identifier retrieval,
+  exact ClinVar matching, scoped CSpec applicability, deterministic evidence
+  readiness, source-attributed classification recovery, persisted-evidence
+  interpretation retry, and reviewer-facing source-status semantics.
 - Stage 58 privacy and safety reverification is implemented and offline-verified.
 - Stage 59 Testing V3 is implemented and offline-verified.
 - Stage 60 End-to-End Acceptance Gate V3 is implemented, offline-verified, and
@@ -80,14 +87,14 @@ its original input order.
   reviewer-facing fallback transparency, and deterministic failure injection are
   implemented, documented, and offline-verified; the multi-variant resilience gate
   and manual reachability utility are available.
-- Pipeline schema: `3.1`.
+- Pipeline schema: `3.2`.
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
-- Draft Variant Report schema: `2.1`.
+- Draft Variant Report schema: `2.2`.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1142 passed, 6 skipped; 85.20% Stage 60 acceptance coverage**.
+- Current verified suite: **1225 passed, 6 skipped**.
 - External-provider availability is not implied by the offline test result.
 
 The complete stage register, API catalog, safety declaration, demonstration
@@ -244,7 +251,7 @@ domain; mismatched or untrusted links fail to an explicit no-validated-link stat
 
 The Variant Interpretation Model receives the bounded reference catalog without
 URLs and may cite only supplied bracket IDs such as `[R1]`. Fabricated, malformed,
-or evidence-absent IDs are rejected. Draft Variant Report schema `2.1` maps those
+or evidence-absent IDs are rejected. Draft Variant Report schema `2.2` maps those
 IDs to canonical objects, Streamlit renders validated links and explicit fallbacks,
 and generic Word/PDF exports preserve allowlisted hyperlinks.
 

@@ -1,10 +1,10 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-105 implemented as recorded below
+**Implementation status:** Stages 0-114 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 106 not started
-**Document date:** 2026-08-12
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 115 final visual sign-off
+**Document date:** 2026-08-13
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
@@ -124,7 +124,12 @@ technical provider details remain collapsed.
 Stage 105 executes the deterministic offline acceptance suite verifying 7-variant
 cardinality, preservation of input order, same-gene separation, phenotype non-concordance
 handling, and provider degradation scenarios.
-This declaration is the unified implementation record for Stages 0-105. The former
+Stages 106-114 implement the nine post-acceptance corrective defects in dependency
+order: Persian multi-concept phenotype extraction, valid no-match evidence rescue,
+cross-provider identifier intelligence, exact ClinVar retrieval, scoped CSpec
+applicability, deterministic evidence readiness, secondary classification recovery,
+classified interpretation retry, and reviewer-facing source-status semantics.
+This declaration is the unified implementation record for Stages 0-114. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -331,7 +336,7 @@ explicit non-clickable fallbacks instead of fabricated links.
 The Variant Interpretation Model receives only a bounded reference catalog without
 URLs and may cite supplied IDs such as `[R1]`. Backend validation rejects malformed,
 invented, or evidence-absent IDs in model output and reviewer-edited report text.
-Draft Variant Report schema `2.1` maps citations to canonical objects. Streamlit and
+Draft Variant Report schema `2.2` maps citations to canonical objects. Streamlit and
 legacy Markdown expose exact links, and generic Word/PDF exports preserve allowlisted
 hyperlinks. Variant Interpretation Result schema is `1.1`; Stage 55 used pipeline
 schema `2.7`.
@@ -423,12 +428,23 @@ flowchart LR
     BN --> BO["Stage 103: reference acceptance suite"]
     BO --> BP["Stage 104: status and warning UX acceptance"]
     BP --> BQ["Stage 105: professor testcase E2E"]
+    BQ --> BR["Stage 106: Persian phenotype extraction hardening"]
+    BR --> BS["Stage 107: valid no-match evidence rescue"]
+    BS --> BT["Stage 108: cross-provider retrieval intelligence"]
+    BT --> BU["Stage 109: exact ClinVar retrieval hardening"]
+    BU --> BV["Stage 110: scoped CSpec applicability"]
+    BV --> BW["Stage 111: deterministic evidence readiness"]
+    BW --> BX["Stage 112: secondary classification recovery"]
+    BX --> BY["Stage 113: classified interpretation retry"]
+    BY --> BZ["Stage 114: reviewer source-status semantics"]
+    BZ --> CA["Stage 115: final visual sign-off"]
 
     classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
     classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
     class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
     class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN,BO,BP,BQ done
+    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN,BO,BP,BQ,BR,BS,BT,BU,BV,BW,BX,BY,BZ done
+    class CA review
 ```
 
 Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
@@ -547,6 +563,16 @@ their original order.
 | 103 | Added end-to-end reference acceptance checks for exact literature targets, category separation, raw/machine-link rejection, human provider pages, and clean missing stable links in HTML and DOCX. | Complete |
 | 104 | Added an exact ready-report summary count and verified that primary status cards identify attention variants, missing sources, and the distinction between partial evidence and action-required interpretation failure. | Complete |
 | 105 | Added the deterministic offline acceptance suite verifying 7-variant cardinality, preservation of input order, same-gene separation, phenotype non-concordance handling, and provider degradation scenarios. | Complete |
+| 106 | Hardened Persian multi-concept phenotype extraction with bounded candidate recovery, locally validated selections, stable deduplication, and preserved manual-entry behavior. | Complete |
+| 107 | Added controlled ClinVar evidence rescue after a valid primary no-match while preserving valid missingness, exact provenance, and non-independent secondary evidence semantics. | Complete |
+| 108 | Added cross-provider identifier intelligence, retrieval-cause classification, alternate identifier attempts, candidate rejection diagnostics, and explicit stop reasons. | Complete |
+| 109 | Hardened ClinVar allele retrieval across SPDI, HGVS, variation identifiers, and exact candidate validation without accepting near or semantically mismatched records. | Complete |
+| 110 | Made ClinGen CSpec results gene/disease scoped, distinguished no applicable specification from provider failure, and preserved CSpec as context-only evidence. | Complete |
+| 111 | Added a deterministic evidence-readiness gate that distinguishes ready, ready with limitations, and blocked variants before interpretation while retaining sparse-evidence interpretation. | Complete |
+| 112 | Added source-attributed classification recovery and audit state for direct ClinVar, GeneBe automated, and MyVariant ClinVar-derived evidence without autonomous ACMG adjudication. | Complete |
+| 113 | Added configuration-error classification and reviewer-triggered retry of one failed interpretation from persisted evidence without rerunning upstream providers or overwriting reviewer decisions. | Complete |
+| 114 | Replaced raw reviewer-facing `no_match` labels with source-specific expected-absence, primary-no-match, rescue, provider-failure, and not-queried wording while retaining technical statuses internally. | Complete |
+| 115 | Perform the final Word/LibreOffice side-by-side visual fidelity review and obtain external sign-off. | Pending |
 
 ## 5. Current implemented architecture
 
@@ -664,7 +690,7 @@ invalidates that confirmation.
 
 ### Draft Variant Report V2
 
-Draft Variant Report schema `2.1` combines evidence, interpretation, conflict summary,
+Draft Variant Report schema `2.2` combines evidence, interpretation, conflict summary,
 references, provenance, and limitations in one coherent per-variant object. Machine
 original and reviewed copies begin identical. Only reviewer-owned narrative fields
 can differ, and every difference must be reproduced by the append-only edit history.
@@ -1325,7 +1351,7 @@ Variant Report, and Stage 86 review-record identity.
 
 The gate uses an assembly-qualified digest of chromosome, position, reference, and
 alternate allele. Gene is deliberately excluded, so multiple alleles in one gene
-remain separate. Pipeline schema `3.1` validates non-empty stage cardinalities against
+remain separate. Pipeline schema `3.2` validates non-empty stage cardinalities against
 the accepted input, rejects reordering or identity drift, and persists the ledger.
 Schemas `2.8`, `2.9`, and `3.0` receive a bounded order-preserving migration without
 provider or model reruns.
@@ -1599,6 +1625,80 @@ The deterministic offline acceptance suite runs the complete report-first workfl
 
 An irrelevant phenotype (abdominal pain) successfully completes interpretation while stating phenotype non-concordance explicitly without fabricating a disease relation or causing an application failure. A degraded provider scenario where ClinVar is unavailable still produces all 7 reports, maps the ClinVar card status to `"ClinVar: no exact record"`, hides the technical failure from the primary UX (not blocking), and generates all Word documents successfully.
 
+### Stage 106 Persian multi-concept phenotype extraction hardening
+
+The phenotype extraction boundary now retains multiple clinically supported concepts
+from Persian free text instead of allowing one broad or duplicated concept to dominate
+the result. Candidate recovery is bounded, deterministic, locally ontology-validated,
+and merged in stable order. Invalid model identifiers remain excluded, manual HPO entry
+remains available after extraction failure, and no diagnosis is inferred.
+
+### Stage 107 valid no-match evidence rescue
+
+A valid primary ClinVar no-match remains valid missingness, but it no longer prevents a
+separately attributed secondary evidence search. The rescue contract records its
+trigger, alternate identifiers, ordered attempts, recovered provider, stop reason, and
+whether usable evidence was recovered. Secondary ClinVar-derived evidence is explicitly
+non-independent and never relabelled as a direct ClinVar exact record.
+
+### Stage 108 cross-provider retrieval intelligence
+
+Retrieval now classifies why evidence is absent, including identifier gaps, query
+weakness, normalization mismatch, semantic mismatch, confirmed source absence,
+operational failure, and cases requiring live verification. Validated identifiers are
+shared across bounded provider strategies, rejected candidates retain safe reasons,
+and every exhausted path records an explicit stop condition.
+
+### Stage 109 exact ClinVar retrieval hardening
+
+ClinVar retrieval now uses ordered SPDI, HGVS, and stable variation strategies with
+exact assembly, coordinate, reference, and alternate validation. Candidate responses
+that represent a nearby allele, wrong assembly, symbolic mismatch, or semantically
+different record are rejected and recorded diagnostically. A no-match is accepted only
+after the configured exact strategies complete without usable evidence.
+
+### Stage 110 scoped CSpec applicability
+
+CSpec lookup now distinguishes provider operation from specification applicability.
+The report states when no released specification applies to the current gene/disease
+scope, when scope cannot be assessed because identity is incomplete, and when cached
+context was used after operational failure. CSpec remains contextual metadata and is
+not treated as negative pathogenicity evidence or an implemented rule engine.
+
+### Stage 111 deterministic evidence readiness
+
+Before interpretation, each Evidence Object receives a deterministic readiness audit.
+`READY` and `READY_WITH_LIMITATIONS` proceed to evidence-bounded interpretation;
+`BLOCKED` is reserved for unsafe or structurally invalid minimum evidence. Capability
+coverage, recovery state, limitations, and blocking reasons remain persisted and
+replayable without inventing unavailable evidence.
+
+### Stage 112 secondary classification recovery
+
+The classification audit now explains which sources were queried, which identifiers
+were used, whether rescue ran, candidate counts, rejection counts, retrieval exhaustion,
+and why no classification remained. Direct ClinVar, GeneBe automated, and MyVariant
+ClinVar-derived classifications remain source-attributed and their independence is
+explicit. The application still does not independently adjudicate ACMG/AMP criteria.
+
+### Stage 113 classified interpretation retry
+
+Interpretation configuration failures now have their own persisted failure category,
+and reviewer messages distinguish request, structured-output, provider/configuration,
+safety/finish, and internal workflow failures. A reviewer may retry one failed draft
+from its persisted Evidence Object; annotation, ClinVar, population, phenotype, and
+literature providers are not rerun. Existing edits, selections, or confirmations
+prevent destructive overwrite.
+
+### Stage 114 reviewer source-status semantics
+
+Primary review surfaces no longer expose raw `no_match` as the explanation. ClinVar,
+CSpec, literature, phenotype, and other capabilities use source-specific wording that
+distinguishes expected absence, a completed primary no-match, successful source-named
+rescue, an operational provider failure, and an unexecuted query. Technical status,
+method, attempts, fallback path, provider result, and stop reason remain available in
+collapsed diagnostics.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1609,12 +1709,12 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.1`.
+- Active pipeline schema: `3.2`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
-- Draft Variant Report schema: `2.1`.
+- Draft Variant Report schema: `2.2`.
 - Variant Report Lifecycle schema: `1.0`.
 - Variant Integrity Record schema: `1.0`.
 - Final Clinical Report schema: `2.0`.
@@ -1835,6 +1935,15 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 103 reference acceptance suite | `tests/test_stage103_reference_acceptance.py`, `docs/stage_103_reference_acceptance.md`, `pytest.ini` |
 | Stage 104 status and warning UX acceptance suite | `frontend/analysis_summary.py`, `frontend/ui.py`, `tests/test_stage104_status_warning_acceptance.py`, `docs/stage_104_status_warning_acceptance.md`, `pytest.ini` |
 | Stage 105 professor testcase end-to-end acceptance | `tests/test_stage105_professor_testcase.py`, `docs/stage_105_professor_testcase.md`, `pytest.ini` |
+| Stage 106 Persian phenotype extraction hardening | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `frontend/ui.py`, `tests/test_defect01_phenotype_extraction.py`, `tests/test_pipeline.py` |
+| Stage 107 valid no-match evidence rescue | `backend/evidence_rescue.py`, `backend/annotation.py`, `backend/report.py`, `tests/test_pipeline.py` |
+| Stage 108 cross-provider retrieval intelligence | `backend/retrieval_intelligence.py`, `backend/annotation.py`, `backend/report.py`, `tests/test_pipeline.py` |
+| Stage 109 exact ClinVar retrieval hardening | `backend/annotation.py`, `tests/test_pipeline.py` |
+| Stage 110 scoped CSpec applicability | `backend/annotation.py`, `backend/report.py`, `backend/variant_report.py`, `frontend/results.py`, `tests/test_pipeline.py` |
+| Stage 111 deterministic evidence readiness | `backend/evidence_readiness.py`, `backend/conditional_enrichment.py`, `backend/pipeline.py`, `backend/database.py`, `backend/variant_interpretation.py`, `tests/test_pipeline.py` |
+| Stage 112 secondary classification recovery | `backend/classification_evidence.py`, `backend/conflict_auditor.py`, `backend/report_data_projection.py`, `backend/variant_report.py`, `frontend/report_preview.py`, `tests/test_classification_evidence.py` |
+| Stage 113 classified interpretation retry | `backend/variant_interpretation.py`, `backend/pipeline.py`, `frontend/evidence_review.py`, `tests/test_defect08_interpretation_recovery.py` |
+| Stage 114 reviewer source-status semantics | `frontend/source_status.py`, `frontend/evidence_review.py`, `frontend/report_preview.py`, `frontend/results.py`, `frontend/warning_semantics.py`, `tests/test_defect09_reviewer_source_status.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1854,10 +1963,10 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-105 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-114 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stage 106, professor feedback, and final visual sign-off remain pending.
+   Stage 115, professor feedback, and final visual sign-off remain pending.
 2. The system assumes that variant filtering and candidate selection happened before
    upload; it must not be presented as a genome-wide prioritization engine.
 3. External APIs can change, throttle, or become unavailable. Live smoke tests should
@@ -1987,5 +2096,9 @@ output. Stage 104 then added the exact ready-report count and validated that pri
 status cards and consequence notices answer the reviewer questions without opening
 technical details. Stage 105 then added the deterministic offline acceptance suite,
 verifying 7-variant cardinality, preservation of input order, same-gene separation,
-phenotype non-concordance handling, and provider degradation scenarios. Stage 106
-is the final visual sign-off gate.
+phenotype non-concordance handling, and provider degradation scenarios. Stages 106-114
+then resolved the nine post-acceptance defects: multi-concept Persian phenotype
+extraction, no-match rescue, identifier-aware retrieval, exact ClinVar matching,
+scope-correct CSpec context, deterministic evidence readiness, source-attributed
+classification recovery, persisted-evidence interpretation retry, and reviewer-safe
+source-status wording. Stage 115 is the final visual sign-off gate.
