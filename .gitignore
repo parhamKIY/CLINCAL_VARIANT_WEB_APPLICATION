@@ -24,6 +24,7 @@ data/cache/*
 !/docs/PROVIDER_RESILIENCE_RUNBOOK.md
 !/docs/report_style_spec.yaml
 !/docs/POST_ACCEPTANCE_FIX_ROADMAP_COMPLETE.md
+!/docs/POST_STAGE_114_SYSTEM_HARDENING_ROADMAP.md
 !/docs/acceptance_failures_v1.md
 !/docs/professor_report_template_spec.md
 !/docs/stage_80_progress.md

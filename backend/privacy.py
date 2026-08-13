@@ -15,6 +15,7 @@ PUBLIC_VARIANT_FIELDS = (
     "alt",
     "qual",
     "filter",
+    "call_quality",
 )
 PROHIBITED_CLINICAL_FIELD_NAMES = frozenset(
     {

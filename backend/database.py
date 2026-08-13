@@ -20,6 +20,11 @@ from backend.report import (
     EvidenceObjectError,
     sanitize_evidence_object,
 )
+from backend.call_quality import (
+    CallQualityError,
+    CallQualityRecord,
+    validate_call_quality_record,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -51,6 +56,9 @@ _CANDIDATE_REQUIRED_FIELDS = frozenset(
 _STORED_CANDIDATE_FIELDS = frozenset(
     {"chrom", "pos", "ref", "alt", "qual", "filter"}
 )
+_STORED_CANDIDATE_FIELDS_WITH_CALL_QUALITY = (
+    _STORED_CANDIDATE_FIELDS | {"call_quality"}
+)
 _CANDIDATE_ALLOWED_FIELDS = frozenset(
     {
         "chrom",
@@ -60,6 +68,7 @@ _CANDIDATE_ALLOWED_FIELDS = frozenset(
         "alt",
         "qual",
         "filter",
+        "call_quality",
         "genotype",
     }
 )
@@ -480,6 +489,7 @@ class StoredCandidateVariant(TypedDict):
     alt: str
     qual: float | None
     filter: str | None
+    call_quality: CallQualityRecord | None
 
 
 class StoredAnalysisRecord(AnalysisRecord):
@@ -1066,7 +1076,7 @@ def _sanitize_candidate(
             maximum=500,
         )
 
-    return {
+    candidate: StoredCandidateVariant = {
         "chrom": _candidate_text(
             value["chrom"],
             path=f"{path}.chrom",
@@ -1086,6 +1096,16 @@ def _sanitize_candidate(
         "qual": None if quality is None else float(quality),
         "filter": normalized_filter,
     }
+    if "call_quality" in value:
+        try:
+            candidate["call_quality"] = validate_call_quality_record(
+                value["call_quality"]
+            )
+        except CallQualityError as exc:
+            raise DatabaseValidationError(
+                f"{path}.call_quality is invalid."
+            ) from exc
+    return candidate
 
 
 def _require_analysis(
@@ -2491,7 +2511,10 @@ def _restore_candidates(
             raw_candidate = json.loads(row["variant_json"])
             if (
                 not isinstance(raw_candidate, dict)
-                or set(raw_candidate) != _STORED_CANDIDATE_FIELDS
+                or set(raw_candidate) not in {
+                    _STORED_CANDIDATE_FIELDS,
+                    _STORED_CANDIDATE_FIELDS_WITH_CALL_QUALITY,
+                }
             ):
                 raise DatabaseValidationError(
                     "Stored candidate fields are invalid."
@@ -2508,7 +2531,10 @@ def _restore_candidates(
             raise DatabaseReadError(
                 "A stored candidate variant is invalid."
             ) from exc
-        if clean_candidate != raw_candidate:
+        expected_candidate = dict(clean_candidate)
+        if "call_quality" not in raw_candidate:
+            expected_candidate.pop("call_quality", None)
+        if expected_candidate != raw_candidate:
             raise DatabaseReadError(
                 "A stored candidate variant is invalid."
             )

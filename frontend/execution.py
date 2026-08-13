@@ -37,6 +37,8 @@ from backend.pipeline import (
     validate_analysis_context,
 )
 from backend.excel_processing import parse_excel_variants
+from backend.call_quality import build_call_quality_records
+from backend.variant_integrity import index_input_variants
 from backend.vcf_processing import (
     VCFProcessingError,
     process_vcf,
@@ -99,6 +101,8 @@ class AnalysisRecoveryRequest(TypedDict):
     input_type: str
     phenotype_extraction_model: str | None
     phenotype_extraction_provenance: dict[str, object] | None
+    call_quality_acknowledgements: dict[int, object]
+    call_quality_overrides: dict[int, object]
     analysis_id: str | None
     created_at: float
 
@@ -393,6 +397,10 @@ def _persist_recovery_request(
         phenotype_extraction_provenance=context[
             "phenotype_extraction_provenance"
         ],
+        call_quality_acknowledgements=request[
+            "call_quality_acknowledgements"
+        ],
+        call_quality_overrides=request["call_quality_overrides"],
         analysis_id=request["analysis_id"],
         created_at=request["created_at"],
     )
@@ -462,6 +470,8 @@ def _load_recovery_request(
     phenotype_provenance = value.get(
         "phenotype_extraction_provenance"
     )
+    raw_acknowledgements = value.get("call_quality_acknowledgements")
+    raw_overrides = value.get("call_quality_overrides")
     analysis_id = value.get("analysis_id")
     if (
         not isinstance(created_at, (int, float))
@@ -481,6 +491,20 @@ def _load_recovery_request(
         or (
             phenotype_provenance is not None
             and not isinstance(phenotype_provenance, dict)
+        )
+        or not isinstance(raw_acknowledgements, dict)
+        or not isinstance(raw_overrides, dict)
+        or any(
+            not isinstance(index, str)
+            or not index.isdecimal()
+            or not isinstance(timestamp, str)
+            for index, timestamp in raw_acknowledgements.items()
+        )
+        or any(
+            not isinstance(index, str)
+            or not index.isdecimal()
+            or not isinstance(override, dict)
+            for index, override in raw_overrides.items()
         )
         or (
             analysis_id is not None
@@ -517,6 +541,14 @@ def _load_recovery_request(
         phenotype_extraction_provenance=context[
             "phenotype_extraction_provenance"
         ],
+        call_quality_acknowledgements={
+            int(index): timestamp
+            for index, timestamp in raw_acknowledgements.items()
+        },
+        call_quality_overrides={
+            int(index): override
+            for index, override in raw_overrides.items()
+        },
         analysis_id=analysis_id,
         created_at=float(created_at),
     )
@@ -939,6 +971,8 @@ def prepare_analysis_recovery_request(
     input_type: str | None = None,
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
+    call_quality_acknowledgements: Mapping[int, object] | None = None,
+    call_quality_overrides: Mapping[int, object] | None = None,
 ) -> AnalysisRecoveryRequest:
     """Normalize input into a restart-safe analysis-phase checkpoint."""
 
@@ -968,6 +1002,10 @@ def prepare_analysis_recovery_request(
                         if phenotype_extraction_provenance is not None
                         else None
                     ),
+                    call_quality_acknowledgements=dict(
+                        call_quality_acknowledgements or {}
+                    ),
+                    call_quality_overrides=dict(call_quality_overrides or {}),
                     analysis_id=None,
                     created_at=time(),
                 )
@@ -1005,9 +1043,38 @@ def prepare_analysis_recovery_request(
             if phenotype_extraction_provenance is not None
             else None
         ),
+        call_quality_acknowledgements=dict(
+            call_quality_acknowledgements or {}
+        ),
+        call_quality_overrides=dict(call_quality_overrides or {}),
         analysis_id=None,
         created_at=time(),
     )
+
+
+def preview_call_quality(
+    *,
+    uploaded_vcf: UploadedVCF | None,
+    manual_variants: Sequence[Mapping[str, object]] | None,
+) -> list[dict[str, object]]:
+    """Return bounded per-allele FILTER state for the submission UI."""
+
+    request = prepare_analysis_recovery_request(
+        uploaded_vcf=uploaded_vcf,
+        manual_variants=manual_variants,
+        phenotypes=[],
+        llm_model=None,
+    )
+    indexed = index_input_variants(request["manual_variants"])
+    records = build_call_quality_records(indexed)
+    return [
+        {
+            "input_index": index,
+            "filter": variant.get("filter"),
+            "status": record["status"],
+        }
+        for index, (variant, record) in enumerate(zip(indexed, records))
+    ]
 
 
 def execute_analysis(
@@ -1019,6 +1086,8 @@ def execute_analysis(
     input_type: str | None = None,
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
+    call_quality_acknowledgements: Mapping[int, object] | None = None,
+    call_quality_overrides: Mapping[int, object] | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
@@ -1027,6 +1096,13 @@ def execute_analysis(
         raise FrontendExecutionError(
             "Choose either a variant-file upload or manual table rows."
         )
+    call_quality_arguments: dict[str, Mapping[int, object]] = {}
+    if call_quality_acknowledgements:
+        call_quality_arguments["call_quality_acknowledgements"] = (
+            call_quality_acknowledgements
+        )
+    if call_quality_overrides:
+        call_quality_arguments["call_quality_overrides"] = call_quality_overrides
 
     if uploaded_vcf is None:
         return run_analysis(
@@ -1039,6 +1115,7 @@ def execute_analysis(
             phenotype_extraction_provenance=(
                 phenotype_extraction_provenance
             ),
+            **call_quality_arguments,
             progress_callback=progress_callback,
         )
 
@@ -1061,6 +1138,7 @@ def execute_analysis(
             phenotype_extraction_provenance=(
                 phenotype_extraction_provenance
             ),
+            **call_quality_arguments,
             progress_callback=progress_callback,
         )
     _validate_upload_content(payload, suffix)
@@ -1097,6 +1175,7 @@ def execute_analysis(
                 phenotype_extraction_provenance=(
                     phenotype_extraction_provenance
                 ),
+                **call_quality_arguments,
                 progress_callback=progress_callback,
             )
     except FrontendExecutionError:
@@ -1162,6 +1241,10 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
             phenotype_extraction_provenance=request[
                 "phenotype_extraction_provenance"
             ],
+            call_quality_acknowledgements=request[
+                "call_quality_acknowledgements"
+            ],
+            call_quality_overrides=request["call_quality_overrides"],
             progress_callback=progress_callback,
         )
 
@@ -1185,6 +1268,7 @@ __all__ = [
     "execute_analysis",
     "get_registered_analysis_job",
     "prepare_analysis_recovery_request",
+    "preview_call_quality",
     "recover_analysis_job",
     "register_analysis_job",
     "release_registered_analysis_job",

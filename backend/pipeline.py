@@ -17,6 +17,11 @@ from backend.annotation import (
     AnnotationProgressStatus,
     annotate_variants,
 )
+from backend.call_quality import (
+    CallQualityError,
+    build_call_quality_records,
+    validate_call_quality_record,
+)
 from backend.conditional_enrichment import enrich_conditionally
 from backend.database import (
     DatabaseError,
@@ -885,6 +890,20 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "pipeline.variant_count must match the complete variant list."
         )
+    for index, variant in enumerate(value["variants"]):
+        if not isinstance(variant, dict):
+            raise PipelineResultError("pipeline.variants must contain dictionaries.")
+        call_quality = variant.get("call_quality")
+        if call_quality is None:
+            continue
+        try:
+            validated_call_quality = validate_call_quality_record(call_quality)
+        except CallQualityError as exc:
+            raise PipelineResultError("pipeline variant call quality is invalid.") from exc
+        if variant.get("input_index") != index or call_quality != validated_call_quality:
+            raise PipelineResultError(
+                "pipeline variant call quality does not match input order."
+            )
     integrity_records = value["variant_integrity_records"]
     if integrity_records:
         for field in (
@@ -1701,6 +1720,8 @@ def _process_filtered_variants(
     request: AnalysisInput,
     result: PipelineResult,
     *,
+    call_quality_acknowledgements: Mapping[int, object] | None = None,
+    call_quality_overrides: Mapping[int, object] | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Load every variant from the pre-filtered input table."""
@@ -1744,9 +1765,33 @@ def _process_filtered_variants(
         raise PipelineError(
             "Accepted input variant order could not be established."
         ) from exc
+    try:
+        call_quality_records = build_call_quality_records(
+            indexed_variants,
+            acknowledgements=call_quality_acknowledgements,
+            overrides=call_quality_overrides,
+            require_ready=True,
+        )
+    except CallQualityError as exc:
+        result["variants"] = [
+            minimize_variant(
+                {
+                    **variant,
+                    "call_quality": record,
+                }
+            )
+            for variant, record in zip(
+                indexed_variants,
+                build_call_quality_records(indexed_variants),
+            )
+        ]
+        result["variant_count"] = len(result["variants"])
+        raise PipelineError(
+            "Call quality must be acknowledged or overridden before analysis."
+        ) from exc
     result["variants"] = [
-        minimize_variant(variant)
-        for variant in indexed_variants
+        minimize_variant({**variant, "call_quality": record})
+        for variant, record in zip(indexed_variants, call_quality_records)
     ]
     result["variant_count"] = len(result["variants"])
     try:
@@ -2592,6 +2637,8 @@ def _run_analysis_unpersisted(
     phenotypes: list[str] | tuple[str, ...],
     manual_variants: Sequence[Mapping[str, object]] | None = None,
     *,
+    call_quality_acknowledgements: Mapping[int, object] | None = None,
+    call_quality_overrides: Mapping[int, object] | None = None,
     annotation_batch_size: int | None = None,
     annotation_max_retries: int | None = None,
     annotation_session: requests.Session | None = None,
@@ -2675,6 +2722,8 @@ def _run_analysis_unpersisted(
         _process_filtered_variants(
             request,
             result,
+            call_quality_acknowledgements=call_quality_acknowledgements,
+            call_quality_overrides=call_quality_overrides,
             progress_callback=progress_callback,
         )
     except VCFProcessingError as exc:
@@ -2825,6 +2874,8 @@ def run_analysis(
     phenotypes: list[str] | tuple[str, ...],
     manual_variants: Sequence[Mapping[str, object]] | None = None,
     *,
+    call_quality_acknowledgements: Mapping[int, object] | None = None,
+    call_quality_overrides: Mapping[int, object] | None = None,
     annotation_batch_size: int | None = None,
     annotation_max_retries: int | None = None,
     annotation_session: requests.Session | None = None,
@@ -2871,6 +2922,8 @@ def run_analysis(
             vcf_path=vcf_path,
             phenotypes=phenotypes,
             manual_variants=manual_variants,
+            call_quality_acknowledgements=call_quality_acknowledgements,
+            call_quality_overrides=call_quality_overrides,
             annotation_batch_size=annotation_batch_size,
             annotation_max_retries=annotation_max_retries,
             annotation_session=annotation_session,
