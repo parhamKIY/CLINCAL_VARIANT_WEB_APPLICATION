@@ -51,10 +51,12 @@ from frontend.execution import (
     UploadedVCF,
     execute_analysis,
     get_registered_analysis_job,
+    load_last_session_analysis_id,
     prepare_analysis_recovery_request,
     recover_analysis_job,
     register_analysis_job,
     release_registered_analysis_job,
+    save_last_session_analysis_id,
 )
 from frontend.evidence_review import (
     clear_evidence_review_state,
@@ -101,6 +103,7 @@ LLM_PROVIDER_MODELS_KEY = "llm_provider_models"
 LLM_PROVIDER_MODELS_ERROR_KEY = "llm_provider_models_error"
 ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
 ANALYSIS_RESULT_QUERY_PARAM = "analysis"
+LAST_SESSION_OFFER_KEY = "last_session_offer_id"
 PIPELINE_STAGE_LABELS = {
     "input": "Input validation",
     "vcf_processing": "Variant input processing",
@@ -309,8 +312,79 @@ def _initialize_session_state() -> None:
     _restore_refresh_state()
 
 
+def _render_restore_last_session() -> None:
+    """Show a one-time banner offering to reload the previous analysis.
+
+    The banner is only shown when:
+    - No analysis is currently active or already loaded in session state.
+    - The ``?analysis=`` URL param is absent (bare root URL navigation).
+    - A valid last-session analysis ID exists on disk.
+
+    The offer is stored in ``session_state`` so it is shown only once per
+    browser session, regardless of how many Streamlit reruns occur.
+    """
+
+    if (
+        _analysis_job() is not None
+        or st.session_state.get(PIPELINE_RESULT_KEY) is not None
+    ):
+        return
+    if _query_param_value(ANALYSIS_RESULT_QUERY_PARAM) is not None:
+        return
+    if _query_param_value(ANALYSIS_JOB_QUERY_PARAM) is not None:
+        return
+
+    offer_id = st.session_state.get(LAST_SESSION_OFFER_KEY)
+    last_id = load_last_session_analysis_id()
+    if last_id is None:
+        return
+    if offer_id == last_id:
+        return
+
+    st.session_state[LAST_SESSION_OFFER_KEY] = last_id
+
+    with st.container(border=True):
+        col_text, col_button = st.columns([4, 1])
+        with col_text:
+            st.info(
+                ":material/history: **Your previous analysis is saved.** "
+                "Click **Restore** to reload it, or simply run a new analysis "
+                "to start fresh.",
+                icon=None,
+            )
+        with col_button:
+            if st.button(
+                "Restore",
+                key="restore_last_session",
+                icon=":material/restore:",
+                type="primary",
+                use_container_width=True,
+            ):
+                st.query_params[ANALYSIS_RESULT_QUERY_PARAM] = last_id
+                st.rerun()
+
+
 def _clear_analysis_result() -> None:
-    """Discard an earlier result when analysis inputs change."""
+    """Mark analysis inputs as changed without discarding the loaded result URL.
+
+    This is a lightweight signal used by widget on_change callbacks. It clears
+    in-memory display artifacts (selected evidence object, evidence review draft
+    state) but deliberately does NOT remove the ``?analysis=`` URL query
+    parameter. The loaded analysis therefore survives until the user explicitly
+    submits a new one via the Analyze variants button.
+    """
+
+    st.session_state.pop("selected_evidence_object", None)
+    clear_evidence_review_state()
+
+
+def _discard_analysis_result() -> None:
+    """Fully discard a completed analysis result and clear the URL param.
+
+    Call this only when the user deliberately starts a new analysis (clicking
+    Analyze variants or Cancel). Do NOT call it from widget on_change
+    callbacks that merely change input values.
+    """
 
     st.session_state[PIPELINE_RESULT_KEY] = None
     _clear_query_param(ANALYSIS_RESULT_QUERY_PARAM)
@@ -329,9 +403,8 @@ def _manual_widget_key(field: str, row_index: int) -> str:
 
 
 def _manual_chromosome_changed(row_index: int) -> None:
-    """Clear stale state when a manual chromosome selection is removed."""
+    """Clear stale position state when a manual chromosome selection changes."""
 
-    _clear_analysis_result()
     chromosome_key = _manual_widget_key("chrom", row_index)
     if st.session_state.get(chromosome_key) is None:
         st.session_state.pop(
@@ -353,7 +426,7 @@ def _cancel_active_analysis() -> None:
     job = _analysis_job()
     if job is not None:
         job.request_cancel()
-    _clear_analysis_result()
+    _discard_analysis_result()
 
 
 def _load_styles() -> None:
@@ -438,7 +511,6 @@ def _render_hpo_update_control() -> None:
         return
 
     st.session_state[HPO_RESULTS_KEY] = []
-    _clear_analysis_result()
     st.success(
         "HPO data updated to "
         f"{result['current_version']} "
@@ -754,10 +826,14 @@ def _render_hpo_picker(phenotype_model: str) -> None:
 
 
 def _task_models_changed() -> None:
-    """Invalidate stale work when either task-specific model changes."""
+    """Clear unaccepted HPO candidate draft when either task-specific model changes.
+
+    Changing the phenotype or interpretation model does NOT discard a
+    completed analysis result — the existing report remains visible until
+    the user submits a new analysis.
+    """
 
     _clear_hpo_candidate_draft()
-    _clear_analysis_result()
 
 
 def _render_task_model_selectors() -> tuple[str, str]:
@@ -1165,16 +1241,13 @@ def _prepare_input(
             st.error(
                 "Upload a .vcf, .vcf.gz, or .xlsx file before analysis."
             )
-            _clear_analysis_result()
             return None
         filename = str(getattr(uploaded_vcf, "name", ""))
         if not _is_supported_upload_filename(filename):
             st.error(
                 "The uploaded file must end in .vcf, .vcf.gz, or .xlsx."
             )
-            _clear_analysis_result()
             return None
-        _clear_analysis_result()
         return {
             "uploaded_vcf": cast(UploadedVCF, uploaded_vcf),
             "manual_variants": None,
@@ -1199,10 +1272,8 @@ def _prepare_input(
         normalized_variants = _normalize_manual_table(manual_table)
     except ValueError as exc:
         st.error(str(exc))
-        _clear_analysis_result()
         return None
 
-    _clear_analysis_result()
     return {
         "uploaded_vcf": None,
         "manual_variants": normalized_variants,
@@ -1485,7 +1556,7 @@ def _start_submission(
             progress_callback=progress_callback,
         )
 
-    _clear_analysis_result()
+    _discard_analysis_result()
     st.session_state[ANALYSIS_NOTICE_KEY] = None
     job = AnalysisJob(runner)
     try:
@@ -1561,6 +1632,7 @@ def _finish_analysis_job(job: AnalysisJob) -> None:
         if isinstance(analysis_id, str):
             durable_result = True
             st.query_params[ANALYSIS_RESULT_QUERY_PARAM] = analysis_id
+            save_last_session_analysis_id(analysis_id)
     if view.state != "completed" or durable_result:
         release_registered_analysis_job(token)
         _clear_query_param(ANALYSIS_JOB_QUERY_PARAM)
@@ -1660,6 +1732,7 @@ def render_app() -> None:
     submission = _render_variant_input(phenotype_model, variant_model)
     st.divider()
 
+    _render_restore_last_session()
     _render_analysis_notice()
     pipeline_result: PipelineResult | None = None
     if submission is not None:
