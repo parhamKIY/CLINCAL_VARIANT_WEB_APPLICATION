@@ -1,10 +1,10 @@
 # Post-Stage 114 System Hardening Roadmap
 
 **Project:** Clinical Variant Interpretation  
-**Roadmap status:** Stages 116-123 implemented and verified; Stage 115 remains deferred
+**Roadmap status:** Stages 115-123 implemented and verified
 **Roadmap date:** 2026-08-14
 **Implemented baseline:** Stages 0-114 and Stages 116-123
-**Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off  
+**Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off, completed
 **Baseline commit:** `6126a72 fix(classification): separate source evidence from system conclusion`  
 **Baseline verification:** `1229 passed, 6 skipped`; Stage 60 gate `875 passed, 4 skipped`, `84.97%` coverage
 
@@ -527,7 +527,7 @@ required visual sign-off.
 
 ## 12. Stage 115 — Final Word/LibreOffice visual sign-off
 
-**Status:** Pending and deferred  
+**Status:** Implemented and verified
 **Priority:** Final release gate  
 **Dependency:** Stages 116-123 complete
 
@@ -562,6 +562,25 @@ overflow, unintended blank pages, or misleading clinical wording, and external v
 sign-off is recorded truthfully.
 
 **Suggested commit:** `docs: record final report visual sign-off`
+
+### Implemented verification
+
+On 2026-08-14, Microsoft Word `16.0` exported each of the six deterministic Stage
+101 reports to PDF. Poppler rasterized the PDFs at 150 DPI; all 25 pages were
+inspected. The page counts were 4, 3, 6, 5, 3, and 4 for fully populated, sparse
+evidence, long interpretation, many references, no phenotype match, and complex
+indel respectively. They remained within the registered ranges, and the raster
+analyzer found no blank page or page-edge overflow.
+
+The Word visual review confirmed classification wording, call-quality disclosure,
+source/conflict/limitations text, long-allele wrapping, tables, references, and
+page breaks without clipping, overlap, or missing glyphs. The retained layout has
+narrow wrapping table headers and occasional short continuation pages before the
+forced third section; these intentional professor-template behaviors were accepted
+because content remains visible and untruncated. `docs/stage_83_fidelity_gate.md`
+contains the renderer, scenario, reviewer-boundary, and deviation record. The
+focused visual suite passed `19 passed, 1 skipped`; the complete offline suite passed
+`1276 passed, 6 skipped` on 2026-08-14.
 
 ## 13. Deferred production-scale concerns
 

@@ -1795,6 +1795,20 @@ scope suite passed `33 passed, 1 skipped`; the complete offline suite passed
 `1275 passed, 6 skipped` on 2026-08-14. Stage 115 remains the next required
 Word/LibreOffice visual sign-off.
 
+### Stage 115 final Word visual sign-off
+
+All six deterministic Stage 101 report scenarios were exported with Microsoft Word
+`16.0`, rasterized at 150 DPI with Poppler, and inspected across 25 pages on
+2026-08-14. Every page count was within its registered scenario range; no clipping,
+overlap, missing glyph, unintended blank page, or page-edge overflow was observed.
+The visual review confirmed source-only classification wording, quality disclosure,
+long-allele wrapping, table flow, references, and controlled page breaks. Narrow
+table-header wrapping and short continuation pages before the forced third section
+remain accepted template behaviors because the content remains visible and
+untruncated. The documented reviewer boundary is document QA only, not clinical or
+laboratory sign-out. The focused visual suite passed `19 passed, 1 skipped`; the
+complete offline suite passed `1276 passed, 6 skipped` on 2026-08-14.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query

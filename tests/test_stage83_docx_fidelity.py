@@ -176,7 +176,9 @@ def test_stage83_contract_records_visual_gate_truthfully() -> None:
         "reference formatting",
         "overall density",
         "clinical-document feel",
-        "manual visual acceptance remains pending",
-        "Stage 84",
+        "Stage 115 Microsoft Word visual sign-off",
+        "Microsoft Word 16.0",
+        "25 pages",
+        "no blank pages or page-edge overflow",
     }
     assert all(value in contract for value in required)
