@@ -12,7 +12,7 @@ One accepted allele produces one independent report. Two variants in the same ge
 
 1. NGS Result Report
 2. Clinical Features
-3. Conclusive Result(s)
+3. Variant and source classification context
 4. Brief Interpretation(s)
 5. Main Finding(s) in Detail
 6. Variant interpretation

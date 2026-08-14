@@ -2,78 +2,78 @@
   "schema_version": "1.0",
   "scenarios": {
     "fully_populated": {
-      "docx_sha256": "31591a58b47220a10f47790dbdd46d50506249d40e6c1695557f161553bc4621",
+      "docx_sha256": "298ca21093d5e39298661f2394843667d8c21e08e35be531504b5592bcbab375",
       "styles_sha256": "412c58a7d6280157b26426b19ee93b02f593e32475314b776a635aa130bb05e6",
-      "layout_signature": "80ecc95f16856c1992ed9386c0d73c93d6562c2007cd96430651218404bcd0f3",
+      "layout_signature": "f4f6619d59008ccb0962cd8e58773d64522f8b996f4ab3d136632d059f963678",
       "hyperlink_count": 20,
       "tables": [
         {"caption": "Report metadata without patient identifiers", "rows": 3, "columns": 2},
-        {"caption": "Conclusive result for one accepted allele", "rows": 1, "columns": 1},
+        {"caption": "Variant and source classification context for one accepted allele", "rows": 1, "columns": 1},
         {"caption": "Main Findings", "rows": 3, "columns": 7},
         {"caption": "Main findings evidence continuation", "rows": 2, "columns": 6},
         {"caption": "Data Sources", "rows": 9, "columns": 6}
       ]
     },
     "sparse_evidence": {
-      "docx_sha256": "ea1e7f64d479767e810cd57df41b36aaf6268c8e94e1dc660303a46f9b08d32f",
+      "docx_sha256": "e4c63a3a1fd5411467433473897243e12f08d8fd258771fbf1c5fc4ac8b415c0",
       "styles_sha256": "412c58a7d6280157b26426b19ee93b02f593e32475314b776a635aa130bb05e6",
-      "layout_signature": "73225c52dcce898dd5f33712f905cfb19e3ee7470c9ae9895124230c89312beb",
+      "layout_signature": "52dbd81fa874ec82cd8fab5bf9c81cfc70d7c7620a0ad861deecb92f5373107c",
       "hyperlink_count": 0,
       "tables": [
         {"caption": "Report metadata without patient identifiers", "rows": 3, "columns": 2},
-        {"caption": "Conclusive result for one accepted allele", "rows": 1, "columns": 1},
+        {"caption": "Variant and source classification context for one accepted allele", "rows": 1, "columns": 1},
         {"caption": "Main Findings", "rows": 3, "columns": 7},
         {"caption": "Main findings evidence continuation", "rows": 2, "columns": 6},
         {"caption": "Data Sources", "rows": 2, "columns": 6}
       ]
     },
     "long_interpretation": {
-      "docx_sha256": "2a0920792a6b92f7e6a9dbcd718f7b1c02c46efa44a599e794e472c4a4da4612",
+      "docx_sha256": "94da548a0eea172d63d3e4a98180e6388a4c867a192b5818654a86d79fa680d5",
       "styles_sha256": "412c58a7d6280157b26426b19ee93b02f593e32475314b776a635aa130bb05e6",
-      "layout_signature": "80ecc95f16856c1992ed9386c0d73c93d6562c2007cd96430651218404bcd0f3",
+      "layout_signature": "f4f6619d59008ccb0962cd8e58773d64522f8b996f4ab3d136632d059f963678",
       "hyperlink_count": 20,
       "tables": [
         {"caption": "Report metadata without patient identifiers", "rows": 3, "columns": 2},
-        {"caption": "Conclusive result for one accepted allele", "rows": 1, "columns": 1},
+        {"caption": "Variant and source classification context for one accepted allele", "rows": 1, "columns": 1},
         {"caption": "Main Findings", "rows": 3, "columns": 7},
         {"caption": "Main findings evidence continuation", "rows": 2, "columns": 6},
         {"caption": "Data Sources", "rows": 9, "columns": 6}
       ]
     },
     "many_references": {
-      "docx_sha256": "959273bd7c371d565c624359458ede567b4d9741b111874fafc7ac7a09d2306d",
+      "docx_sha256": "f19eadaa9d3e26154d66300eb5e58db80739694880f552283c6e61ed9c7408b9",
       "styles_sha256": "412c58a7d6280157b26426b19ee93b02f593e32475314b776a635aa130bb05e6",
-      "layout_signature": "78ed7d02b4ecae54bfdd2776419f5af050cc12e490578b5488433adc6018e2e4",
+      "layout_signature": "6566c603b38827a9fc8b3006bd7be0e133d19b3159f1bbabcfc5dd01e414ecd3",
       "hyperlink_count": 54,
       "tables": [
         {"caption": "Report metadata without patient identifiers", "rows": 3, "columns": 2},
-        {"caption": "Conclusive result for one accepted allele", "rows": 1, "columns": 1},
+        {"caption": "Variant and source classification context for one accepted allele", "rows": 1, "columns": 1},
         {"caption": "Main Findings", "rows": 3, "columns": 7},
         {"caption": "Main findings evidence continuation", "rows": 2, "columns": 6},
         {"caption": "Data Sources", "rows": 9, "columns": 6}
       ]
     },
     "no_phenotype_match": {
-      "docx_sha256": "29df895851382697e21822a6631eed06cffb3d3846bc72eced20e2bf34fe31df",
+      "docx_sha256": "2717336870c9211e6d1b7e5fc7fce1301e8cd311517557af78e2c8a7a8ae1d2f",
       "styles_sha256": "412c58a7d6280157b26426b19ee93b02f593e32475314b776a635aa130bb05e6",
-      "layout_signature": "80ecc95f16856c1992ed9386c0d73c93d6562c2007cd96430651218404bcd0f3",
+      "layout_signature": "f4f6619d59008ccb0962cd8e58773d64522f8b996f4ab3d136632d059f963678",
       "hyperlink_count": 20,
       "tables": [
         {"caption": "Report metadata without patient identifiers", "rows": 3, "columns": 2},
-        {"caption": "Conclusive result for one accepted allele", "rows": 1, "columns": 1},
+        {"caption": "Variant and source classification context for one accepted allele", "rows": 1, "columns": 1},
         {"caption": "Main Findings", "rows": 3, "columns": 7},
         {"caption": "Main findings evidence continuation", "rows": 2, "columns": 6},
         {"caption": "Data Sources", "rows": 9, "columns": 6}
       ]
     },
     "complex_indel": {
-      "docx_sha256": "484f9ca75f839d72fc56f422239e71540174ebade3c05d76847cdae85272ae7f",
+      "docx_sha256": "4cf562e4b661bdcab8e4274391bc3fe909ca6b57e54236afc93287d41084c034",
       "styles_sha256": "412c58a7d6280157b26426b19ee93b02f593e32475314b776a635aa130bb05e6",
-      "layout_signature": "80ecc95f16856c1992ed9386c0d73c93d6562c2007cd96430651218404bcd0f3",
+      "layout_signature": "f4f6619d59008ccb0962cd8e58773d64522f8b996f4ab3d136632d059f963678",
       "hyperlink_count": 20,
       "tables": [
         {"caption": "Report metadata without patient identifiers", "rows": 3, "columns": 2},
-        {"caption": "Conclusive result for one accepted allele", "rows": 1, "columns": 1},
+        {"caption": "Variant and source classification context for one accepted allele", "rows": 1, "columns": 1},
         {"caption": "Main Findings", "rows": 3, "columns": 7},
         {"caption": "Main findings evidence continuation", "rows": 2, "columns": 6},
         {"caption": "Data Sources", "rows": 9, "columns": 6}

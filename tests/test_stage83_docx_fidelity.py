@@ -101,7 +101,7 @@ def test_generated_document_has_professor_family_structure_and_density() -> None
     expected_headings = [
         "NGS Result Report",
         "Clinical Features:",
-        "Conclusive Result(s):",
+        "Variant and source classification context:",
         "Brief Interpretation(s):",
         "Main Finding(s) in Detail:",
         "Variant interpretation:",

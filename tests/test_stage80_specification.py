@@ -33,7 +33,7 @@ def test_specification_covers_required_anatomy_and_content_rules() -> None:
     specification = SPECIFICATION.read_text(encoding="utf-8")
     required_phrases = {
         "Clinical Features",
-        "Conclusive Result(s)",
+        "Variant and source classification context",
         "Brief Interpretation(s)",
         "Main Finding(s) in Detail",
         "Variant interpretation",

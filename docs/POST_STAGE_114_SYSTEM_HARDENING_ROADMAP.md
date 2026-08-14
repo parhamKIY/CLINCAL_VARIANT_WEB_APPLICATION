@@ -1,9 +1,9 @@
 # Post-Stage 114 System Hardening Roadmap
 
 **Project:** Clinical Variant Interpretation  
-**Roadmap status:** Stages 116-122 implemented and verified; Stage 123 remains planned
+**Roadmap status:** Stages 116-123 implemented and verified; Stage 115 remains deferred
 **Roadmap date:** 2026-08-14
-**Implemented baseline:** Stages 0-114 and Stages 116-122
+**Implemented baseline:** Stages 0-114 and Stages 116-123
 **Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off  
 **Baseline commit:** `6126a72 fix(classification): separate source evidence from system conclusion`  
 **Baseline verification:** `1229 passed, 6 skipped`; Stage 60 gate `875 passed, 4 skipped`, `84.97%` coverage
@@ -440,7 +440,7 @@ scanning, vulnerability status, and the deterministic release suite.
 
 ## 11. Stage 123 — Classification-product scope decision
 
-**Status:** Planned decision gate  
+**Status:** Implemented and verified — evidence-synthesis scope retained
 **Priority:** Architectural  
 **Dependency:** Stage 122
 
@@ -506,6 +506,24 @@ adjudication.
 
 **Suggested commit for recommended decision:**
 `refactor(report): clarify evidence synthesis scope`
+
+### Implemented decision and verification
+
+The approved product boundary remains source-attributed evidence synthesis. The
+result heading is now `Variant and source classification context`; the HTML and
+DOCX surfaces retain `System classification: Not independently determined` and
+the source context separately. Confirmation now explicitly covers evidence review
+and report wording, while finalization is explicitly an audited report disposition,
+not a laboratory sign-out or independent ACMG/AMP adjudication. The final-report
+export carries the same scope notice.
+
+The Stage 83 binary golden and all six Stage 101 structural snapshots were
+regenerated only for the intentional heading and accessibility-caption change.
+`tests/test_stage123_evidence_synthesis_scope.py` covers the retained boundary;
+the focused report suite passed `33 passed, 1 skipped`, and the complete offline
+suite passed `1275 passed, 6 skipped` on 2026-08-14. A local Word/LibreOffice
+raster render is not available in this environment, so Stage 115 remains the
+required visual sign-off.
 
 ## 12. Stage 115 — Final Word/LibreOffice visual sign-off
 

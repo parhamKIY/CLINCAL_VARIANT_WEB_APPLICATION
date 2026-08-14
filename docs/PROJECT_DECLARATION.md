@@ -1782,6 +1782,19 @@ audit, the deterministic suite, and the Stage 60 acceptance gate. The resolved
 `GitPython` dependency is pinned to `3.1.58`, the patched version for the detected
 `3.1.57` advisories.
 
+### Stage 123 evidence-synthesis scope decision
+
+The approved product boundary remains educational/research evidence synthesis, not
+expert ACMG/AMP adjudication or laboratory sign-out. The result heading is now
+`Variant and source classification context`; ReportData, HTML, DOCX, final-report,
+and package paths continue to retain `System classification: Not independently
+determined` while presenting external classifications only as immutable,
+source-attributed evidence. Reviewer confirmation confirms evidence review and
+report wording, and finalization records an audited report disposition. The focused
+scope suite passed `33 passed, 1 skipped`; the complete offline suite passed
+`1275 passed, 6 skipped` on 2026-08-14. Stage 115 remains the next required
+Word/LibreOffice visual sign-off.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query

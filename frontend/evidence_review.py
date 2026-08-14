@@ -1298,7 +1298,8 @@ def _render_confirmation(
     st.caption(
         "Confirming builds an immutable reviewed evidence state for this "
         "variant. Interpretation was already generated during analysis; "
-        "confirmation does not call a model."
+        "confirmation does not call a model. It confirms evidence review and "
+        "report wording, not a pathogenicity classification or laboratory sign-out."
     )
     privacy_attested = st.checkbox(
         (
@@ -1395,7 +1396,8 @@ def _render_finalization_action(result: PipelineResult) -> None:
             f"{variant_count}. Finalization validates the persisted review "
             "state and does not make another LLM call. Final Report "
             f"selection: {included_count} of {variant_count}, in original "
-            "input order."
+            "input order. It records an audited report disposition, not a "
+            "laboratory sign-out or independent ACMG/AMP adjudication."
         )
         if not fully_confirmed:
             st.info(
@@ -1425,7 +1427,7 @@ def _render_finalization_action(result: PipelineResult) -> None:
             st.session_state["pipeline_result"] = result
             persisted = _persist_review_state(result)
             if persisted:
-                _set_notice("success", "Final review confirmed.")
+                _set_notice("success", "Audited report disposition recorded.")
             else:
                 _set_notice(
                     "warning",
@@ -1449,7 +1451,8 @@ def _render_finalization_action(result: PipelineResult) -> None:
                 )
             else:
                 st.success(
-                    "Final review is confirmed. No additional LLM call was made."
+                    "Audited report disposition is recorded. No additional LLM "
+                    "call was made; this is not a laboratory sign-out."
                 )
 
 

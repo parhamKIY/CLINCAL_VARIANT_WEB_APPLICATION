@@ -303,6 +303,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <h2>Method</h2>
 <p>Allele-level evidence synthesis for an already filtered variant. The application did not perform sequencing or genome-wide prioritization.</p>
 <div class="{quality_class}"><b>Call quality:</b> {_text(quality_text)}</div>
+<h2>Variant and source classification context</h2>
 <div class="cv-result">
   <div class="cv-result-allele">{_text(gene_hgvs)}</div>
   <div>{_text(allele)}</div>

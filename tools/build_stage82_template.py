@@ -280,7 +280,7 @@ def _result_block(document: Document) -> None:
     _set_fixed_table(
         table,
         [8860],
-        caption="Conclusive result for one accepted allele",
+        caption="Variant and source classification context for one accepted allele",
         indent=200,
     )
     _set_table_borders(table, color=RED, size=16)
@@ -423,7 +423,11 @@ def build_template(output: Path = OUTPUT) -> Path:
     _paragraph(document, "{{CLINICAL_FEATURES}}")
     _paragraph(document, "Method:", style="Major Heading")
     _paragraph(document, "{{METHOD_SCOPE}}")
-    _paragraph(document, "Conclusive Result(s):", style="Major Heading")
+    _paragraph(
+        document,
+        "Variant and source classification context:",
+        style="Major Heading",
+    )
     _result_block(document)
     _paragraph(document, "Brief Interpretation(s):", style="Major Heading")
     _paragraph(document, "{{BRIEF_INTERPRETATION}}")

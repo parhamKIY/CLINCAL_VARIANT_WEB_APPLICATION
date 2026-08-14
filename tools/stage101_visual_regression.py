@@ -37,7 +37,7 @@ EXPECTED_HEADINGS = [
     "NGS Result Report",
     "Clinical Features:",
     "Method:",
-    "Conclusive Result(s):",
+    "Variant and source classification context:",
     "Brief Interpretation(s):",
     "Main Finding(s) in Detail:",
     "Variant interpretation:",
@@ -51,7 +51,7 @@ REQUIRED_LABELS = frozenset(
     {
         "NGS Result Report",
         "Clinical Features:",
-        "Conclusive Result(s):",
+        "Variant and source classification context:",
         "Brief Interpretation(s):",
         "Main Finding(s) in Detail:",
         "Variant interpretation:",

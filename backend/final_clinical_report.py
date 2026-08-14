@@ -38,6 +38,11 @@ FINAL_CLINICAL_REPORT_DISCLAIMER = (
     "qualified healthcare professional. It does not establish an independent "
     "diagnosis and does not provide treatment or reproductive recommendations."
 )
+FINAL_CLINICAL_REPORT_SCOPE_NOTICE = (
+    "This reviewer-approved evidence-synthesis report records an audited report "
+    "disposition. It is not laboratory sign-out and does not independently "
+    "classify variant pathogenicity."
+)
 
 
 class FinalClinicalReportError(ValueError):
@@ -644,6 +649,8 @@ def render_final_clinical_report_markdown(value: object) -> str:
     lines = [
         "# Final Clinical Report",
         "",
+        FINAL_CLINICAL_REPORT_SCOPE_NOTICE,
+        "",
         "## Report metadata",
         "",
         f"- Report ID: {_md(report['report_id'])}",
@@ -823,6 +830,7 @@ def render_final_clinical_report_text(value: object) -> str:
 
 __all__ = [
     "FINAL_CLINICAL_REPORT_DISCLAIMER",
+    "FINAL_CLINICAL_REPORT_SCOPE_NOTICE",
     "FINAL_CLINICAL_REPORT_SCHEMA_VERSION",
     "FinalClinicalReport",
     "FinalClinicalReportError",
