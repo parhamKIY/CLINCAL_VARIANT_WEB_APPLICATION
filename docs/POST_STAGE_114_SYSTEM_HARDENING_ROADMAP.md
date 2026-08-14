@@ -1,9 +1,9 @@
 # Post-Stage 114 System Hardening Roadmap
 
 **Project:** Clinical Variant Interpretation  
-**Roadmap status:** Stages 116-121 implemented and verified; Stages 122-123 remain planned
+**Roadmap status:** Stages 116-122 implemented and verified; Stage 123 remains planned
 **Roadmap date:** 2026-08-14
-**Implemented baseline:** Stages 0-114 and Stages 116-121
+**Implemented baseline:** Stages 0-114 and Stages 116-122
 **Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off  
 **Baseline commit:** `6126a72 fix(classification): separate source evidence from system conclusion`  
 **Baseline verification:** `1229 passed, 6 skipped`; Stage 60 gate `875 passed, 4 skipped`, `84.97%` coverage
@@ -393,7 +393,7 @@ surface remains available on demand with unchanged state.
 
 ## 10. Stage 122 — Dependency-security release gate
 
-**Status:** Planned  
+**Status:** Implemented
 **Priority:** Medium  
 **Dependency:** Stage 121
 

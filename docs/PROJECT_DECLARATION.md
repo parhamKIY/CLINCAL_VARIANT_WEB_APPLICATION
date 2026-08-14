@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stages 116-121 implemented as recorded below
+**Implementation status:** Stages 0-114 and Stages 116-122 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 122 dependency-security release gate; Stage 115 final visual sign-off remains deferred
+**Next checkpoint:** Stage 123 classification-product scope decision; Stage 115 final visual sign-off remains deferred
 **Document date:** 2026-08-14
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -1769,6 +1769,18 @@ raw original evidence, edit history, and other technical report surfaces until t
 reviewer selects them. Dynamic expanders also avoid serializing hidden source JSON,
 fallback provenance, warnings, and plain-text report sources. Reviewer-owned draft,
 selection, and confirmation state remains in session state and is not cached.
+
+### Stage 122 dependency-security release gate
+
+`pip-audit==2.10.1` is now installed only through the development requirements and
+the CI release gate audits the resolved local environment in strict JSON mode. The
+checked-in runner emits only a package/version/advisory summary, fails closed on
+scanner errors or malformed, expired, broad, unknown, duplicate, or unused exception
+records, and does not create an exception mechanism until a real reviewed exception is
+needed. CI explicitly runs compilation, `pip check`, the secrets audit, the dependency
+audit, the deterministic suite, and the Stage 60 acceptance gate. The resolved
+`GitPython` dependency is pinned to `3.1.58`, the patched version for the detected
+`3.1.57` advisories.
 
 ### Post-Stage 78 corrective maintenance
 
