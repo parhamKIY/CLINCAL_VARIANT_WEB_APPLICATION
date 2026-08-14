@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 from typing import Literal, TypedDict, cast
 
 from backend.classification_evidence import build_classification_evidence_audit
+from backend.call_quality import (
+    CallQualityEvidence,
+    build_call_quality_evidence,
+    validate_call_quality_evidence,
+)
 from backend.fallback_transparency import build_fallback_notices
 from backend.privacy import (
     ClinicalDataPrivacyError,
@@ -139,6 +144,7 @@ class VariantReportContent(TypedDict):
 
     variant_summary: VariantSummary
     phenotype_context: PhenotypeContext
+    call_quality: CallQualityEvidence
     evidence_sections: list[EvidenceSection]
     conflict_summary: ConflictSummary
     variant_interpretation: InterpretationSection
@@ -618,6 +624,9 @@ def _content(
         "Decision-support report only; it is not a diagnosis or treatment "
         "recommendation and requires qualified human review."
     )
+    call_quality = evidence.get("call_quality")
+    if call_quality is None:
+        call_quality = build_call_quality_evidence(evidence["variant"])
     content: VariantReportContent = {
         "variant_summary": {
             "display_label": display_label,
@@ -642,6 +651,7 @@ def _content(
             "phenotype_to_gene_summary": _phen2gene_summary(evidence),
             "disease_context": _disease_context(evidence),
         },
+        "call_quality": deepcopy(call_quality),
         "evidence_sections": _evidence_sections(evidence),
         "conflict_summary": {
             "detected": audit["status"] == "conflict",
@@ -1143,6 +1153,10 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
         raise DraftVariantReportError(
             f"{path}.phenotype_context.phenotype_score is invalid."
         )
+    try:
+        validate_call_quality_evidence(content["call_quality"])
+    except ValueError as exc:
+        raise DraftVariantReportError(f"{path}.call_quality is invalid.") from exc
 
     sections = content["evidence_sections"]
     if (

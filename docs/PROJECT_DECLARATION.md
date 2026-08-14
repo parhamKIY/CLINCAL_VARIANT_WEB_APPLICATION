@@ -1,10 +1,10 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stage 116 implemented as recorded below
+**Implementation status:** Stages 0-114 and Stages 116-117 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 117 call-quality report disclosure; Stage 115 final visual sign-off remains deferred
-**Document date:** 2026-08-13
+**Next checkpoint:** Stage 118 fail-closed ReportData classification invariant; Stage 115 final visual sign-off remains deferred
+**Document date:** 2026-08-14
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
@@ -1715,8 +1715,15 @@ acknowledgement; a `failed` allele requires a bounded reason and timestamped ove
 Otherwise the pipeline stops after normalized input and makes zero provider or LLM
 calls. The retained state is persisted in the candidate and pipeline snapshots and is
 revalidated on recovery. The Streamlit submission surface previews the affected
-alleles and collects the required decision. Stage 117 will carry that existing state
-into Evidence Objects and report rendering.
+alleles and collects the required decision.
+
+### Stage 117 call-quality report disclosure
+
+Immutable `QUAL`, raw `FILTER`, derived state, acknowledgement, and override facts now
+flow from Evidence Objects through Draft Variant Reports into typed `ReportData`.
+HTML previews and DOCX method/result context disclose the state directly. Unresolved
+missing or failed calls show `ACTION REQUIRED`; overridden failures show prominent
+`PARTIAL` notices. Inclusion changes preserve the same immutable quality provenance.
 
 ### Post-Stage 78 corrective maintenance
 
@@ -1964,6 +1971,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 113 classified interpretation retry | `backend/variant_interpretation.py`, `backend/pipeline.py`, `frontend/evidence_review.py`, `tests/test_defect08_interpretation_recovery.py` |
 | Stage 114 reviewer source-status semantics | `frontend/source_status.py`, `frontend/evidence_review.py`, `frontend/report_preview.py`, `frontend/results.py`, `frontend/warning_semantics.py`, `tests/test_defect09_reviewer_source_status.py` |
 | Stage 116 call-quality contract and gate | `backend/call_quality.py`, `backend/vcf_processing.py`, `backend/pipeline.py`, `backend/database.py`, `frontend/execution.py`, `frontend/ui.py`, `tests/test_stage116_call_quality_gate.py` |
+| Stage 117 call-quality report disclosure | `backend/report.py`, `backend/variant_report.py`, `backend/report_data.py`, `backend/report_data_projection.py`, `backend/report_docx.py`, `frontend/report_preview.py`, `frontend/warning_semantics.py`, `tests/test_stage117_call_quality_reporting.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1983,7 +1991,7 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-114 and Stage 116 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-114 and Stages 116-117 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
    Stage 115, professor feedback, and final visual sign-off remain pending.
@@ -2123,5 +2131,6 @@ scope-correct CSpec context, deterministic evidence readiness, source-attributed
 classification recovery, persisted-evidence interpretation retry, and reviewer-safe
 source-status wording. Stage 116 then added the deterministic upstream call-quality
 gate, audited acknowledgement/override state, persistence/recovery, and submission
-controls. Stage 117 is next; Stage 115 remains the deferred final visual sign-off
-gate.
+controls. Stage 117 then propagated immutable call-quality provenance into evidence,
+reports, reviewer notices, HTML, DOCX, persistence, and recovery. Stage 118 is next;
+Stage 115 remains the deferred final visual sign-off gate.

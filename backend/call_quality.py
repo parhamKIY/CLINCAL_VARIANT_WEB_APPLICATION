@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -37,7 +38,19 @@ class CallQualityRecord(TypedDict):
     override: CallQualityOverride | None
 
 
+class CallQualityEvidence(TypedDict):
+    """Immutable input-call facts carried into evidence and reporting."""
+
+    schema_version: str
+    qual: float | None
+    filter: str | None
+    status: CallQualityStatus
+    acknowledged_at: str | None
+    override: CallQualityOverride | None
+
+
 CALL_QUALITY_RECORD_FIELDS = frozenset(CallQualityRecord.__required_keys__)
+CALL_QUALITY_EVIDENCE_FIELDS = frozenset(CallQualityEvidence.__required_keys__)
 CALL_QUALITY_OVERRIDE_FIELDS = frozenset(CallQualityOverride.__required_keys__)
 
 
@@ -143,6 +156,65 @@ def validate_call_quality_record(value: object) -> CallQualityRecord:
     }
 
 
+def _qual(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CallQualityError("QUAL must be numeric when supplied.")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise CallQualityError("QUAL must be finite.")
+    return normalized
+
+
+def validate_call_quality_evidence(value: object) -> CallQualityEvidence:
+    """Validate one immutable call-quality payload used by report contracts."""
+
+    if not isinstance(value, Mapping) or set(value) != CALL_QUALITY_EVIDENCE_FIELDS:
+        raise CallQualityError("Call-quality evidence has invalid fields.")
+    record = validate_call_quality_record(
+        {
+            "schema_version": value["schema_version"],
+            "status": value["status"],
+            "acknowledged_at": value["acknowledged_at"],
+            "override": value["override"],
+        }
+    )
+    raw_filter = normalize_filter_value(value["filter"])
+    if evaluate_call_quality(raw_filter) != record["status"]:
+        raise CallQualityError("Call-quality evidence status does not match FILTER.")
+    return {
+        "schema_version": record["schema_version"],
+        "qual": _qual(value["qual"]),
+        "filter": raw_filter,
+        "status": record["status"],
+        "acknowledged_at": record["acknowledged_at"],
+        "override": record["override"],
+    }
+
+
+def build_call_quality_evidence(variant: Mapping[str, object]) -> CallQualityEvidence:
+    """Copy input QUAL/FILTER with its gate decision into report-safe form."""
+
+    raw_filter = normalize_filter_value(variant.get("filter"))
+    record_value = variant.get("call_quality")
+    record = (
+        build_call_quality_records([{"input_index": 0, "filter": raw_filter}])[0]
+        if record_value is None
+        else validate_call_quality_record(record_value)
+    )
+    return validate_call_quality_evidence(
+        {
+            "schema_version": record["schema_version"],
+            "qual": _qual(variant.get("qual")),
+            "filter": raw_filter,
+            "status": record["status"],
+            "acknowledged_at": record["acknowledged_at"],
+            "override": record["override"],
+        }
+    )
+
+
 def _decision_map(
     values: Mapping[int, object] | None,
     *,
@@ -230,12 +302,15 @@ def build_call_quality_records(
 __all__ = [
     "CALL_QUALITY_SCHEMA_VERSION",
     "CallQualityError",
+    "CallQualityEvidence",
     "CallQualityOverride",
     "CallQualityRecord",
     "CallQualityStatus",
     "build_call_quality_records",
+    "build_call_quality_evidence",
     "evaluate_call_quality",
     "normalize_filter_value",
     "validate_call_quality_override",
     "validate_call_quality_record",
+    "validate_call_quality_evidence",
 ]

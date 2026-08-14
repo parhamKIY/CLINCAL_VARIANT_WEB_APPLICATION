@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 from urllib.parse import urlsplit
 
+from backend.call_quality import (
+    CallQualityEvidence,
+    CallQualityError,
+    build_call_quality_evidence,
+    validate_call_quality_evidence,
+)
 from backend.conflict_auditor import (
     ConflictAuditResult,
     audit_evidence_conflicts,
@@ -336,6 +342,7 @@ class EvidenceObject(TypedDict):
     phenotype_score: float | None
     hpo_terms: list[str]
     matched_hpo_terms: list[str]
+    call_quality: CallQualityEvidence
     source_statuses: EvidenceSourceStatuses
     references: list[EvidenceReference]
     warnings: list[str]
@@ -1288,7 +1295,16 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         raise EvidenceObjectError(
             "Evidence object must be a dictionary."
         )
-    _validate_exact_fields(value, EVIDENCE_OBJECT_FIELDS, "evidence")
+    legacy_fields = EVIDENCE_OBJECT_FIELDS - {"call_quality"}
+    actual_fields = set(value)
+    if actual_fields not in {EVIDENCE_OBJECT_FIELDS, legacy_fields}:
+        extra_fields = actual_fields - EVIDENCE_OBJECT_FIELDS
+        if extra_fields:
+            raise EvidenceObjectError(
+                "evidence has unsupported fields: "
+                f"{', '.join(sorted(extra_fields))}."
+            )
+        _validate_exact_fields(value, EVIDENCE_OBJECT_FIELDS, "evidence")
     if value["schema_version"] != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceObjectError(
             "evidence.schema_version must be "
@@ -1357,6 +1373,11 @@ def validate_evidence_object(value: object) -> EvidenceObject:
     _validate_source_statuses(value["source_statuses"])
     _validate_references(value["references"])
     _validate_unique_strings(value["warnings"], "evidence.warnings")
+    if "call_quality" in value:
+        try:
+            validate_call_quality_evidence(value["call_quality"])
+        except CallQualityError as exc:
+            raise EvidenceObjectError("evidence.call_quality is invalid.") from exc
     _validate_v2_sections(value)
     try:
         validate_no_prohibited_fields(
@@ -2137,6 +2158,8 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
             for capability, result in evidence["capability_results"].items()
         },
     }
+    if "call_quality" in evidence:
+        clean_evidence["call_quality"] = deepcopy(evidence["call_quality"])
     clean_evidence = validate_evidence_object(clean_evidence)
     serialized_size = len(
         json.dumps(
@@ -4651,6 +4674,7 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
         "phenotype_score": phenotype_score,
         "hpo_terms": hpo_terms,
         "matched_hpo_terms": matched_hpo_terms,
+        "call_quality": build_call_quality_evidence(variant),
         "source_statuses": {
             source: payload.get("status")
             for source, payload in source_payloads.items()

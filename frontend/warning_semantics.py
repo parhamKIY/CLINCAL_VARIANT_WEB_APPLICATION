@@ -157,6 +157,31 @@ def _raw_warning_notice(content: Mapping[str, object]) -> WarningNotice | None:
     return None
 
 
+def _call_quality_notice(content: Mapping[str, object]) -> WarningNotice | None:
+    quality = _mapping(content.get("call_quality"))
+    if quality is None:
+        return None
+    status = _normalized(quality.get("status"))
+    acknowledged = quality.get("acknowledged_at")
+    override = _mapping(quality.get("override"))
+    if status == "not_evaluated" and not acknowledged:
+        return _notice(
+            "ACTION REQUIRED",
+            "Call quality was not evaluated. A qualified reviewer must acknowledge this before confirmation.",
+        )
+    if status == "failed" and override is None:
+        return _notice(
+            "ACTION REQUIRED",
+            "The upstream call failed its supplied FILTER. A qualified reviewer must record an override before confirmation.",
+        )
+    if status == "failed" and override is not None:
+        return _notice(
+            "PARTIAL",
+            "The upstream call failed its supplied FILTER and is included only under a documented reviewer override.",
+        )
+    return None
+
+
 def build_warning_notices(report: object) -> list[WarningNotice]:
     """Classify one report by consequence without exposing implementation trivia."""
 
@@ -172,6 +197,9 @@ def build_warning_notices(report: object) -> list[WarningNotice]:
         ]
 
     notices = _source_notices(_sequence(content.get("data_sources")))
+    quality_notice = _call_quality_notice(content)
+    if quality_notice is not None:
+        notices.append(quality_notice)
     phenotype = _mapping(content.get("phenotype_context")) or {}
     phenotype_status = _normalized(phenotype.get("phenotype_status"))
     if phenotype_status in _NO_ASSOCIATION_STATES:

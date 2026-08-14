@@ -119,6 +119,17 @@ class ReportConclusiveResult(TypedDict):
     status: AvailabilityStatus
 
 
+class ReportCallQuality(TypedDict):
+    """Typed input-call quality facts, separate from report prose."""
+
+    qual: float | None
+    filter: str | None
+    status: Literal["passed", "not_evaluated", "failed"]
+    acknowledged_at: str | None
+    override_reason: str | None
+    override_timestamp: str | None
+
+
 class ReportPopulationFinding(TypedDict):
     """One exact-allele population observation or missingness state."""
 
@@ -287,6 +298,7 @@ class ReportData(TypedDict):
     variant_identity: ReportVariantIdentity
     phenotype_summary: ReportPhenotypeSummary
     conclusive_result: ReportConclusiveResult
+    call_quality: ReportCallQuality
     main_findings: ReportMainFindings
     interpretation: ReportInterpretation
     classification_summary: ReportClassificationSummary
@@ -307,6 +319,7 @@ VARIANT_IDENTITY_FIELDS = _fields(ReportVariantIdentity)
 HPO_TERM_FIELDS = _fields(ReportHPOTerm)
 PHENOTYPE_SUMMARY_FIELDS = _fields(ReportPhenotypeSummary)
 CONCLUSIVE_RESULT_FIELDS = _fields(ReportConclusiveResult)
+CALL_QUALITY_FIELDS = _fields(ReportCallQuality)
 MAIN_FINDINGS_FIELDS = _fields(ReportMainFindings)
 POPULATION_FINDING_FIELDS = _fields(ReportPopulationFinding)
 DISEASE_ASSOCIATION_FIELDS = _fields(ReportDiseaseAssociation)
@@ -516,6 +529,36 @@ def _validate_conclusive_result(value: object) -> None:
         raise ReportDataError(
             "Available conclusive_result requires classification and source."
         )
+
+
+def _validate_call_quality(value: object) -> None:
+    item = _mapping(value, CALL_QUALITY_FIELDS, "call_quality")
+    _number(item["qual"], "call_quality.qual", optional=True)
+    _text(item["filter"], "call_quality.filter", optional=True)
+    status = _enum(
+        item["status"],
+        frozenset({"passed", "not_evaluated", "failed"}),
+        "call_quality.status",
+    )
+    _timestamp(item["acknowledged_at"], "call_quality.acknowledged_at", optional=True)
+    reason = _text(
+        item["override_reason"], "call_quality.override_reason", optional=True
+    )
+    _timestamp(
+        item["override_timestamp"],
+        "call_quality.override_timestamp",
+        optional=True,
+    )
+    acknowledged = item["acknowledged_at"] is not None
+    has_override_timestamp = item["override_timestamp"] is not None
+    if (reason is None) == has_override_timestamp:
+        raise ReportDataError("Call-quality override fields are inconsistent.")
+    if status == "passed" and (acknowledged or reason is not None):
+        raise ReportDataError("Passed calls cannot have reviewer exceptions.")
+    if status == "not_evaluated" and reason is not None:
+        raise ReportDataError("Only failed calls can have an override.")
+    if status == "failed" and acknowledged:
+        raise ReportDataError("Failed calls require an override, not acknowledgement.")
 
 
 def _validate_population_findings(value: object) -> None:
@@ -855,7 +898,11 @@ def _validate_review_state(value: object) -> None:
 def validate_report_data(value: object) -> ReportData:
     """Validate and copy one renderer-neutral ReportData V4 record."""
 
-    item = _mapping(value, REPORT_DATA_FIELDS, "report_data")
+    legacy_fields = REPORT_DATA_FIELDS - {"call_quality"}
+    fields = REPORT_DATA_FIELDS if (
+        isinstance(value, Mapping) and "call_quality" in value
+    ) else legacy_fields
+    item = _mapping(value, fields, "report_data")
     if item["schema_version"] != REPORT_DATA_SCHEMA_VERSION:
         raise ReportDataError("report_data.schema_version is unsupported.")
     _text(item["report_id"], "report_data.report_id", maximum=128)
@@ -864,6 +911,8 @@ def validate_report_data(value: object) -> ReportData:
     _validate_variant_identity(item["variant_identity"])
     _validate_phenotype_summary(item["phenotype_summary"])
     _validate_conclusive_result(item["conclusive_result"])
+    if "call_quality" in item:
+        _validate_call_quality(item["call_quality"])
     _validate_main_findings(item["main_findings"])
     _validate_interpretation(item["interpretation"])
     _validate_classification_summary(item["classification_summary"])

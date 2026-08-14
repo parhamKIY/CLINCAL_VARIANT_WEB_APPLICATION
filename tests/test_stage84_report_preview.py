@@ -52,6 +52,14 @@ def _draft_report() -> dict[str, object]:
             "phenotype_to_gene_summary": ["Source-supported gene context."],
             "disease_context": ["Synthetic condition (MONDO:0000001)."],
         },
+        "call_quality": {
+            "schema_version": "1.0",
+            "qual": 50.0,
+            "filter": "PASS",
+            "status": "passed",
+            "acknowledged_at": None,
+            "override": None,
+        },
         "evidence_sections": [
             {
                 "source": "Ensembl VEP",

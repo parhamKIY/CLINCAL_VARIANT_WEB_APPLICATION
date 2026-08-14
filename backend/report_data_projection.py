@@ -193,6 +193,7 @@ def build_report_data_from_draft(
     variant = content["variant_summary"]
     phenotype = content["phenotype_context"]
     interpretation = content["variant_interpretation"]
+    quality = content["call_quality"]
     (
         classification_findings,
         clinvar,
@@ -345,6 +346,18 @@ def build_report_data_from_draft(
             "classification": None,
             "classification_source": None,
             "status": "not_assessed",
+        },
+        "call_quality": {
+            "qual": quality["qual"],
+            "filter": quality["filter"],
+            "status": quality["status"],
+            "acknowledged_at": quality["acknowledged_at"],
+            "override_reason": (
+                None if quality["override"] is None else quality["override"]["reason"]
+            ),
+            "override_timestamp": (
+                None if quality["override"] is None else quality["override"]["timestamp"]
+            ),
         },
         "main_findings": {
             "population_frequencies": population_findings,

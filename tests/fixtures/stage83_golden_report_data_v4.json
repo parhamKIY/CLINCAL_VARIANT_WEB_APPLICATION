@@ -47,6 +47,14 @@
     "classification_source": "NCBI ClinVar",
     "status": "available"
   },
+  "call_quality": {
+    "qual": 99.0,
+    "filter": "PASS",
+    "status": "passed",
+    "acknowledged_at": null,
+    "override_reason": null,
+    "override_timestamp": null
+  },
   "main_findings": {
     "population_frequencies": [
       {

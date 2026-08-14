@@ -140,6 +140,30 @@ def _brief_interpretation(report: ReportData) -> str:
     return " ".join(selected) or interpretation
 
 
+def _call_quality_text(report: ReportData) -> str:
+    quality = report.get("call_quality")
+    if quality is None:
+        return "Call quality was not retained in this legacy report."
+    qual = "Not available" if quality["qual"] is None else f"{quality['qual']:g}"
+    raw_filter = quality["filter"] or "Not evaluated"
+    state = quality["status"].replace("_", " ")
+    if quality["status"] == "not_evaluated" and quality["acknowledged_at"] is None:
+        return f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}. ACTION REQUIRED: reviewer acknowledgement is missing."
+    if quality["status"] == "failed" and quality["override_reason"] is None:
+        return f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}. ACTION REQUIRED: documented reviewer override is missing."
+    if quality["status"] == "failed":
+        return (
+            f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}. "
+            f"PARTIAL: reviewer override — {quality['override_reason']} ({quality['override_timestamp']})."
+        )
+    if quality["status"] == "not_evaluated":
+        return (
+            f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}; "
+            f"reviewer acknowledgement: {quality['acknowledged_at']}."
+        )
+    return f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}."
+
+
 def _frequency_text(item: dict[str, object]) -> str:
     if item["status"] != "available":
         return _status_text(str(item["status"]))
@@ -292,7 +316,8 @@ def _placeholder_map(report: ReportData) -> dict[str, str]:
         "{{CLINICAL_FEATURES}}": _phenotype_text(report),
         "{{METHOD_SCOPE}}": (
             "Allele-level evidence synthesis for an already filtered variant; this "
-            "application did not perform sequencing or genome-wide prioritization."
+            "application did not perform sequencing or genome-wide prioritization. "
+            + _call_quality_text(report)
         ),
         "{{VARIANT_DISPLAY}}": _variant_display(report),
         "{{ZYGOSITY}}": _sentence_case(conclusive["zygosity"]),

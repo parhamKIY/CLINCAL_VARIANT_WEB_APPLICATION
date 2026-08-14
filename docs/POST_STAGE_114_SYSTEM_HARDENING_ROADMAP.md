@@ -1,9 +1,9 @@
 # Post-Stage 114 System Hardening Roadmap
 
 **Project:** Clinical Variant Interpretation  
-**Roadmap status:** Stage 116 implemented and verified; Stages 117-123 remain planned  
-**Roadmap date:** 2026-08-13  
-**Implemented baseline:** Stages 0-114 and Stage 116  
+**Roadmap status:** Stages 116-117 implemented and verified; Stages 118-123 remain planned
+**Roadmap date:** 2026-08-14
+**Implemented baseline:** Stages 0-114 and Stages 116-117
 **Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off  
 **Baseline commit:** `6126a72 fix(classification): separate source evidence from system conclusion`  
 **Baseline verification:** `1229 passed, 6 skipped`; Stage 60 gate `875 passed, 4 skipped`, `84.97%` coverage
@@ -135,7 +135,7 @@ without a bounded, timestamped override. The full offline suite passed
 
 ## 5. Stage 117 — Call-quality propagation and reviewer disclosure
 
-**Status:** Planned  
+**Status:** Implemented and verified
 **Priority:** Critical  
 **Dependency:** Stage 116
 
@@ -182,6 +182,9 @@ entire evidence/report lifecycle so reviewers cannot miss upstream call limitati
 
 A reviewer can determine, without opening raw provider diagnostics, whether the call
 passed filters, was not evaluated, or failed and was explicitly overridden.
+
+**Verification:** `tests/test_stage117_call_quality_reporting.py`; the complete offline
+suite passed `1244 passed, 6 skipped` on 2026-08-14.
 
 **Suggested commit:** `feat(report): disclose variant call quality`
 

@@ -66,6 +66,9 @@ _PAGE_STYLE = """
 }
 .cv-result-allele { color: #17365d; font-size: 20px; font-weight: 700; }
 .cv-result-class { color: #a56a00; font-size: 18px; font-weight: 700; }
+.cv-quality { margin: 10px 0; padding: 9px 11px; border-left: 5px solid #17365d; background: #eef3f8; }
+.cv-quality-action { border-left-color: #8b1a1a; background: #fff1f2; font-weight: 700; }
+.cv-quality-partial { border-left-color: #a56a00; background: #fff8e6; font-weight: 700; }
 .cv-notice { color: #4b5563; font-size: 12px; }
 .cv-report-page table { width: 100%; border-collapse: collapse; margin: 10px 0 14px; }
 .cv-report-page th, .cv-report-page td {
@@ -216,6 +219,35 @@ def _brief_interpretation(report: DraftVariantReport) -> str:
     return first_paragraph[:1200]
 
 
+def _call_quality_text(report: DraftVariantReport) -> tuple[str, str]:
+    quality = report["reviewed_report"]["call_quality"]
+    qual = "Not available" if quality["qual"] is None else f"{quality['qual']:g}"
+    raw_filter = quality["filter"] or "Not evaluated"
+    state = quality["status"].replace("_", " ")
+    override = quality["override"]
+    if quality["status"] == "not_evaluated" and quality["acknowledged_at"] is None:
+        return (
+            f"QUAL: {qual}; FILTER: {raw_filter}; State: {state}. ACTION REQUIRED: reviewer acknowledgement is missing.",
+            "cv-quality-action",
+        )
+    if quality["status"] == "failed" and override is None:
+        return (
+            f"QUAL: {qual}; FILTER: {raw_filter}; State: {state}. ACTION REQUIRED: documented reviewer override is missing.",
+            "cv-quality-action",
+        )
+    if quality["status"] == "failed" and override is not None:
+        return (
+            f"QUAL: {qual}; FILTER: {raw_filter}; State: {state}. PARTIAL: overridden by reviewer — {override['reason']} ({override['timestamp']}).",
+            "cv-quality-partial",
+        )
+    if quality["status"] == "not_evaluated":
+        return (
+            f"QUAL: {qual}; FILTER: {raw_filter}; State: {state}; reviewer acknowledgement: {quality['acknowledged_at']}.",
+            "cv-quality",
+        )
+    return f"QUAL: {qual}; FILTER: {raw_filter}; State: {state}.", "cv-quality"
+
+
 def _page(content: str, *, page: int) -> str:
     return (
         _PAGE_STYLE
@@ -253,6 +285,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
             "fallback_used": False,
         }
     )
+    quality_text, quality_class = _call_quality_text(report)
 
     page_one = _page(
         f"""
@@ -269,12 +302,14 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <p><b>Phenotype evidence:</b> {_text(phenotype_status['message'])}</p>
 <h2>Method</h2>
 <p>Allele-level evidence synthesis for an already filtered variant. The application did not perform sequencing or genome-wide prioritization.</p>
+<div class="{quality_class}"><b>Call quality:</b> {_text(quality_text)}</div>
 <div class="cv-result">
   <div class="cv-result-allele">{_text(gene_hgvs)}</div>
   <div>{_text(allele)}</div>
   <div class="cv-result-class">System classification: Not independently determined</div>
   <div>Source classification context: {_text(source_classification)}</div>
   <div>{_text(source_classification_detail)}</div>
+  <div class="{quality_class}"><b>Call quality:</b> {_text(quality_text)}</div>
 </div>
 <h2>Brief Interpretation(s)</h2>
 <p class="cv-prose">{_text(_brief_interpretation(report))}</p>

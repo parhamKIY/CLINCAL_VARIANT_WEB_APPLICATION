@@ -88,6 +88,7 @@ from backend.privacy import (
 from backend.report import (
     EvidenceObjectError,
     build_evidence_objects,
+    validate_evidence_object,
 )
 from backend.report_lifecycle import (
     ReportLifecycleError,
@@ -995,8 +996,8 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         for index, report in enumerate(validated_reports):
             if (
                 report["variant_index"] != index
-                or report["original_machine_report"]
-                != value["evidence_objects"][index]
+                or validate_evidence_object(report["original_machine_report"])
+                != validate_evidence_object(value["evidence_objects"][index])
             ):
                 raise PipelineResultError(
                     "pipeline.evidence_review_reports must preserve "
@@ -1149,8 +1150,8 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 )
             if (
                 index >= len(value["evidence_objects"])
-                or package["original_machine_report"]
-                != value["evidence_objects"][index]
+                or validate_evidence_object(package["original_machine_report"])
+                != validate_evidence_object(value["evidence_objects"][index])
             ):
                 raise PipelineResultError(
                     "pipeline.reviewed_evidence_packages must reference "
@@ -3031,12 +3032,30 @@ def confirm_reviewed_evidence(
         index = package["variant_index"]
         if (
             index >= len(working["evidence_objects"])
-            or package["original_machine_report"]
-            != working["evidence_objects"][index]
+            or validate_evidence_object(package["original_machine_report"])
+            != validate_evidence_object(working["evidence_objects"][index])
         ):
             raise PipelineError(
                 "Confirmed evidence does not match this analysis."
             )
+        if index < len(working["variants"]):
+            source_quality = working["variants"][index].get("call_quality")
+            if source_quality is not None:
+                try:
+                    quality = validate_call_quality_record(source_quality)
+                except CallQualityError as exc:
+                    raise PipelineError(
+                        "Call-quality confirmation state is invalid."
+                    ) from exc
+                if (
+                    quality["status"] == "not_evaluated"
+                    and quality["acknowledged_at"] is None
+                ) or (
+                    quality["status"] == "failed" and quality["override"] is None
+                ):
+                    raise PipelineError(
+                        "Call quality requires acknowledgement or an override before confirmation."
+                    )
         packages_by_index[index] = dict(package)
         updated_indexes.add(index)
         LOGGER.info(

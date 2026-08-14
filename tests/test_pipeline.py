@@ -7878,6 +7878,14 @@ class TestEvidenceObject:
                 "HP:0001263",
             ],
             "matched_hpo_terms": ["HP:0001250"],
+            "call_quality": {
+                "schema_version": "1.0",
+                "qual": 99.0,
+                "filter": "PASS",
+                "status": "passed",
+                "acknowledged_at": None,
+                "override": None,
+            },
             "source_statuses": {
                 "vep": "success",
                 "myvariant": "success",
