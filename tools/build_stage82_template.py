@@ -293,7 +293,7 @@ def _result_block(document: Document) -> None:
     zygosity = cell.add_paragraph(style="Result Variant")
     zygosity.add_run("{{ZYGOSITY}}")
     classification = cell.add_paragraph(style="Result Classification")
-    classification.add_run("{{CLASSIFICATION}}")
+    classification.add_run("System classification: {{CLASSIFICATION}}")
     source = cell.add_paragraph(style="Result Source")
     source.add_run("Source: {{CLASSIFICATION_SOURCE}}")
 

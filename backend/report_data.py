@@ -531,6 +531,23 @@ def _validate_conclusive_result(value: object) -> None:
         )
 
 
+def _validate_source_only_classification(value: Mapping[str, object]) -> None:
+    """Keep provider observations out of the application's result block."""
+
+    conclusive = value["conclusive_result"]
+    summary = value["classification_summary"]
+    if not isinstance(conclusive, Mapping) or not isinstance(summary, Mapping):
+        return
+    if summary["independent_acmg_adjudication"] is False and (
+        conclusive["classification"] is not None
+        or conclusive["classification_source"] is not None
+        or conclusive["status"] != "not_assessed"
+    ):
+        raise ReportDataError(
+            "Source-attributed classifications cannot populate conclusive_result."
+        )
+
+
 def _validate_call_quality(value: object) -> None:
     item = _mapping(value, CALL_QUALITY_FIELDS, "call_quality")
     _number(item["qual"], "call_quality.qual", optional=True)
@@ -916,6 +933,7 @@ def validate_report_data(value: object) -> ReportData:
     _validate_main_findings(item["main_findings"])
     _validate_interpretation(item["interpretation"])
     _validate_classification_summary(item["classification_summary"])
+    _validate_source_only_classification(item)
     _validate_literature_references(item["literature_references"])
     _validate_data_sources(item["data_sources"])
     _validate_warnings(item["warnings"])

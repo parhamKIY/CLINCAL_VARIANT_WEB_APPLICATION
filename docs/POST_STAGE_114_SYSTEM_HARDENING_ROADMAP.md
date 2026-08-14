@@ -1,9 +1,9 @@
 # Post-Stage 114 System Hardening Roadmap
 
 **Project:** Clinical Variant Interpretation  
-**Roadmap status:** Stages 116-117 implemented and verified; Stages 118-123 remain planned
+**Roadmap status:** Stages 116-118 implemented and verified; Stages 119-123 remain planned
 **Roadmap date:** 2026-08-14
-**Implemented baseline:** Stages 0-114 and Stages 116-117
+**Implemented baseline:** Stages 0-114 and Stages 116-118
 **Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off  
 **Baseline commit:** `6126a72 fix(classification): separate source evidence from system conclusion`  
 **Baseline verification:** `1229 passed, 6 skipped`; Stage 60 gate `875 passed, 4 skipped`, `84.97%` coverage
@@ -190,7 +190,7 @@ suite passed `1244 passed, 6 skipped` on 2026-08-14.
 
 ## 6. Stage 118 — Fail-closed ReportData classification invariant
 
-**Status:** Planned  
+**Status:** Implemented and verified
 **Priority:** High  
 **Dependency:** Stage 117
 
@@ -237,6 +237,10 @@ While `classification_summary.independent_acmg_adjudication` is `False`:
 
 No supported construction, persistence, recovery, or rendering path can represent an
 external provider assertion as the application's classification.
+
+**Verification:** `tests/test_stage118_classification_invariant.py`; targeted lifecycle,
+persistence, DOCX, and report checks passed, and the full offline suite reached
+`1249 passed, 6 skipped` on 2026-08-14.
 
 **Suggested commit:** `fix(schema): enforce source-only classifications`
 

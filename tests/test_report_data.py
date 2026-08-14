@@ -57,9 +57,9 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "hgvs_c": None if sparse else "c.101C>T",
             "hgvs_p": None if sparse else "p.(Arg34Trp)",
             "zygosity": None,
-            "classification": None if sparse else "uncertain significance",
-            "classification_source": None if sparse else "NCBI ClinVar",
-            "status": "unavailable" if sparse else "available",
+            "classification": None,
+            "classification_source": None,
+            "status": "not_assessed",
         },
         "main_findings": {
             "population_frequencies": [

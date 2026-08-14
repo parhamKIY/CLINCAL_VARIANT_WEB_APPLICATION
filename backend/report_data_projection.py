@@ -74,14 +74,13 @@ def _classifications(
     str | None,
     str | None,
     str | None,
-    str | None,
+    bool,
     str | None,
 ]:
     findings: list[dict[str, object]] = []
     clinvar_value: str | None = None
     automated_value: str | None = None
     derived_value: str | None = None
-    conclusive_source: str | None = None
     clinvar = _section(report, "ClinVar")
     if clinvar is not None:
         values = _section_values(clinvar)
@@ -89,7 +88,6 @@ def _classifications(
         status = _availability(clinvar["status"])
         if clinvar_value:
             status = "available"
-            conclusive_source = clinvar["source"]
         elif status == "available":
             status = "not_assessed"
         findings.append(
@@ -110,8 +108,6 @@ def _classifications(
         status = _availability(genebe["status"])
         if automated_value:
             status = "available"
-            if conclusive_source is None:
-                conclusive_source = genebe["source"]
         elif status == "available":
             status = "not_assessed"
         findings.append(
@@ -151,10 +147,6 @@ def _classifications(
                     "status": "available",
                 }
             )
-            if conclusive_source is None:
-                conclusive_source = (
-                    "MyVariant.info (ClinVar-derived rescue)"
-                )
     normalized = {
         normalized
         for value in (clinvar_value, automated_value, derived_value)
@@ -166,17 +158,16 @@ def _classifications(
             clinvar_value,
             automated_value,
             derived_value,
-            "Classification conflict",
+            True,
             "Multiple source-attributed classifications",
         )
-    conclusive = clinvar_value or automated_value or derived_value
     return (
         findings,
         clinvar_value,
         automated_value,
         derived_value,
-        conclusive,
-        conclusive_source if conclusive else None,
+        False,
+        None,
     )
 
 
@@ -199,8 +190,8 @@ def build_report_data_from_draft(
         clinvar,
         automated,
         _derived,
-        source_result,
-        _source_result_source,
+        source_conflict,
+        source_conflict_summary,
     ) = (
         _classifications(report)
     )
@@ -388,13 +379,13 @@ def build_report_data_from_draft(
             "conflict_status": (
                 "conflict"
                 if conflict["detected"]
-                or source_result == "Classification conflict"
+                or source_conflict
                 else "none"
             ),
             "conflict_severity": conflict["severity"],
             "source_attributions": source_attributions,
             "independent_acmg_adjudication": False,
-            "summary": interpretation["conflict_assessment"],
+            "summary": source_conflict_summary or interpretation["conflict_assessment"],
         },
         "literature_references": [
             item

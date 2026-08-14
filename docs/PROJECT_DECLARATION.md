@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stages 116-117 implemented as recorded below
+**Implementation status:** Stages 0-114 and Stages 116-118 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 118 fail-closed ReportData classification invariant; Stage 115 final visual sign-off remains deferred
+**Next checkpoint:** Stage 119 unresolved-interpretation finalization semantics; Stage 115 final visual sign-off remains deferred
 **Document date:** 2026-08-14
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -1725,6 +1725,14 @@ HTML previews and DOCX method/result context disclose the state directly. Unreso
 missing or failed calls show `ACTION REQUIRED`; overridden failures show prominent
 `PARTIAL` notices. Inclusion changes preserve the same immutable quality provenance.
 
+### Stage 118 source-only classification invariant
+
+`ReportData` now rejects any provider-derived value in `conclusive_result` while the
+application has not independently adjudicated ACMG/AMP classification. ClinVar,
+GeneBe, and MyVariant-derived observations remain source-attributed in the detailed
+findings and classification summary. HTML and DOCX explicitly display `System
+classification: Not independently determined`.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1972,6 +1980,7 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 114 reviewer source-status semantics | `frontend/source_status.py`, `frontend/evidence_review.py`, `frontend/report_preview.py`, `frontend/results.py`, `frontend/warning_semantics.py`, `tests/test_defect09_reviewer_source_status.py` |
 | Stage 116 call-quality contract and gate | `backend/call_quality.py`, `backend/vcf_processing.py`, `backend/pipeline.py`, `backend/database.py`, `frontend/execution.py`, `frontend/ui.py`, `tests/test_stage116_call_quality_gate.py` |
 | Stage 117 call-quality report disclosure | `backend/report.py`, `backend/variant_report.py`, `backend/report_data.py`, `backend/report_data_projection.py`, `backend/report_docx.py`, `frontend/report_preview.py`, `frontend/warning_semantics.py`, `tests/test_stage117_call_quality_reporting.py` |
+| Stage 118 source-only classification invariant | `backend/report_data.py`, `backend/report_data_projection.py`, `backend/report_docx.py`, `tools/build_stage82_template.py`, `tests/test_stage118_classification_invariant.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -1991,7 +2000,7 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-114 and Stages 116-117 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-114 and Stages 116-118 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
    Stage 115, professor feedback, and final visual sign-off remain pending.

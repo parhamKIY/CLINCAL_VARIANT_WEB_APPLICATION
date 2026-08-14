@@ -106,7 +106,7 @@ def _sparse_evidence(report: dict[str, Any]) -> None:
         {
             "classification": None,
             "classification_source": None,
-            "status": "unavailable",
+            "status": "not_assessed",
         }
     )
     report["main_findings"] = {
