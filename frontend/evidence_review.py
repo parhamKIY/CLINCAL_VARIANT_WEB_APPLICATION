@@ -22,6 +22,7 @@ from backend.pipeline import (
     acknowledge_unresolved_interpretation_inclusion,
     confirm_reviewed_evidence,
     finalize_reviewed_analysis,
+    request_revised_variant_interpretation,
     retry_failed_variant_interpretation,
     update_draft_variant_report,
 )
@@ -879,6 +880,90 @@ def _render_interpretation_retry(
         )
 
 
+def _render_revised_interpretation_request(
+    report: DraftVariantReport,
+    result: PipelineResult,
+    *,
+    model: str | None,
+) -> None:
+    """Collect an explicit reviewer context before a new model request."""
+
+    revisions = [
+        item
+        for item in result.get("revised_interpretations", [])
+        if item.get("variant_index") == report["variant_index"]
+    ]
+    with st.expander(
+        "Request revised interpretation",
+        icon=":material/autorenew:",
+    ):
+        st.caption(
+            "Use this only after reviewing the retained evidence. Your context is "
+            "versioned with the new interpretation; provider evidence and the "
+            "initial interpretation remain unchanged. Do not enter personal data."
+        )
+        if revisions:
+            st.markdown("**Prior revised interpretations**")
+            for revision in revisions:
+                outcome = revision["interpretation"]
+                label = outcome.get("preliminary_classification") or "Ambiguous"
+                with st.expander(
+                    f"Version {revision['revision_number']}: {label}",
+                    icon=":material/history:",
+                ):
+                    st.caption(f"Requested: {revision['requested_at']}")
+                    st.markdown("**Reviewer context**")
+                    st.write(revision["reviewer_context"])
+                    st.markdown("**Classification rationale**")
+                    st.write(outcome.get("classification_rationale"))
+                    st.markdown("**Revised interpretation**")
+                    st.write(outcome.get("interpretation"))
+        with st.form(
+            f"{_REVIEW_WIDGET_PREFIX}reinterpret_{report['report_id']}",
+            border=False,
+        ):
+            reviewer_context = st.text_area(
+                "Reviewer-approved context or conflict resolution",
+                height=180,
+                help=(
+                    "Explain the review decision or the missing context to use. "
+                    "This does not change the retained source evidence."
+                ),
+                key=f"{_REVIEW_WIDGET_PREFIX}reinterpret_context_{report['report_id']}",
+            )
+            request = st.form_submit_button(
+                "Request revised interpretation",
+                type="primary",
+                icon=":material/autorenew:",
+            )
+    if not request:
+        return
+    try:
+        with st.spinner("Generating a revised interpretation from retained evidence..."):
+            updated = request_revised_variant_interpretation(
+                result,
+                variant_index=report["variant_index"],
+                reviewer_context=reviewer_context,
+                model=model,
+            )
+    except PipelineError as exc:
+        st.error(f"Revised interpretation was not completed: {exc}")
+        return
+    result.clear()
+    result.update(updated)
+    st.session_state["pipeline_result"] = result
+    persisted = _persist_review_state(result)
+    _set_notice(
+        "success" if persisted else "warning",
+        (
+            "Revised interpretation created; the initial interpretation remains available."
+            if persisted
+            else "Revised interpretation created, but persistence failed."
+        ),
+    )
+    st.rerun()
+
+
 def _render_report_editor(
     report: DraftVariantReport,
     result: PipelineResult,
@@ -1328,6 +1413,14 @@ def _render_confirmation(
         "confirmation does not call a model. It confirms evidence review and "
         "report wording, not a pathogenicity classification or laboratory sign-out."
     )
+    if any(
+        item.get("variant_index") == report["variant_index"]
+        for item in result.get("revised_interpretations", [])
+    ):
+        st.info(
+            "A revised interpretation exists. Stage 127 will require selecting "
+            "the interpretation version before final confirmation."
+        )
     privacy_attested = st.checkbox(
         (
             "I confirm that this reviewed evidence contains no names, "
@@ -1588,6 +1681,11 @@ def render_evidence_review(
     if review_view == "Clinical report review":
         _render_inclusion_control(draft_variant_report, result)
         _render_report_editor(draft_variant_report, result)
+        _render_revised_interpretation_request(
+            draft_variant_report,
+            result,
+            model=retry_model,
+        )
         _render_editable_docx_download(draft_variant_report, result)
     else:
         technical_view = st.segmented_control(

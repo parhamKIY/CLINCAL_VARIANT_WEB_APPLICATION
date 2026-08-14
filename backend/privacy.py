@@ -132,7 +132,13 @@ PHENOTYPE_EXTRACTION_PAYLOAD_FIELDS = frozenset(
     {"clinical_text_fa", "task"}
 )
 VARIANT_INTERPRETATION_PAYLOAD_FIELDS = frozenset(
-    {"evidence", "prompt_mode", "reference_catalog", "task"}
+    {
+        "evidence",
+        "prompt_mode",
+        "reference_catalog",
+        "reviewer_context",
+        "task",
+    }
 )
 VARIANT_REFERENCE_CATALOG_FIELDS = frozenset(
     {"identifier", "identifier_type", "reference_id", "source", "title"}
@@ -271,9 +277,11 @@ def validate_phenotype_extraction_payload(
 def validate_variant_interpretation_payload(value: object) -> None:
     """Validate the separate bounded interpretation-model payload."""
 
-    if not isinstance(value, Mapping) or set(value) != (
-        VARIANT_INTERPRETATION_PAYLOAD_FIELDS
-    ):
+    legacy_fields = VARIANT_INTERPRETATION_PAYLOAD_FIELDS - {"reviewer_context"}
+    if not isinstance(value, Mapping) or set(value) not in {
+        VARIANT_INTERPRETATION_PAYLOAD_FIELDS,
+        legacy_fields,
+    }:
         raise ClinicalDataPrivacyError(
             "Variant interpretation payload has unsupported fields."
         )
@@ -284,6 +292,15 @@ def validate_variant_interpretation_payload(value: object) -> None:
     if value.get("prompt_mode") not in {"standard", "conflict_aware"}:
         raise ClinicalDataPrivacyError(
             "Variant interpretation payload has an invalid prompt mode."
+        )
+    reviewer_context = value.get("reviewer_context")
+    if reviewer_context is not None and (
+        not isinstance(reviewer_context, str)
+        or not reviewer_context.strip()
+        or len(reviewer_context) > 2_000
+    ):
+        raise ClinicalDataPrivacyError(
+            "Variant interpretation reviewer context is invalid."
         )
     evidence = value.get("evidence")
     references = value.get("reference_catalog")

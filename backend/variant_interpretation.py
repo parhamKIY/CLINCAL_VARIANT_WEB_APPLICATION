@@ -67,6 +67,7 @@ MAX_INTERPRETATION_WARNINGS = 20
 MAX_INTERPRETATION_WARNING_CHARACTERS = 2_000
 MAX_INTERPRETATION_LIMITATIONS = 20
 MAX_INTERPRETATION_LIMITATION_CHARACTERS = 2_000
+MAX_REVIEWER_CONTEXT_CHARACTERS = 2_000
 MEANINGFUL_CONFLICT_SEVERITIES = {"moderate", "major", "critical"}
 URL_PATTERN = re.compile(r"(?i)(?:https?://|www\.)")
 LOGGER = get_logger("variant_interpretation")
@@ -457,6 +458,7 @@ def _build_prompt(
     *,
     prompt_mode: InterpretationPromptMode,
     readiness_audit: Mapping[str, object],
+    reviewer_context: str | None = None,
 ) -> str:
     try:
         validate_llm_payload(evidence)
@@ -493,6 +495,18 @@ def _build_prompt(
         raise VariantInterpretationError(
             "Evidence exceeds the interpretation prompt size limit."
         )
+    if reviewer_context is not None:
+        reviewer_context = _bounded_text(
+            reviewer_context,
+            field="reviewer_context",
+            maximum=MAX_REVIEWER_CONTEXT_CHARACTERS,
+        )
+        try:
+            validate_llm_payload({"reviewer_context": reviewer_context})
+        except ClinicalDataPrivacyError as exc:
+            raise VariantInterpretationError(
+                "Reviewer context contains prohibited clinical data."
+            ) from exc
     mode_instruction = (
         "Return classification status 'ambiguous' and a null preliminary "
         "classification. Explain the meaningful evidence conflict and leave "
@@ -523,6 +537,7 @@ def _build_prompt(
                 "prompt_mode": prompt_mode,
                 "evidence": evidence,
                 "reference_catalog": reference_catalog,
+                "reviewer_context": reviewer_context,
             }
         )
     except ClinicalDataPrivacyError as exc:
@@ -540,6 +555,7 @@ def _build_prompt(
         len(serialized.encode("utf-8"))
         + len(serialized_readiness.encode("utf-8"))
         + len(serialized_references.encode("utf-8"))
+        + len((reviewer_context or "").encode("utf-8"))
         > MAX_INTERPRETATION_EVIDENCE_BYTES
     ):
         raise VariantInterpretationError(
@@ -559,6 +575,17 @@ def _build_prompt(
         "found', state that explicitly and continue interpreting the "
         "variant from all remaining evidence. Phenotype mismatch is not "
         "negative pathogenicity evidence.\n"
+        + (
+            "BEGIN_REVIEWER_APPROVED_CONTEXT\n"
+            f"{reviewer_context}\n"
+            "END_REVIEWER_APPROVED_CONTEXT\n"
+            "Reviewer context is an auditable conflict-resolution instruction, "
+            "not a new source. Do not invent, cite, or rely on external evidence. "
+            "If it resolves the source hierarchy, explain the remaining limits.\n"
+            if reviewer_context is not None
+            else ""
+        )
+        + ""
         "BEGIN_VALIDATED_EVIDENCE_OBJECT\n"
         f"{serialized}\n"
         "END_VALIDATED_EVIDENCE_OBJECT\n"
@@ -607,6 +634,7 @@ def _parse_response(
     *,
     evidence: EvidenceObject,
     allowed_reference_ids: set[str],
+    reviewer_context: str | None,
 ) -> ParsedInterpretationResponse:
     if response.finish_reason not in {None, "stop"}:
         raise VariantInterpretationError(
@@ -691,7 +719,10 @@ def _parse_response(
                 failure_type="output_schema_failure",
                 schema_error="preliminary_classification_mismatch",
             )
-        if _conflict_context(evidence)[1] in MEANINGFUL_CONFLICT_SEVERITIES:
+        if (
+            _conflict_context(evidence)[1] in MEANINGFUL_CONFLICT_SEVERITIES
+            and reviewer_context is None
+        ):
             raise VariantInterpretationError(
                 "Material conflict requires an ambiguous classification outcome.",
                 failure_type="output_schema_failure",
@@ -986,6 +1017,7 @@ def _execute_interpretation_request(
     model: str,
     client: LLMClient | None,
     max_retries: int | None,
+    reviewer_context: str | None,
 ) -> tuple[LLMResponse, ParsedInterpretationResponse, bool]:
     """Execute one model with one bounded structured-output repair."""
 
@@ -1020,6 +1052,7 @@ def _execute_interpretation_request(
                 response,
                 evidence=evidence,
                 allowed_reference_ids=allowed_reference_ids,
+                reviewer_context=reviewer_context,
             )
             return response, parsed, repair_used
         except (LLMError, VariantInterpretationError) as exc:
@@ -1082,6 +1115,7 @@ def interpret_variant(
     max_retries: int | None = None,
     timestamp: str | None = None,
     readiness_audit: Mapping[str, object] | None = None,
+    reviewer_context: str | None = None,
 ) -> VariantInterpretationResult:
     """Interpret one validated Evidence Object with one selected model."""
 
@@ -1159,6 +1193,7 @@ def interpret_variant(
         evidence,
         prompt_mode=prompt_mode,
         readiness_audit=readiness,
+        reviewer_context=reviewer_context,
     )
     active_model = configured_model
     fallback_used = False
@@ -1169,6 +1204,7 @@ def interpret_variant(
             model=configured_model,
             client=client,
             max_retries=max_retries,
+            reviewer_context=reviewer_context,
         )
     except (LLMError, VariantInterpretationError) as primary_error:
         failure_type = classify_interpretation_failure(primary_error)
@@ -1198,6 +1234,7 @@ def interpret_variant(
                 model=configured_fallback_model,
                 client=fallback_client,
                 max_retries=max_retries,
+                reviewer_context=reviewer_context,
             )
         except (LLMError, VariantInterpretationError) as fallback_error:
             fallback_error.fallback_used = True
@@ -1247,7 +1284,11 @@ def interpret_variant(
         "generated_at": _timestamp(timestamp),
         "error_type": None,
     }
-    return validate_variant_interpretation_result(result, evidence=evidence)
+    return validate_variant_interpretation_result(
+        result,
+        evidence=evidence,
+        reviewer_context=reviewer_context,
+    )
 
 
 def _failed_result(
@@ -1478,6 +1519,7 @@ def validate_variant_interpretation_result(
     value: object,
     *,
     evidence: Mapping[str, object] | None = None,
+    reviewer_context: str | None = None,
 ) -> VariantInterpretationResult:
     """Validate one route-free interpretation result."""
 
@@ -1568,7 +1610,10 @@ def validate_variant_interpretation_result(
                 raise VariantInterpretationError(
                     "Preliminary classification is invalid."
                 )
-            if value["conflict_severity"] in MEANINGFUL_CONFLICT_SEVERITIES:
+            if (
+                value["conflict_severity"] in MEANINGFUL_CONFLICT_SEVERITIES
+                and reviewer_context is None
+            ):
                 raise VariantInterpretationError(
                     "Material conflict requires an ambiguous classification outcome."
                 )

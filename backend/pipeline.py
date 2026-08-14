@@ -86,6 +86,7 @@ from backend.privacy import (
     ClinicalDataPrivacyError,
     minimize_variant,
     validate_human_review_content,
+    validate_llm_payload,
     validate_no_prohibited_fields,
 )
 from backend.report import (
@@ -100,6 +101,7 @@ from backend.report_lifecycle import (
 )
 from backend.variant_interpretation import (
     VariantInterpretationError,
+    interpret_variant,
     interpret_variants,
     retry_variant_interpretation,
     validate_variant_interpretation_result,
@@ -123,11 +125,14 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.3"
+PIPELINE_SCHEMA_VERSION = "3.4"
+LEGACY_PIPELINE_SCHEMA_VERSION = "3.3"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
 MAX_UNRESOLVED_FINALIZATION_REASON_CHARS = 500
+MAX_REVISED_INTERPRETATIONS_PER_VARIANT = 20
+MAX_REVISED_INTERPRETATION_CONTEXT_CHARS = 2_000
 ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
 LOGGER = get_logger("pipeline")
 
@@ -280,6 +285,18 @@ class UnresolvedFinalizationAcknowledgement(TypedDict):
     acknowledged_at: str
 
 
+class RevisedInterpretationRecord(TypedDict):
+    """One reviewer-requested interpretation version over retained evidence."""
+
+    schema_version: str
+    variant_index: int
+    revision_number: int
+    base_interpretation_fingerprint: str
+    reviewer_context: str
+    requested_at: str
+    interpretation: dict[str, object]
+
+
 class PipelineResult(TypedDict):
     """Versioned JSON-safe output retained for the frontend."""
 
@@ -299,6 +316,7 @@ class PipelineResult(TypedDict):
     evidence_objects: list[dict[str, object]]
     evidence_readiness: list[dict[str, object]]
     variant_interpretation_results: list[dict[str, object]]
+    revised_interpretations: list[RevisedInterpretationRecord]
     draft_variant_reports: list[dict[str, object]]
     variant_report_records: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
@@ -337,6 +355,9 @@ PIPELINE_ISSUE_FIELDS = frozenset(PipelineIssue.__required_keys__)
 UNRESOLVED_FINALIZATION_ACKNOWLEDGEMENT_FIELDS = frozenset(
     UnresolvedFinalizationAcknowledgement.__required_keys__
 )
+REVISED_INTERPRETATION_RECORD_FIELDS = frozenset(
+    RevisedInterpretationRecord.__required_keys__
+)
 PIPELINE_RESULT_FIELDS = frozenset(PipelineResult.__required_keys__)
 
 
@@ -366,6 +387,115 @@ def _interpretation_fingerprint(value: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _result_fingerprint(value: Mapping[str, object]) -> str:
+    """Bind a revised version to the exact initial interpretation result."""
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalize_revised_interpretation_context(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PipelineError("Reviewer context must be non-empty text.")
+    normalized = value.strip()
+    if len(normalized) > MAX_REVISED_INTERPRETATION_CONTEXT_CHARS:
+        raise PipelineError("Reviewer context exceeds the supported length.")
+    try:
+        validate_llm_payload({"reviewer_context": normalized})
+    except ClinicalDataPrivacyError as exc:
+        raise PipelineError(
+            "Reviewer context contains prohibited clinical data."
+        ) from exc
+    return normalized
+
+
+def _validate_revised_interpretations(
+    value: object,
+    *,
+    initial_interpretations: Sequence[Mapping[str, object]],
+    evidence_objects: Sequence[Mapping[str, object]],
+) -> list[RevisedInterpretationRecord]:
+    if not isinstance(value, list) or len(value) > (
+        len(initial_interpretations) * MAX_REVISED_INTERPRETATIONS_PER_VARIANT
+    ):
+        raise PipelineResultError("pipeline.revised_interpretations is invalid.")
+    next_revision = [1] * len(initial_interpretations)
+    previous_timestamp: list[datetime | None] = [None] * len(
+        initial_interpretations
+    )
+    validated: list[RevisedInterpretationRecord] = []
+    for item in value:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != REVISED_INTERPRETATION_RECORD_FIELDS
+        ):
+            raise PipelineResultError("Revised interpretation record is invalid.")
+        if item["schema_version"] != "1.0":
+            raise PipelineResultError("Revised interpretation schema is unsupported.")
+        index = item["variant_index"]
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= len(initial_interpretations)
+        ):
+            raise PipelineResultError("Revised interpretation index is invalid.")
+        if item["revision_number"] != next_revision[index]:
+            raise PipelineResultError(
+                "Revised interpretation version order is invalid."
+            )
+        if item["base_interpretation_fingerprint"] != _result_fingerprint(
+            initial_interpretations[index]
+        ):
+            raise PipelineResultError("Revised interpretation base is stale.")
+        try:
+            context = _normalize_revised_interpretation_context(
+                item["reviewer_context"]
+            )
+            requested_at = _normalized_timestamp(item["requested_at"])
+            interpretation = validate_variant_interpretation_result(
+                item["interpretation"],
+                evidence=evidence_objects[index],
+                reviewer_context=context,
+            )
+        except (PipelineError, VariantInterpretationError) as exc:
+            raise PipelineResultError("Revised interpretation record is invalid.") from exc
+        if interpretation["variant_index"] != index:
+            raise PipelineResultError("Revised interpretation identity is invalid.")
+        current_timestamp = datetime.fromisoformat(
+            requested_at.replace("Z", "+00:00")
+        )
+        if (
+            previous_timestamp[index] is not None
+            and current_timestamp < previous_timestamp[index]
+        ):
+            raise PipelineResultError(
+                "Revised interpretation timestamps are invalid."
+            )
+        previous_timestamp[index] = current_timestamp
+        next_revision[index] += 1
+        validated.append(
+            {
+                "schema_version": "1.0",
+                "variant_index": index,
+                "revision_number": item["revision_number"],
+                "base_interpretation_fingerprint": item[
+                    "base_interpretation_fingerprint"
+                ],
+                "reviewer_context": context,
+                "requested_at": requested_at,
+                "interpretation": dict(interpretation),
+            }
+        )
+    return validated
 
 
 def _validate_unresolved_finalization_acknowledgements(
@@ -650,6 +780,7 @@ def create_pipeline_result() -> PipelineResult:
         "evidence_objects": [],
         "evidence_readiness": [],
         "variant_interpretation_results": [],
+        "revised_interpretations": [],
         "draft_variant_reports": [],
         "variant_report_records": [],
         "evidence_review_reports": [],
@@ -911,13 +1042,17 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         raise PipelineResultError(
             "Pipeline result must be a dictionary."
         )
-    _exact_fields(
-        value,
-        PIPELINE_RESULT_FIELDS,
-        "pipeline",
-        PipelineResultError,
+    is_current_schema = value.get("schema_version") == PIPELINE_SCHEMA_VERSION
+    expected_fields = (
+        PIPELINE_RESULT_FIELDS
+        if is_current_schema
+        else PIPELINE_RESULT_FIELDS - {"revised_interpretations"}
     )
-    if value["schema_version"] != PIPELINE_SCHEMA_VERSION:
+    _exact_fields(value, expected_fields, "pipeline", PipelineResultError)
+    if value["schema_version"] not in {
+        PIPELINE_SCHEMA_VERSION,
+        LEGACY_PIPELINE_SCHEMA_VERSION,
+    }:
         raise PipelineResultError(
             "pipeline.schema_version must be "
             f"{PIPELINE_SCHEMA_VERSION}."
@@ -970,11 +1105,14 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "evidence_objects",
         "evidence_readiness",
         "variant_interpretation_results",
+        "revised_interpretations",
         "draft_variant_reports",
         "variant_report_records",
         "evidence_review_reports",
         "llm_routing_results",
     ):
+        if field == "revised_interpretations" and field not in value:
+            continue
         collection = value[field]
         if (
             not isinstance(collection, list)
@@ -996,6 +1134,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "evidence_objects",
                     "evidence_readiness",
                     "variant_interpretation_results",
+                    "revised_interpretations",
                     "draft_variant_reports",
                     "variant_report_records",
                     "evidence_review_reports",
@@ -1004,6 +1143,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "final_interpretation_report",
                     "final_clinical_report",
                 )
+                if field in value
             },
             context="Pipeline result",
         )
@@ -1169,6 +1309,12 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "pipeline.variant_interpretation_results is invalid."
                 ) from exc
             previous_index = index
+    if "revised_interpretations" in value:
+        _validate_revised_interpretations(
+            value["revised_interpretations"],
+            initial_interpretations=interpretation_results,
+            evidence_objects=value["evidence_objects"],
+        )
     draft_variant_reports = value["draft_variant_reports"]
     if draft_variant_reports:
         if len(draft_variant_reports) != len(value["evidence_objects"]):
@@ -3174,6 +3320,18 @@ def confirm_reviewed_evidence(
     }
     updated_indexes: set[int] = set()
     for report in reports:
+        candidate_index = report.get("variant_index")
+        if (
+            "revised_interpretations" in working
+            and any(
+                revision["variant_index"] == candidate_index
+                for revision in working["revised_interpretations"]
+            )
+        ):
+            raise PipelineError(
+                "A revised interpretation exists for this variant and must be "
+                "selected in the final-report workflow."
+            )
         try:
             package = confirm_evidence_review(report, timestamp=timestamp)
         except EvidenceConfirmationError as exc:
@@ -3635,6 +3793,95 @@ def retry_failed_variant_interpretation(
     return validate_pipeline_result(working)
 
 
+def request_revised_variant_interpretation(
+    result: PipelineResult,
+    *,
+    variant_index: int,
+    reviewer_context: object,
+    model: str | None = None,
+    client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
+    max_retries: int | None = None,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Create a reviewer-requested interpretation version from retained evidence."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if "revised_interpretations" not in working:
+        raise PipelineError(
+            "This retained analysis predates revised interpretation support."
+        )
+    if (
+        isinstance(variant_index, bool)
+        or not isinstance(variant_index, int)
+        or variant_index < 0
+        or variant_index >= working["variant_count"]
+    ):
+        raise PipelineError("Revised interpretation variant index is invalid.")
+    context = _normalize_revised_interpretation_context(reviewer_context)
+    existing = [
+        item
+        for item in working["revised_interpretations"]
+        if item["variant_index"] == variant_index
+    ]
+    if len(existing) >= MAX_REVISED_INTERPRETATIONS_PER_VARIANT:
+        raise PipelineError("Revised interpretation version limit was reached.")
+    try:
+        revised = interpret_variant(
+            working["evidence_objects"][variant_index],
+            variant_index=variant_index,
+            model=model,
+            client=client,
+            fallback_model=fallback_model,
+            fallback_client=fallback_client,
+            max_retries=max_retries,
+            timestamp=timestamp,
+            readiness_audit=working["evidence_readiness"][variant_index],
+            reviewer_context=context,
+        )
+    except VariantInterpretationError as exc:
+        raise PipelineError(
+            "Revised interpretation could not be completed."
+        ) from exc
+    record: RevisedInterpretationRecord = {
+        "schema_version": "1.0",
+        "variant_index": variant_index,
+        "revision_number": len(existing) + 1,
+        "base_interpretation_fingerprint": _result_fingerprint(
+            working["variant_interpretation_results"][variant_index]
+        ),
+        "reviewer_context": context,
+        "requested_at": revised["generated_at"],
+        "interpretation": dict(revised),
+    }
+    working["revised_interpretations"].append(record)
+    working["reviewed_evidence_packages"] = [
+        package
+        for package in working["reviewed_evidence_packages"]
+        if package["variant_index"] != variant_index
+    ]
+    working["unresolved_finalization_acknowledgements"] = [
+        acknowledgement
+        for acknowledgement in working["unresolved_finalization_acknowledgements"]
+        if acknowledgement["variant_index"] != variant_index
+    ]
+    working["llm_routing_results"] = []
+    working["final_interpretation_report"] = None
+    working["final_clinical_report"] = None
+    working["workflow_state"] = "awaiting_final_review"
+    working["current_stage"] = "completed"
+    working["progress_percent"] = 100
+    _sync_variant_report_records(working)
+    LOGGER.info(
+        "event=revised_variant_interpretation_requested variant_index=%d "
+        "revision_number=%d",
+        variant_index,
+        record["revision_number"],
+    )
+    return validate_pipeline_result(working)
+
+
 def get_selected_draft_variant_reports(
     result: PipelineResult,
 ) -> list[dict[str, object]]:
@@ -4030,6 +4277,7 @@ __all__ = [
     "PipelineStageStatus",
     "PipelineStatus",
     "PipelineWorkflowState",
+    "RevisedInterpretationRecord",
     "PersistedInputType",
     "UnresolvedFinalizationAcknowledgement",
     "acknowledge_unresolved_interpretation_inclusion",
@@ -4041,6 +4289,7 @@ __all__ = [
     "resume_confirmed_analysis",
     "resume_saved_analysis",
     "retry_failed_variant_interpretation",
+    "request_revised_variant_interpretation",
     "create_pipeline_result",
     "run_analysis",
     "update_draft_variant_report",

@@ -1,6 +1,6 @@
 # Proposed Stages 124–127 — Preliminary Classification and Review Workflow
 
-**Status:** Stages 124–125 implemented and verified; Stages 126–127 proposed
+**Status:** Stages 124–126 implemented and verified; Stage 127 proposed
 
 ## Approved product behavior
 
@@ -121,6 +121,21 @@ request a revised LLM interpretation.
 - A reviewer edit can produce a distinct, traceable revised interpretation.
 - The initial and revised versions remain recoverable and distinguishable.
 - Confirmation without an explicit reinterpretation request does not call the LLM.
+
+### Implemented behavior and verification
+
+The review surface now provides an explicit `Request revised interpretation`
+action with a bounded, privacy-checked reviewer context. It creates an append-only
+version record that retains the initial interpretation unchanged, captures the
+approved context, request time, model provenance, and the revised preliminary
+classification/interpretation. It uses the persisted Evidence Object only and does
+not rerun upstream providers. A revised request clears stale downstream review and
+finalization state; ordinary confirmation still does not request a model call.
+
+New Pipeline Results use schema `3.4`; retained `3.3` pipeline state remains
+readable. `tests/test_stage126_revised_interpretation.py` covers version creation,
+ordering, privacy rejection before any model call, material-conflict review context,
+and immutable initial state.
 
 **Suggested commit:** `feat(review): support revised evidence interpretation`
 
