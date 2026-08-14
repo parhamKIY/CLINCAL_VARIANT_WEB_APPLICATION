@@ -57,17 +57,9 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "hgvs_c": None if sparse else "c.101C>T",
             "hgvs_p": None if sparse else "p.(Arg34Trp)",
             "zygosity": None,
-            "classification": None,
-            "classification_source": None,
-            "status": "not_assessed",
-        },
-        "call_quality": {
-            "qual": None if sparse else 50.0,
-            "filter": None if sparse else "PASS",
-            "status": "not_evaluated" if sparse else "passed",
-            "acknowledged_at": None,
-            "override_reason": None,
-            "override_timestamp": None,
+            "classification": None if sparse else "uncertain significance",
+            "classification_source": None if sparse else "NCBI ClinVar",
+            "status": "unavailable" if sparse else "available",
         },
         "main_findings": {
             "population_frequencies": [
@@ -145,17 +137,6 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "independent_acmg_adjudication": False,
             "summary": None,
         },
-        "preliminary_classification": {
-            "status": "unavailable" if sparse else "classified",
-            "classification": None if sparse else "Likely pathogenic",
-            "rationale": (
-                "No preliminary classification was generated."
-                if sparse
-                else "The retained evidence supports the preliminary label."
-            ),
-            "limitations": [] if sparse else ["Qualified human review is required."],
-            "review_required": True,
-        },
         "literature_references": [] if sparse else [
             canonicalize_reference(
                 source="PubMed",
@@ -208,11 +189,6 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "confirmed_at": None,
             "reviewer_summary": None,
             "reviewer_notes": [],
-            "selection_history": [],
-        },
-        "interpretation_version_selection": {
-            "selected_revision_number": 0,
-            "selected_at": None,
             "selection_history": [],
         },
         "template_version": "professor-report-v1",

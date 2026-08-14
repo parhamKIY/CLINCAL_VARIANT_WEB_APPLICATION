@@ -280,7 +280,7 @@ def _result_block(document: Document) -> None:
     _set_fixed_table(
         table,
         [8860],
-        caption="Variant and source classification context for one accepted allele",
+        caption="Conclusive result for one accepted allele",
         indent=200,
     )
     _set_table_borders(table, color=RED, size=16)
@@ -293,7 +293,7 @@ def _result_block(document: Document) -> None:
     zygosity = cell.add_paragraph(style="Result Variant")
     zygosity.add_run("{{ZYGOSITY}}")
     classification = cell.add_paragraph(style="Result Classification")
-    classification.add_run("System classification: {{CLASSIFICATION}}")
+    classification.add_run("{{CLASSIFICATION}}")
     source = cell.add_paragraph(style="Result Source")
     source.add_run("Source: {{CLASSIFICATION_SOURCE}}")
 
@@ -423,11 +423,7 @@ def build_template(output: Path = OUTPUT) -> Path:
     _paragraph(document, "{{CLINICAL_FEATURES}}")
     _paragraph(document, "Method:", style="Major Heading")
     _paragraph(document, "{{METHOD_SCOPE}}")
-    _paragraph(
-        document,
-        "Variant and source classification context:",
-        style="Major Heading",
-    )
+    _paragraph(document, "Conclusive Result(s):", style="Major Heading")
     _result_block(document)
     _paragraph(document, "Brief Interpretation(s):", style="Major Heading")
     _paragraph(document, "{{BRIEF_INTERPRETATION}}")

@@ -829,12 +829,9 @@ population, literature, and configured LLM endpoint through production clients:
 .\.venv\Scripts\python.exe tests\run_live_provider_validation.py
 ```
 
-Use `--skip-llm` when only biomedical providers should be checked. The harness
-defaults to a 180-second overall deadline, prints a concise start/result line per
-provider group, and atomically checkpoints a normalized non-clinical summary after
-each group. Override the deadline when needed with `--deadline-seconds 120`.
-The ignored summary is written to `output/live-provider-validation.json`. It may
-consume provider quotas.
+Use `--skip-llm` when only biomedical providers should be checked. The gate
+writes a non-clinical, ignored summary to
+`output/live-provider-validation.json`. It may consume provider quotas.
 
 For a quicker manual DNS/HTTP check that does not exercise production evidence
 contracts or LLMs, run:

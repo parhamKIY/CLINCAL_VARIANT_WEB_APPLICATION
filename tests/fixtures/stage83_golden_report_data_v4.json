@@ -43,17 +43,9 @@
     "hgvs_c": "c.101C>T",
     "hgvs_p": "p.(Arg34Trp)",
     "zygosity": "heterozygous",
-    "classification": null,
-    "classification_source": null,
-    "status": "not_assessed"
-  },
-  "call_quality": {
-    "qual": 99.0,
-    "filter": "PASS",
-    "status": "passed",
-    "acknowledged_at": null,
-    "override_reason": null,
-    "override_timestamp": null
+    "classification": "uncertain significance",
+    "classification_source": "NCBI ClinVar",
+    "status": "available"
   },
   "main_findings": {
     "population_frequencies": [

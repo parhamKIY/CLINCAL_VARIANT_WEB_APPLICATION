@@ -326,29 +326,6 @@ from frontend.ui import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _open_review_detail(app: AppTest, detail: str) -> AppTest:
-    review_surface = next(
-        (
-            control
-            for control in app.button_group
-            if control.label == "Review surface"
-        ),
-        None,
-    )
-    if review_surface is None:
-        return next(
-            control
-            for control in app.button_group
-            if control.label == "Evidence review details"
-        ).select(detail).run(timeout=10)
-    review_surface.select("Technical details").run(timeout=10)
-    return next(
-        control
-        for control in app.button_group
-        if control.label == "Technical detail"
-    ).select(detail).run(timeout=10)
 pytestmark = [
     pytest.mark.stage43_testing_v2,
     pytest.mark.stage59_testing_v3,
@@ -1676,28 +1653,17 @@ def _variant_interpretation_response(
     model: str = "variant-interpretation-test-model",
     conflict_assessment: str = "No meaningful conflict is present.",
     phenotype_conclusion: str = "partially supported",
-    preliminary_classification_status: str = "classified",
-    preliminary_classification: str | None = "Pathogenic",
 ) -> LLMResponse:
     """Return one valid Stage 50 response for pipeline integration tests."""
 
     return LLMResponse(
         content=json.dumps(
             {
-                "preliminary_classification_status": (
-                    preliminary_classification_status
-                ),
-                "preliminary_classification": preliminary_classification,
-                "classification_rationale": (
-                    "The source evidence supports a preliminary pathogenic "
-                    "classification."
-                ),
                 "interpretation": (
                     "The supplied evidence supports cautious human review."
                 ),
                 "conflict_assessment": conflict_assessment,
                 "phenotype_conclusion": phenotype_conclusion,
-                "limitations": ["Human review remains required."],
                 "warnings": [],
             }
         ),
@@ -7912,14 +7878,6 @@ class TestEvidenceObject:
                 "HP:0001263",
             ],
             "matched_hpo_terms": ["HP:0001250"],
-            "call_quality": {
-                "schema_version": "1.0",
-                "qual": 99.0,
-                "filter": "PASS",
-                "status": "passed",
-                "acknowledged_at": None,
-                "override": None,
-            },
             "source_statuses": {
                 "vep": "success",
                 "myvariant": "success",
@@ -13162,24 +13120,13 @@ class TestStage50SingleModelInterpretation:
         *,
         conflict_assessment: str = "No meaningful conflict is present.",
         phenotype_conclusion: str = "partially supported",
-        preliminary_classification_status: str = "classified",
-        preliminary_classification: str | None = "Pathogenic",
     ) -> dict[str, object]:
         return {
-            "preliminary_classification_status": (
-                preliminary_classification_status
-            ),
-            "preliminary_classification": preliminary_classification,
-            "classification_rationale": (
-                "The source evidence supports a preliminary pathogenic "
-                "classification."
-            ),
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
             "conflict_assessment": conflict_assessment,
             "phenotype_conclusion": phenotype_conclusion,
-            "limitations": ["Human review remains required."],
             "warnings": ["Human review remains required."],
         }
 
@@ -13225,13 +13172,6 @@ class TestStage50SingleModelInterpretation:
             "prompt_mode": "standard",
             "conflict_status": "no_conflict",
             "conflict_severity": "none",
-            "preliminary_classification_status": "classified",
-            "preliminary_classification": "Pathogenic",
-            "classification_rationale": (
-                "The source evidence supports a preliminary pathogenic "
-                "classification."
-            ),
-            "limitations": ["Human review remains required."],
             "provider": settings.LLM_PROVIDER,
             "configured_model": settings.VARIANT_INTERPRETATION_MODEL,
             "response_model": "variant-model",
@@ -13306,19 +13246,12 @@ class TestStage50SingleModelInterpretation:
 
         def fake_call_llm(*args: object, **kwargs: object) -> LLMResponse:
             observed.append({"args": args, **kwargs})
-            is_conflicting = len(observed) == 2
             return self._response(
                 self._payload(
                     conflict_assessment=(
                         "The supplied classifications disagree and remain "
                         "unresolved."
-                    ),
-                    preliminary_classification_status=(
-                        "ambiguous" if is_conflicting else "classified"
-                    ),
-                    preliminary_classification=(
-                        None if is_conflicting else "Pathogenic"
-                    ),
+                    )
                 ),
                 model="provider-returned-model",
             )
@@ -13382,40 +13315,28 @@ class TestStage50SingleModelInterpretation:
             ),
             (
                 {
-                    "preliminary_classification_status": "classified",
-                    "preliminary_classification": "Pathogenic",
-                    "classification_rationale": "Supported by sources.",
                     "interpretation": "x"
                     * (MAX_INTERPRETATION_CHARACTERS + 1),
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
-                    "limitations": [],
                     "warnings": [],
                 },
                 "size limit",
             ),
             (
                 {
-                    "preliminary_classification_status": "classified",
-                    "preliminary_classification": "Pathogenic",
-                    "classification_rationale": "Supported by sources.",
                     "interpretation": "See https://invented.example",
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
-                    "limitations": [],
                     "warnings": [],
                 },
                 "must not contain URLs",
             ),
             (
                 {
-                    "preliminary_classification_status": "classified",
-                    "preliminary_classification": "Pathogenic",
-                    "classification_rationale": "Supported by sources.",
                     "interpretation": "Text",
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
-                    "limitations": [],
                     "warnings": ["Repeated", "Repeated"],
                 },
                 "must be unique",
@@ -13668,10 +13589,6 @@ class TestStage52DraftVariantReportV2:
             "prompt_version": failed["prompt_version"],
             "generated_at": failed["generated_at"],
             "failure_type": "request_timeout",
-            "preliminary_classification_status": None,
-            "preliminary_classification": None,
-            "classification_rationale": None,
-            "limitations": [],
         }
         assert any(
             "evidence remains reviewable" in limitation
@@ -14447,7 +14364,6 @@ class TestStage55CanonicalReferences:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
-        _open_review_detail(app, "Draft Variant Report")
 
         displayed_urls = {
             button.url
@@ -15961,7 +15877,7 @@ class TestStage40FrontendReviewWorkflow:
             "SCN1A" in markdown.value
             for markdown in app.markdown
         )
-        _open_review_detail(app, "Edit evidence draft")
+        assert len(app.table) >= 2
 
         reviewed = deepcopy(original)
         reviewed["manual_evidence"] = {
@@ -16024,7 +15940,6 @@ class TestStage40FrontendReviewWorkflow:
             for subheader in app.subheader
         )
 
-        _open_review_detail(app, "Final confirmation")
         confirm = next(
             button
             for button in app.button
@@ -16107,7 +16022,10 @@ class TestStage40FrontendReviewWorkflow:
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
 
-        _open_review_detail(app, "Edit evidence draft")
+        assert any(
+            "temporarily unavailable" in error.value
+            for error in app.error
+        )
         assert any(
             area.label == "Reviewed evidence report (JSON)"
             for area in app.text_area
@@ -16140,7 +16058,6 @@ class TestStage40FrontendReviewWorkflow:
         )
         app.session_state["pipeline_result"] = self._draft_result()
         app.run(timeout=10)
-        _open_review_detail(app, "Final confirmation")
         next(
             checkbox
             for checkbox in app.checkbox
@@ -16156,12 +16073,6 @@ class TestStage40FrontendReviewWorkflow:
         assert app.session_state["pipeline_result"][
             "reviewed_evidence_packages"
         ]
-
-        next(
-            control
-            for control in app.button_group
-            if control.label == "Review surface"
-        ).select("Clinical report review").run(timeout=10)
 
         next(
             area
@@ -16185,6 +16096,7 @@ class TestStage40FrontendReviewWorkflow:
         assert result["reviewed_evidence_packages"] == []
         assert result["workflow_state"] == "awaiting_final_review"
         assert saved[-1]["draft_variant_reports"][0] == report
+        assert app.dataframe
 
 
 @pytest.mark.stage15_security
@@ -16858,12 +16770,6 @@ class TestStage60EndToEndAcceptanceV3:
                             if index % 2
                             else "No meaningful conflict is present."
                         ),
-                        preliminary_classification_status=(
-                            "ambiguous" if index % 2 else "classified"
-                        ),
-                        preliminary_classification=(
-                            None if index % 2 else "Pathogenic"
-                        ),
                     )
                 )
                 for index in range(10)
@@ -17407,7 +17313,7 @@ class TestStage57PersistenceSchemaV3:
         assert restored["draft_variant_reports"][0]["reviewed_report"][
             "reviewer_summary"
         ] == "Persisted reviewer-approved summary."
-        assert row["final_report_schema_version"] == "2.1"
+        assert row["final_report_schema_version"] == "2.0"
         assert json.loads(row["artifact_metadata_json"])[
             "available_formats"
         ] == ["text", "pdf", "docx"]
@@ -23099,11 +23005,6 @@ class TestStage49TaskSpecificModelUI:
         ).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
-        next(
-            control
-            for control in app.button_group
-            if control.label == "Analysis result view"
-        ).select("Analysis and provider details").run(timeout=10)
 
         assert not app.exception
         assert observed == {
@@ -23705,11 +23606,6 @@ class TestFrontendFoundation:
         ).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
-        next(
-            control
-            for control in app.button_group
-            if control.label == "Analysis result view"
-        ).select("Analysis and provider details").run(timeout=10)
 
         assert not app.exception
         rendered = "\n".join(
@@ -24015,21 +23911,6 @@ class TestFrontendFoundation:
             "success"
         )
         assert any(
-            subheader.value
-            == "Draft Variant Review — Evidence and interpretation"
-            for subheader in app.subheader
-        )
-        next(
-            control
-            for control in app.button_group
-            if control.label == "Analysis result view"
-        ).select("Analysis and provider details").run(timeout=10)
-        next(
-            control
-            for control in app.button_group
-            if control.label == "Analysis view"
-        ).select("Evidence").run(timeout=10)
-        assert any(
             subheader.value == "Analysis results"
             for subheader in app.subheader
         )
@@ -24048,18 +23929,17 @@ class TestFrontendFoundation:
             "ClinVar": "Evidence available",
             "ClinGen/GenCC": "Evidence available",
         }
-        assert len(app.dataframe) == 3
+        assert len(app.dataframe) == 6
+        assert any(
+            subheader.value
+            == "Draft Variant Review — Evidence and interpretation"
+            for subheader in app.subheader
+        )
         assert not app.get("download_button")
         reviewed = TestEvidenceObject._complete_evidence_object()
         reviewed["manual_evidence"] = {
             "laboratory": "confirmation pending"
         }
-        next(
-            control
-            for control in app.button_group
-            if control.label == "Analysis result view"
-        ).select("Clinical report review").run(timeout=10)
-        _open_review_detail(app, "Edit evidence draft")
         next(
             area
             for area in app.text_area

@@ -23,14 +23,9 @@ from backend.variant_report import (
 )
 
 
-REPORT_LIFECYCLE_SCHEMA_VERSION = "1.1"
+REPORT_LIFECYCLE_SCHEMA_VERSION = "1.0"
 UNPERSISTED_ANALYSIS_ID = "unpersisted-analysis"
-ReportLifecycleState = Literal[
-    "draft",
-    "confirmed",
-    "finalized",
-    "finalized_with_unresolved_interpretation",
-]
+ReportLifecycleState = Literal["draft", "confirmed", "finalized"]
 LIFECYCLE_STATES = frozenset(ReportLifecycleState.__args__)
 
 
@@ -47,16 +42,6 @@ class ReportDocxArtifact(TypedDict):
     template_version: str
 
 
-class UnresolvedInterpretationAcknowledgement(TypedDict):
-    """Audited reviewer decision to include an unresolved interpretation."""
-
-    variant_index: int
-    interpretation_fingerprint: str
-    failure_type: str
-    reason: str
-    acknowledged_at: str
-
-
 class VariantReportRecord(TypedDict):
     """One ordered report from draft through confirmation and finalization."""
 
@@ -71,16 +56,10 @@ class VariantReportRecord(TypedDict):
     updated_at: str
     confirmed_at: str | None
     finalized_at: str | None
-    unresolved_interpretation_acknowledgement: (
-        UnresolvedInterpretationAcknowledgement | None
-    )
 
 
 RECORD_FIELDS = frozenset(VariantReportRecord.__required_keys__)
 ARTIFACT_FIELDS = frozenset(ReportDocxArtifact.__required_keys__)
-ACKNOWLEDGEMENT_FIELDS = frozenset(
-    UnresolvedInterpretationAcknowledgement.__required_keys__
-)
 
 
 def _timestamp(value: object, path: str, *, optional: bool = False) -> str | None:
@@ -128,9 +107,6 @@ def build_variant_report_record(
     analysis_id: str | None,
     confirmed_at: str | None = None,
     finalized_at: str | None = None,
-    unresolved_interpretation_acknowledgement: Mapping[str, object] | None = None,
-    selected_interpretation: Mapping[str, object] | None = None,
-    interpretation_selection_history: Sequence[Mapping[str, object]] = (),
 ) -> VariantReportRecord:
     """Build one canonical lifecycle record and its DOCX draft metadata."""
 
@@ -139,8 +115,6 @@ def build_variant_report_record(
         report = build_report_data_from_draft(
             validated_draft,
             analysis_id=analysis_id or UNPERSISTED_ANALYSIS_ID,
-            selected_interpretation=selected_interpretation,
-            interpretation_selection_history=interpretation_selection_history,
         )
         if confirmed_at is not None:
             _timestamp(confirmed_at, "confirmed_at")
@@ -151,23 +125,11 @@ def build_variant_report_record(
             raise ReportLifecycleError(
                 "A finalized report record must already be confirmed."
             )
-        unresolved = (
-            validated_draft["reviewed_report"]["variant_interpretation"]["status"]
-            == "failed"
+        lifecycle_state: ReportLifecycleState = (
+            "finalized"
+            if finalized_at is not None
+            else ("confirmed" if confirmed_at is not None else "draft")
         )
-        selected = validated_draft["include_in_final_report"]
-        if finalized_at is not None and selected and unresolved:
-            if unresolved_interpretation_acknowledgement is None:
-                raise ReportLifecycleError(
-                    "An unresolved selected report requires a reviewer acknowledgement."
-                )
-            lifecycle_state: ReportLifecycleState = (
-                "finalized_with_unresolved_interpretation"
-            )
-        elif finalized_at is not None and selected:
-            lifecycle_state = "finalized"
-        else:
-            lifecycle_state = "confirmed" if confirmed_at is not None else "draft"
         effective_updated_at = (
             finalized_at or confirmed_at or validated_draft["updated_at"]
         )
@@ -184,12 +146,6 @@ def build_variant_report_record(
                 "updated_at": effective_updated_at,
                 "confirmed_at": confirmed_at,
                 "finalized_at": finalized_at,
-                "unresolved_interpretation_acknowledgement": (
-                    dict(unresolved_interpretation_acknowledgement)
-                    if lifecycle_state
-                    == "finalized_with_unresolved_interpretation"
-                    else None
-                ),
             }
         )
     except (DraftVariantReportError, ReportDataError, ReportDocxError) as exc:
@@ -204,11 +160,6 @@ def build_variant_report_records(
     analysis_id: str | None,
     confirmed_packages: Sequence[Mapping[str, object]] = (),
     finalized_at: str | None = None,
-    unresolved_interpretation_acknowledgements: Sequence[
-        Mapping[str, object]
-    ] = (),
-    selected_interpretations: Mapping[int, Mapping[str, object]] | None = None,
-    interpretation_selection_history: Sequence[Mapping[str, object]] = (),
 ) -> list[VariantReportRecord]:
     """Build every record in immutable original input order."""
 
@@ -223,42 +174,14 @@ def build_variant_report_records(
         ):
             raise ReportLifecycleError("Confirmed package metadata is invalid.")
         confirmed_by_index[index] = timestamp
-    acknowledgements_by_index: dict[int, Mapping[str, object]] = {}
-    for acknowledgement in unresolved_interpretation_acknowledgements:
-        index = acknowledgement.get("variant_index")
-        if isinstance(index, bool) or not isinstance(index, int) or index in acknowledgements_by_index:
-            raise ReportLifecycleError(
-                "Unresolved interpretation acknowledgement metadata is invalid."
-            )
-        acknowledgements_by_index[index] = acknowledgement
-    histories_by_index: dict[int, list[Mapping[str, object]]] = {}
-    for selection in interpretation_selection_history:
-        index = selection.get("variant_index")
-        if isinstance(index, bool) or not isinstance(index, int):
-            raise ReportLifecycleError(
-                "Interpretation selection history metadata is invalid."
-            )
-        histories_by_index.setdefault(index, []).append(selection)
     records = [
         build_variant_report_record(
             draft,
             analysis_id=analysis_id,
             confirmed_at=confirmed_by_index.get(index),
             finalized_at=(
-                finalized_at
-                if index in confirmed_by_index
-                and bool(draft.get("include_in_final_report"))
-                else None
+                finalized_at if index in confirmed_by_index else None
             ),
-            unresolved_interpretation_acknowledgement=acknowledgements_by_index.get(
-                index
-            ),
-            selected_interpretation=(
-                None
-                if selected_interpretations is None
-                else selected_interpretations.get(index)
-            ),
-            interpretation_selection_history=histories_by_index.get(index, ()),
         )
         for index, draft in enumerate(drafts)
     ]
@@ -303,34 +226,6 @@ def validate_variant_report_record(value: object) -> VariantReportRecord:
     updated_at = cast(str, _timestamp(item["updated_at"], "updated_at"))
     confirmed_at = _timestamp(item["confirmed_at"], "confirmed_at", optional=True)
     finalized_at = _timestamp(item["finalized_at"], "finalized_at", optional=True)
-    acknowledgement_value = item["unresolved_interpretation_acknowledgement"]
-    acknowledgement: dict[str, object] | None = None
-    if acknowledgement_value is not None:
-        if (
-            not isinstance(acknowledgement_value, Mapping)
-            or set(acknowledgement_value) != ACKNOWLEDGEMENT_FIELDS
-        ):
-            raise ReportLifecycleError(
-                "Unresolved interpretation acknowledgement is invalid."
-            )
-        acknowledgement = dict(acknowledgement_value)
-        if acknowledgement["variant_index"] != index:
-            raise ReportLifecycleError(
-                "Unresolved interpretation acknowledgement index is inconsistent."
-            )
-        for field in ("interpretation_fingerprint", "failure_type", "reason"):
-            if not isinstance(acknowledgement[field], str) or not acknowledgement[field].strip():
-                raise ReportLifecycleError(
-                    "Unresolved interpretation acknowledgement text is invalid."
-                )
-        acknowledged_at = _timestamp(
-            acknowledgement["acknowledged_at"],
-            "unresolved_interpretation_acknowledgement.acknowledged_at",
-        )
-        if acknowledged_at is None:
-            raise ReportLifecycleError(
-                "Unresolved interpretation acknowledgement timestamp is invalid."
-            )
     created_value = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     updated_value = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
     confirmed_value = (
@@ -365,31 +260,6 @@ def validate_variant_report_record(value: object) -> VariantReportRecord:
         raise ReportLifecycleError(
             "Finalized report lifecycle timestamps are inconsistent."
         )
-    if state == "finalized_with_unresolved_interpretation" and (
-        confirmed_at is None or finalized_at is None
-    ):
-        raise ReportLifecycleError(
-            "Unresolved finalization timestamps are inconsistent."
-        )
-    selected = report["review_state"]["include_in_final_report"]
-    unresolved = report["interpretation"]["interpretation_status"] == "unavailable"
-    if state == "finalized" and (not selected or unresolved):
-        raise ReportLifecycleError(
-            "Ordinary finalization cannot contain an unselected or unresolved report."
-        )
-    if state == "finalized_with_unresolved_interpretation":
-        if not selected or not unresolved or acknowledgement is None:
-            raise ReportLifecycleError(
-                "Unresolved finalization does not match the selected report state."
-            )
-        if acknowledgement["failure_type"] != report["interpretation"]["failure_type"]:
-            raise ReportLifecycleError(
-                "Unresolved finalization failure category is inconsistent."
-            )
-    elif acknowledgement is not None:
-        raise ReportLifecycleError(
-            "Only unresolved finalization may retain an acknowledgement."
-        )
     if (report["review_state"]["review_status"] == "confirmed") != (
         confirmed_at is not None
     ):
@@ -412,7 +282,6 @@ __all__ = [
     "REPORT_LIFECYCLE_SCHEMA_VERSION",
     "UNPERSISTED_ANALYSIS_ID",
     "ReportLifecycleError",
-    "UnresolvedInterpretationAcknowledgement",
     "VariantReportRecord",
     "build_variant_report_record",
     "build_variant_report_records",

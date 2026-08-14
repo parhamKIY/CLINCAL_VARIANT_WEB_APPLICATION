@@ -37,7 +37,7 @@ EXPECTED_HEADINGS = [
     "NGS Result Report",
     "Clinical Features:",
     "Method:",
-    "Variant and source classification context:",
+    "Conclusive Result(s):",
     "Brief Interpretation(s):",
     "Main Finding(s) in Detail:",
     "Variant interpretation:",
@@ -51,7 +51,7 @@ REQUIRED_LABELS = frozenset(
     {
         "NGS Result Report",
         "Clinical Features:",
-        "Variant and source classification context:",
+        "Conclusive Result(s):",
         "Brief Interpretation(s):",
         "Main Finding(s) in Detail:",
         "Variant interpretation:",
@@ -106,7 +106,7 @@ def _sparse_evidence(report: dict[str, Any]) -> None:
         {
             "classification": None,
             "classification_source": None,
-            "status": "not_assessed",
+            "status": "unavailable",
         }
     )
     report["main_findings"] = {

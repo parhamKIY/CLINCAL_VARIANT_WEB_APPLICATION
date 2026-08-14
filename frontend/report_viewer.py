@@ -172,18 +172,15 @@ def render_report_viewer(result: PipelineResult) -> None:
         st.divider()
         st.markdown(report.text)
 
-    source = st.expander(
+    with st.expander(
         "Plain-text source",
         icon=":material/text_snippet:",
-        on_change="rerun",
-    )
-    if getattr(source, "open", True):
-        with source:
-            st.code(
-                report.text,
-                language="text",
-                wrap_lines=True,
-            )
+    ):
+        st.code(
+            report.text,
+            language="text",
+            wrap_lines=True,
+        )
 
 
 def render_final_clinical_report_viewer(result: PipelineResult) -> None:
@@ -206,9 +203,6 @@ def render_final_clinical_report_viewer(result: PipelineResult) -> None:
             "Reviewer-approved content only. The selected editable Word package "
             "is authoritative; export does not regenerate interpretation or make "
             "another LLM call."
-        )
-        st.caption(
-            f"Finalization state: {report['metadata']['finalization_state']}"
         )
         selected_count = report["metadata"]["selected_variant_count"]
         package = None

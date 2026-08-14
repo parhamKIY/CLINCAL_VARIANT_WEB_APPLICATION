@@ -1,10 +1,10 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stages 116-122 implemented as recorded below
+**Implementation status:** Stages 0-114 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 123 classification-product scope decision; Stage 115 final visual sign-off remains deferred
-**Document date:** 2026-08-14
+**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 115 final visual sign-off
+**Document date:** 2026-08-13
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
@@ -129,10 +129,7 @@ order: Persian multi-concept phenotype extraction, valid no-match evidence rescu
 cross-provider identifier intelligence, exact ClinVar retrieval, scoped CSpec
 applicability, deterministic evidence readiness, secondary classification recovery,
 classified interpretation retry, and reviewer-facing source-status semantics.
-Stage 116 adds a typed call-quality contract: non-`PASS` upstream FILTER values are
-blocked before provider or model use unless a reviewer records a bounded, timestamped
-override; absent FILTER values require explicit acknowledgement. This declaration is
-the unified implementation record for Stages 0-114 and 116. The former
+This declaration is the unified implementation record for Stages 0-114. The former
 Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
 facts were reconciled here. Sections describing Output A, Output B, or two-layer
 routing are historical Stage 44 facts; they are not part of the active workflow for
@@ -576,7 +573,6 @@ their original order.
 | 113 | Added configuration-error classification and reviewer-triggered retry of one failed interpretation from persisted evidence without rerunning upstream providers or overwriting reviewer decisions. | Complete |
 | 114 | Replaced raw reviewer-facing `no_match` labels with source-specific expected-absence, primary-no-match, rescue, provider-failure, and not-queried wording while retaining technical statuses internally. | Complete |
 | 115 | Perform the final Word/LibreOffice side-by-side visual fidelity review and obtain external sign-off. | Pending |
-| 116 | Added deterministic `FILTER` call-quality state, pre-annotation/LLM gate, audited acknowledgement or override, persistence/recovery, and Streamlit submission controls. | Complete |
 
 ## 5. Current implemented architecture
 
@@ -791,12 +787,6 @@ report links. Live validation showed that the Ensembl VEP and GeneBe batch POST
 endpoints are source endpoints rather than browser-navigable records; Stage 61 now
 maps them to the explicit unavailable-link fallback. Representative ClinVar and
 MyVariant exact links returned reachable responses.
-
-Stage 120 wraps that production-client command in a sequential 180-second default
-overall deadline, concise provider-group progress lines, and atomic normalized JSON
-checkpoints. It retains the production clients' own timeout classifications, omits
-raw payloads, credentials, URLs, and clinical input from the checkpoint, and exits
-nonzero with the partial summary when interrupted or deadline-limited.
 
 ### Stage 62 documentation and professor-review handoff
 
@@ -1709,106 +1699,6 @@ rescue, an operational provider failure, and an unexecuted query. Technical stat
 method, attempts, fallback path, provider result, and stop reason remain available in
 collapsed diagnostics.
 
-### Stage 116 call-quality contract and interpretation gate
-
-`backend/call_quality.py` derives one state for every normalized allele without
-interpreting caller-specific FILTER codes: trimmed case-insensitive `PASS` is
-`passed`, absent/blank/`.` is `not_evaluated`, and every other nonempty value is
-`failed`. The original bounded FILTER code string and QUAL value remain unchanged.
-
-Before annotation, a `not_evaluated` allele requires an explicit timestamped reviewer
-acknowledgement; a `failed` allele requires a bounded reason and timestamped override.
-Otherwise the pipeline stops after normalized input and makes zero provider or LLM
-calls. The retained state is persisted in the candidate and pipeline snapshots and is
-revalidated on recovery. The Streamlit submission surface previews the affected
-alleles and collects the required decision.
-
-### Stage 117 call-quality report disclosure
-
-Immutable `QUAL`, raw `FILTER`, derived state, acknowledgement, and override facts now
-flow from Evidence Objects through Draft Variant Reports into typed `ReportData`.
-HTML previews and DOCX method/result context disclose the state directly. Unresolved
-missing or failed calls show `ACTION REQUIRED`; overridden failures show prominent
-`PARTIAL` notices. Inclusion changes preserve the same immutable quality provenance.
-
-### Stage 118 source-only classification invariant
-
-`ReportData` now rejects any provider-derived value in `conclusive_result` while the
-application has not independently adjudicated ACMG/AMP classification. ClinVar,
-GeneBe, and MyVariant-derived observations remain source-attributed in the detailed
-findings and classification summary. HTML and DOCX explicitly display `System
-classification: Not independently determined`.
-
-### Stage 119 unresolved-interpretation finalization semantics
-
-Failed or exhausted interpretations now default to exclusion from the selected final
-package. A reviewer who elects to include one must record a bounded, timestamped,
-privacy-checked reason bound to the exact failed interpretation. Selected unresolved
-reports receive the lifecycle state `finalized_with_unresolved_interpretation`; all
-other ordinary finalized reports have a successful interpretation. Final Clinical
-Reports, selected DOCX package manifests, the final-review UI, analysis summaries, and
-variant status cards use `Finalized with unresolved variants` when applicable.
-
-Retrying a failed interpretation clears the prior acknowledgement when the result is
-replaced. Finalization remains deterministic and makes no LLM request.
-
-### Stage 120 bounded live-validation harness
-
-The retained live-provider command now delegates deadline, progress, partial-result,
-and privacy-safe checkpoint orchestration to `tools/live_provider_validation.py`.
-Its summary records ordered provider-group states from `not_started` through
-`completed`, `unavailable`, or `overall_deadline_exceeded`; no raw provider response,
-credential-bearing URL, or clinical input is retained. `--skip-llm` does not create
-either LLM task.
-
-### Stage 121 lazy Streamlit technical surfaces
-
-The completed-analysis interface now defaults to Clinical report review. Explicit,
-stateful segmented controls defer analysis/provider details, provider diagnostics,
-raw original evidence, edit history, and other technical report surfaces until the
-reviewer selects them. Dynamic expanders also avoid serializing hidden source JSON,
-fallback provenance, warnings, and plain-text report sources. Reviewer-owned draft,
-selection, and confirmation state remains in session state and is not cached.
-
-### Stage 122 dependency-security release gate
-
-`pip-audit==2.10.1` is now installed only through the development requirements and
-the CI release gate audits the resolved local environment in strict JSON mode. The
-checked-in runner emits only a package/version/advisory summary, fails closed on
-scanner errors or malformed, expired, broad, unknown, duplicate, or unused exception
-records, and does not create an exception mechanism until a real reviewed exception is
-needed. CI explicitly runs compilation, `pip check`, the secrets audit, the dependency
-audit, the deterministic suite, and the Stage 60 acceptance gate. The resolved
-`GitPython` dependency is pinned to `3.1.58`, the patched version for the detected
-`3.1.57` advisories.
-
-### Stage 123 evidence-synthesis scope decision
-
-The approved product boundary remains educational/research evidence synthesis, not
-expert ACMG/AMP adjudication or laboratory sign-out. The result heading is now
-`Variant and source classification context`; ReportData, HTML, DOCX, final-report,
-and package paths continue to retain `System classification: Not independently
-determined` while presenting external classifications only as immutable,
-source-attributed evidence. Reviewer confirmation confirms evidence review and
-report wording, and finalization records an audited report disposition. The focused
-scope suite passed `33 passed, 1 skipped`; the complete offline suite passed
-`1275 passed, 6 skipped` on 2026-08-14. Stage 115 remains the next required
-Word/LibreOffice visual sign-off.
-
-### Stage 115 final Word visual sign-off
-
-All six deterministic Stage 101 report scenarios were exported with Microsoft Word
-`16.0`, rasterized at 150 DPI with Poppler, and inspected across 25 pages on
-2026-08-14. Every page count was within its registered scenario range; no clipping,
-overlap, missing glyph, unintended blank page, or page-edge overflow was observed.
-The visual review confirmed source-only classification wording, quality disclosure,
-long-allele wrapping, table flow, references, and controlled page breaks. Narrow
-table-header wrapping and short continuation pages before the forced third section
-remain accepted template behaviors because the content remains visible and
-untruncated. The documented reviewer boundary is document QA only, not clinical or
-laboratory sign-out. The focused visual suite passed `19 passed, 1 skipped`; the
-complete offline suite passed `1276 passed, 6 skipped` on 2026-08-14.
-
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1819,15 +1709,15 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.3`.
+- Active pipeline schema: `3.2`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.2`.
-- Variant Report Lifecycle schema: `1.1`.
+- Variant Report Lifecycle schema: `1.0`.
 - Variant Integrity Record schema: `1.0`.
-- Final Clinical Report schema: `2.1`.
+- Final Clinical Report schema: `2.0`.
 - Recovery request schema: `3`.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
@@ -1934,10 +1824,6 @@ population, literature, and configured LLM endpoint:
 ```powershell
 .\.venv\Scripts\python.exe tests\run_live_provider_validation.py
 ```
-
-Use `--skip-llm` to omit both configured LLM tasks, or
-`--deadline-seconds 120` to set a bounded overall deadline. The default is 180
-seconds, and the JSON checkpoint is rewritten atomically after each provider group.
 
 The complete Stage 61 gate passed on **2026-08-09**. GenCC, CSpec, LitVar2, Europe
 PMC, and PubMed returned valid no-match responses for the public probe. Every other
@@ -2058,9 +1944,6 @@ and sign-off remain external and must not be recorded as complete before review.
 | Stage 112 secondary classification recovery | `backend/classification_evidence.py`, `backend/conflict_auditor.py`, `backend/report_data_projection.py`, `backend/variant_report.py`, `frontend/report_preview.py`, `tests/test_classification_evidence.py` |
 | Stage 113 classified interpretation retry | `backend/variant_interpretation.py`, `backend/pipeline.py`, `frontend/evidence_review.py`, `tests/test_defect08_interpretation_recovery.py` |
 | Stage 114 reviewer source-status semantics | `frontend/source_status.py`, `frontend/evidence_review.py`, `frontend/report_preview.py`, `frontend/results.py`, `frontend/warning_semantics.py`, `tests/test_defect09_reviewer_source_status.py` |
-| Stage 116 call-quality contract and gate | `backend/call_quality.py`, `backend/vcf_processing.py`, `backend/pipeline.py`, `backend/database.py`, `frontend/execution.py`, `frontend/ui.py`, `tests/test_stage116_call_quality_gate.py` |
-| Stage 117 call-quality report disclosure | `backend/report.py`, `backend/variant_report.py`, `backend/report_data.py`, `backend/report_data_projection.py`, `backend/report_docx.py`, `frontend/report_preview.py`, `frontend/warning_semantics.py`, `tests/test_stage117_call_quality_reporting.py` |
-| Stage 118 source-only classification invariant | `backend/report_data.py`, `backend/report_data_projection.py`, `backend/report_docx.py`, `tools/build_stage82_template.py`, `tests/test_stage118_classification_invariant.py` |
 | Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
 | gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
 | ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
@@ -2080,7 +1963,7 @@ and sign-off remain external and must not be recorded as complete before review.
 
 ## 15. Known limitations and remaining work
 
-1. Stages 46-114 and Stages 116-118 are implemented and documented. The provider-resilience roadmap is
+1. Stages 46-114 are implemented and documented. The provider-resilience roadmap is
    complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
    the professor-report template specification. Stage 83 manual DOCX visual fidelity,
    Stage 115, professor feedback, and final visual sign-off remain pending.
@@ -2218,8 +2101,4 @@ then resolved the nine post-acceptance defects: multi-concept Persian phenotype
 extraction, no-match rescue, identifier-aware retrieval, exact ClinVar matching,
 scope-correct CSpec context, deterministic evidence readiness, source-attributed
 classification recovery, persisted-evidence interpretation retry, and reviewer-safe
-source-status wording. Stage 116 then added the deterministic upstream call-quality
-gate, audited acknowledgement/override state, persistence/recovery, and submission
-controls. Stage 117 then propagated immutable call-quality provenance into evidence,
-reports, reviewer notices, HTML, DOCX, persistence, and recovery. Stage 118 is next;
-Stage 115 remains the deferred final visual sign-off gate.
+source-status wording. Stage 115 is the final visual sign-off gate.

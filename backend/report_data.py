@@ -1,4 +1,4 @@
-"""Stable ReportData V6 contract for future DOCX and preview renderers."""
+"""Stable ReportData V4 contract for future DOCX and preview renderers."""
 
 from __future__ import annotations
 
@@ -20,8 +20,7 @@ from backend.references import (
 )
 
 
-REPORT_DATA_SCHEMA_VERSION = "6.0"
-LEGACY_REPORT_DATA_SCHEMA_VERSIONS = frozenset({"4.0", "5.0"})
+REPORT_DATA_SCHEMA_VERSION = "4.0"
 MAX_REPORT_DATA_BYTES = 256 * 1024
 MAX_TEXT_CHARS = 20_000
 MAX_SHORT_TEXT_CHARS = 500
@@ -118,17 +117,6 @@ class ReportConclusiveResult(TypedDict):
     classification: str | None
     classification_source: str | None
     status: AvailabilityStatus
-
-
-class ReportCallQuality(TypedDict):
-    """Typed input-call quality facts, separate from report prose."""
-
-    qual: float | None
-    filter: str | None
-    status: Literal["passed", "not_evaluated", "failed"]
-    acknowledged_at: str | None
-    override_reason: str | None
-    override_timestamp: str | None
 
 
 class ReportPopulationFinding(TypedDict):
@@ -230,16 +218,6 @@ class ReportClassificationSummary(TypedDict):
     summary: str | None
 
 
-class ReportPreliminaryClassification(TypedDict):
-    """LLM evidence synthesis kept distinct from a final clinical result."""
-
-    status: Literal["classified", "ambiguous", "unavailable"]
-    classification: str | None
-    rationale: str | None
-    limitations: list[str]
-    review_required: bool
-
-
 class ReportDataSource(TypedDict):
     """Database/tool provenance kept separate from literature."""
 
@@ -299,23 +277,6 @@ class ReportReviewState(TypedDict):
     selection_history: list[ReportSelectionRecord]
 
 
-class ReportInterpretationVersionSelectionRecord(TypedDict):
-    """One explicit reviewed interpretation selection retained for final output."""
-
-    sequence: int
-    selected_revision_number: int
-    selected_at: str
-    reviewer_context: str
-
-
-class ReportInterpretationVersionSelection(TypedDict):
-    """Current selected initial/revised version plus its audit history."""
-
-    selected_revision_number: int
-    selected_at: str | None
-    selection_history: list[ReportInterpretationVersionSelectionRecord]
-
-
 class ReportData(TypedDict):
     """Renderer-neutral source of truth for one allele-level report."""
 
@@ -326,17 +287,14 @@ class ReportData(TypedDict):
     variant_identity: ReportVariantIdentity
     phenotype_summary: ReportPhenotypeSummary
     conclusive_result: ReportConclusiveResult
-    call_quality: ReportCallQuality
     main_findings: ReportMainFindings
     interpretation: ReportInterpretation
     classification_summary: ReportClassificationSummary
-    preliminary_classification: ReportPreliminaryClassification
     literature_references: list[CanonicalReference]
     data_sources: list[ReportDataSource]
     warnings: list[ReportWarning]
     provenance: ReportProvenance
     review_state: ReportReviewState
-    interpretation_version_selection: ReportInterpretationVersionSelection
     template_version: str
 
 
@@ -349,7 +307,6 @@ VARIANT_IDENTITY_FIELDS = _fields(ReportVariantIdentity)
 HPO_TERM_FIELDS = _fields(ReportHPOTerm)
 PHENOTYPE_SUMMARY_FIELDS = _fields(ReportPhenotypeSummary)
 CONCLUSIVE_RESULT_FIELDS = _fields(ReportConclusiveResult)
-CALL_QUALITY_FIELDS = _fields(ReportCallQuality)
 MAIN_FINDINGS_FIELDS = _fields(ReportMainFindings)
 POPULATION_FINDING_FIELDS = _fields(ReportPopulationFinding)
 DISEASE_ASSOCIATION_FIELDS = _fields(ReportDiseaseAssociation)
@@ -359,18 +316,11 @@ CLASSIFICATION_FINDING_FIELDS = _fields(ReportClassificationFinding)
 INTERPRETATION_FIELDS = _fields(ReportInterpretation)
 INTERPRETATION_EDIT_FIELDS = _fields(ReportInterpretationEdit)
 CLASSIFICATION_SUMMARY_FIELDS = _fields(ReportClassificationSummary)
-PRELIMINARY_CLASSIFICATION_FIELDS = _fields(ReportPreliminaryClassification)
 DATA_SOURCE_FIELDS = _fields(ReportDataSource)
 WARNING_FIELDS = _fields(ReportWarning)
 PROVENANCE_FIELDS = _fields(ReportProvenance)
 REVIEW_STATE_FIELDS = _fields(ReportReviewState)
 SELECTION_RECORD_FIELDS = _fields(ReportSelectionRecord)
-INTERPRETATION_VERSION_SELECTION_FIELDS = _fields(
-    ReportInterpretationVersionSelection
-)
-INTERPRETATION_VERSION_SELECTION_RECORD_FIELDS = _fields(
-    ReportInterpretationVersionSelectionRecord
-)
 
 
 def _mapping(
@@ -566,53 +516,6 @@ def _validate_conclusive_result(value: object) -> None:
         raise ReportDataError(
             "Available conclusive_result requires classification and source."
         )
-
-
-def _validate_source_only_classification(value: Mapping[str, object]) -> None:
-    """Keep provider observations out of the application's result block."""
-
-    conclusive = value["conclusive_result"]
-    summary = value["classification_summary"]
-    if not isinstance(conclusive, Mapping) or not isinstance(summary, Mapping):
-        return
-    if summary["independent_acmg_adjudication"] is False and (
-        conclusive["classification"] is not None
-        or conclusive["classification_source"] is not None
-        or conclusive["status"] != "not_assessed"
-    ):
-        raise ReportDataError(
-            "Source-attributed classifications cannot populate conclusive_result."
-        )
-
-
-def _validate_call_quality(value: object) -> None:
-    item = _mapping(value, CALL_QUALITY_FIELDS, "call_quality")
-    _number(item["qual"], "call_quality.qual", optional=True)
-    _text(item["filter"], "call_quality.filter", optional=True)
-    status = _enum(
-        item["status"],
-        frozenset({"passed", "not_evaluated", "failed"}),
-        "call_quality.status",
-    )
-    _timestamp(item["acknowledged_at"], "call_quality.acknowledged_at", optional=True)
-    reason = _text(
-        item["override_reason"], "call_quality.override_reason", optional=True
-    )
-    _timestamp(
-        item["override_timestamp"],
-        "call_quality.override_timestamp",
-        optional=True,
-    )
-    acknowledged = item["acknowledged_at"] is not None
-    has_override_timestamp = item["override_timestamp"] is not None
-    if (reason is None) == has_override_timestamp:
-        raise ReportDataError("Call-quality override fields are inconsistent.")
-    if status == "passed" and (acknowledged or reason is not None):
-        raise ReportDataError("Passed calls cannot have reviewer exceptions.")
-    if status == "not_evaluated" and reason is not None:
-        raise ReportDataError("Only failed calls can have an override.")
-    if status == "failed" and acknowledged:
-        raise ReportDataError("Failed calls require an override, not acknowledgement.")
 
 
 def _validate_population_findings(value: object) -> None:
@@ -824,61 +727,6 @@ def _validate_classification_summary(value: object) -> None:
     )
 
 
-def _validate_preliminary_classification(value: object) -> None:
-    item = _mapping(
-        value,
-        PRELIMINARY_CLASSIFICATION_FIELDS,
-        "preliminary_classification",
-    )
-    status = _enum(
-        item["status"],
-        frozenset({"classified", "ambiguous", "unavailable"}),
-        "preliminary_classification.status",
-    )
-    classification = _text(
-        item["classification"],
-        "preliminary_classification.classification",
-        optional=True,
-    )
-    rationale = _text(
-        item["rationale"],
-        "preliminary_classification.rationale",
-        optional=True,
-        maximum=MAX_TEXT_CHARS,
-    )
-    _text_list(
-        item["limitations"],
-        "preliminary_classification.limitations",
-    )
-    if not _boolean(
-        item["review_required"],
-        "preliminary_classification.review_required",
-    ):
-        raise ReportDataError(
-            "Preliminary classification must require human review."
-        )
-    allowed = frozenset(
-        {
-            "Pathogenic",
-            "Likely pathogenic",
-            "Uncertain significance",
-            "Likely benign",
-            "Benign",
-        }
-    )
-    if status == "classified":
-        if classification not in allowed or rationale is None:
-            raise ReportDataError(
-                "Classified preliminary output requires an allowed label and rationale."
-            )
-    elif classification is not None:
-        raise ReportDataError(
-            "Ambiguous or unavailable preliminary output cannot contain a label."
-        )
-    if status == "ambiguous" and rationale is None:
-        raise ReportDataError("Ambiguous preliminary output requires a rationale.")
-
-
 def _validate_literature_references(value: object) -> None:
     seen: set[str] = set()
     for index, raw in enumerate(
@@ -982,20 +830,11 @@ def _validate_review_state(value: object) -> None:
     if (status == "confirmed") != (item["confirmed_at"] is not None):
         raise ReportDataError("Review status and confirmation time are inconsistent.")
 
+    replayed = True
     history = _sequence(
         item["selection_history"],
         "review_state.selection_history",
         maximum=MAX_EDIT_HISTORY,
-    )
-    replayed = (
-        False
-        if (not history and not included)
-        or (
-            bool(history)
-            and isinstance(history[0], Mapping)
-            and history[0].get("old_value") is False
-        )
-        else True
     )
     for index, raw in enumerate(history):
         path = f"review_state.selection_history[{index}]"
@@ -1013,80 +852,11 @@ def _validate_review_state(value: object) -> None:
         raise ReportDataError("Selection history does not match current inclusion.")
 
 
-def _validate_interpretation_version_selection(value: object) -> None:
-    item = _mapping(
-        value,
-        INTERPRETATION_VERSION_SELECTION_FIELDS,
-        "interpretation_version_selection",
-    )
-    selected_revision = _integer(
-        item["selected_revision_number"],
-        "interpretation_version_selection.selected_revision_number",
-    )
-    selected_at = item["selected_at"]
-    _timestamp(
-        selected_at,
-        "interpretation_version_selection.selected_at",
-        optional=True,
-    )
-    history = _sequence(
-        item["selection_history"],
-        "interpretation_version_selection.selection_history",
-        maximum=MAX_EDIT_HISTORY,
-    )
-    if not history:
-        if selected_revision != 0 or selected_at is not None:
-            raise ReportDataError(
-                "An implicit initial interpretation selection cannot have metadata."
-            )
-        return
-    for index, raw in enumerate(history):
-        path = f"interpretation_version_selection.selection_history[{index}]"
-        record = _mapping(raw, INTERPRETATION_VERSION_SELECTION_RECORD_FIELDS, path)
-        if _integer(record["sequence"], f"{path}.sequence", minimum=1) != index + 1:
-            raise ReportDataError(
-                "Interpretation version selection history is not contiguous."
-            )
-        _integer(record["selected_revision_number"], f"{path}.selected_revision_number")
-        _timestamp(record["selected_at"], f"{path}.selected_at")
-        _text(record["reviewer_context"], f"{path}.reviewer_context")
-    latest = cast(Mapping[str, object], history[-1])
-    if (
-        latest["selected_revision_number"] != selected_revision
-        or latest["selected_at"] != selected_at
-    ):
-        raise ReportDataError(
-            "Interpretation version selection does not match its history."
-        )
-
-
 def validate_report_data(value: object) -> ReportData:
-    """Validate and copy a V6 record or retained compatibility record."""
+    """Validate and copy one renderer-neutral ReportData V4 record."""
 
-    is_v6 = (
-        isinstance(value, Mapping)
-        and value.get("schema_version") == REPORT_DATA_SCHEMA_VERSION
-    )
-    v5_fields = REPORT_DATA_FIELDS - {"interpretation_version_selection"}
-    v4_fields = v5_fields - {"preliminary_classification"}
-    legacy_fields = v4_fields - {"call_quality"}
-    fields = (
-        REPORT_DATA_FIELDS
-        if is_v6
-        else (
-            v5_fields
-            if isinstance(value, Mapping) and "call_quality" in value
-            and "preliminary_classification" in value
-            else v4_fields
-            if isinstance(value, Mapping) and "call_quality" in value
-            else legacy_fields
-        )
-    )
-    item = _mapping(value, fields, "report_data")
-    if item["schema_version"] not in {
-        REPORT_DATA_SCHEMA_VERSION,
-        *LEGACY_REPORT_DATA_SCHEMA_VERSIONS,
-    }:
+    item = _mapping(value, REPORT_DATA_FIELDS, "report_data")
+    if item["schema_version"] != REPORT_DATA_SCHEMA_VERSION:
         raise ReportDataError("report_data.schema_version is unsupported.")
     _text(item["report_id"], "report_data.report_id", maximum=128)
     _text(item["analysis_id"], "report_data.analysis_id", maximum=128)
@@ -1094,18 +864,9 @@ def validate_report_data(value: object) -> ReportData:
     _validate_variant_identity(item["variant_identity"])
     _validate_phenotype_summary(item["phenotype_summary"])
     _validate_conclusive_result(item["conclusive_result"])
-    if "call_quality" in item:
-        _validate_call_quality(item["call_quality"])
     _validate_main_findings(item["main_findings"])
     _validate_interpretation(item["interpretation"])
     _validate_classification_summary(item["classification_summary"])
-    if "preliminary_classification" in item:
-        _validate_preliminary_classification(item["preliminary_classification"])
-    if "interpretation_version_selection" in item:
-        _validate_interpretation_version_selection(
-            item["interpretation_version_selection"]
-        )
-    _validate_source_only_classification(item)
     _validate_literature_references(item["literature_references"])
     _validate_data_sources(item["data_sources"])
     _validate_warnings(item["warnings"])
@@ -1136,7 +897,6 @@ def validate_report_data(value: object) -> ReportData:
 
 __all__ = [
     "AVAILABILITY_STATUSES",
-    "LEGACY_REPORT_DATA_SCHEMA_VERSIONS",
     "PHENOTYPE_CONCORDANCE_VALUES",
     "REPORT_DATA_SCHEMA_VERSION",
     "ReportData",

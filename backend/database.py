@@ -20,11 +20,6 @@ from backend.report import (
     EvidenceObjectError,
     sanitize_evidence_object,
 )
-from backend.call_quality import (
-    CallQualityError,
-    CallQualityRecord,
-    validate_call_quality_record,
-)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -56,9 +51,6 @@ _CANDIDATE_REQUIRED_FIELDS = frozenset(
 _STORED_CANDIDATE_FIELDS = frozenset(
     {"chrom", "pos", "ref", "alt", "qual", "filter"}
 )
-_STORED_CANDIDATE_FIELDS_WITH_CALL_QUALITY = (
-    _STORED_CANDIDATE_FIELDS | {"call_quality"}
-)
 _CANDIDATE_ALLOWED_FIELDS = frozenset(
     {
         "chrom",
@@ -68,7 +60,6 @@ _CANDIDATE_ALLOWED_FIELDS = frozenset(
         "alt",
         "qual",
         "filter",
-        "call_quality",
         "genotype",
     }
 )
@@ -489,7 +480,6 @@ class StoredCandidateVariant(TypedDict):
     alt: str
     qual: float | None
     filter: str | None
-    call_quality: CallQualityRecord | None
 
 
 class StoredAnalysisRecord(AnalysisRecord):
@@ -1076,7 +1066,7 @@ def _sanitize_candidate(
             maximum=500,
         )
 
-    candidate: StoredCandidateVariant = {
+    return {
         "chrom": _candidate_text(
             value["chrom"],
             path=f"{path}.chrom",
@@ -1096,16 +1086,6 @@ def _sanitize_candidate(
         "qual": None if quality is None else float(quality),
         "filter": normalized_filter,
     }
-    if "call_quality" in value:
-        try:
-            candidate["call_quality"] = validate_call_quality_record(
-                value["call_quality"]
-            )
-        except CallQualityError as exc:
-            raise DatabaseValidationError(
-                f"{path}.call_quality is invalid."
-            ) from exc
-    return candidate
 
 
 def _require_analysis(
@@ -1978,27 +1958,6 @@ def _bounded_stage56_pipeline_migration(
         except (TypeError, ValueError):
             return None
     source_version = candidate.get("schema_version")
-    if source_version == "3.2":
-        candidate["unresolved_finalization_acknowledgements"] = []
-        reports = candidate.get("draft_variant_reports")
-        interpretations = candidate.get("variant_interpretation_results")
-        if (
-            candidate.get("workflow_state") == "completed"
-            and isinstance(reports, list)
-            and isinstance(interpretations, list)
-            and any(
-                isinstance(report, dict)
-                and report.get("include_in_final_report")
-                and index < len(interpretations)
-                and isinstance(interpretations[index], dict)
-                and interpretations[index].get("status") == "failed"
-                for index, report in enumerate(reports)
-            )
-        ):
-            candidate["workflow_state"] = "awaiting_final_review"
-            candidate["final_clinical_report"] = None
-            candidate["status"] = "partial"
-        source_version = "3.2"
     if source_version == "3.1":
         evidence_objects = candidate.get("evidence_objects")
         if not isinstance(evidence_objects, list) or not all(
@@ -2022,13 +1981,12 @@ def _bounded_stage56_pipeline_migration(
         except EvidenceReadinessError:
             return None
         candidate["evidence_readiness"] = readiness
-        candidate["unresolved_finalization_acknowledgements"] = []
         candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
         try:
             return validate_pipeline_result(candidate)
         except (TypeError, ValueError):
             return None
-    if source_version not in {"2.8", "2.9", "3.0", "3.2"}:
+    if source_version not in {"2.8", "2.9", "3.0"}:
         return None
     variant_count = candidate.get("variant_count")
     reports = candidate.get("draft_variant_reports")
@@ -2073,7 +2031,6 @@ def _bounded_stage56_pipeline_migration(
             "phenotype_extraction_provenance": None,
         }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
-    candidate.setdefault("unresolved_finalization_acknowledgements", [])
     raw_variants = candidate.get("variants")
     evidence_objects = candidate.get("evidence_objects")
     if not isinstance(raw_variants, list) or not all(
@@ -2372,17 +2329,17 @@ def load_pipeline_state(
         or len(raw_json.encode("utf-8")) > MAX_PIPELINE_STATE_JSON_BYTES
     ):
         raise DatabaseReadError("The stored pipeline state is invalid.")
-    migrated_from_legacy_schema = False
+    migrated_from_schema31 = False
     try:
         raw = json.loads(raw_json)
-        if isinstance(raw, dict) and raw.get("schema_version") in {"3.1", "3.2"}:
+        if isinstance(raw, dict) and raw.get("schema_version") == "3.1":
             migrated = _bounded_stage56_pipeline_migration(raw)
             if migrated is None:
                 raise DatabaseReadError(
                     "The stored pipeline state is invalid."
                 )
             raw = migrated
-            migrated_from_legacy_schema = True
+            migrated_from_schema31 = True
         if (
             isinstance(raw, dict)
             and raw.get("schema_version") != PIPELINE_SCHEMA_VERSION
@@ -2409,8 +2366,8 @@ def load_pipeline_state(
         or (
             validated["schema_version"] != row["pipeline_schema_version"]
             and not (
-                migrated_from_legacy_schema
-                and row["pipeline_schema_version"] in {"3.1", "3.2"}
+                migrated_from_schema31
+                and row["pipeline_schema_version"] == "3.1"
             )
         )
         or _derive_review_state(validated) != row["review_state"]
@@ -2534,10 +2491,7 @@ def _restore_candidates(
             raw_candidate = json.loads(row["variant_json"])
             if (
                 not isinstance(raw_candidate, dict)
-                or set(raw_candidate) not in {
-                    _STORED_CANDIDATE_FIELDS,
-                    _STORED_CANDIDATE_FIELDS_WITH_CALL_QUALITY,
-                }
+                or set(raw_candidate) != _STORED_CANDIDATE_FIELDS
             ):
                 raise DatabaseValidationError(
                     "Stored candidate fields are invalid."
@@ -2554,10 +2508,7 @@ def _restore_candidates(
             raise DatabaseReadError(
                 "A stored candidate variant is invalid."
             ) from exc
-        expected_candidate = dict(clean_candidate)
-        if "call_quality" not in raw_candidate:
-            expected_candidate.pop("call_quality", None)
-        if expected_candidate != raw_candidate:
+        if clean_candidate != raw_candidate:
             raise DatabaseReadError(
                 "A stored candidate variant is invalid."
             )

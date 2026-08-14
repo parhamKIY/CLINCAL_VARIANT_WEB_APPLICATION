@@ -98,17 +98,8 @@ def build_analysis_summary(result: Mapping[str, object]) -> AnalysisSummary:
 
     status = str(result.get("status") or "").casefold()
     current_stage = str(result.get("current_stage") or "").casefold()
-    final_report = result.get("final_clinical_report")
-    finalization_state = (
-        final_report.get("metadata", {}).get("finalization_state")
-        if isinstance(final_report, Mapping)
-        and isinstance(final_report.get("metadata"), Mapping)
-        else None
-    )
     headline = (
-        str(finalization_state)
-        if current_stage == "completed" and finalization_state
-        else "Analysis complete"
+        "Analysis complete"
         if current_stage == "completed"
         else "Analysis requires attention"
         if status in {"partial", "error"}

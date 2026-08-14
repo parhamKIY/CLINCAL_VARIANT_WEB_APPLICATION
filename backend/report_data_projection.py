@@ -1,9 +1,8 @@
-"""Transient Draft Variant Report V2 to ReportData V5 projection."""
+"""Transient Draft Variant Report V2 to ReportData V4 projection."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
 from typing import cast
 
 from backend.conflict_auditor import normalize_classification_label
@@ -75,13 +74,14 @@ def _classifications(
     str | None,
     str | None,
     str | None,
-    bool,
+    str | None,
     str | None,
 ]:
     findings: list[dict[str, object]] = []
     clinvar_value: str | None = None
     automated_value: str | None = None
     derived_value: str | None = None
+    conclusive_source: str | None = None
     clinvar = _section(report, "ClinVar")
     if clinvar is not None:
         values = _section_values(clinvar)
@@ -89,6 +89,7 @@ def _classifications(
         status = _availability(clinvar["status"])
         if clinvar_value:
             status = "available"
+            conclusive_source = clinvar["source"]
         elif status == "available":
             status = "not_assessed"
         findings.append(
@@ -109,6 +110,8 @@ def _classifications(
         status = _availability(genebe["status"])
         if automated_value:
             status = "available"
+            if conclusive_source is None:
+                conclusive_source = genebe["source"]
         elif status == "available":
             status = "not_assessed"
         findings.append(
@@ -148,6 +151,10 @@ def _classifications(
                     "status": "available",
                 }
             )
+            if conclusive_source is None:
+                conclusive_source = (
+                    "MyVariant.info (ClinVar-derived rescue)"
+                )
     normalized = {
         normalized
         for value in (clinvar_value, automated_value, derived_value)
@@ -159,16 +166,17 @@ def _classifications(
             clinvar_value,
             automated_value,
             derived_value,
-            True,
+            "Classification conflict",
             "Multiple source-attributed classifications",
         )
+    conclusive = clinvar_value or automated_value or derived_value
     return (
         findings,
         clinvar_value,
         automated_value,
         derived_value,
-        False,
-        None,
+        conclusive,
+        conclusive_source if conclusive else None,
     )
 
 
@@ -176,10 +184,8 @@ def build_report_data_from_draft(
     value: object,
     *,
     analysis_id: str,
-    selected_interpretation: Mapping[str, object] | None = None,
-    interpretation_selection_history: Sequence[Mapping[str, object]] = (),
 ) -> ReportData:
-    """Project current reviewed fields into a validated transient ReportData V6."""
+    """Project current reviewed fields into a validated transient ReportData V4."""
 
     report = validate_draft_variant_report(value)
     content = report["reviewed_report"]
@@ -187,15 +193,13 @@ def build_report_data_from_draft(
     variant = content["variant_summary"]
     phenotype = content["phenotype_context"]
     interpretation = content["variant_interpretation"]
-    selected = selected_interpretation or interpretation
-    quality = content["call_quality"]
     (
         classification_findings,
         clinvar,
         automated,
         _derived,
-        source_conflict,
-        source_conflict_summary,
+        source_result,
+        _source_result_source,
     ) = (
         _classifications(report)
     )
@@ -302,80 +306,11 @@ def build_report_data_from_draft(
         if item["status"] == "available"
     ]
     warning_messages = [
-        *selected["warnings"],
+        *interpretation["warnings"],
         *content["limitations"],
     ][:50]
-    preliminary_status = selected.get("preliminary_classification_status")
-    preliminary_label = selected.get("preliminary_classification")
-    preliminary_rationale = selected.get("classification_rationale")
-    preliminary_limitations = selected.get("limitations", [])
-    if selected["status"] != "success" or preliminary_status not in {
-        "classified",
-        "ambiguous",
-    }:
-        preliminary = {
-            "status": "unavailable",
-            "classification": None,
-            "rationale": (
-                "No preliminary classification was generated for this "
-                "interpretation."
-            ),
-            "limitations": (
-                [
-                    "This report predates the preliminary classification "
-                    "output contract."
-                ]
-                if interpretation["status"] == "success"
-                else []
-            ),
-            "review_required": True,
-        }
-    else:
-        preliminary = {
-            "status": preliminary_status,
-            "classification": preliminary_label,
-            "rationale": preliminary_rationale,
-            "limitations": preliminary_limitations,
-            "review_required": True,
-        }
-    selected_revision_number = 0
-    if interpretation_selection_history:
-        selected_revision_number = cast(
-            int,
-            interpretation_selection_history[-1]["selected_revision_number"],
-        )
-    narrative_edits = list(narrative_edits)
-    if selected_interpretation is not None:
-        narrative_edits.append(
-            {
-                "sequence": len(narrative_edits) + 1,
-                "old_value": (
-                    narrative_edits[-1]["new_value"]
-                    if narrative_edits
-                    else original["variant_interpretation"]["narrative"]
-                ),
-                "new_value": selected["interpretation"],
-                "timestamp": selected["generated_at"],
-                "reviewer_context": "selected_revised_interpretation",
-            }
-        )
-    selected_narrative = (
-        selected["interpretation"]
-        if selected_interpretation is not None
-        else selected["narrative"]
-    )
-    selected_model = (
-        selected["configured_model"]
-        if selected_interpretation is not None
-        else selected["model"]
-    )
-    selected_failure_type = (
-        selected["error_type"]
-        if selected_interpretation is not None
-        else selected["failure_type"]
-    )
     projected: dict[str, object] = {
-        "schema_version": "6.0",
+        "schema_version": "4.0",
         "report_id": report["report_id"],
         "analysis_id": analysis_id,
         "input_index": report["variant_index"],
@@ -411,18 +346,6 @@ def build_report_data_from_draft(
             "classification_source": None,
             "status": "not_assessed",
         },
-        "call_quality": {
-            "qual": quality["qual"],
-            "filter": quality["filter"],
-            "status": quality["status"],
-            "acknowledged_at": quality["acknowledged_at"],
-            "override_reason": (
-                None if quality["override"] is None else quality["override"]["reason"]
-            ),
-            "override_timestamp": (
-                None if quality["override"] is None else quality["override"]["timestamp"]
-            ),
-        },
         "main_findings": {
             "population_frequencies": population_findings,
             "disease_associations": disease_associations,
@@ -434,18 +357,16 @@ def build_report_data_from_draft(
             "original_model_interpretation": original[
                 "variant_interpretation"
             ]["narrative"],
-            "current_reviewer_interpretation": selected_narrative,
-            "model": selected_model,
-            "prompt_version": selected["prompt_version"],
-            "generated_at": selected["generated_at"],
+            "current_reviewer_interpretation": interpretation["narrative"],
+            "model": interpretation["model"],
+            "prompt_version": interpretation["prompt_version"],
+            "generated_at": interpretation["generated_at"],
             "edit_history": narrative_edits,
             "interpretation_status": (
-                "available"
-                if selected["status"] == "success"
-                else "unavailable"
+                "available" if interpretation["narrative"] else "unavailable"
             ),
-            "failure_type": selected_failure_type,
-            "conflict_assessment": selected["conflict_assessment"],
+            "failure_type": interpretation["failure_type"],
+            "conflict_assessment": interpretation["conflict_assessment"],
         },
         "classification_summary": {
             "reviewer_confirmed_classification": None,
@@ -454,15 +375,14 @@ def build_report_data_from_draft(
             "conflict_status": (
                 "conflict"
                 if conflict["detected"]
-                or source_conflict
+                or source_result == "Classification conflict"
                 else "none"
             ),
             "conflict_severity": conflict["severity"],
             "source_attributions": source_attributions,
             "independent_acmg_adjudication": False,
-            "summary": source_conflict_summary or selected["conflict_assessment"],
+            "summary": interpretation["conflict_assessment"],
         },
-        "preliminary_classification": preliminary,
         "literature_references": [
             item
             for item in content["literature_references"]
@@ -497,23 +417,6 @@ def build_report_data_from_draft(
             "reviewer_summary": content["reviewer_summary"],
             "reviewer_notes": content["reviewer_notes"],
             "selection_history": report["selection_history"],
-        },
-        "interpretation_version_selection": {
-            "selected_revision_number": selected_revision_number,
-            "selected_at": (
-                interpretation_selection_history[-1]["selected_at"]
-                if interpretation_selection_history
-                else None
-            ),
-            "selection_history": [
-                {
-                    "sequence": index + 1,
-                    "selected_revision_number": item["selected_revision_number"],
-                    "selected_at": item["selected_at"],
-                    "reviewer_context": item["reviewer_context"],
-                }
-                for index, item in enumerate(interpretation_selection_history)
-            ],
         },
         "template_version": "professor-report-v1",
     }

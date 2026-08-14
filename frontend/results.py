@@ -622,25 +622,22 @@ def _render_fallback_notices(evidence: dict[str, object]) -> None:
         )
         for notice in notices:
             st.write(f"- {notice['message']}")
-        details = st.expander(
+        with st.expander(
             "Fallback provenance details",
             icon=":material/info:",
-            on_change="rerun",
-        )
-        if getattr(details, "open", True):
-            with details:
-                st.table(
-                    [
-                        {
-                            "Capability": notice["capability_label"],
-                            "Primary": notice["primary_provider_label"],
-                            "Fallback": notice["fallback_provider_label"],
-                            "Primary failure": notice["primary_failure"],
-                            "Method": notice["method_label"],
-                        }
-                        for notice in notices
-                    ]
-                )
+        ):
+            st.table(
+                [
+                    {
+                        "Capability": notice["capability_label"],
+                        "Primary": notice["primary_provider_label"],
+                        "Fallback": notice["fallback_provider_label"],
+                        "Primary failure": notice["primary_failure"],
+                        "Method": notice["method_label"],
+                    }
+                    for notice in notices
+                ]
+            )
 
 
 def _render_evidence_details(evidence: dict[str, object]) -> None:
@@ -795,14 +792,11 @@ def _render_evidence_details(evidence: dict[str, object]) -> None:
         for warning in warnings:
             st.warning(str(warning))
 
-    sanitized_evidence = st.expander(
+    with st.expander(
         "Sanitized Evidence Object",
         icon=":material/data_object:",
-        on_change="rerun",
-    )
-    if getattr(sanitized_evidence, "open", True):
-        with sanitized_evidence:
-            st.json(evidence, expanded=2)
+    ):
+        st.json(evidence, expanded=2)
 
 
 def _render_evidence_view(result: PipelineResult) -> None:
@@ -863,33 +857,32 @@ def render_analysis_results(result: PipelineResult) -> None:
             border=True,
         )
 
-    analysis_view = st.segmented_control(
-        "Analysis view",
-        ("Input variants", "Annotations", "Phenotype", "Evidence"),
-        default="Input variants",
-        required=True,
-        key="analysis_results_view",
-        persist_state="page",
+    variants_tab, annotations_tab, phenotype_tab, evidence_tab = (
+        st.tabs(
+            (
+                "Input variants",
+                "Annotations",
+                "Phenotype",
+                "Evidence",
+            )
+        )
     )
-    if analysis_view == "Input variants":
+    with variants_tab:
         _render_variant_table(result)
-    elif analysis_view == "Annotations":
+    with annotations_tab:
         _render_annotation_table(result)
-    elif analysis_view == "Phenotype":
+    with phenotype_tab:
         _render_phenotype_table(result)
-    else:
+    with evidence_tab:
         _render_evidence_view(result)
 
     if result["warnings"]:
-        warnings = st.expander(
+        with st.expander(
             f"Pipeline warnings ({len(result['warnings'])})",
             icon=":material/warning:",
-            on_change="rerun",
-        )
-        if getattr(warnings, "open", True):
-            with warnings:
-                for warning in result["warnings"]:
-                    st.warning(warning)
+        ):
+            for warning in result["warnings"]:
+                st.warning(warning)
 
 
 __all__ = [

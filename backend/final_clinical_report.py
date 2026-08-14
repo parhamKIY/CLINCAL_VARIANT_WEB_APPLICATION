@@ -31,17 +31,12 @@ from backend.variant_report import (
 )
 
 
-FINAL_CLINICAL_REPORT_SCHEMA_VERSION = "2.1"
+FINAL_CLINICAL_REPORT_SCHEMA_VERSION = "2.0"
 MAX_FINAL_CLINICAL_REPORT_BYTES = 4 * 1024 * 1024
 FINAL_CLINICAL_REPORT_DISCLAIMER = (
     "This report is clinical decision-support material for review by a "
     "qualified healthcare professional. It does not establish an independent "
     "diagnosis and does not provide treatment or reproductive recommendations."
-)
-FINAL_CLINICAL_REPORT_SCOPE_NOTICE = (
-    "This reviewer-approved evidence-synthesis report records an audited report "
-    "disposition. It is not laboratory sign-out and does not independently "
-    "classify variant pathogenicity."
 )
 
 
@@ -76,7 +71,6 @@ _METADATA_FIELDS = frozenset(
         "selected_variant_count",
         "selected_variant_indexes",
         "assemblies",
-        "finalization_state",
     }
 )
 _PHENOTYPE_FIELDS = frozenset(
@@ -89,7 +83,6 @@ _FINDING_FIELDS = frozenset(
         "display_label",
         "gene",
         "interpretation_status",
-        "interpretation_failure_type",
         "reviewer_summary",
         "interpretation_narrative",
     }
@@ -115,7 +108,6 @@ _AUDIT_REPORT_FIELDS = frozenset(
         "updated_at",
         "confirmation_package_id",
         "confirmed_at",
-        "unresolved_interpretation_acknowledgement",
     }
 )
 
@@ -152,56 +144,6 @@ def _digest(value: Mapping[str, object]) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()[:24]
-
-
-def _selected_reviewed_report(
-    report: Mapping[str, object],
-    lifecycle_record: Mapping[str, object] | None,
-) -> dict[str, object]:
-    """Project the selected preliminary version into the final read-only view."""
-
-    reviewed = deepcopy(cast(dict[str, object], report["reviewed_report"]))
-    if lifecycle_record is None:
-        return reviewed
-    report_data = cast(dict[str, object], lifecycle_record["report_data"])
-    selected = report_data.get("interpretation_version_selection")
-    if not isinstance(selected, Mapping) or not selected.get("selection_history"):
-        return reviewed
-    interpretation = cast(dict[str, object], reviewed["variant_interpretation"])
-    projected = cast(dict[str, object], report_data["interpretation"])
-    preliminary = cast(dict[str, object], report_data["preliminary_classification"])
-    interpretation.update(
-        {
-            "status": (
-                "success"
-                if projected["interpretation_status"] == "available"
-                else "failed"
-            ),
-            "narrative": projected["current_reviewer_interpretation"],
-            "model": projected["model"],
-            "prompt_version": projected["prompt_version"],
-            "generated_at": projected["generated_at"],
-            "failure_type": projected["failure_type"],
-            "conflict_assessment": projected["conflict_assessment"],
-            "preliminary_classification_status": preliminary["status"],
-            "preliminary_classification": preliminary["classification"],
-            "classification_rationale": preliminary["rationale"],
-            "limitations": preliminary["limitations"],
-        }
-    )
-    notes = cast(list[str], reviewed["reviewer_notes"])
-    revision = selected["selected_revision_number"]
-    label = "initial" if revision == 0 else f"revised version {revision}"
-    notes.append(f"Final report uses the {label} interpretation.")
-    for history in selected["selection_history"]:
-        version = history["selected_revision_number"]
-        version_label = "initial" if version == 0 else f"revision {version}"
-        notes.append(
-            "Interpretation selection history: "
-            f"{version_label} selected at {history['selected_at']} "
-            f"({history['reviewer_context']})."
-        )
-    return reviewed
 
 
 def _require_mapping(
@@ -292,45 +234,6 @@ def compose_final_clinical_report(
         ]
     )
     selected = [reports[index] for index in selected_indexes]
-    records_by_index = {
-        record["variant_index"]: record for record in lifecycle_records
-    }
-    selected_views = [
-        (
-            report,
-            _selected_reviewed_report(
-                report,
-                records_by_index.get(report["variant_index"]),
-            ),
-        )
-        for report in selected
-    ]
-    unresolved_by_index = {
-        record["variant_index"]: record["unresolved_interpretation_acknowledgement"]
-        for record in lifecycle_records
-        if record["lifecycle_state"]
-        == "finalized_with_unresolved_interpretation"
-    }
-    if not unresolved_by_index:
-        acknowledgements_value = pipeline.get(
-            "unresolved_finalization_acknowledgements",
-            (),
-        )
-        if isinstance(acknowledgements_value, Sequence) and not isinstance(
-            acknowledgements_value,
-            (str, bytes),
-        ):
-            unresolved_by_index = {
-                item["variant_index"]: dict(item)
-                for item in acknowledgements_value
-                if isinstance(item, Mapping)
-                and isinstance(item.get("variant_index"), int)
-                and item.get("variant_index") in selected_indexes
-                and reports[item["variant_index"]]["reviewed_report"][
-                    "variant_interpretation"
-                ]["status"]
-                == "failed"
-            }
     source_reports = selected or reports
     accepted_hpo = _unique_text(
         [
@@ -353,15 +256,15 @@ def compose_final_clinical_report(
     providers = _unique_text(
         [
             provider
-            for _, reviewed in selected_views
-            for provider in cast(dict[str, object], reviewed["provenance"])["providers"]
+            for report in selected
+            for provider in report["reviewed_report"]["provenance"]["providers"]
         ]
     )
     upstream_sources = _unique_text(
         [
             source
-            for _, reviewed in selected_views
-            for source in cast(dict[str, object], reviewed["provenance"])[
+            for report in selected
+            for source in report["reviewed_report"]["provenance"][
                 "upstream_sources"
             ]
         ]
@@ -369,8 +272,8 @@ def compose_final_clinical_report(
     limitations = _unique_text(
         [
             limitation
-            for _, reviewed in selected_views
-            for limitation in cast(list[str], reviewed["limitations"])
+            for report in selected
+            for limitation in report["reviewed_report"]["limitations"]
         ]
     )
     if not limitations:
@@ -400,11 +303,6 @@ def compose_final_clinical_report(
                     for report in source_reports
                 ]
             ),
-            "finalization_state": (
-                "Finalized with unresolved variants"
-                if unresolved_by_index
-                else "Finalized"
-            ),
         },
         "phenotype_summary": {
             "accepted_hpo_terms": accepted_hpo,
@@ -414,32 +312,37 @@ def compose_final_clinical_report(
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "display_label": cast(dict[str, object], reviewed["variant_summary"])[
+                "display_label": item["reviewed_report"]["variant_summary"][
                     "display_label"
                 ],
-                "gene": cast(dict[str, object], reviewed["variant_summary"])["gene"],
-                "interpretation_status": cast(dict[str, object], reviewed["variant_interpretation"])["status"],
-                "interpretation_failure_type": cast(dict[str, object], reviewed["variant_interpretation"])["failure_type"],
-                "reviewer_summary": reviewed["reviewer_summary"],
-                "interpretation_narrative": cast(dict[str, object], reviewed["variant_interpretation"])["narrative"],
+                "gene": item["reviewed_report"]["variant_summary"]["gene"],
+                "interpretation_status": item["reviewed_report"][
+                    "variant_interpretation"
+                ]["status"],
+                "reviewer_summary": item["reviewed_report"]["reviewer_summary"],
+                "interpretation_narrative": item["reviewed_report"][
+                    "variant_interpretation"
+                ]["narrative"],
             }
-            for item, reviewed in selected_views
+            for item in selected
         ],
         "variant_sections": [
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "reviewed_report": deepcopy(reviewed),
+                "reviewed_report": deepcopy(item["reviewed_report"]),
             }
-            for item, reviewed in selected_views
+            for item in selected
         ],
         "references": [
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "items": deepcopy(reviewed["literature_references"]),
+                "items": deepcopy(
+                    item["reviewed_report"]["literature_references"]
+                ),
             }
-            for item, reviewed in selected_views
+            for item in selected
         ],
         "method_data_sources": {
             "composition_method": "deterministic_reviewer_approved_composition",
@@ -469,11 +372,6 @@ def compose_final_clinical_report(
                     ].get("package_id"),
                     "confirmed_at": packages_by_index[item["variant_index"]].get(
                         "confirmed_at"
-                    ),
-                    "unresolved_interpretation_acknowledgement": (
-                        deepcopy(unresolved_by_index[item["variant_index"]])
-                        if item["variant_index"] in unresolved_by_index
-                        else None
                     ),
                 }
                 for item in selected
@@ -523,12 +421,6 @@ def validate_final_clinical_report(value: object) -> FinalClinicalReport:
     _require_text(metadata["pipeline_schema_version"], "metadata.pipeline_schema_version")
     _require_text(metadata["draft_report_schema_version"], "metadata.draft_report_schema_version")
     _require_text_list(metadata["assemblies"], "metadata.assemblies")
-    finalization_state = metadata["finalization_state"]
-    if finalization_state not in {
-        "Finalized",
-        "Finalized with unresolved variants",
-    }:
-        raise FinalClinicalReportError("Final report finalization state is invalid.")
     phenotype = _require_mapping(
         report["phenotype_summary"], _PHENOTYPE_FIELDS, "phenotype_summary"
     )
@@ -552,13 +444,6 @@ def validate_final_clinical_report(value: object) -> FinalClinicalReport:
         _require_text(finding["report_id"], f"main_findings[{position}].report_id")
         _require_text(finding["display_label"], f"main_findings[{position}].display_label")
         _require_text(finding["interpretation_status"], f"main_findings[{position}].interpretation_status")
-        if finding["interpretation_status"] not in {"success", "failed"}:
-            raise FinalClinicalReportError("Final report interpretation status is invalid.")
-        if finding["interpretation_failure_type"] is not None:
-            _require_text(
-                finding["interpretation_failure_type"],
-                f"main_findings[{position}].interpretation_failure_type",
-            )
         for field in ("gene", "reviewer_summary", "interpretation_narrative"):
             _require_text(finding[field], f"main_findings[{position}].{field}", optional=True)
         reviewed_value = section["reviewed_report"]
@@ -578,8 +463,6 @@ def validate_final_clinical_report(value: object) -> FinalClinicalReport:
                 finding["gene"] != summary.get("gene"),
                 finding["interpretation_status"]
                 != interpretation.get("status"),
-                finding["interpretation_failure_type"]
-                != interpretation.get("failure_type"),
                 finding["reviewer_summary"]
                 != reviewed.get("reviewer_summary"),
                 finding["interpretation_narrative"]
@@ -631,37 +514,6 @@ def validate_final_clinical_report(value: object) -> FinalClinicalReport:
             raise FinalClinicalReportError(
                 "Final report audit timestamps are not normalized."
             )
-        acknowledgement = item["unresolved_interpretation_acknowledgement"]
-        failed = findings[position]["interpretation_status"] == "failed"
-        if failed:
-            if not isinstance(acknowledgement, dict):
-                raise FinalClinicalReportError(
-                    "Selected unresolved interpretation lacks acknowledgement."
-                )
-            if finalization_state != "Finalized with unresolved variants":
-                raise FinalClinicalReportError(
-                    "Ordinary finalization cannot contain an unresolved interpretation."
-                )
-            if acknowledgement.get("failure_type") != findings[position]["interpretation_failure_type"]:
-                raise FinalClinicalReportError(
-                    "Unresolved finalization failure category is inconsistent."
-                )
-            for field in ("interpretation_fingerprint", "failure_type", "reason"):
-                _require_text(acknowledgement.get(field), f"unresolved_acknowledgement.{field}")
-            if _timestamp(cast(str, acknowledgement.get("acknowledged_at"))) != acknowledgement.get("acknowledged_at"):
-                raise FinalClinicalReportError(
-                    "Unresolved finalization acknowledgement timestamp is invalid."
-                )
-        elif acknowledgement is not None:
-            raise FinalClinicalReportError(
-                "Successful finalization cannot retain an unresolved acknowledgement."
-            )
-    if finalization_state == "Finalized with unresolved variants" and not any(
-        finding["interpretation_status"] == "failed" for finding in findings
-    ):
-        raise FinalClinicalReportError(
-            "Unresolved finalization state requires a selected unresolved interpretation."
-        )
     try:
         validate_no_prohibited_fields(report, context="Final Clinical Report")
         validate_human_review_content(report, report, [])
@@ -704,8 +556,6 @@ def render_final_clinical_report_markdown(value: object) -> str:
     lines = [
         "# Final Clinical Report",
         "",
-        FINAL_CLINICAL_REPORT_SCOPE_NOTICE,
-        "",
         "## Report metadata",
         "",
         f"- Report ID: {_md(report['report_id'])}",
@@ -714,7 +564,6 @@ def render_final_clinical_report_markdown(value: object) -> str:
         f"- Genome assembly: {_list_text(metadata['assemblies'])}",
         f"- Variants reviewed: {metadata['variant_count']}",
         f"- Variants selected: {metadata['selected_variant_count']}",
-        f"- Finalization state: {_md(metadata['finalization_state'])}",
         "",
         "## De-identified phenotype summary",
         "",
@@ -734,14 +583,6 @@ def render_final_clinical_report_markdown(value: object) -> str:
                 "",
                 f"- Gene: {_md(finding['gene'])}",
                 f"- Interpretation status: {_md(finding['interpretation_status'])}",
-                *(
-                    [
-                        "- Interpretation failure category: "
-                        f"{_md(finding['interpretation_failure_type'])}"
-                    ]
-                    if finding["interpretation_failure_type"]
-                    else []
-                ),
                 f"- Approved summary: {_md(summary)}",
                 "",
             ]
@@ -885,7 +726,6 @@ def render_final_clinical_report_text(value: object) -> str:
 
 __all__ = [
     "FINAL_CLINICAL_REPORT_DISCLAIMER",
-    "FINAL_CLINICAL_REPORT_SCOPE_NOTICE",
     "FINAL_CLINICAL_REPORT_SCHEMA_VERSION",
     "FinalClinicalReport",
     "FinalClinicalReportError",

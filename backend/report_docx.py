@@ -140,30 +140,6 @@ def _brief_interpretation(report: ReportData) -> str:
     return " ".join(selected) or interpretation
 
 
-def _call_quality_text(report: ReportData) -> str:
-    quality = report.get("call_quality")
-    if quality is None:
-        return "Call quality was not retained in this legacy report."
-    qual = "Not available" if quality["qual"] is None else f"{quality['qual']:g}"
-    raw_filter = quality["filter"] or "Not evaluated"
-    state = quality["status"].replace("_", " ")
-    if quality["status"] == "not_evaluated" and quality["acknowledged_at"] is None:
-        return f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}. ACTION REQUIRED: reviewer acknowledgement is missing."
-    if quality["status"] == "failed" and quality["override_reason"] is None:
-        return f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}. ACTION REQUIRED: documented reviewer override is missing."
-    if quality["status"] == "failed":
-        return (
-            f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}. "
-            f"PARTIAL: reviewer override — {quality['override_reason']} ({quality['override_timestamp']})."
-        )
-    if quality["status"] == "not_evaluated":
-        return (
-            f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}; "
-            f"reviewer acknowledgement: {quality['acknowledged_at']}."
-        )
-    return f"Call quality — QUAL: {qual}; FILTER: {raw_filter}; state: {state}."
-
-
 def _frequency_text(item: dict[str, object]) -> str:
     if item["status"] != "available":
         return _status_text(str(item["status"]))
@@ -250,49 +226,6 @@ def _classification_context(report: ReportData) -> str:
 def _classification_summary(report: ReportData) -> str:
     summary = report["classification_summary"]
     statements: list[str] = []
-    preliminary = report.get("preliminary_classification")
-    interpretation_selection = report.get("interpretation_version_selection")
-    if interpretation_selection is not None:
-        revision = interpretation_selection["selected_revision_number"]
-        version_label = (
-            "initial interpretation"
-            if revision == 0
-            else f"revised interpretation version {revision}"
-        )
-        statements.append(
-            "Final-report interpretation selection: " + version_label + "."
-        )
-        if interpretation_selection["selected_at"]:
-            statements.append(
-                "Selection recorded at: "
-                + str(interpretation_selection["selected_at"])
-                + "."
-            )
-    if preliminary is not None:
-        if preliminary["status"] == "classified":
-            statements.append(
-                "Preliminary evidence-based classification: "
-                f"{_sentence_case(preliminary['classification'])}."
-            )
-        elif preliminary["status"] == "ambiguous":
-            statements.append(
-                "Preliminary evidence-based classification: "
-                "Ambiguous — user review required."
-            )
-        else:
-            statements.append(
-                "Preliminary evidence-based classification: Not available."
-            )
-        if preliminary["rationale"]:
-            statements.append(
-                "Classification rationale: " + preliminary["rationale"]
-            )
-        if preliminary["limitations"]:
-            statements.append(
-                "Classification limitations: "
-                + "; ".join(preliminary["limitations"])
-                + "."
-            )
     if summary["summary"]:
         statements.append(summary["summary"])
     for label, value in (
@@ -317,16 +250,6 @@ def _classification_summary(report: ReportData) -> str:
 def _comments_and_scope(report: ReportData) -> str:
     comments = [item["message"] for item in report["warnings"]]
     comments.extend(report["review_state"]["reviewer_notes"])
-    selection = report.get("interpretation_version_selection")
-    if selection is not None:
-        for record in selection["selection_history"]:
-            version = record["selected_revision_number"]
-            label = "initial" if version == 0 else f"revision {version}"
-            comments.append(
-                "Interpretation selection history: "
-                f"{label} selected at {record['selected_at']} "
-                f"({record['reviewer_context']})."
-            )
     comments.append(
         "This allele-level report supports qualified human review and does not provide "
         "a diagnosis, treatment recommendation, or testing directive."
@@ -369,8 +292,7 @@ def _placeholder_map(report: ReportData) -> dict[str, str]:
         "{{CLINICAL_FEATURES}}": _phenotype_text(report),
         "{{METHOD_SCOPE}}": (
             "Allele-level evidence synthesis for an already filtered variant; this "
-            "application did not perform sequencing or genome-wide prioritization. "
-            + _call_quality_text(report)
+            "application did not perform sequencing or genome-wide prioritization."
         ),
         "{{VARIANT_DISPLAY}}": _variant_display(report),
         "{{ZYGOSITY}}": _sentence_case(conclusive["zygosity"]),

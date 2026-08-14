@@ -10,7 +10,6 @@ from pathlib import Path
 
 import vcfpy
 
-from backend.call_quality import CallQualityError, normalize_filter_value
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
 
 
@@ -196,10 +195,12 @@ def get_primary_chromosome_length(
 def _format_filter(filters: list[str]) -> str | None:
     """Convert VCF FILTER values to one stable output value."""
 
-    try:
-        return normalize_filter_value(";".join(str(value) for value in filters))
-    except CallQualityError as exc:
-        raise VCFProcessingError("VCF FILTER is invalid.") from exc
+    cleaned_filters = [
+        value
+        for value in filters
+        if value and value != "."
+    ]
+    return ";".join(cleaned_filters) if cleaned_filters else None
 
 
 def _record_to_variants(
@@ -401,12 +402,11 @@ def _parse_manual_row(
         raise VCFProcessingError(
             f"Manual row {row_index + 1} FILTER must be text."
         )
-    try:
-        filter_value = normalize_filter_value(raw_filter)
-    except CallQualityError as exc:
-        raise VCFProcessingError(
-            f"Manual row {row_index + 1} FILTER is invalid."
-        ) from exc
+    filter_value = (
+        raw_filter.strip()
+        if isinstance(raw_filter, str) and raw_filter.strip()
+        else None
+    )
     return [
         {
             "chrom": chromosome,

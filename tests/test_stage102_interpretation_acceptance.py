@@ -30,26 +30,14 @@ def _response(
     interpretation: str,
     conflict_assessment: str = "No meaningful conflict is present.",
     phenotype_conclusion: str = "partially supported",
-    preliminary_classification_status: str = "classified",
-    preliminary_classification: str | None = "Pathogenic",
-    classification_rationale: str = (
-        "The source evidence supports a preliminary pathogenic classification."
-    ),
-    limitations: list[str] | None = None,
     warnings: list[str] | None = None,
 ) -> LLMResponse:
     return LLMResponse(
         content=json.dumps(
             {
-                "preliminary_classification_status": (
-                    preliminary_classification_status
-                ),
-                "preliminary_classification": preliminary_classification,
-                "classification_rationale": classification_rationale,
                 "interpretation": interpretation,
                 "conflict_assessment": conflict_assessment,
                 "phenotype_conclusion": phenotype_conclusion,
-                "limitations": limitations or ["Human review remains required."],
                 "warnings": warnings or [],
             }
         ),
@@ -203,11 +191,6 @@ def test_102_4_conflicting_evidence_remains_unresolved() -> None:
                     ),
                     conflict_assessment=(
                         "The supplied classifications disagree and remain unresolved."
-                    ),
-                    preliminary_classification_status="ambiguous",
-                    preliminary_classification=None,
-                    classification_rationale=(
-                        "The conflicting source classifications require human review."
                     ),
                 )
             )

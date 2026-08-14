@@ -228,12 +228,7 @@ def test_drawer_is_collapsed_and_uses_all_required_columns(
 
     assert observed["expander"] == (
         "Show technical details",
-        {
-            "expanded": False,
-            "key": "variant_provider_diagnostics_0",
-            "icon": ":material/monitoring:",
-            "on_change": "rerun",
-        },
+        {"expanded": False, "icon": ":material/monitoring:"},
     )
     rendered_rows, options = observed["dataframe"]  # type: ignore[misc]
     assert rendered_rows == rows
@@ -249,7 +244,7 @@ def test_drawer_is_collapsed_and_uses_all_required_columns(
     )
     assert options["hide_index"] is True
     assert options["width"] == "stretch"
-    assert options["key"] == "variant_provider_diagnostics_table_0"
+    assert options["key"] == "variant_provider_diagnostics_0"
 
 
 def test_drawer_marks_unavailable_telemetry_as_not_recorded(

@@ -10,7 +10,6 @@ import pytest
 
 from frontend.analysis_summary import build_analysis_summary
 from frontend.evidence_review import (
-    _render_selected_provider_diagnostics,
     _render_technical_diagnostics,
     _render_variant_status_cards,
 )
@@ -195,11 +194,9 @@ def test_primary_ui_answers_questions_with_drawers_closed() -> None:
     assert "**Variant 3 of 3 \u2014 GENE3 c.102C>T**" in rendered
     assert "Status: **Interpretation requires attention**" in rendered
     card_renderer = inspect.getsource(_render_variant_status_cards)
-    diagnostics_renderer = inspect.getsource(
-        _render_selected_provider_diagnostics
-    )
     drawer_renderer = inspect.getsource(_render_technical_diagnostics)
-    assert "card['status']" in card_renderer
-    assert "build_provider_diagnostics" in diagnostics_renderer
+    assert card_renderer.index("card['status']") < card_renderer.index(
+        "_render_technical_diagnostics"
+    )
     assert '"Show technical details"' in drawer_renderer
     assert "expanded=False" in drawer_renderer

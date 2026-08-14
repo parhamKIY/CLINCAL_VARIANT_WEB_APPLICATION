@@ -174,7 +174,7 @@ def test_final_docx_package_requires_completed_finalized_state() -> None:
         build_final_docx_package(pipeline)
 
     pipeline = _completed_pipeline()
-    pipeline["variant_report_records"][1]["lifecycle_state"] = "confirmed"
+    pipeline["variant_report_records"][0]["lifecycle_state"] = "confirmed"
     with pytest.raises(FinalDocxPackageError, match="approved final report state"):
         build_final_docx_package(pipeline)
 

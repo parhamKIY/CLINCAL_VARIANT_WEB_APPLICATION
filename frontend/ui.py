@@ -1,7 +1,6 @@
 """Presentation-only Streamlit interface for the analysis pipeline."""
 
 from copy import deepcopy
-from datetime import UTC, datetime
 from math import isfinite
 from numbers import Integral, Real
 from pathlib import Path
@@ -53,7 +52,6 @@ from frontend.execution import (
     execute_analysis,
     get_registered_analysis_job,
     prepare_analysis_recovery_request,
-    preview_call_quality,
     recover_analysis_job,
     register_analysis_job,
     release_registered_analysis_job,
@@ -153,8 +151,6 @@ class AnalysisSubmission(TypedDict):
     phenotype_extraction_model: str
     phenotype_extraction_provenance: dict[str, object] | None
     llm_model: str
-    call_quality_acknowledgements: dict[int, object]
-    call_quality_overrides: dict[int, object]
 
 
 @st.cache_data(ttl=300, max_entries=1, show_spinner=False)
@@ -1158,37 +1154,12 @@ def _prepare_input(
     manual_table: object,
     phenotype_model: str,
     llm_model: str,
-    call_quality_preview: list[dict[str, object]],
 ) -> AnalysisSubmission | None:
     """Validate frontend presence rules and build one submission."""
 
     phenotype_ids = [
         term["id"] for term in st.session_state[SELECTED_HPO_KEY]
     ]
-    acknowledgement_timestamp = datetime.now(UTC).isoformat().replace(
-        "+00:00",
-        "Z",
-    )
-    call_quality_acknowledgements: dict[int, object] = {}
-    call_quality_overrides: dict[int, object] = {}
-    for item in call_quality_preview:
-        index = item["input_index"]
-        if item["status"] == "not_evaluated" and st.session_state.get(
-            f"call_quality_acknowledge_{index}",
-            False,
-        ):
-            call_quality_acknowledgements[index] = acknowledgement_timestamp
-        if item["status"] == "failed" and st.session_state.get(
-            f"call_quality_override_{index}",
-            False,
-        ):
-            call_quality_overrides[index] = {
-                "reason": st.session_state.get(
-                    f"call_quality_override_reason_{index}",
-                    "",
-                ),
-                "timestamp": acknowledgement_timestamp,
-            }
     if input_mode == VCF_INPUT_MODE:
         if uploaded_vcf is None:
             st.error(
@@ -1222,8 +1193,6 @@ def _prepare_input(
                 PHENOTYPE_EXTRACTION_PROVENANCE_KEY
             ),
             "llm_model": llm_model,
-            "call_quality_acknowledgements": call_quality_acknowledgements,
-            "call_quality_overrides": call_quality_overrides,
         }
 
     try:
@@ -1244,8 +1213,6 @@ def _prepare_input(
             PHENOTYPE_EXTRACTION_PROVENANCE_KEY
         ),
         "llm_model": llm_model,
-        "call_quality_acknowledgements": call_quality_acknowledgements,
-        "call_quality_overrides": call_quality_overrides,
     }
 
 
@@ -1273,7 +1240,6 @@ def _render_variant_input(
 
         uploaded_vcf = None
         manual_table: object = _manual_variant_table()
-        call_quality_preview: list[dict[str, object]] = []
         position_errors: tuple[str, ...] = ()
         if input_mode == MANUAL_INPUT_MODE:
             st.caption(
@@ -1285,13 +1251,6 @@ def _render_variant_input(
             manual_table, position_errors = (
                 _render_manual_variant_table()
             )
-            try:
-                call_quality_preview = preview_call_quality(
-                    uploaded_vcf=None,
-                    manual_variants=_normalize_manual_table(manual_table),
-                )
-            except (FrontendExecutionError, ValueError):
-                call_quality_preview = []
 
         with st.form("analysis_input_form", border=False):
             if input_mode == VCF_INPUT_MODE:
@@ -1311,44 +1270,6 @@ def _render_variant_input(
                         f"{settings.MAX_UPLOAD_BYTES // 1_000_000} MB."
                     ),
                 )
-                if uploaded_vcf is not None:
-                    try:
-                        call_quality_preview = preview_call_quality(
-                            uploaded_vcf=uploaded_vcf,
-                            manual_variants=None,
-                        )
-                    except FrontendExecutionError:
-                        call_quality_preview = []
-
-            if call_quality_preview:
-                needs_decision = [
-                    item
-                    for item in call_quality_preview
-                    if item["status"] != "passed"
-                ]
-                if needs_decision:
-                    st.caption(
-                        "Call quality must be acknowledged before analysis. "
-                        "Failed FILTER values require an audited override."
-                    )
-                for item in needs_decision:
-                    index = item["input_index"]
-                    label = f"Variant {index + 1}"
-                    if item["status"] == "not_evaluated":
-                        st.checkbox(
-                            f"Acknowledge missing FILTER for {label}",
-                            key=f"call_quality_acknowledge_{index}",
-                        )
-                    else:
-                        st.checkbox(
-                            f"Override failed FILTER for {label}",
-                            key=f"call_quality_override_{index}",
-                        )
-                        st.text_input(
-                            f"Override reason for {label}",
-                            key=f"call_quality_override_reason_{index}",
-                            max_chars=500,
-                        )
 
             with st.container(
                 horizontal=True,
@@ -1386,7 +1307,6 @@ def _render_variant_input(
                 manual_table,
                 phenotype_model,
                 llm_model,
-                call_quality_preview,
             )
     return None
 
@@ -1550,29 +1470,20 @@ def _start_submission(
     def runner(
         progress_callback: PipelineProgressCallback,
     ) -> PipelineResult:
-        arguments: dict[str, object] = {
-            "uploaded_vcf": submission["uploaded_vcf"],
-            "manual_variants": submission["manual_variants"],
-            "phenotypes": submission["phenotypes"],
-            "input_type": submission["input_type"],
-            "phenotype_extraction_model": submission[
+        return execute_analysis(
+            uploaded_vcf=submission["uploaded_vcf"],
+            manual_variants=submission["manual_variants"],
+            phenotypes=submission["phenotypes"],
+            input_type=submission["input_type"],
+            phenotype_extraction_model=submission[
                 "phenotype_extraction_model"
             ],
-            "phenotype_extraction_provenance": submission[
+            phenotype_extraction_provenance=submission[
                 "phenotype_extraction_provenance"
             ],
-            "llm_model": submission["llm_model"],
-            "progress_callback": progress_callback,
-        }
-        if submission["call_quality_acknowledgements"]:
-            arguments["call_quality_acknowledgements"] = submission[
-                "call_quality_acknowledgements"
-            ]
-        if submission["call_quality_overrides"]:
-            arguments["call_quality_overrides"] = submission[
-                "call_quality_overrides"
-            ]
-        return execute_analysis(**arguments)
+            llm_model=submission["llm_model"],
+            progress_callback=progress_callback,
+        )
 
     _clear_analysis_result()
     st.session_state[ANALYSIS_NOTICE_KEY] = None
@@ -1590,10 +1501,6 @@ def _start_submission(
                 "phenotype_extraction_provenance"
             ],
             llm_model=submission["llm_model"],
-            call_quality_acknowledgements=submission[
-                "call_quality_acknowledgements"
-            ],
-            call_quality_overrides=submission["call_quality_overrides"],
         )
         token = register_analysis_job(
             job,
@@ -1770,20 +1677,15 @@ def render_app() -> None:
     if pipeline_result is not None:
         st.divider()
         _render_analysis_summary(pipeline_result)
-        result_view = st.segmented_control(
-            "Analysis result view",
-            ("Clinical report review", "Analysis and provider details"),
-            default="Clinical report review",
-            required=True,
-            key="analysis_result_view",
-            persist_state="page",
+        report_tab, technical_tab = st.tabs(
+            ["Clinical report review", "Analysis and provider details"]
         )
-        if result_view == "Clinical report review":
+        with report_tab:
             render_evidence_review(
                 pipeline_result,
                 light_model=variant_model,
                 strong_model=variant_model,
             )
-        else:
+        with technical_tab:
             _render_pipeline_status(pipeline_result)
             render_analysis_results(pipeline_result)

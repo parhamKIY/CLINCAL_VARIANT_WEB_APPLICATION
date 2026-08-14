@@ -223,8 +223,6 @@ def test_conflict_never_selects_fallback_without_operational_failure() -> None:
             _variant_interpretation_response(
                 model="primary-model",
                 conflict_assessment="The conflict remains unresolved.",
-                preliminary_classification_status="ambiguous",
-                preliminary_classification=None,
             ),
         ]
     )

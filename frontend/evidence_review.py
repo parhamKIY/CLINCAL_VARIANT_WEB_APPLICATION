@@ -19,12 +19,9 @@ from backend.evidence_review import (
 from backend.pipeline import (
     PipelineError,
     PipelineResult,
-    acknowledge_unresolved_interpretation_inclusion,
     confirm_reviewed_evidence,
     finalize_reviewed_analysis,
-    request_revised_variant_interpretation,
     retry_failed_variant_interpretation,
-    select_final_interpretation_version,
     update_draft_variant_report,
 )
 from backend.report_data_projection import build_report_data_from_draft
@@ -120,68 +117,65 @@ def _render_technical_diagnostics(
     variant_index: int,
     diagnostics: list[ProviderDiagnostic],
 ) -> None:
-    """Render the Stage 98 developer drawer only when opened."""
+    """Render the Stage 98 developer drawer collapsed by default."""
 
-    details = st.expander(
+    with st.expander(
         "Show technical details",
         expanded=False,
-        key=f"variant_provider_diagnostics_{variant_index}",
         icon=":material/monitoring:",
-        on_change="rerun",
-    )
-    if getattr(details, "open", True):
-        with details:
-            if not diagnostics:
-                st.caption("No provider diagnostic records are available.")
-                return
-            display_rows: list[dict[str, object]] = [
-                {
-                    **diagnostic,
-                    "attempt_count": (
-                        diagnostic["attempt_count"]
-                        if diagnostic["attempt_count"] is not None
-                        else "Not recorded"
-                    ),
-                    "latency_ms": (
-                        diagnostic["latency_ms"]
-                        if diagnostic["latency_ms"] is not None
-                        else "Not recorded"
-                    ),
-                }
-                for diagnostic in diagnostics
-            ]
-            st.dataframe(
-                display_rows,
-                column_order=(
-                    "provider",
-                    "variant_identity",
-                    "status",
-                    "attempt_count",
-                    "latency_ms",
-                    "fallback_used",
-                    "failure_category",
-                    "provider_note",
+    ):
+        if not diagnostics:
+            st.caption("No provider diagnostic records are available.")
+            return
+        display_rows: list[dict[str, object]] = [
+            {
+                **diagnostic,
+                "attempt_count": (
+                    diagnostic["attempt_count"]
+                    if diagnostic["attempt_count"] is not None
+                    else "Not recorded"
                 ),
-                column_config={
-                    "provider": "Provider",
-                    "variant_identity": "Variant identity",
-                    "status": "Status",
-                    "attempt_count": "Attempt count",
-                    "latency_ms": "Latency (ms)",
-                    "fallback_used": "Fallback used",
-                    "failure_category": "Failure category",
-                    "provider_note": "Provider-specific note",
-                },
-                hide_index=True,
-                width="stretch",
-                key=f"variant_provider_diagnostics_table_{variant_index}",
-            )
+                "latency_ms": (
+                    diagnostic["latency_ms"]
+                    if diagnostic["latency_ms"] is not None
+                    else "Not recorded"
+                ),
+            }
+            for diagnostic in diagnostics
+        ]
+        st.dataframe(
+            display_rows,
+            column_order=(
+                "provider",
+                "variant_identity",
+                "status",
+                "attempt_count",
+                "latency_ms",
+                "fallback_used",
+                "failure_category",
+                "provider_note",
+            ),
+            column_config={
+                "provider": "Provider",
+                "variant_identity": "Variant identity",
+                "status": "Status",
+                "attempt_count": "Attempt count",
+                "latency_ms": "Latency (ms)",
+                "fallback_used": "Fallback used",
+                "failure_category": "Failure category",
+                "provider_note": "Provider-specific note",
+            },
+            hide_index=True,
+            width="stretch",
+            key=f"variant_provider_diagnostics_{variant_index}",
+        )
 
 
 def _render_variant_status_cards(result: PipelineResult) -> None:
     """Render Stage 96 variant-first status and warning cards."""
 
     st.markdown("### Variant status")
+    diagnostics_by_variant = build_provider_diagnostics(result)
     for card in build_variant_status_cards(result):
         with st.container(border=True):
             st.markdown(f"**{card['heading']}**")
@@ -196,19 +190,10 @@ def _render_variant_status_cards(result: PipelineResult) -> None:
                 st.write(line)
             for notice in card["notices"]:
                 _render_variant_notice(card["variant_index"], notice)
-
-
-def _render_selected_provider_diagnostics(
-    result: PipelineResult,
-    variant_index: int,
-) -> None:
-    """Render provider diagnostics for the selected variant on demand."""
-
-    diagnostics_by_variant = build_provider_diagnostics(result)
-    _render_technical_diagnostics(
-        variant_index,
-        diagnostics_by_variant.get(variant_index, []),
-    )
+            _render_technical_diagnostics(
+                card["variant_index"],
+                diagnostics_by_variant.get(card["variant_index"], []),
+            )
 
 
 def _select_review_variant(index: int) -> None:
@@ -707,33 +692,6 @@ def _render_draft_variant_report(
         st.write(f"- {finding}")
 
     interpretation = content["variant_interpretation"]
-    preliminary_status = interpretation.get("preliminary_classification_status")
-    st.markdown("#### Preliminary classification")
-    if interpretation["status"] != "success":
-        st.caption("No preliminary classification is available for this interpretation.")
-    elif preliminary_status == "classified":
-        st.info(
-            "Preliminary evidence-based classification: "
-            f"{interpretation['preliminary_classification']}"
-        )
-    elif preliminary_status == "ambiguous":
-        st.warning(
-            "Preliminary evidence-based classification: "
-            "Ambiguous — user review required"
-        )
-    else:
-        st.caption(
-            "No preliminary classification is available for this pre-Stage-124 analysis."
-        )
-    if interpretation.get("classification_rationale"):
-        st.markdown("**Classification rationale**")
-        st.write(interpretation["classification_rationale"])
-    for limitation in interpretation.get("limitations", []):
-        st.caption(f"Limitation: {limitation}")
-    st.caption(
-        "This preliminary LLM evidence synthesis requires qualified human review "
-        "and is not an independent ACMG/AMP adjudication."
-    )
     st.markdown("#### Variant interpretation")
     if interpretation["status"] == "failed":
         st.error(
@@ -828,8 +786,10 @@ def _render_interpretation_retry(
     interpretation = report["reviewed_report"]["variant_interpretation"]
     if interpretation["status"] != "failed":
         return
-    has_reviewer_edits_or_confirmation = bool(
+    has_reviewer_decisions = bool(
         report["edit_history"]
+        or report["selection_history"]
+        or report["review_status"] != "draft"
         or any(
             package["variant_index"] == report["variant_index"]
             for package in result["reviewed_evidence_packages"]
@@ -843,7 +803,7 @@ def _render_interpretation_retry(
         "Retry interpretation",
         type="primary",
         icon=":material/refresh:",
-        disabled=has_reviewer_edits_or_confirmation,
+        disabled=has_reviewer_decisions,
         key=f"{_REVIEW_WIDGET_PREFIX}retry_{report['report_id']}",
     ):
         try:
@@ -869,184 +829,11 @@ def _render_interpretation_retry(
             ),
         )
         st.rerun()
-    if has_reviewer_edits_or_confirmation:
+    if has_reviewer_decisions:
         st.caption(
-            "Retry is disabled because report edits or confirmation already "
-            "exist for this report."
+            "Retry is disabled because reviewer decisions already exist for "
+            "this report."
         )
-    elif report["selection_history"]:
-        st.warning(
-            "Retry replaces the prior failed interpretation and clears any "
-            "unresolved-inclusion acknowledgement."
-        )
-
-
-def _render_revised_interpretation_request(
-    report: DraftVariantReport,
-    result: PipelineResult,
-    *,
-    model: str | None,
-) -> None:
-    """Collect an explicit reviewer context before a new model request."""
-
-    revisions = [
-        item
-        for item in result.get("revised_interpretations", [])
-        if item.get("variant_index") == report["variant_index"]
-    ]
-    with st.expander(
-        "Request revised interpretation",
-        icon=":material/autorenew:",
-    ):
-        st.caption(
-            "Use this only after reviewing the retained evidence. Your context is "
-            "versioned with the new interpretation; provider evidence and the "
-            "initial interpretation remain unchanged. Do not enter personal data."
-        )
-        if revisions:
-            st.markdown("**Prior revised interpretations**")
-            for revision in revisions:
-                outcome = revision["interpretation"]
-                label = outcome.get("preliminary_classification") or "Ambiguous"
-                with st.expander(
-                    f"Version {revision['revision_number']}: {label}",
-                    icon=":material/history:",
-                ):
-                    st.caption(f"Requested: {revision['requested_at']}")
-                    st.markdown("**Reviewer context**")
-                    st.write(revision["reviewer_context"])
-                    st.markdown("**Classification rationale**")
-                    st.write(outcome.get("classification_rationale"))
-                    st.markdown("**Revised interpretation**")
-                    st.write(outcome.get("interpretation"))
-        with st.form(
-            f"{_REVIEW_WIDGET_PREFIX}reinterpret_{report['report_id']}",
-            border=False,
-        ):
-            reviewer_context = st.text_area(
-                "Reviewer-approved context or conflict resolution",
-                height=180,
-                help=(
-                    "Explain the review decision or the missing context to use. "
-                    "This does not change the retained source evidence."
-                ),
-                key=f"{_REVIEW_WIDGET_PREFIX}reinterpret_context_{report['report_id']}",
-            )
-            request = st.form_submit_button(
-                "Request revised interpretation",
-                type="primary",
-                icon=":material/autorenew:",
-            )
-    if not request:
-        return
-    try:
-        with st.spinner("Generating a revised interpretation from retained evidence..."):
-            updated = request_revised_variant_interpretation(
-                result,
-                variant_index=report["variant_index"],
-                reviewer_context=reviewer_context,
-                model=model,
-            )
-    except PipelineError as exc:
-        st.error(f"Revised interpretation was not completed: {exc}")
-        return
-    result.clear()
-    result.update(updated)
-    st.session_state["pipeline_result"] = result
-    persisted = _persist_review_state(result)
-    _set_notice(
-        "success" if persisted else "warning",
-        (
-            "Revised interpretation created; the initial interpretation remains available."
-            if persisted
-            else "Revised interpretation created, but persistence failed."
-        ),
-    )
-    st.rerun()
-
-
-def _render_interpretation_version_selection(
-    report: DraftVariantReport,
-    result: PipelineResult,
-) -> None:
-    """Let the reviewer explicitly choose the retained version for final output."""
-
-    revisions = [
-        item
-        for item in result.get("revised_interpretations", [])
-        if item.get("variant_index") == report["variant_index"]
-    ]
-    if not revisions:
-        return
-    history = [
-        item
-        for item in result.get("interpretation_version_selection_history", [])
-        if item.get("variant_index") == report["variant_index"]
-    ]
-    selected_revision = (
-        history[-1]["selected_revision_number"] if history else None
-    )
-    options = [0, *[item["revision_number"] for item in revisions]]
-    labels = {
-        0: "Initial interpretation",
-        **{
-            item["revision_number"]: (
-                f"Revised interpretation {item['revision_number']} — "
-                f"{item['interpretation'].get('preliminary_classification') or 'Ambiguous'}"
-            )
-            for item in revisions
-        },
-    }
-    with st.container(border=True):
-        st.markdown("#### Final-report interpretation version")
-        st.caption(
-            "Choose the reviewed initial or revised preliminary interpretation. "
-            "This selection is audited, preserves source evidence, and must be "
-            "made before evidence confirmation."
-        )
-        choice = st.selectbox(
-            "Interpretation version for final output",
-            options,
-            index=options.index(selected_revision)
-            if selected_revision in options
-            else 0,
-            format_func=lambda item: labels[item],
-            key=(
-                f"{_REVIEW_WIDGET_PREFIX}interpretation_version_"
-                f"{report['report_id']}"
-            ),
-        )
-        if st.button(
-            "Save interpretation version",
-            icon=":material/save:",
-            key=(
-                f"{_REVIEW_WIDGET_PREFIX}save_interpretation_version_"
-                f"{report['report_id']}"
-            ),
-        ):
-            try:
-                updated = select_final_interpretation_version(
-                    result,
-                    variant_index=report["variant_index"],
-                    selected_revision_number=choice,
-                    reviewer_context="local_streamlit_session",
-                )
-            except PipelineError as exc:
-                st.error(f"Interpretation version was not saved: {exc}")
-                return
-            result.clear()
-            result.update(updated)
-            st.session_state["pipeline_result"] = result
-            persisted = _persist_review_state(result)
-            _set_notice(
-                "success" if persisted else "warning",
-                (
-                    "Interpretation version saved for final output."
-                    if persisted
-                    else "Interpretation version saved in this session, but persistence failed."
-                ),
-            )
-            st.rerun()
 
 
 def _render_report_editor(
@@ -1241,86 +1028,7 @@ def _render_inclusion_control(
     report: DraftVariantReport,
     result: PipelineResult,
 ) -> None:
-    """Render selection and the audited unresolved-inclusion exception."""
-
-    interpretation = report["reviewed_report"]["variant_interpretation"]
-    if interpretation["status"] == "failed":
-        acknowledgements = {
-            item["variant_index"]: item
-            for item in result.get("unresolved_finalization_acknowledgements", [])
-            if isinstance(item, dict)
-        }
-        existing = acknowledgements.get(report["variant_index"], {})
-        st.warning(
-            "This interpretation remains unresolved. It is excluded by default. "
-            "Including it requires an explicit reviewer acknowledgement."
-        )
-        with st.form(
-            f"{_REVIEW_WIDGET_PREFIX}unresolved_selection_{report['report_id']}",
-            border=True,
-        ):
-            include = st.checkbox(
-                "Include this unresolved variant in Final Report",
-                value=report["include_in_final_report"],
-                key=(
-                    f"{_REVIEW_WIDGET_PREFIX}include_final_"
-                    f"{report['report_id']}"
-                ),
-            )
-            reason = st.text_area(
-                "Reason for including an unresolved interpretation",
-                value=str(existing.get("reason") or ""),
-                max_chars=500,
-                disabled=not include,
-                help="Record the reviewer rationale without patient identifiers.",
-                key=(
-                    f"{_REVIEW_WIDGET_PREFIX}unresolved_reason_"
-                    f"{report['report_id']}"
-                ),
-            )
-            submitted = st.form_submit_button(
-                "Save final report selection",
-                icon=":material/save:",
-            )
-        if not submitted:
-            return
-        try:
-            updated_result = result
-            if include != report["include_in_final_report"]:
-                updated_report = set_draft_variant_report_inclusion(
-                    report,
-                    include,
-                    reviewer_context="local_streamlit_session",
-                )
-                updated_result = update_draft_variant_report(
-                    result,
-                    updated_report,
-                )
-            if include:
-                updated_result = acknowledge_unresolved_interpretation_inclusion(
-                    updated_result,
-                    variant_index=report["variant_index"],
-                    reason=reason,
-                )
-        except (DraftVariantReportError, PipelineError) as exc:
-            st.error(f"Final Report selection was not saved: {exc}")
-            return
-        result.clear()
-        result.update(updated_result)
-        st.session_state["pipeline_result"] = result
-        persisted = _persist_review_state(result)
-        _set_notice(
-            "success" if persisted else "warning",
-            (
-                "Unresolved inclusion acknowledgement saved."
-                if include and persisted
-                else "Variant excluded from the Final Report selection."
-                if not include and persisted
-                else "Selection was saved in this session, but persistence failed."
-            ),
-        )
-        st.rerun()
-        return
+    """Render and persist the Stage 54 reporting-only decision."""
 
     include = st.checkbox(
         "Include this variant in Final Report",
@@ -1495,17 +1203,8 @@ def _render_confirmation(
     st.caption(
         "Confirming builds an immutable reviewed evidence state for this "
         "variant. Interpretation was already generated during analysis; "
-        "confirmation does not call a model. It confirms evidence review and "
-        "report wording, not a pathogenicity classification or laboratory sign-out."
+        "confirmation does not call a model."
     )
-    if any(
-        item.get("variant_index") == report["variant_index"]
-        for item in result.get("revised_interpretations", [])
-    ):
-        st.info(
-            "A revised interpretation exists. Select the initial or revised "
-            "version in Clinical report review before confirming evidence."
-        )
     privacy_attested = st.checkbox(
         (
             "I confirm that this reviewed evidence contains no names, "
@@ -1576,23 +1275,6 @@ def _render_finalization_action(result: PipelineResult) -> None:
         bool(report.get("include_in_final_report"))
         for report in result.get("draft_variant_reports", [])
     )
-    selected_unresolved = [
-        item["variant_index"]
-        for item in result.get("variant_interpretation_results", [])
-        if item.get("status") == "failed"
-        and item.get("variant_index") < len(result.get("draft_variant_reports", []))
-        and result["draft_variant_reports"][item["variant_index"]].get(
-            "include_in_final_report"
-        )
-    ]
-    acknowledged_indexes = {
-        item.get("variant_index")
-        for item in result.get("unresolved_finalization_acknowledgements", [])
-        if isinstance(item, dict)
-    }
-    missing_acknowledgements = [
-        index for index in selected_unresolved if index not in acknowledged_indexes
-    ]
 
     with st.container(border=True):
         st.markdown("**Finalize reviewed analysis**")
@@ -1601,24 +1283,18 @@ def _render_finalization_action(result: PipelineResult) -> None:
             f"{variant_count}. Finalization validates the persisted review "
             "state and does not make another LLM call. Final Report "
             f"selection: {included_count} of {variant_count}, in original "
-            "input order. It records an audited report disposition, not a "
-            "laboratory sign-out or independent ACMG/AMP adjudication."
+            "input order."
         )
         if not fully_confirmed:
             st.info(
                 "Confirm the reviewed state for every variant before "
                 "finalization."
             )
-        if missing_acknowledgements:
-            st.warning(
-                "Selected unresolved interpretations require an explicit "
-                "reviewer acknowledgement before finalization."
-            )
         if st.button(
             "Finalize review",
             type="primary",
             icon=":material/task_alt:",
-            disabled=not fully_confirmed or completed or bool(missing_acknowledgements),
+            disabled=not fully_confirmed or completed,
             key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
         ):
             try:
@@ -1632,7 +1308,7 @@ def _render_finalization_action(result: PipelineResult) -> None:
             st.session_state["pipeline_result"] = result
             persisted = _persist_review_state(result)
             if persisted:
-                _set_notice("success", "Audited report disposition recorded.")
+                _set_notice("success", "Final review confirmed.")
             else:
                 _set_notice(
                     "warning",
@@ -1640,24 +1316,14 @@ def _render_finalization_action(result: PipelineResult) -> None:
                 )
             st.rerun()
         if completed:
-            final_report = result.get("final_clinical_report")
-            metadata = (
-                final_report.get("metadata")
-                if isinstance(final_report, dict)
-                else None
-            )
-            state = metadata.get("finalization_state") if isinstance(metadata, dict) else None
-            if state == "Finalized with unresolved variants":
-                st.warning("Finalized with unresolved variants.")
-            elif failed_count:
+            if failed_count:
                 st.warning(
-                    f"Final review excludes {failed_count} unresolved "
-                    "interpretation(s)."
+                    f"Final review retains {failed_count} explicit "
+                    "interpretation failure(s)."
                 )
             else:
                 st.success(
-                    "Audited report disposition is recorded. No additional LLM "
-                    "call was made; this is not a laboratory sign-out."
+                    "Final review is confirmed. No additional LLM call was made."
                 )
 
 
@@ -1708,23 +1374,18 @@ def render_evidence_review(
             "Draft Variant Report V2 is unavailable for this legacy "
             "analysis state. Evidence remains readable."
         )
-        legacy_view = st.segmented_control(
-            "Evidence review details",
-            (
+        evidence_editor_tab, original_evidence_tab, history_tab = st.tabs(
+            [
                 "Edit evidence draft",
                 "Original evidence",
                 "Evidence edit history",
-            ),
-            default="Edit evidence draft",
-            required=True,
-            key=f"{_REVIEW_WIDGET_PREFIX}legacy_detail_view",
-            persist_state="page",
+            ]
         )
-        if legacy_view == "Edit evidence draft":
+        with evidence_editor_tab:
             _render_editor(report, selected, drafts, result)
-        elif legacy_view == "Original evidence":
+        with original_evidence_tab:
             st.json(report["original_machine_report"], expanded=2)
-        else:
+        with history_tab:
             _render_history(report)
         return
     draft_variant_report = cast(
@@ -1754,62 +1415,40 @@ def render_evidence_review(
         f"Final Report selection: {selected_count} of "
         f"{result['variant_count']} variants."
     )
+    _render_inclusion_control(draft_variant_report, result)
+    _render_report_editor(draft_variant_report, result)
+    _render_editable_docx_download(draft_variant_report, result)
+    st.markdown("### Technical details")
     _render_conflict_status(report)
-    review_view = st.segmented_control(
-        "Review surface",
-        ("Clinical report review", "Technical details"),
-        default="Clinical report review",
-        required=True,
-        key=f"{_REVIEW_WIDGET_PREFIX}surface_view",
-        persist_state="page",
+    (
+        report_tab,
+        compare_tab,
+        evidence_editor_tab,
+        original_evidence_tab,
+        evidence_history_tab,
+        confirm_tab,
+    ) = st.tabs(
+        [
+            "Draft Variant Report",
+            "Compare report",
+            "Edit evidence draft",
+            "Original evidence",
+            "Evidence edit history",
+            "Final confirmation",
+        ]
     )
-    if review_view == "Clinical report review":
-        _render_inclusion_control(draft_variant_report, result)
-        _render_report_editor(draft_variant_report, result)
-        _render_revised_interpretation_request(
-            draft_variant_report,
-            result,
-            model=retry_model,
-        )
-        _render_interpretation_version_selection(
-            draft_variant_report,
-            result,
-        )
-        _render_editable_docx_download(draft_variant_report, result)
-    else:
-        technical_view = st.segmented_control(
-            "Technical detail",
-            (
-                "Provider diagnostics",
-                "Draft Variant Report",
-                "Compare report",
-                "Edit evidence draft",
-                "Original evidence",
-                "Evidence edit history",
-                "Final confirmation",
-            ),
-            default="Provider diagnostics",
-            required=True,
-            key=f"{_REVIEW_WIDGET_PREFIX}technical_detail_view",
-            persist_state="page",
-        )
-        if technical_view == "Provider diagnostics":
-            _render_selected_provider_diagnostics(
-                result,
-                report["variant_index"],
-            )
-        elif technical_view == "Draft Variant Report":
-            _render_draft_variant_report(result, report["variant_index"])
-        elif technical_view == "Compare report":
-            _render_report_comparison(draft_variant_report)
-        elif technical_view == "Edit evidence draft":
-            _render_editor(report, selected, drafts, result)
-        elif technical_view == "Original evidence":
-            st.json(report["original_machine_report"], expanded=2)
-        elif technical_view == "Evidence edit history":
-            _render_history(report)
-        else:
-            _render_confirmation(drafts[selected], result)
+    with report_tab:
+        _render_draft_variant_report(result, report["variant_index"])
+    with compare_tab:
+        _render_report_comparison(draft_variant_report)
+    with evidence_editor_tab:
+        _render_editor(report, selected, drafts, result)
+    with original_evidence_tab:
+        st.json(report["original_machine_report"], expanded=2)
+    with evidence_history_tab:
+        _render_history(report)
+    with confirm_tab:
+        _render_confirmation(drafts[selected], result)
     _render_finalization_action(result)
     if result.get("workflow_state") == "completed":
         render_final_clinical_report_viewer(result)
