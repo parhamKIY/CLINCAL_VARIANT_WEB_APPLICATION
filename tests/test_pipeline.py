@@ -17321,7 +17321,7 @@ class TestStage57PersistenceSchemaV3:
         assert restored["draft_variant_reports"][0]["reviewed_report"][
             "reviewer_summary"
         ] == "Persisted reviewer-approved summary."
-        assert row["final_report_schema_version"] == "2.0"
+        assert row["final_report_schema_version"] == "2.1"
         assert json.loads(row["artifact_metadata_json"])[
             "available_formats"
         ] == ["text", "pdf", "docx"]

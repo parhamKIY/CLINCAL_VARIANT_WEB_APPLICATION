@@ -367,7 +367,9 @@ def build_report_data_from_draft(
             "generated_at": interpretation["generated_at"],
             "edit_history": narrative_edits,
             "interpretation_status": (
-                "available" if interpretation["narrative"] else "unavailable"
+                "available"
+                if interpretation["status"] == "success"
+                else "unavailable"
             ),
             "failure_type": interpretation["failure_type"],
             "conflict_assessment": interpretation["conflict_assessment"],

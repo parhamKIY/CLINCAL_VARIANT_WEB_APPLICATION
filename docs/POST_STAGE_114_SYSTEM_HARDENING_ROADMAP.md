@@ -246,7 +246,7 @@ persistence, DOCX, and report checks passed, and the full offline suite reached
 
 ## 7. Stage 119 — Unresolved-interpretation finalization semantics
 
-**Status:** Planned  
+**Status:** Implemented
 **Priority:** High  
 **Dependency:** Stage 118
 
@@ -289,6 +289,9 @@ interpretation.
 
 Every selected unresolved interpretation is an explicit, audited reviewer decision,
 and no ordinary `Finalized` state contains an unresolved interpretation.
+
+**Verification:** `tests/test_stage119_unresolved_finalization.py`; targeted lifecycle,
+DOCX-package, retry, summary, status, warning, and persistence checks passed.
 
 **Suggested commit:** `fix(review): distinguish unresolved finalization`
 

@@ -1978,6 +1978,27 @@ def _bounded_stage56_pipeline_migration(
         except (TypeError, ValueError):
             return None
     source_version = candidate.get("schema_version")
+    if source_version == "3.2":
+        candidate["unresolved_finalization_acknowledgements"] = []
+        reports = candidate.get("draft_variant_reports")
+        interpretations = candidate.get("variant_interpretation_results")
+        if (
+            candidate.get("workflow_state") == "completed"
+            and isinstance(reports, list)
+            and isinstance(interpretations, list)
+            and any(
+                isinstance(report, dict)
+                and report.get("include_in_final_report")
+                and index < len(interpretations)
+                and isinstance(interpretations[index], dict)
+                and interpretations[index].get("status") == "failed"
+                for index, report in enumerate(reports)
+            )
+        ):
+            candidate["workflow_state"] = "awaiting_final_review"
+            candidate["final_clinical_report"] = None
+            candidate["status"] = "partial"
+        source_version = "3.2"
     if source_version == "3.1":
         evidence_objects = candidate.get("evidence_objects")
         if not isinstance(evidence_objects, list) or not all(
@@ -2001,12 +2022,13 @@ def _bounded_stage56_pipeline_migration(
         except EvidenceReadinessError:
             return None
         candidate["evidence_readiness"] = readiness
+        candidate["unresolved_finalization_acknowledgements"] = []
         candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
         try:
             return validate_pipeline_result(candidate)
         except (TypeError, ValueError):
             return None
-    if source_version not in {"2.8", "2.9", "3.0"}:
+    if source_version not in {"2.8", "2.9", "3.0", "3.2"}:
         return None
     variant_count = candidate.get("variant_count")
     reports = candidate.get("draft_variant_reports")
@@ -2051,6 +2073,7 @@ def _bounded_stage56_pipeline_migration(
             "phenotype_extraction_provenance": None,
         }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
+    candidate.setdefault("unresolved_finalization_acknowledgements", [])
     raw_variants = candidate.get("variants")
     evidence_objects = candidate.get("evidence_objects")
     if not isinstance(raw_variants, list) or not all(
@@ -2349,17 +2372,17 @@ def load_pipeline_state(
         or len(raw_json.encode("utf-8")) > MAX_PIPELINE_STATE_JSON_BYTES
     ):
         raise DatabaseReadError("The stored pipeline state is invalid.")
-    migrated_from_schema31 = False
+    migrated_from_legacy_schema = False
     try:
         raw = json.loads(raw_json)
-        if isinstance(raw, dict) and raw.get("schema_version") == "3.1":
+        if isinstance(raw, dict) and raw.get("schema_version") in {"3.1", "3.2"}:
             migrated = _bounded_stage56_pipeline_migration(raw)
             if migrated is None:
                 raise DatabaseReadError(
                     "The stored pipeline state is invalid."
                 )
             raw = migrated
-            migrated_from_schema31 = True
+            migrated_from_legacy_schema = True
         if (
             isinstance(raw, dict)
             and raw.get("schema_version") != PIPELINE_SCHEMA_VERSION
@@ -2386,8 +2409,8 @@ def load_pipeline_state(
         or (
             validated["schema_version"] != row["pipeline_schema_version"]
             and not (
-                migrated_from_schema31
-                and row["pipeline_schema_version"] == "3.1"
+                migrated_from_legacy_schema
+                and row["pipeline_schema_version"] in {"3.1", "3.2"}
             )
         )
         or _derive_review_state(validated) != row["review_state"]

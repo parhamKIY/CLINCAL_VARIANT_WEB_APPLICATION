@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
@@ -83,6 +85,7 @@ from backend.phenotype import (
 from backend.privacy import (
     ClinicalDataPrivacyError,
     minimize_variant,
+    validate_human_review_content,
     validate_no_prohibited_fields,
 )
 from backend.report import (
@@ -120,10 +123,11 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.2"
+PIPELINE_SCHEMA_VERSION = "3.3"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
+MAX_UNRESOLVED_FINALIZATION_REASON_CHARS = 500
 ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
 LOGGER = get_logger("pipeline")
 
@@ -266,6 +270,16 @@ class PipelineIssue(TypedDict):
     recoverable: bool
 
 
+class UnresolvedFinalizationAcknowledgement(TypedDict):
+    """Explicit reviewer inclusion decision for one failed interpretation."""
+
+    variant_index: int
+    interpretation_fingerprint: str
+    failure_type: str
+    reason: str
+    acknowledged_at: str
+
+
 class PipelineResult(TypedDict):
     """Versioned JSON-safe output retained for the frontend."""
 
@@ -289,6 +303,9 @@ class PipelineResult(TypedDict):
     variant_report_records: list[dict[str, object]]
     evidence_review_reports: list[dict[str, object]]
     reviewed_evidence_packages: list[dict[str, object]]
+    unresolved_finalization_acknowledgements: list[
+        UnresolvedFinalizationAcknowledgement
+    ]
     llm_routing_results: list[dict[str, object]]
     final_interpretation_report: dict[str, object] | None
     final_clinical_report: dict[str, object] | None
@@ -317,7 +334,113 @@ PIPELINE_STAGE_FIELDS = frozenset(
 )
 PIPELINE_API_FIELDS = frozenset(PipelineAPIRecord.__required_keys__)
 PIPELINE_ISSUE_FIELDS = frozenset(PipelineIssue.__required_keys__)
+UNRESOLVED_FINALIZATION_ACKNOWLEDGEMENT_FIELDS = frozenset(
+    UnresolvedFinalizationAcknowledgement.__required_keys__
+)
 PIPELINE_RESULT_FIELDS = frozenset(PipelineResult.__required_keys__)
+
+
+def _normalized_timestamp(value: str | None = None) -> str:
+    if value is None:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if not isinstance(value, str) or not value.strip():
+        raise PipelineError("Acknowledgement timestamp must be ISO 8601 text.")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PipelineError("Acknowledgement timestamp must use ISO 8601.") from exc
+    if parsed.tzinfo is None:
+        raise PipelineError("Acknowledgement timestamp must include a timezone.")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _interpretation_fingerprint(value: Mapping[str, object]) -> str:
+    """Bind an acknowledgement to the exact persisted failed result."""
+
+    payload = {
+        "variant_index": value.get("variant_index"),
+        "status": value.get("status"),
+        "error_type": value.get("error_type"),
+        "generated_at": value.get("generated_at"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_unresolved_finalization_acknowledgements(
+    value: object,
+    *,
+    interpretations: Sequence[Mapping[str, object]],
+    reports: Sequence[Mapping[str, object]],
+) -> list[UnresolvedFinalizationAcknowledgement]:
+    if not isinstance(value, list) or len(value) > len(interpretations):
+        raise PipelineResultError(
+            "pipeline.unresolved_finalization_acknowledgements is invalid."
+        )
+    validated: list[UnresolvedFinalizationAcknowledgement] = []
+    previous_index = -1
+    for position, candidate in enumerate(value):
+        if (
+            not isinstance(candidate, dict)
+            or set(candidate) != UNRESOLVED_FINALIZATION_ACKNOWLEDGEMENT_FIELDS
+        ):
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement is invalid."
+            )
+        index = candidate["variant_index"]
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index <= previous_index
+            or index >= len(interpretations)
+        ):
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement order is invalid."
+            )
+        interpretation = interpretations[index]
+        report = reports[index]
+        failure_type = interpretation.get("error_type")
+        if (
+            interpretation.get("status") != "failed"
+            or not report.get("include_in_final_report")
+            or not isinstance(failure_type, str)
+            or candidate["failure_type"] != failure_type
+            or candidate["interpretation_fingerprint"]
+            != _interpretation_fingerprint(interpretation)
+        ):
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement is stale."
+            )
+        reason = candidate["reason"]
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > MAX_UNRESOLVED_FINALIZATION_REASON_CHARS
+        ):
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement reason is invalid."
+            )
+        try:
+            validate_human_review_content(None, [reason], [])
+        except ClinicalDataPrivacyError as exc:
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement contains prohibited clinical data."
+            ) from exc
+        timestamp = candidate["acknowledged_at"]
+        try:
+            normalized_timestamp = _normalized_timestamp(cast(str, timestamp))
+        except PipelineError as exc:
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement timestamp is invalid."
+            ) from exc
+        if timestamp != normalized_timestamp:
+            raise PipelineResultError(
+                "pipeline unresolved finalization acknowledgement timestamp is invalid."
+            )
+        validated.append(cast(UnresolvedFinalizationAcknowledgement, deepcopy(candidate)))
+        previous_index = index
+    return validated
 
 
 def _annotation_api_progress_percent(
@@ -531,6 +654,7 @@ def create_pipeline_result() -> PipelineResult:
         "variant_report_records": [],
         "evidence_review_reports": [],
         "reviewed_evidence_packages": [],
+        "unresolved_finalization_acknowledgements": [],
         "llm_routing_results": [],
         "final_interpretation_report": None,
         "final_clinical_report": None,
@@ -1068,6 +1192,24 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 raise PipelineResultError(
                     "pipeline.draft_variant_reports is invalid."
                 ) from exc
+    validated_unresolved_acknowledgements = (
+        _validate_unresolved_finalization_acknowledgements(
+            value["unresolved_finalization_acknowledgements"],
+            interpretations=cast(
+                Sequence[Mapping[str, object]], interpretation_results
+            ),
+            reports=cast(Sequence[Mapping[str, object]], draft_variant_reports),
+        )
+        if interpretation_results and draft_variant_reports
+        else []
+    )
+    if (
+        not interpretation_results
+        and value["unresolved_finalization_acknowledgements"]
+    ):
+        raise PipelineResultError(
+            "pipeline unresolved finalization acknowledgement requires interpretations."
+        )
     variant_report_records = value["variant_report_records"]
     if variant_report_records:
         if len(variant_report_records) != len(draft_variant_reports):
@@ -1174,6 +1316,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     list[Mapping[str, object]], validated_packages
                 ),
                 finalized_at=cast(str | None, finalized_at),
+                unresolved_interpretation_acknowledgements=(
+                    validated_unresolved_acknowledgements
+                ),
             )
         except ReportLifecycleError as exc:
             raise PipelineResultError(
@@ -1677,6 +1822,10 @@ def _sync_variant_report_records(
                 result["reviewed_evidence_packages"],
             ),
             finalized_at=finalized_at,
+            unresolved_interpretation_acknowledgements=cast(
+                Sequence[Mapping[str, object]],
+                result["unresolved_finalization_acknowledgements"],
+            ),
         )
     except ReportLifecycleError as exc:
         raise PipelineError(
@@ -3086,6 +3235,62 @@ def confirm_reviewed_evidence(
     return validate_pipeline_result(working)
 
 
+def acknowledge_unresolved_interpretation_inclusion(
+    result: PipelineResult,
+    *,
+    variant_index: int,
+    reason: str,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Persist the explicit decision required to include a failed interpretation."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if (
+        isinstance(variant_index, bool)
+        or not isinstance(variant_index, int)
+        or variant_index < 0
+        or variant_index >= working["variant_count"]
+    ):
+        raise PipelineError("Unresolved interpretation acknowledgement index is invalid.")
+    interpretation = working["variant_interpretation_results"][variant_index]
+    report = working["draft_variant_reports"][variant_index]
+    if interpretation["status"] != "failed" or not report["include_in_final_report"]:
+        raise PipelineError(
+            "Only a selected failed interpretation can be acknowledged for finalization."
+        )
+    if (
+        not isinstance(reason, str)
+        or not reason.strip()
+        or len(reason.strip()) > MAX_UNRESOLVED_FINALIZATION_REASON_CHARS
+    ):
+        raise PipelineError(
+            "Unresolved interpretation acknowledgement reason must be bounded non-empty text."
+        )
+    normalized_reason = reason.strip()
+    try:
+        validate_human_review_content(None, [normalized_reason], [])
+    except ClinicalDataPrivacyError as exc:
+        raise PipelineError(
+            "Unresolved interpretation acknowledgement contains prohibited clinical data."
+        ) from exc
+    acknowledged_at = _normalized_timestamp(timestamp)
+    acknowledgement: UnresolvedFinalizationAcknowledgement = {
+        "variant_index": variant_index,
+        "interpretation_fingerprint": _interpretation_fingerprint(interpretation),
+        "failure_type": cast(str, interpretation["error_type"]),
+        "reason": normalized_reason,
+        "acknowledged_at": acknowledged_at,
+    }
+    retained = [
+        item
+        for item in working["unresolved_finalization_acknowledgements"]
+        if item["variant_index"] != variant_index
+    ]
+    retained.append(acknowledgement)
+    working["unresolved_finalization_acknowledgements"] = retained
+    return validate_pipeline_result(working)
+
+
 def finalize_reviewed_analysis(
     result: PipelineResult,
     reports: Sequence[Mapping[str, object]] | None = None,
@@ -3121,6 +3326,20 @@ def finalize_reviewed_analysis(
         raise PipelineError(
             "Finalization requires one pre-review interpretation result "
             "for every variant."
+        )
+    acknowledgements = {
+        item["variant_index"]: item
+        for item in working["unresolved_finalization_acknowledgements"]
+    }
+    selected_unresolved_indexes = [
+        index
+        for index, report in enumerate(working["draft_variant_reports"])
+        if report["include_in_final_report"]
+        and working["variant_interpretation_results"][index]["status"] == "failed"
+    ]
+    if any(index not in acknowledgements for index in selected_unresolved_indexes):
+        raise PipelineError(
+            "Each selected unresolved interpretation requires an explicit reviewer acknowledgement before finalization."
         )
 
     working["workflow_state"] = "finalization_running"
@@ -3175,10 +3394,18 @@ def finalize_reviewed_analysis(
     working["current_stage"] = "completed"
     working["progress_percent"] = 100
     try:
+        preliminary_report = compose_final_clinical_report(
+            working,
+            timestamp=timestamp,
+        )
+        _sync_variant_report_records(
+            working,
+            finalized_at=preliminary_report["generated_at"],
+        )
         working["final_clinical_report"] = dict(
             compose_final_clinical_report(
                 working,
-                timestamp=timestamp,
+                timestamp=preliminary_report["generated_at"],
             )
         )
     except FinalClinicalReportError as exc:
@@ -3186,13 +3413,6 @@ def finalize_reviewed_analysis(
             "Final Clinical Report could not be composed from the "
             "reviewer-approved state."
         ) from exc
-    _sync_variant_report_records(
-        working,
-        finalized_at=cast(
-            str,
-            working["final_clinical_report"]["generated_at"],
-        ),
-    )
     validated = validate_pipeline_result(working)
     _notify_progress(validated, progress_callback)
     return validated
@@ -3254,6 +3474,13 @@ def update_draft_variant_report(
     )
     working["draft_variant_reports"][index] = dict(validated_report)
     if confirmation_invalidated:
+        working["unresolved_finalization_acknowledgements"] = [
+            acknowledgement
+            for acknowledgement in working[
+                "unresolved_finalization_acknowledgements"
+            ]
+            if acknowledgement["variant_index"] != index
+        ]
         working["reviewed_evidence_packages"] = [
             package
             for package in working["reviewed_evidence_packages"]
@@ -3308,8 +3535,6 @@ def retry_failed_variant_interpretation(
     report = working["draft_variant_reports"][variant_index]
     if (
         report["edit_history"]
-        or report["selection_history"]
-        or report["review_status"] != "draft"
         or any(
             package["variant_index"] == variant_index
             for package in working["reviewed_evidence_packages"]
@@ -3340,6 +3565,11 @@ def retry_failed_variant_interpretation(
 
     working["variant_interpretation_results"][variant_index] = dict(retried)
     working["draft_variant_reports"][variant_index] = dict(rebuilt)
+    working["unresolved_finalization_acknowledgements"] = [
+        acknowledgement
+        for acknowledgement in working["unresolved_finalization_acknowledgements"]
+        if acknowledgement["variant_index"] != variant_index
+    ]
     working["reviewed_evidence_packages"] = [
         package
         for package in working["reviewed_evidence_packages"]
@@ -3801,6 +4031,8 @@ __all__ = [
     "PipelineStatus",
     "PipelineWorkflowState",
     "PersistedInputType",
+    "UnresolvedFinalizationAcknowledgement",
+    "acknowledge_unresolved_interpretation_inclusion",
     "confirm_reviewed_evidence",
     "finalize_reviewed_analysis",
     "generate_confirmed_interpretations",

@@ -21,7 +21,7 @@ from backend.report_lifecycle import (
 )
 
 
-FINAL_DOCX_PACKAGE_SCHEMA_VERSION = "1.0"
+FINAL_DOCX_PACKAGE_SCHEMA_VERSION = "1.1"
 MAX_FINAL_DOCX_PACKAGE_BYTES = 55 * 1024 * 1024
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -81,10 +81,6 @@ def _validated_final_records(value: Mapping[str, object]) -> tuple[
         raise FinalDocxPackageError(
             "Final report records must preserve original input order."
         )
-    if any(record["lifecycle_state"] != "finalized" for record in records):
-        raise FinalDocxPackageError(
-            "Every report must be confirmed and finalized before export."
-        )
     if final_report["analysis_id"] != value.get("analysis_id"):
         raise FinalDocxPackageError(
             "The final report does not belong to this analysis."
@@ -110,6 +106,14 @@ def build_final_docx_package(value: object) -> FinalDocxPackage:
     ]:
         raise FinalDocxPackageError(
             "The selected final report does not match the report lifecycle."
+        )
+    selected_states = {
+        "finalized",
+        "finalized_with_unresolved_interpretation",
+    }
+    if any(records[index]["lifecycle_state"] not in selected_states for index in selected_indexes):
+        raise FinalDocxPackageError(
+            "Every selected report must be finalized before export."
         )
 
     rendered: list[tuple[VariantReportRecord, bytes]] = []
@@ -153,6 +157,10 @@ def build_final_docx_package(value: object) -> FinalDocxPackage:
                 "template_version": artifact["template_version"],
                 "confirmed_at": record["confirmed_at"],
                 "finalized_at": record["finalized_at"],
+                "lifecycle_state": record["lifecycle_state"],
+                "unresolved_interpretation_acknowledgement": record[
+                    "unresolved_interpretation_acknowledgement"
+                ],
             }
         )
 
@@ -162,6 +170,7 @@ def build_final_docx_package(value: object) -> FinalDocxPackage:
         "final_report_id": final_report["report_id"],
         "selected_report_count": len(rendered),
         "selected_variant_indexes": selected_indexes,
+        "finalization_state": metadata["finalization_state"],
         "reports": manifest_reports,
     }
     manifest_data = json.dumps(

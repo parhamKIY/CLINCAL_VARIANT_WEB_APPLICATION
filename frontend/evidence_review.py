@@ -19,6 +19,7 @@ from backend.evidence_review import (
 from backend.pipeline import (
     PipelineError,
     PipelineResult,
+    acknowledge_unresolved_interpretation_inclusion,
     confirm_reviewed_evidence,
     finalize_reviewed_analysis,
     retry_failed_variant_interpretation,
@@ -786,10 +787,8 @@ def _render_interpretation_retry(
     interpretation = report["reviewed_report"]["variant_interpretation"]
     if interpretation["status"] != "failed":
         return
-    has_reviewer_decisions = bool(
+    has_reviewer_edits_or_confirmation = bool(
         report["edit_history"]
-        or report["selection_history"]
-        or report["review_status"] != "draft"
         or any(
             package["variant_index"] == report["variant_index"]
             for package in result["reviewed_evidence_packages"]
@@ -803,7 +802,7 @@ def _render_interpretation_retry(
         "Retry interpretation",
         type="primary",
         icon=":material/refresh:",
-        disabled=has_reviewer_decisions,
+        disabled=has_reviewer_edits_or_confirmation,
         key=f"{_REVIEW_WIDGET_PREFIX}retry_{report['report_id']}",
     ):
         try:
@@ -829,10 +828,15 @@ def _render_interpretation_retry(
             ),
         )
         st.rerun()
-    if has_reviewer_decisions:
+    if has_reviewer_edits_or_confirmation:
         st.caption(
-            "Retry is disabled because reviewer decisions already exist for "
-            "this report."
+            "Retry is disabled because report edits or confirmation already "
+            "exist for this report."
+        )
+    elif report["selection_history"]:
+        st.warning(
+            "Retry replaces the prior failed interpretation and clears any "
+            "unresolved-inclusion acknowledgement."
         )
 
 
@@ -1028,7 +1032,86 @@ def _render_inclusion_control(
     report: DraftVariantReport,
     result: PipelineResult,
 ) -> None:
-    """Render and persist the Stage 54 reporting-only decision."""
+    """Render selection and the audited unresolved-inclusion exception."""
+
+    interpretation = report["reviewed_report"]["variant_interpretation"]
+    if interpretation["status"] == "failed":
+        acknowledgements = {
+            item["variant_index"]: item
+            for item in result.get("unresolved_finalization_acknowledgements", [])
+            if isinstance(item, dict)
+        }
+        existing = acknowledgements.get(report["variant_index"], {})
+        st.warning(
+            "This interpretation remains unresolved. It is excluded by default. "
+            "Including it requires an explicit reviewer acknowledgement."
+        )
+        with st.form(
+            f"{_REVIEW_WIDGET_PREFIX}unresolved_selection_{report['report_id']}",
+            border=True,
+        ):
+            include = st.checkbox(
+                "Include this unresolved variant in Final Report",
+                value=report["include_in_final_report"],
+                key=(
+                    f"{_REVIEW_WIDGET_PREFIX}include_final_"
+                    f"{report['report_id']}"
+                ),
+            )
+            reason = st.text_area(
+                "Reason for including an unresolved interpretation",
+                value=str(existing.get("reason") or ""),
+                max_chars=500,
+                disabled=not include,
+                help="Record the reviewer rationale without patient identifiers.",
+                key=(
+                    f"{_REVIEW_WIDGET_PREFIX}unresolved_reason_"
+                    f"{report['report_id']}"
+                ),
+            )
+            submitted = st.form_submit_button(
+                "Save final report selection",
+                icon=":material/save:",
+            )
+        if not submitted:
+            return
+        try:
+            updated_result = result
+            if include != report["include_in_final_report"]:
+                updated_report = set_draft_variant_report_inclusion(
+                    report,
+                    include,
+                    reviewer_context="local_streamlit_session",
+                )
+                updated_result = update_draft_variant_report(
+                    result,
+                    updated_report,
+                )
+            if include:
+                updated_result = acknowledge_unresolved_interpretation_inclusion(
+                    updated_result,
+                    variant_index=report["variant_index"],
+                    reason=reason,
+                )
+        except (DraftVariantReportError, PipelineError) as exc:
+            st.error(f"Final Report selection was not saved: {exc}")
+            return
+        result.clear()
+        result.update(updated_result)
+        st.session_state["pipeline_result"] = result
+        persisted = _persist_review_state(result)
+        _set_notice(
+            "success" if persisted else "warning",
+            (
+                "Unresolved inclusion acknowledgement saved."
+                if include and persisted
+                else "Variant excluded from the Final Report selection."
+                if not include and persisted
+                else "Selection was saved in this session, but persistence failed."
+            ),
+        )
+        st.rerun()
+        return
 
     include = st.checkbox(
         "Include this variant in Final Report",
@@ -1275,6 +1358,23 @@ def _render_finalization_action(result: PipelineResult) -> None:
         bool(report.get("include_in_final_report"))
         for report in result.get("draft_variant_reports", [])
     )
+    selected_unresolved = [
+        item["variant_index"]
+        for item in result.get("variant_interpretation_results", [])
+        if item.get("status") == "failed"
+        and item.get("variant_index") < len(result.get("draft_variant_reports", []))
+        and result["draft_variant_reports"][item["variant_index"]].get(
+            "include_in_final_report"
+        )
+    ]
+    acknowledged_indexes = {
+        item.get("variant_index")
+        for item in result.get("unresolved_finalization_acknowledgements", [])
+        if isinstance(item, dict)
+    }
+    missing_acknowledgements = [
+        index for index in selected_unresolved if index not in acknowledged_indexes
+    ]
 
     with st.container(border=True):
         st.markdown("**Finalize reviewed analysis**")
@@ -1290,11 +1390,16 @@ def _render_finalization_action(result: PipelineResult) -> None:
                 "Confirm the reviewed state for every variant before "
                 "finalization."
             )
+        if missing_acknowledgements:
+            st.warning(
+                "Selected unresolved interpretations require an explicit "
+                "reviewer acknowledgement before finalization."
+            )
         if st.button(
             "Finalize review",
             type="primary",
             icon=":material/task_alt:",
-            disabled=not fully_confirmed or completed,
+            disabled=not fully_confirmed or completed or bool(missing_acknowledgements),
             key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
         ):
             try:
@@ -1316,10 +1421,19 @@ def _render_finalization_action(result: PipelineResult) -> None:
                 )
             st.rerun()
         if completed:
-            if failed_count:
+            final_report = result.get("final_clinical_report")
+            metadata = (
+                final_report.get("metadata")
+                if isinstance(final_report, dict)
+                else None
+            )
+            state = metadata.get("finalization_state") if isinstance(metadata, dict) else None
+            if state == "Finalized with unresolved variants":
+                st.warning("Finalized with unresolved variants.")
+            elif failed_count:
                 st.warning(
-                    f"Final review retains {failed_count} explicit "
-                    "interpretation failure(s)."
+                    f"Final review excludes {failed_count} unresolved "
+                    "interpretation(s)."
                 )
             else:
                 st.success(

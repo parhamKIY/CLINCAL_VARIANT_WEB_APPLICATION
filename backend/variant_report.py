@@ -727,7 +727,7 @@ def build_draft_variant_report(
         "machine_original_report": deepcopy(original),
         "reviewed_report": deepcopy(original),
         "edit_history": [],
-        "include_in_final_report": True,
+        "include_in_final_report": interpretation["status"] == "success",
         "selection_history": [],
         "review_status": "draft",
         "created_at": interpretation["generated_at"],
@@ -1458,7 +1458,14 @@ def validate_draft_variant_report(
         raise DraftVariantReportError(
             "Draft report selection_history must be a bounded list."
         )
-    replayed_selection = True
+    replayed_selection = (
+        original["variant_interpretation"]["status"] == "success"
+        or (
+            original["variant_interpretation"]["status"] == "failed"
+            and not selection_history
+            and include_in_final_report
+        )
+    )
     selection_timestamp = _timestamp_value(created_at)
     for selection_index, record_value in enumerate(selection_history):
         path = f"draft_variant_report.selection_history[{selection_index}]"

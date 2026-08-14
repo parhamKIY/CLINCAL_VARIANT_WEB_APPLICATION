@@ -12,6 +12,7 @@ VariantCardStatus = Literal[
     "Report ready",
     "Report ready with partial evidence",
     "Interpretation requires attention",
+    "Finalized with unresolved variants",
     "Input requires attention",
 ]
 
@@ -130,6 +131,7 @@ def build_variant_status_card(
     *,
     variant_index: int,
     total: int,
+    finalized_with_unresolved: bool = False,
 ) -> VariantStatusCard:
     """Build one card without exposing internal exception names as its status."""
 
@@ -204,7 +206,9 @@ def build_variant_status_card(
         )
         for status in _source_statuses(sources, capability)
     )
-    if input_requires_attention:
+    if finalized_with_unresolved:
+        status: VariantCardStatus = "Finalized with unresolved variants"
+    elif input_requires_attention:
         status: VariantCardStatus = "Input requires attention"
     elif interpretation_failed:
         status = "Interpretation requires attention"
@@ -247,11 +251,32 @@ def build_variant_status_cards(result: Mapping[str, object]) -> list[VariantStat
         and declared_total > 0
         else max((int(index) for index in reports), default=-1) + 1
     )
+    final_report = _mapping(result.get("final_clinical_report"))
+    metadata = _mapping(final_report.get("metadata")) if final_report else None
+    audit = _mapping(final_report.get("audit_summary")) if final_report else None
+    unresolved_indexes: set[object] = set()
+    for candidate in _sequence(
+        audit.get("selected_reports") if audit is not None else ()
+    ):
+        item = _mapping(candidate)
+        if (
+            item is not None
+            and item.get("unresolved_interpretation_acknowledgement") is not None
+        ):
+            unresolved_indexes.add(item.get("variant_index"))
+    finalized_with_unresolved = (
+        metadata is not None
+        and metadata.get("finalization_state")
+        == "Finalized with unresolved variants"
+    )
     return [
         build_variant_status_card(
             reports.get(index),
             variant_index=index,
             total=total,
+            finalized_with_unresolved=(
+                finalized_with_unresolved and index in unresolved_indexes
+            ),
         )
         for index in range(total)
     ]

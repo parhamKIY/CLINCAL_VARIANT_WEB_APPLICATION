@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stages 116-118 implemented as recorded below
+**Implementation status:** Stages 0-114 and Stages 116-119 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 119 unresolved-interpretation finalization semantics; Stage 115 final visual sign-off remains deferred
+**Next checkpoint:** Stage 120 bounded live-validation harness; Stage 115 final visual sign-off remains deferred
 **Document date:** 2026-08-14
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -1733,6 +1733,19 @@ GeneBe, and MyVariant-derived observations remain source-attributed in the detai
 findings and classification summary. HTML and DOCX explicitly display `System
 classification: Not independently determined`.
 
+### Stage 119 unresolved-interpretation finalization semantics
+
+Failed or exhausted interpretations now default to exclusion from the selected final
+package. A reviewer who elects to include one must record a bounded, timestamped,
+privacy-checked reason bound to the exact failed interpretation. Selected unresolved
+reports receive the lifecycle state `finalized_with_unresolved_interpretation`; all
+other ordinary finalized reports have a successful interpretation. Final Clinical
+Reports, selected DOCX package manifests, the final-review UI, analysis summaries, and
+variant status cards use `Finalized with unresolved variants` when applicable.
+
+Retrying a failed interpretation clears the prior acknowledgement when the result is
+replaced. Finalization remains deterministic and makes no LLM request.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1743,15 +1756,15 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.2`.
+- Active pipeline schema: `3.3`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.2`.
-- Variant Report Lifecycle schema: `1.0`.
+- Variant Report Lifecycle schema: `1.1`.
 - Variant Integrity Record schema: `1.0`.
-- Final Clinical Report schema: `2.0`.
+- Final Clinical Report schema: `2.1`.
 - Recovery request schema: `3`.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,

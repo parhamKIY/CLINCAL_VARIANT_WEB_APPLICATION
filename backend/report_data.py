@@ -890,11 +890,20 @@ def _validate_review_state(value: object) -> None:
     if (status == "confirmed") != (item["confirmed_at"] is not None):
         raise ReportDataError("Review status and confirmation time are inconsistent.")
 
-    replayed = True
     history = _sequence(
         item["selection_history"],
         "review_state.selection_history",
         maximum=MAX_EDIT_HISTORY,
+    )
+    replayed = (
+        False
+        if (not history and not included)
+        or (
+            bool(history)
+            and isinstance(history[0], Mapping)
+            and history[0].get("old_value") is False
+        )
+        else True
     )
     for index, raw in enumerate(history):
         path = f"review_state.selection_history[{index}]"

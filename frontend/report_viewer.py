@@ -204,6 +204,9 @@ def render_final_clinical_report_viewer(result: PipelineResult) -> None:
             "is authoritative; export does not regenerate interpretation or make "
             "another LLM call."
         )
+        st.caption(
+            f"Finalization state: {report['metadata']['finalization_state']}"
+        )
         selected_count = report["metadata"]["selected_variant_count"]
         package = None
         if selected_count:
