@@ -251,6 +251,23 @@ def _classification_summary(report: ReportData) -> str:
     summary = report["classification_summary"]
     statements: list[str] = []
     preliminary = report.get("preliminary_classification")
+    interpretation_selection = report.get("interpretation_version_selection")
+    if interpretation_selection is not None:
+        revision = interpretation_selection["selected_revision_number"]
+        version_label = (
+            "initial interpretation"
+            if revision == 0
+            else f"revised interpretation version {revision}"
+        )
+        statements.append(
+            "Final-report interpretation selection: " + version_label + "."
+        )
+        if interpretation_selection["selected_at"]:
+            statements.append(
+                "Selection recorded at: "
+                + str(interpretation_selection["selected_at"])
+                + "."
+            )
     if preliminary is not None:
         if preliminary["status"] == "classified":
             statements.append(
@@ -300,6 +317,16 @@ def _classification_summary(report: ReportData) -> str:
 def _comments_and_scope(report: ReportData) -> str:
     comments = [item["message"] for item in report["warnings"]]
     comments.extend(report["review_state"]["reviewer_notes"])
+    selection = report.get("interpretation_version_selection")
+    if selection is not None:
+        for record in selection["selection_history"]:
+            version = record["selected_revision_number"]
+            label = "initial" if version == 0 else f"revision {version}"
+            comments.append(
+                "Interpretation selection history: "
+                f"{label} selected at {record['selected_at']} "
+                f"({record['reviewer_context']})."
+            )
     comments.append(
         "This allele-level report supports qualified human review and does not provide "
         "a diagnosis, treatment recommendation, or testing directive."

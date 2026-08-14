@@ -1,4 +1,4 @@
-"""Stable ReportData V5 contract for future DOCX and preview renderers."""
+"""Stable ReportData V6 contract for future DOCX and preview renderers."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ from backend.references import (
 )
 
 
-REPORT_DATA_SCHEMA_VERSION = "5.0"
-LEGACY_REPORT_DATA_SCHEMA_VERSION = "4.0"
+REPORT_DATA_SCHEMA_VERSION = "6.0"
+LEGACY_REPORT_DATA_SCHEMA_VERSIONS = frozenset({"4.0", "5.0"})
 MAX_REPORT_DATA_BYTES = 256 * 1024
 MAX_TEXT_CHARS = 20_000
 MAX_SHORT_TEXT_CHARS = 500
@@ -299,6 +299,23 @@ class ReportReviewState(TypedDict):
     selection_history: list[ReportSelectionRecord]
 
 
+class ReportInterpretationVersionSelectionRecord(TypedDict):
+    """One explicit reviewed interpretation selection retained for final output."""
+
+    sequence: int
+    selected_revision_number: int
+    selected_at: str
+    reviewer_context: str
+
+
+class ReportInterpretationVersionSelection(TypedDict):
+    """Current selected initial/revised version plus its audit history."""
+
+    selected_revision_number: int
+    selected_at: str | None
+    selection_history: list[ReportInterpretationVersionSelectionRecord]
+
+
 class ReportData(TypedDict):
     """Renderer-neutral source of truth for one allele-level report."""
 
@@ -319,6 +336,7 @@ class ReportData(TypedDict):
     warnings: list[ReportWarning]
     provenance: ReportProvenance
     review_state: ReportReviewState
+    interpretation_version_selection: ReportInterpretationVersionSelection
     template_version: str
 
 
@@ -347,6 +365,12 @@ WARNING_FIELDS = _fields(ReportWarning)
 PROVENANCE_FIELDS = _fields(ReportProvenance)
 REVIEW_STATE_FIELDS = _fields(ReportReviewState)
 SELECTION_RECORD_FIELDS = _fields(ReportSelectionRecord)
+INTERPRETATION_VERSION_SELECTION_FIELDS = _fields(
+    ReportInterpretationVersionSelection
+)
+INTERPRETATION_VERSION_SELECTION_RECORD_FIELDS = _fields(
+    ReportInterpretationVersionSelectionRecord
+)
 
 
 def _mapping(
@@ -989,20 +1013,71 @@ def _validate_review_state(value: object) -> None:
         raise ReportDataError("Selection history does not match current inclusion.")
 
 
-def validate_report_data(value: object) -> ReportData:
-    """Validate and copy a V5 record or a retained V4 compatibility record."""
+def _validate_interpretation_version_selection(value: object) -> None:
+    item = _mapping(
+        value,
+        INTERPRETATION_VERSION_SELECTION_FIELDS,
+        "interpretation_version_selection",
+    )
+    selected_revision = _integer(
+        item["selected_revision_number"],
+        "interpretation_version_selection.selected_revision_number",
+    )
+    selected_at = item["selected_at"]
+    _timestamp(
+        selected_at,
+        "interpretation_version_selection.selected_at",
+        optional=True,
+    )
+    history = _sequence(
+        item["selection_history"],
+        "interpretation_version_selection.selection_history",
+        maximum=MAX_EDIT_HISTORY,
+    )
+    if not history:
+        if selected_revision != 0 or selected_at is not None:
+            raise ReportDataError(
+                "An implicit initial interpretation selection cannot have metadata."
+            )
+        return
+    for index, raw in enumerate(history):
+        path = f"interpretation_version_selection.selection_history[{index}]"
+        record = _mapping(raw, INTERPRETATION_VERSION_SELECTION_RECORD_FIELDS, path)
+        if _integer(record["sequence"], f"{path}.sequence", minimum=1) != index + 1:
+            raise ReportDataError(
+                "Interpretation version selection history is not contiguous."
+            )
+        _integer(record["selected_revision_number"], f"{path}.selected_revision_number")
+        _timestamp(record["selected_at"], f"{path}.selected_at")
+        _text(record["reviewer_context"], f"{path}.reviewer_context")
+    latest = cast(Mapping[str, object], history[-1])
+    if (
+        latest["selected_revision_number"] != selected_revision
+        or latest["selected_at"] != selected_at
+    ):
+        raise ReportDataError(
+            "Interpretation version selection does not match its history."
+        )
 
-    is_v5 = (
+
+def validate_report_data(value: object) -> ReportData:
+    """Validate and copy a V6 record or retained compatibility record."""
+
+    is_v6 = (
         isinstance(value, Mapping)
         and value.get("schema_version") == REPORT_DATA_SCHEMA_VERSION
     )
-    v4_fields = REPORT_DATA_FIELDS - {"preliminary_classification"}
+    v5_fields = REPORT_DATA_FIELDS - {"interpretation_version_selection"}
+    v4_fields = v5_fields - {"preliminary_classification"}
     legacy_fields = v4_fields - {"call_quality"}
     fields = (
         REPORT_DATA_FIELDS
-        if is_v5
+        if is_v6
         else (
-            v4_fields
+            v5_fields
+            if isinstance(value, Mapping) and "call_quality" in value
+            and "preliminary_classification" in value
+            else v4_fields
             if isinstance(value, Mapping) and "call_quality" in value
             else legacy_fields
         )
@@ -1010,7 +1085,7 @@ def validate_report_data(value: object) -> ReportData:
     item = _mapping(value, fields, "report_data")
     if item["schema_version"] not in {
         REPORT_DATA_SCHEMA_VERSION,
-        LEGACY_REPORT_DATA_SCHEMA_VERSION,
+        *LEGACY_REPORT_DATA_SCHEMA_VERSIONS,
     }:
         raise ReportDataError("report_data.schema_version is unsupported.")
     _text(item["report_id"], "report_data.report_id", maximum=128)
@@ -1026,6 +1101,10 @@ def validate_report_data(value: object) -> ReportData:
     _validate_classification_summary(item["classification_summary"])
     if "preliminary_classification" in item:
         _validate_preliminary_classification(item["preliminary_classification"])
+    if "interpretation_version_selection" in item:
+        _validate_interpretation_version_selection(
+            item["interpretation_version_selection"]
+        )
     _validate_source_only_classification(item)
     _validate_literature_references(item["literature_references"])
     _validate_data_sources(item["data_sources"])
@@ -1057,7 +1136,7 @@ def validate_report_data(value: object) -> ReportData:
 
 __all__ = [
     "AVAILABILITY_STATUSES",
-    "LEGACY_REPORT_DATA_SCHEMA_VERSION",
+    "LEGACY_REPORT_DATA_SCHEMA_VERSIONS",
     "PHENOTYPE_CONCORDANCE_VALUES",
     "REPORT_DATA_SCHEMA_VERSION",
     "ReportData",

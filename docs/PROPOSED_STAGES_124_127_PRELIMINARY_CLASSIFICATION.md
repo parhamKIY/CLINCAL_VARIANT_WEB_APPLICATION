@@ -1,6 +1,6 @@
 # Proposed Stages 124–127 — Preliminary Classification and Review Workflow
 
-**Status:** Stages 124–126 implemented and verified; Stage 127 proposed
+**Status:** Stages 124–127 implemented and verified
 
 ## Approved product behavior
 
@@ -160,6 +160,24 @@ preserving preliminary status, provenance, and unresolved ambiguity.
   and full regression suites.
 - The final output retains the selected version, evidence provenance, limitations,
   and user-review history.
+
+### Implemented behavior and verification
+
+The review surface now requires an explicit, auditable choice between the initial
+interpretation and each retained revised interpretation before evidence confirmation.
+The selected version is projected into `ReportData` schema `6.0`, where it retains
+the selection history, LLM provenance, preliminary classification rationale, and
+limitations. DOCX and Final Clinical Report output state the selected version while
+keeping source evidence attributed and retaining `Ambiguous — user review required`
+when the selected result is ambiguous. Selection invalidates stale confirmation and
+finalization state but does not request a further model call.
+
+New Pipeline Results use schema `3.5`; retained `3.3` and `3.4` states remain
+readable. Retained `ReportData` schemas `4.0` and `5.0` remain readable.
+`tests/test_stage127_preliminary_finalization.py` covers Streamlit version choice,
+audited selection, persistence/recovery, confirmation gating, DOCX disclosure, and
+Final Clinical Report retention. Offline regression on 2026-08-14 passed
+`1292 passed, 6 skipped`.
 
 **Suggested commit:** `test(workflow): verify preliminary classification finalization`
 

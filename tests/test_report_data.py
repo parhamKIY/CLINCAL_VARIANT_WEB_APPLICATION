@@ -210,6 +210,11 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "reviewer_notes": [],
             "selection_history": [],
         },
+        "interpretation_version_selection": {
+            "selected_revision_number": 0,
+            "selected_at": None,
+            "selection_history": [],
+        },
         "template_version": "professor-report-v1",
     }
 

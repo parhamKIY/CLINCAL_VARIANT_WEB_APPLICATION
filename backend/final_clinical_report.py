@@ -154,6 +154,56 @@ def _digest(value: Mapping[str, object]) -> str:
     ).hexdigest()[:24]
 
 
+def _selected_reviewed_report(
+    report: Mapping[str, object],
+    lifecycle_record: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Project the selected preliminary version into the final read-only view."""
+
+    reviewed = deepcopy(cast(dict[str, object], report["reviewed_report"]))
+    if lifecycle_record is None:
+        return reviewed
+    report_data = cast(dict[str, object], lifecycle_record["report_data"])
+    selected = report_data.get("interpretation_version_selection")
+    if not isinstance(selected, Mapping) or not selected.get("selection_history"):
+        return reviewed
+    interpretation = cast(dict[str, object], reviewed["variant_interpretation"])
+    projected = cast(dict[str, object], report_data["interpretation"])
+    preliminary = cast(dict[str, object], report_data["preliminary_classification"])
+    interpretation.update(
+        {
+            "status": (
+                "success"
+                if projected["interpretation_status"] == "available"
+                else "failed"
+            ),
+            "narrative": projected["current_reviewer_interpretation"],
+            "model": projected["model"],
+            "prompt_version": projected["prompt_version"],
+            "generated_at": projected["generated_at"],
+            "failure_type": projected["failure_type"],
+            "conflict_assessment": projected["conflict_assessment"],
+            "preliminary_classification_status": preliminary["status"],
+            "preliminary_classification": preliminary["classification"],
+            "classification_rationale": preliminary["rationale"],
+            "limitations": preliminary["limitations"],
+        }
+    )
+    notes = cast(list[str], reviewed["reviewer_notes"])
+    revision = selected["selected_revision_number"]
+    label = "initial" if revision == 0 else f"revised version {revision}"
+    notes.append(f"Final report uses the {label} interpretation.")
+    for history in selected["selection_history"]:
+        version = history["selected_revision_number"]
+        version_label = "initial" if version == 0 else f"revision {version}"
+        notes.append(
+            "Interpretation selection history: "
+            f"{version_label} selected at {history['selected_at']} "
+            f"({history['reviewer_context']})."
+        )
+    return reviewed
+
+
 def _require_mapping(
     value: object,
     fields: frozenset[str],
@@ -242,6 +292,19 @@ def compose_final_clinical_report(
         ]
     )
     selected = [reports[index] for index in selected_indexes]
+    records_by_index = {
+        record["variant_index"]: record for record in lifecycle_records
+    }
+    selected_views = [
+        (
+            report,
+            _selected_reviewed_report(
+                report,
+                records_by_index.get(report["variant_index"]),
+            ),
+        )
+        for report in selected
+    ]
     unresolved_by_index = {
         record["variant_index"]: record["unresolved_interpretation_acknowledgement"]
         for record in lifecycle_records
@@ -290,15 +353,15 @@ def compose_final_clinical_report(
     providers = _unique_text(
         [
             provider
-            for report in selected
-            for provider in report["reviewed_report"]["provenance"]["providers"]
+            for _, reviewed in selected_views
+            for provider in cast(dict[str, object], reviewed["provenance"])["providers"]
         ]
     )
     upstream_sources = _unique_text(
         [
             source
-            for report in selected
-            for source in report["reviewed_report"]["provenance"][
+            for _, reviewed in selected_views
+            for source in cast(dict[str, object], reviewed["provenance"])[
                 "upstream_sources"
             ]
         ]
@@ -306,8 +369,8 @@ def compose_final_clinical_report(
     limitations = _unique_text(
         [
             limitation
-            for report in selected
-            for limitation in report["reviewed_report"]["limitations"]
+            for _, reviewed in selected_views
+            for limitation in cast(list[str], reviewed["limitations"])
         ]
     )
     if not limitations:
@@ -351,40 +414,32 @@ def compose_final_clinical_report(
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "display_label": item["reviewed_report"]["variant_summary"][
+                "display_label": cast(dict[str, object], reviewed["variant_summary"])[
                     "display_label"
                 ],
-                "gene": item["reviewed_report"]["variant_summary"]["gene"],
-                "interpretation_status": item["reviewed_report"][
-                    "variant_interpretation"
-                ]["status"],
-                "interpretation_failure_type": item["reviewed_report"][
-                    "variant_interpretation"
-                ]["failure_type"],
-                "reviewer_summary": item["reviewed_report"]["reviewer_summary"],
-                "interpretation_narrative": item["reviewed_report"][
-                    "variant_interpretation"
-                ]["narrative"],
+                "gene": cast(dict[str, object], reviewed["variant_summary"])["gene"],
+                "interpretation_status": cast(dict[str, object], reviewed["variant_interpretation"])["status"],
+                "interpretation_failure_type": cast(dict[str, object], reviewed["variant_interpretation"])["failure_type"],
+                "reviewer_summary": reviewed["reviewer_summary"],
+                "interpretation_narrative": cast(dict[str, object], reviewed["variant_interpretation"])["narrative"],
             }
-            for item in selected
+            for item, reviewed in selected_views
         ],
         "variant_sections": [
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "reviewed_report": deepcopy(item["reviewed_report"]),
+                "reviewed_report": deepcopy(reviewed),
             }
-            for item in selected
+            for item, reviewed in selected_views
         ],
         "references": [
             {
                 "variant_index": item["variant_index"],
                 "report_id": item["report_id"],
-                "items": deepcopy(
-                    item["reviewed_report"]["literature_references"]
-                ),
+                "items": deepcopy(reviewed["literature_references"]),
             }
-            for item in selected
+            for item, reviewed in selected_views
         ],
         "method_data_sources": {
             "composition_method": "deterministic_reviewer_approved_composition",

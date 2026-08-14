@@ -24,6 +24,7 @@ from backend.pipeline import (
     finalize_reviewed_analysis,
     request_revised_variant_interpretation,
     retry_failed_variant_interpretation,
+    select_final_interpretation_version,
     update_draft_variant_report,
 )
 from backend.report_data_projection import build_report_data_from_draft
@@ -964,6 +965,90 @@ def _render_revised_interpretation_request(
     st.rerun()
 
 
+def _render_interpretation_version_selection(
+    report: DraftVariantReport,
+    result: PipelineResult,
+) -> None:
+    """Let the reviewer explicitly choose the retained version for final output."""
+
+    revisions = [
+        item
+        for item in result.get("revised_interpretations", [])
+        if item.get("variant_index") == report["variant_index"]
+    ]
+    if not revisions:
+        return
+    history = [
+        item
+        for item in result.get("interpretation_version_selection_history", [])
+        if item.get("variant_index") == report["variant_index"]
+    ]
+    selected_revision = (
+        history[-1]["selected_revision_number"] if history else None
+    )
+    options = [0, *[item["revision_number"] for item in revisions]]
+    labels = {
+        0: "Initial interpretation",
+        **{
+            item["revision_number"]: (
+                f"Revised interpretation {item['revision_number']} — "
+                f"{item['interpretation'].get('preliminary_classification') or 'Ambiguous'}"
+            )
+            for item in revisions
+        },
+    }
+    with st.container(border=True):
+        st.markdown("#### Final-report interpretation version")
+        st.caption(
+            "Choose the reviewed initial or revised preliminary interpretation. "
+            "This selection is audited, preserves source evidence, and must be "
+            "made before evidence confirmation."
+        )
+        choice = st.selectbox(
+            "Interpretation version for final output",
+            options,
+            index=options.index(selected_revision)
+            if selected_revision in options
+            else 0,
+            format_func=lambda item: labels[item],
+            key=(
+                f"{_REVIEW_WIDGET_PREFIX}interpretation_version_"
+                f"{report['report_id']}"
+            ),
+        )
+        if st.button(
+            "Save interpretation version",
+            icon=":material/save:",
+            key=(
+                f"{_REVIEW_WIDGET_PREFIX}save_interpretation_version_"
+                f"{report['report_id']}"
+            ),
+        ):
+            try:
+                updated = select_final_interpretation_version(
+                    result,
+                    variant_index=report["variant_index"],
+                    selected_revision_number=choice,
+                    reviewer_context="local_streamlit_session",
+                )
+            except PipelineError as exc:
+                st.error(f"Interpretation version was not saved: {exc}")
+                return
+            result.clear()
+            result.update(updated)
+            st.session_state["pipeline_result"] = result
+            persisted = _persist_review_state(result)
+            _set_notice(
+                "success" if persisted else "warning",
+                (
+                    "Interpretation version saved for final output."
+                    if persisted
+                    else "Interpretation version saved in this session, but persistence failed."
+                ),
+            )
+            st.rerun()
+
+
 def _render_report_editor(
     report: DraftVariantReport,
     result: PipelineResult,
@@ -1418,8 +1503,8 @@ def _render_confirmation(
         for item in result.get("revised_interpretations", [])
     ):
         st.info(
-            "A revised interpretation exists. Stage 127 will require selecting "
-            "the interpretation version before final confirmation."
+            "A revised interpretation exists. Select the initial or revised "
+            "version in Clinical report review before confirming evidence."
         )
     privacy_attested = st.checkbox(
         (
@@ -1685,6 +1770,10 @@ def render_evidence_review(
             draft_variant_report,
             result,
             model=retry_model,
+        )
+        _render_interpretation_version_selection(
+            draft_variant_report,
+            result,
         )
         _render_editable_docx_download(draft_variant_report, result)
     else:

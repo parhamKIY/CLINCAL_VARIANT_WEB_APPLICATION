@@ -129,6 +129,8 @@ def build_variant_report_record(
     confirmed_at: str | None = None,
     finalized_at: str | None = None,
     unresolved_interpretation_acknowledgement: Mapping[str, object] | None = None,
+    selected_interpretation: Mapping[str, object] | None = None,
+    interpretation_selection_history: Sequence[Mapping[str, object]] = (),
 ) -> VariantReportRecord:
     """Build one canonical lifecycle record and its DOCX draft metadata."""
 
@@ -137,6 +139,8 @@ def build_variant_report_record(
         report = build_report_data_from_draft(
             validated_draft,
             analysis_id=analysis_id or UNPERSISTED_ANALYSIS_ID,
+            selected_interpretation=selected_interpretation,
+            interpretation_selection_history=interpretation_selection_history,
         )
         if confirmed_at is not None:
             _timestamp(confirmed_at, "confirmed_at")
@@ -203,6 +207,8 @@ def build_variant_report_records(
     unresolved_interpretation_acknowledgements: Sequence[
         Mapping[str, object]
     ] = (),
+    selected_interpretations: Mapping[int, Mapping[str, object]] | None = None,
+    interpretation_selection_history: Sequence[Mapping[str, object]] = (),
 ) -> list[VariantReportRecord]:
     """Build every record in immutable original input order."""
 
@@ -225,6 +231,14 @@ def build_variant_report_records(
                 "Unresolved interpretation acknowledgement metadata is invalid."
             )
         acknowledgements_by_index[index] = acknowledgement
+    histories_by_index: dict[int, list[Mapping[str, object]]] = {}
+    for selection in interpretation_selection_history:
+        index = selection.get("variant_index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ReportLifecycleError(
+                "Interpretation selection history metadata is invalid."
+            )
+        histories_by_index.setdefault(index, []).append(selection)
     records = [
         build_variant_report_record(
             draft,
@@ -239,6 +253,12 @@ def build_variant_report_records(
             unresolved_interpretation_acknowledgement=acknowledgements_by_index.get(
                 index
             ),
+            selected_interpretation=(
+                None
+                if selected_interpretations is None
+                else selected_interpretations.get(index)
+            ),
+            interpretation_selection_history=histories_by_index.get(index, ()),
         )
         for index, draft in enumerate(drafts)
     ]
