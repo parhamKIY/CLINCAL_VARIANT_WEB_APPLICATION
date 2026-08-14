@@ -1676,17 +1676,28 @@ def _variant_interpretation_response(
     model: str = "variant-interpretation-test-model",
     conflict_assessment: str = "No meaningful conflict is present.",
     phenotype_conclusion: str = "partially supported",
+    preliminary_classification_status: str = "classified",
+    preliminary_classification: str | None = "Pathogenic",
 ) -> LLMResponse:
     """Return one valid Stage 50 response for pipeline integration tests."""
 
     return LLMResponse(
         content=json.dumps(
             {
+                "preliminary_classification_status": (
+                    preliminary_classification_status
+                ),
+                "preliminary_classification": preliminary_classification,
+                "classification_rationale": (
+                    "The source evidence supports a preliminary pathogenic "
+                    "classification."
+                ),
                 "interpretation": (
                     "The supplied evidence supports cautious human review."
                 ),
                 "conflict_assessment": conflict_assessment,
                 "phenotype_conclusion": phenotype_conclusion,
+                "limitations": ["Human review remains required."],
                 "warnings": [],
             }
         ),
@@ -13151,13 +13162,24 @@ class TestStage50SingleModelInterpretation:
         *,
         conflict_assessment: str = "No meaningful conflict is present.",
         phenotype_conclusion: str = "partially supported",
+        preliminary_classification_status: str = "classified",
+        preliminary_classification: str | None = "Pathogenic",
     ) -> dict[str, object]:
         return {
+            "preliminary_classification_status": (
+                preliminary_classification_status
+            ),
+            "preliminary_classification": preliminary_classification,
+            "classification_rationale": (
+                "The source evidence supports a preliminary pathogenic "
+                "classification."
+            ),
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
             "conflict_assessment": conflict_assessment,
             "phenotype_conclusion": phenotype_conclusion,
+            "limitations": ["Human review remains required."],
             "warnings": ["Human review remains required."],
         }
 
@@ -13203,6 +13225,13 @@ class TestStage50SingleModelInterpretation:
             "prompt_mode": "standard",
             "conflict_status": "no_conflict",
             "conflict_severity": "none",
+            "preliminary_classification_status": "classified",
+            "preliminary_classification": "Pathogenic",
+            "classification_rationale": (
+                "The source evidence supports a preliminary pathogenic "
+                "classification."
+            ),
+            "limitations": ["Human review remains required."],
             "provider": settings.LLM_PROVIDER,
             "configured_model": settings.VARIANT_INTERPRETATION_MODEL,
             "response_model": "variant-model",
@@ -13277,12 +13306,19 @@ class TestStage50SingleModelInterpretation:
 
         def fake_call_llm(*args: object, **kwargs: object) -> LLMResponse:
             observed.append({"args": args, **kwargs})
+            is_conflicting = len(observed) == 2
             return self._response(
                 self._payload(
                     conflict_assessment=(
                         "The supplied classifications disagree and remain "
                         "unresolved."
-                    )
+                    ),
+                    preliminary_classification_status=(
+                        "ambiguous" if is_conflicting else "classified"
+                    ),
+                    preliminary_classification=(
+                        None if is_conflicting else "Pathogenic"
+                    ),
                 ),
                 model="provider-returned-model",
             )
@@ -13346,28 +13382,40 @@ class TestStage50SingleModelInterpretation:
             ),
             (
                 {
+                    "preliminary_classification_status": "classified",
+                    "preliminary_classification": "Pathogenic",
+                    "classification_rationale": "Supported by sources.",
                     "interpretation": "x"
                     * (MAX_INTERPRETATION_CHARACTERS + 1),
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
+                    "limitations": [],
                     "warnings": [],
                 },
                 "size limit",
             ),
             (
                 {
+                    "preliminary_classification_status": "classified",
+                    "preliminary_classification": "Pathogenic",
+                    "classification_rationale": "Supported by sources.",
                     "interpretation": "See https://invented.example",
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
+                    "limitations": [],
                     "warnings": [],
                 },
                 "must not contain URLs",
             ),
             (
                 {
+                    "preliminary_classification_status": "classified",
+                    "preliminary_classification": "Pathogenic",
+                    "classification_rationale": "Supported by sources.",
                     "interpretation": "Text",
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
+                    "limitations": [],
                     "warnings": ["Repeated", "Repeated"],
                 },
                 "must be unique",
@@ -16805,6 +16853,12 @@ class TestStage60EndToEndAcceptanceV3:
                             "unresolved."
                             if index % 2
                             else "No meaningful conflict is present."
+                        ),
+                        preliminary_classification_status=(
+                            "ambiguous" if index % 2 else "classified"
+                        ),
+                        preliminary_classification=(
+                            None if index % 2 else "Pathogenic"
                         ),
                     )
                 )
