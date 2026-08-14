@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stages 116-119 implemented as recorded below
+**Implementation status:** Stages 0-114 and Stages 116-120 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 120 bounded live-validation harness; Stage 115 final visual sign-off remains deferred
+**Next checkpoint:** Stage 121 lazy Streamlit technical surfaces; Stage 115 final visual sign-off remains deferred
 **Document date:** 2026-08-14
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -791,6 +791,12 @@ report links. Live validation showed that the Ensembl VEP and GeneBe batch POST
 endpoints are source endpoints rather than browser-navigable records; Stage 61 now
 maps them to the explicit unavailable-link fallback. Representative ClinVar and
 MyVariant exact links returned reachable responses.
+
+Stage 120 wraps that production-client command in a sequential 180-second default
+overall deadline, concise provider-group progress lines, and atomic normalized JSON
+checkpoints. It retains the production clients' own timeout classifications, omits
+raw payloads, credentials, URLs, and clinical input from the checkpoint, and exits
+nonzero with the partial summary when interrupted or deadline-limited.
 
 ### Stage 62 documentation and professor-review handoff
 
@@ -1746,6 +1752,15 @@ variant status cards use `Finalized with unresolved variants` when applicable.
 Retrying a failed interpretation clears the prior acknowledgement when the result is
 replaced. Finalization remains deterministic and makes no LLM request.
 
+### Stage 120 bounded live-validation harness
+
+The retained live-provider command now delegates deadline, progress, partial-result,
+and privacy-safe checkpoint orchestration to `tools/live_provider_validation.py`.
+Its summary records ordered provider-group states from `not_started` through
+`completed`, `unavailable`, or `overall_deadline_exceeded`; no raw provider response,
+credential-bearing URL, or clinical input is retained. `--skip-llm` does not create
+either LLM task.
+
 ### Post-Stage 78 corrective maintenance
 
 Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
@@ -1871,6 +1886,10 @@ population, literature, and configured LLM endpoint:
 ```powershell
 .\.venv\Scripts\python.exe tests\run_live_provider_validation.py
 ```
+
+Use `--skip-llm` to omit both configured LLM tasks, or
+`--deadline-seconds 120` to set a bounded overall deadline. The default is 180
+seconds, and the JSON checkpoint is rewritten atomically after each provider group.
 
 The complete Stage 61 gate passed on **2026-08-09**. GenCC, CSpec, LitVar2, Europe
 PMC, and PubMed returned valid no-match responses for the public probe. Every other

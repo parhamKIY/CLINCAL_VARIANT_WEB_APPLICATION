@@ -297,7 +297,7 @@ DOCX-package, retry, summary, status, warning, and persistence checks passed.
 
 ## 8. Stage 120 — Bounded live-validation harness
 
-**Status:** Planned  
+**Status:** Implemented
 **Priority:** Medium  
 **Dependency:** Stage 119
 
@@ -339,6 +339,10 @@ provider stalls.
 
 The harness always produces an incremental summary and terminates within its declared
 deadline, including when a provider never responds.
+
+**Verification:** `tests/test_stage120_live_validation_harness.py`; deterministic
+deadline, atomic-checkpoint, cancellation, privacy, ordered-completion, and
+`--skip-llm` checks passed without network access.
 
 **Suggested commit:** `fix(validation): bound live provider audit`
 

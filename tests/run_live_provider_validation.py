@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
-from time import perf_counter
-from typing import Any
 
 import requests
 
@@ -44,6 +40,11 @@ from backend.report import build_evidence_object
 from backend.vcf_processing import parse_manual_variants
 from backend.variant_interpretation import interpret_variant
 from config import settings
+from tools.live_provider_validation import (
+    DEFAULT_OVERALL_DEADLINE_SECONDS,
+    ProviderTask,
+    run_live_validation,
+)
 
 
 DEFAULT_OUTPUT = PROJECT_ROOT / "output" / "live-provider-validation.json"
@@ -545,61 +546,64 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_OUTPUT,
         help="Write a non-clinical JSON status summary to this path.",
     )
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=DEFAULT_OVERALL_DEADLINE_SECONDS,
+        help=(
+            "Overall wall-clock deadline for the harness "
+            f"(default: {DEFAULT_OVERALL_DEADLINE_SECONDS:g} seconds)."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     arguments = parse_arguments()
-    started_at = perf_counter()
-    summary: dict[str, Any] = {
-        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "assembly": settings.GENOME_ASSEMBLY,
-        "probe_variant": arguments.variant,
-        "checks": [],
-    }
-    try:
+    state: dict[str, dict[str, object]] = {}
+
+    def initialize() -> list[dict[str, object]]:
         settings.initialize()
-        variant = _parse_variant(arguments.variant)
-        candidate, annotation_checks = _annotation_checks(variant)
-        summary["checks"].extend(annotation_checks)
-        candidate, phenotype_checks = _phenotype_checks(candidate)
-        summary["checks"].extend(phenotype_checks)
-        summary["checks"].extend(_conditional_checks(candidate))
-        summary["checks"].extend(_canonical_link_checks(candidate))
-        if not arguments.skip_llm:
-            summary["checks"].extend(_llm_checks(candidate))
-    except Exception as exc:
-        summary["status"] = "failed"
-        summary["failure"] = str(exc)
-        exit_code = 1
-    else:
-        summary["status"] = "passed"
-        summary["failure"] = None
-        exit_code = 0
+        state["variant"] = _parse_variant(arguments.variant)
+        return []
 
-    summary["elapsed_seconds"] = round(perf_counter() - started_at, 3)
-    output_path = arguments.output.resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(
-            summary,
-            indent=2,
-            ensure_ascii=True,
-            allow_nan=False,
+    def annotation() -> list[dict[str, object]]:
+        candidate, checks = _annotation_checks(state["variant"])
+        state["candidate"] = candidate
+        return checks
+
+    def phenotype() -> list[dict[str, object]]:
+        candidate, checks = _phenotype_checks(state["candidate"])
+        state["candidate"] = candidate
+        return checks
+
+    def conditional() -> list[dict[str, object]]:
+        return _conditional_checks(state["candidate"])
+
+    def canonical_links() -> list[dict[str, object]]:
+        return _canonical_link_checks(state["candidate"])
+
+    tasks = [
+        ProviderTask("initialization", initialize),
+        ProviderTask("annotation", annotation),
+        ProviderTask("phenotype", phenotype),
+        ProviderTask("conditional_evidence", conditional),
+        ProviderTask("canonical_links", canonical_links),
+    ]
+    if not arguments.skip_llm:
+        tasks.append(
+            ProviderTask(
+                "llm",
+                lambda: _llm_checks(state["candidate"]),
+            )
         )
-        + "\n",
-        encoding="utf-8",
+    summary, exit_code = run_live_validation(
+        tasks,
+        output_path=arguments.output.resolve(),
+        overall_deadline_seconds=arguments.deadline_seconds,
     )
-
-    for check in summary["checks"]:
-        print(f"{check['provider']}: {check['status']}")
-    print(f"Summary: {output_path}")
-    print(
-        "Live provider validation: "
-        f"{str(summary['status']).upper()}"
-    )
-    if summary["failure"]:
-        print(str(summary["failure"]), file=sys.stderr)
+    print(f"Summary: {arguments.output.resolve()}")
+    print(f"Live provider validation: {summary['status'].upper()}")
     return exit_code
 
 
