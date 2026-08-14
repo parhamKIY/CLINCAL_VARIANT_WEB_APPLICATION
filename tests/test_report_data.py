@@ -61,6 +61,14 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "classification_source": None,
             "status": "not_assessed",
         },
+        "call_quality": {
+            "qual": None if sparse else 50.0,
+            "filter": None if sparse else "PASS",
+            "status": "not_evaluated" if sparse else "passed",
+            "acknowledged_at": None,
+            "override_reason": None,
+            "override_timestamp": None,
+        },
         "main_findings": {
             "population_frequencies": [
                 {
@@ -136,6 +144,17 @@ def _report_data(*, sparse: bool = False) -> dict[str, object]:
             "source_attributions": [] if sparse else ["NCBI ClinVar"],
             "independent_acmg_adjudication": False,
             "summary": None,
+        },
+        "preliminary_classification": {
+            "status": "unavailable" if sparse else "classified",
+            "classification": None if sparse else "Likely pathogenic",
+            "rationale": (
+                "No preliminary classification was generated."
+                if sparse
+                else "The retained evidence supports the preliminary label."
+            ),
+            "limitations": [] if sparse else ["Qualified human review is required."],
+            "review_required": True,
         },
         "literature_references": [] if sparse else [
             canonicalize_reference(

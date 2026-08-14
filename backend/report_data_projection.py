@@ -1,4 +1,4 @@
-"""Transient Draft Variant Report V2 to ReportData V4 projection."""
+"""Transient Draft Variant Report V2 to ReportData V5 projection."""
 
 from __future__ import annotations
 
@@ -176,7 +176,7 @@ def build_report_data_from_draft(
     *,
     analysis_id: str,
 ) -> ReportData:
-    """Project current reviewed fields into a validated transient ReportData V4."""
+    """Project current reviewed fields into a validated transient ReportData V5."""
 
     report = validate_draft_variant_report(value)
     content = report["reviewed_report"]
@@ -301,8 +301,41 @@ def build_report_data_from_draft(
         *interpretation["warnings"],
         *content["limitations"],
     ][:50]
+    preliminary_status = interpretation.get("preliminary_classification_status")
+    preliminary_label = interpretation.get("preliminary_classification")
+    preliminary_rationale = interpretation.get("classification_rationale")
+    preliminary_limitations = interpretation.get("limitations", [])
+    if interpretation["status"] != "success" or preliminary_status not in {
+        "classified",
+        "ambiguous",
+    }:
+        preliminary = {
+            "status": "unavailable",
+            "classification": None,
+            "rationale": (
+                "No preliminary classification was generated for this "
+                "interpretation."
+            ),
+            "limitations": (
+                [
+                    "This report predates the preliminary classification "
+                    "output contract."
+                ]
+                if interpretation["status"] == "success"
+                else []
+            ),
+            "review_required": True,
+        }
+    else:
+        preliminary = {
+            "status": preliminary_status,
+            "classification": preliminary_label,
+            "rationale": preliminary_rationale,
+            "limitations": preliminary_limitations,
+            "review_required": True,
+        }
     projected: dict[str, object] = {
-        "schema_version": "4.0",
+        "schema_version": "5.0",
         "report_id": report["report_id"],
         "analysis_id": analysis_id,
         "input_index": report["variant_index"],
@@ -389,6 +422,7 @@ def build_report_data_from_draft(
             "independent_acmg_adjudication": False,
             "summary": source_conflict_summary or interpretation["conflict_assessment"],
         },
+        "preliminary_classification": preliminary,
         "literature_references": [
             item
             for item in content["literature_references"]

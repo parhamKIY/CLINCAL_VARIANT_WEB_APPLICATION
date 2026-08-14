@@ -1,6 +1,6 @@
 # Proposed Stages 124–127 — Preliminary Classification and Review Workflow
 
-**Status:** Stage 124 implemented and verified; Stages 125–127 proposed
+**Status:** Stages 124–125 implemented and verified; Stages 126–127 proposed
 
 ## Approved product behavior
 
@@ -84,6 +84,20 @@ existing report template without hiding source provenance.
 - Ambiguous output visibly identifies the unresolved evidence and never presents a
   false consensus.
 - Existing source-attribution and call-quality disclosures remain intact.
+
+### Implemented behavior and verification
+
+The initial HTML preview, review screen, and professor-template DOCX now display
+the initial LLM evidence synthesis separately from the final system result. Clear
+evidence shows the controlled preliminary label, its rationale, and limitations.
+Materially ambiguous evidence shows `Ambiguous — user review required` with no
+forced label. `System classification: Not independently determined` remains
+visible, while provider classifications, call quality, and source provenance stay
+separate and attributed.
+
+New Draft Variant Reports use schema `2.3`; persisted schema `2.2` reports remain
+readable as pre-Stage-124 output. Newly persisted renderer data uses `ReportData`
+schema `5.0`, while retained `4.0` records remain readable.
 
 **Suggested commit:** `feat(report): show preliminary classification in initial output`
 

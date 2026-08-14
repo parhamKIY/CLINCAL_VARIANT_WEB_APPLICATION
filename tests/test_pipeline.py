@@ -13668,6 +13668,10 @@ class TestStage52DraftVariantReportV2:
             "prompt_version": failed["prompt_version"],
             "generated_at": failed["generated_at"],
             "failure_type": "request_timeout",
+            "preliminary_classification_status": None,
+            "preliminary_classification": None,
+            "classification_rationale": None,
+            "limitations": [],
         }
         assert any(
             "evidence remains reviewable" in limitation

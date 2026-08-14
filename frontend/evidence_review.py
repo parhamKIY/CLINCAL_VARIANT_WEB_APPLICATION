@@ -705,6 +705,33 @@ def _render_draft_variant_report(
         st.write(f"- {finding}")
 
     interpretation = content["variant_interpretation"]
+    preliminary_status = interpretation.get("preliminary_classification_status")
+    st.markdown("#### Preliminary classification")
+    if interpretation["status"] != "success":
+        st.caption("No preliminary classification is available for this interpretation.")
+    elif preliminary_status == "classified":
+        st.info(
+            "Preliminary evidence-based classification: "
+            f"{interpretation['preliminary_classification']}"
+        )
+    elif preliminary_status == "ambiguous":
+        st.warning(
+            "Preliminary evidence-based classification: "
+            "Ambiguous — user review required"
+        )
+    else:
+        st.caption(
+            "No preliminary classification is available for this pre-Stage-124 analysis."
+        )
+    if interpretation.get("classification_rationale"):
+        st.markdown("**Classification rationale**")
+        st.write(interpretation["classification_rationale"])
+    for limitation in interpretation.get("limitations", []):
+        st.caption(f"Limitation: {limitation}")
+    st.caption(
+        "This preliminary LLM evidence synthesis requires qualified human review "
+        "and is not an independent ACMG/AMP adjudication."
+    )
     st.markdown("#### Variant interpretation")
     if interpretation["status"] == "failed":
         st.error(

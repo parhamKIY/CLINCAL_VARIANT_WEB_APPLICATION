@@ -208,6 +208,28 @@ def _result_classification(report: DraftVariantReport) -> tuple[str, str]:
     return "Classification not assessed", "Classification retrieval is incomplete"
 
 
+def _preliminary_classification(
+    report: DraftVariantReport,
+) -> tuple[str, str | None, list[str]]:
+    interpretation = report["reviewed_report"]["variant_interpretation"]
+    if interpretation["status"] != "success":
+        return "Not available", None, []
+    status = interpretation.get("preliminary_classification_status")
+    if status == "classified":
+        return (
+            str(interpretation["preliminary_classification"]),
+            str(interpretation["classification_rationale"]),
+            list(interpretation.get("limitations", [])),
+        )
+    if status == "ambiguous":
+        return (
+            "Ambiguous — user review required",
+            str(interpretation["classification_rationale"]),
+            list(interpretation.get("limitations", [])),
+        )
+    return "Not available for this pre-Stage-124 analysis", None, []
+
+
 def _brief_interpretation(report: DraftVariantReport) -> str:
     content = report["reviewed_report"]
     if content["reviewer_summary"]:
@@ -268,6 +290,9 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     source_classification, source_classification_detail = (
         _result_classification(report)
     )
+    preliminary_classification, classification_rationale, classification_limitations = (
+        _preliminary_classification(report)
+    )
     allele = stable_allele_identity(report)
     hgvs = " / ".join(
         item for item in (variant["hgvs_c"], variant["hgvs_p"]) if item
@@ -307,6 +332,9 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <div class="cv-result">
   <div class="cv-result-allele">{_text(gene_hgvs)}</div>
   <div>{_text(allele)}</div>
+  <div class="cv-result-class">Preliminary evidence-based classification: {_text(preliminary_classification)}</div>
+  {f'<div><b>Classification rationale:</b> {_text(classification_rationale)}</div>' if classification_rationale else ''}
+  {f'<div><b>Classification limitations:</b> {_text("; ".join(classification_limitations))}</div>' if classification_limitations else ''}
   <div class="cv-result-class">System classification: Not independently determined</div>
   <div>Source classification context: {_text(source_classification)}</div>
   <div>{_text(source_classification_detail)}</div>
@@ -397,6 +425,9 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     page_three = _page(
         f"""
 <h1>Variant(s) classification</h1>
+<p><b>Preliminary evidence-based classification:</b> {_text(preliminary_classification)}</p>
+{f'<p><b>Classification rationale:</b> {_text(classification_rationale)}</p>' if classification_rationale else ''}
+{f'<p><b>Classification limitations:</b> {_text("; ".join(classification_limitations))}</p>' if classification_limitations else ''}
 <p><b>System classification:</b> Not independently determined</p>
 <p><b>Source-attributed result:</b> {_text(source_classification)} ({_text(source_classification_detail)})</p>
 <p><b>Conflict status:</b> {_text(conflict['status'].replace('_', ' '))}; severity: {_text(conflict['severity'])}.</p>

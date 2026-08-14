@@ -250,6 +250,32 @@ def _classification_context(report: ReportData) -> str:
 def _classification_summary(report: ReportData) -> str:
     summary = report["classification_summary"]
     statements: list[str] = []
+    preliminary = report.get("preliminary_classification")
+    if preliminary is not None:
+        if preliminary["status"] == "classified":
+            statements.append(
+                "Preliminary evidence-based classification: "
+                f"{_sentence_case(preliminary['classification'])}."
+            )
+        elif preliminary["status"] == "ambiguous":
+            statements.append(
+                "Preliminary evidence-based classification: "
+                "Ambiguous — user review required."
+            )
+        else:
+            statements.append(
+                "Preliminary evidence-based classification: Not available."
+            )
+        if preliminary["rationale"]:
+            statements.append(
+                "Classification rationale: " + preliminary["rationale"]
+            )
+        if preliminary["limitations"]:
+            statements.append(
+                "Classification limitations: "
+                + "; ".join(preliminary["limitations"])
+                + "."
+            )
     if summary["summary"]:
         statements.append(summary["summary"])
     for label, value in (

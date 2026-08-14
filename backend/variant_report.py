@@ -44,7 +44,8 @@ from backend.variant_interpretation import (
 )
 
 
-DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.2"
+DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.3"
+LEGACY_DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.2"
 MAX_DRAFT_VARIANT_REPORT_BYTES = 128 * 1024
 MAX_REPORT_TEXT_CHARS = 20_000
 MAX_EVIDENCE_VALUE_CHARS = 4_000
@@ -126,6 +127,10 @@ class InterpretationSection(TypedDict):
     prompt_version: str
     generated_at: str
     failure_type: str | None
+    preliminary_classification_status: str | None
+    preliminary_classification: str | None
+    classification_rationale: str | None
+    limitations: list[str]
 
 
 class ReportProvenance(TypedDict):
@@ -202,6 +207,12 @@ _EVIDENCE_SECTION_FIELDS = frozenset(EvidenceSection.__required_keys__)
 _EVIDENCE_ITEM_FIELDS = frozenset(EvidenceItem.__required_keys__)
 _CONFLICT_FIELDS = frozenset(ConflictSummary.__required_keys__)
 _INTERPRETATION_FIELDS = frozenset(InterpretationSection.__required_keys__)
+_LEGACY_INTERPRETATION_FIELDS = _INTERPRETATION_FIELDS - {
+    "preliminary_classification_status",
+    "preliminary_classification",
+    "classification_rationale",
+    "limitations",
+}
 _PROVENANCE_FIELDS = frozenset(ReportProvenance.__required_keys__)
 _EDIT_RECORD_FIELDS = frozenset(ReportEditRecord.__required_keys__)
 _SELECTION_RECORD_FIELDS = frozenset(SelectionRecord.__required_keys__)
@@ -668,6 +679,16 @@ def _content(
             "prompt_version": interpretation["prompt_version"],
             "generated_at": interpretation["generated_at"],
             "failure_type": interpretation["error_type"],
+            "preliminary_classification_status": interpretation[
+                "preliminary_classification_status"
+            ],
+            "preliminary_classification": interpretation[
+                "preliminary_classification"
+            ],
+            "classification_rationale": interpretation[
+                "classification_rationale"
+            ],
+            "limitations": list(interpretation["limitations"]),
         },
         "reviewer_summary": None,
         "reviewer_notes": [],
@@ -1092,7 +1113,12 @@ def _validate_edit_value(
     )
 
 
-def _validate_content(value: object, path: str) -> VariantReportContent:
+def _validate_content(
+    value: object,
+    path: str,
+    *,
+    legacy: bool,
+) -> VariantReportContent:
     content = _require_fields(value, _CONTENT_FIELDS, path)
     summary = _require_fields(
         content["variant_summary"],
@@ -1192,7 +1218,7 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
 
     interpretation = _require_fields(
         content["variant_interpretation"],
-        _INTERPRETATION_FIELDS,
+        _LEGACY_INTERPRETATION_FIELDS if legacy else _INTERPRETATION_FIELDS,
         f"{path}.variant_interpretation",
     )
     for field in ("status", "model", "prompt_version", "generated_at"):
@@ -1203,6 +1229,38 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
             f"{path}.variant_interpretation.{field}",
             optional=True,
         )
+    if not legacy:
+        classification_status = interpretation["preliminary_classification_status"]
+        classification = interpretation["preliminary_classification"]
+        rationale = interpretation["classification_rationale"]
+        if classification_status not in {"classified", "ambiguous", None}:
+            raise DraftVariantReportError(
+                f"{path}.variant_interpretation preliminary classification status is invalid."
+            )
+        _require_text(
+            rationale,
+            f"{path}.variant_interpretation.classification_rationale",
+            optional=True,
+        )
+        _require_text_list(
+            interpretation["limitations"],
+            f"{path}.variant_interpretation.limitations",
+        )
+        if classification_status == "classified":
+            if classification not in {
+                "Pathogenic",
+                "Likely pathogenic",
+                "Uncertain significance",
+                "Likely benign",
+                "Benign",
+            } or rationale is None:
+                raise DraftVariantReportError(
+                    f"{path}.variant_interpretation classified output is invalid."
+                )
+        elif classification is not None:
+            raise DraftVariantReportError(
+                f"{path}.variant_interpretation ambiguous output cannot contain a label."
+            )
     _require_text_list(
         interpretation["warnings"],
         f"{path}.variant_interpretation.warnings",
@@ -1253,6 +1311,13 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
         content["reviewer_summary"],
         *content["reviewer_notes"],
     ]
+    if not legacy:
+        citation_texts.extend(
+            [
+                interpretation["classification_rationale"],
+                *interpretation["limitations"],
+            ]
+        )
     citation_tokens = re.findall(
         r"\[(R[^\]]*)\]",
         "\n".join(item for item in citation_texts if isinstance(item, str)),
@@ -1326,8 +1391,12 @@ def validate_draft_variant_report(
     """Validate persisted or UI-bound Draft Variant Report V2 state."""
 
     report = _require_fields(value, _REPORT_FIELDS, "draft_variant_report")
-    if report["schema_version"] != DRAFT_VARIANT_REPORT_SCHEMA_VERSION:
+    if report["schema_version"] not in {
+        DRAFT_VARIANT_REPORT_SCHEMA_VERSION,
+        LEGACY_DRAFT_VARIANT_REPORT_SCHEMA_VERSION,
+    }:
         raise DraftVariantReportError("Draft report schema version is unsupported.")
+    legacy = report["schema_version"] == LEGACY_DRAFT_VARIANT_REPORT_SCHEMA_VERSION
     _require_text(report["report_id"], "draft_variant_report.report_id")
     index = report["variant_index"]
     if isinstance(index, bool) or not isinstance(index, int) or index < 0:
@@ -1335,10 +1404,12 @@ def validate_draft_variant_report(
     original = _validate_content(
         report["machine_original_report"],
         "draft_variant_report.machine_original_report",
+        legacy=legacy,
     )
     reviewed = _validate_content(
         report["reviewed_report"],
         "draft_variant_report.reviewed_report",
+        legacy=legacy,
     )
     original_digest = hashlib.sha256(
         json.dumps(
@@ -1601,6 +1672,7 @@ def validate_draft_variant_report(
 
 __all__ = [
     "DRAFT_VARIANT_REPORT_SCHEMA_VERSION",
+    "LEGACY_DRAFT_VARIANT_REPORT_SCHEMA_VERSION",
     "DraftVariantReport",
     "DraftVariantReportError",
     "ReportEditRecord",

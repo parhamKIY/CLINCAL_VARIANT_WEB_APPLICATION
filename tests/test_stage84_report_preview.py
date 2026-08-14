@@ -100,6 +100,15 @@ def _draft_report() -> dict[str, object]:
             "prompt_version": "test-v1",
             "generated_at": "2026-08-11T08:00:00Z",
             "failure_type": None,
+            "preliminary_classification_status": "classified",
+            "preliminary_classification": "Likely pathogenic",
+            "classification_rationale": (
+                "The retained exact-allele evidence supports a preliminary "
+                "Likely pathogenic classification."
+            ),
+            "limitations": [
+                "This is an initial LLM evidence synthesis and requires human review."
+            ],
         },
         "reviewer_summary": None,
         "reviewer_notes": [],
@@ -152,7 +161,7 @@ def _draft_report() -> dict[str, object]:
         ).encode("utf-8")
     ).hexdigest()[:20]
     return {
-        "schema_version": "2.2",
+        "schema_version": "2.3",
         "report_id": f"dvr-0-{digest}",
         "variant_index": 0,
         "machine_original_report": deepcopy(content),
@@ -191,6 +200,96 @@ def test_preview_has_three_clear_professor_family_pages() -> None:
     assert "Variant(s) classification" in pages[2]
     assert "Data Sources" in pages[2]
     assert all('class="cv-report-page"' in page for page in pages)
+
+
+def test_preview_and_docx_show_preliminary_classification_without_a_final_system_call() -> None:
+    report = _draft_report()
+    pages = render_draft_report_preview_pages(report)
+    report_data = build_report_data_from_draft(
+        report,
+        analysis_id=f"analysis-{'e' * 32}",
+    )
+    document = Document(BytesIO(render_report_data_docx(report_data)))
+    docx_text = "\n".join(
+        [paragraph.text for paragraph in document.paragraphs]
+        + [
+            cell.text
+            for table in document.tables
+            for row in table.rows
+            for cell in row.cells
+        ]
+    )
+
+    assert "Preliminary evidence-based classification: Likely pathogenic" in pages[0]
+    assert "Classification rationale:" in pages[0]
+    assert "System classification: Not independently determined" in pages[0]
+    assert report_data["preliminary_classification"] == {
+        "status": "classified",
+        "classification": "Likely pathogenic",
+        "rationale": (
+            "The retained exact-allele evidence supports a preliminary "
+            "Likely pathogenic classification."
+        ),
+        "limitations": [
+            "This is an initial LLM evidence synthesis and requires human review."
+        ],
+        "review_required": True,
+    }
+    assert report_data["conclusive_result"]["classification"] is None
+    assert "Preliminary evidence-based classification: Likely pathogenic" in docx_text
+    assert "Not independently determined" in docx_text
+
+
+def test_ambiguous_preliminary_output_does_not_force_a_classification() -> None:
+    report = _draft_report()
+    interpretation = report["machine_original_report"]["variant_interpretation"]
+    interpretation.update(
+        {
+            "preliminary_classification_status": "ambiguous",
+            "preliminary_classification": None,
+            "classification_rationale": "The retained sources materially disagree.",
+            "limitations": ["User review is needed to resolve the conflict."],
+        }
+    )
+    report["reviewed_report"] = deepcopy(report["machine_original_report"])
+    _accept_machine_evidence_change(report)
+
+    pages = render_draft_report_preview_pages(report)
+    report_data = build_report_data_from_draft(
+        report,
+        analysis_id=f"analysis-{'f' * 32}",
+    )
+
+    assert "Ambiguous — user review required" in pages[0]
+    assert "Likely pathogenic" not in pages[0]
+    assert report_data["preliminary_classification"]["status"] == "ambiguous"
+    assert report_data["preliminary_classification"]["classification"] is None
+    assert report_data["conclusive_result"]["classification"] is None
+
+
+def test_retained_pre_stage125_draft_remains_readable_without_an_invented_label() -> None:
+    report = _draft_report()
+    report["schema_version"] = "2.2"
+    for content_key in ("machine_original_report", "reviewed_report"):
+        interpretation = report[content_key]["variant_interpretation"]
+        for field in (
+            "preliminary_classification_status",
+            "preliminary_classification",
+            "classification_rationale",
+            "limitations",
+        ):
+            interpretation.pop(field)
+    _accept_machine_evidence_change(report)
+
+    pages = render_draft_report_preview_pages(report)
+    report_data = build_report_data_from_draft(
+        report,
+        analysis_id=f"analysis-{'g' * 32}",
+    )
+
+    assert "Not available for this pre-Stage-124 analysis" in pages[0]
+    assert report_data["preliminary_classification"]["status"] == "unavailable"
+    assert report_data["preliminary_classification"]["classification"] is None
 
 
 def test_preview_uses_assembly_qualified_allele_navigation_identity() -> None:

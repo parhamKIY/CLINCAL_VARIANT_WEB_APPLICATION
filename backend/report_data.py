@@ -1,4 +1,4 @@
-"""Stable ReportData V4 contract for future DOCX and preview renderers."""
+"""Stable ReportData V5 contract for future DOCX and preview renderers."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ from backend.references import (
 )
 
 
-REPORT_DATA_SCHEMA_VERSION = "4.0"
+REPORT_DATA_SCHEMA_VERSION = "5.0"
+LEGACY_REPORT_DATA_SCHEMA_VERSION = "4.0"
 MAX_REPORT_DATA_BYTES = 256 * 1024
 MAX_TEXT_CHARS = 20_000
 MAX_SHORT_TEXT_CHARS = 500
@@ -229,6 +230,16 @@ class ReportClassificationSummary(TypedDict):
     summary: str | None
 
 
+class ReportPreliminaryClassification(TypedDict):
+    """LLM evidence synthesis kept distinct from a final clinical result."""
+
+    status: Literal["classified", "ambiguous", "unavailable"]
+    classification: str | None
+    rationale: str | None
+    limitations: list[str]
+    review_required: bool
+
+
 class ReportDataSource(TypedDict):
     """Database/tool provenance kept separate from literature."""
 
@@ -302,6 +313,7 @@ class ReportData(TypedDict):
     main_findings: ReportMainFindings
     interpretation: ReportInterpretation
     classification_summary: ReportClassificationSummary
+    preliminary_classification: ReportPreliminaryClassification
     literature_references: list[CanonicalReference]
     data_sources: list[ReportDataSource]
     warnings: list[ReportWarning]
@@ -329,6 +341,7 @@ CLASSIFICATION_FINDING_FIELDS = _fields(ReportClassificationFinding)
 INTERPRETATION_FIELDS = _fields(ReportInterpretation)
 INTERPRETATION_EDIT_FIELDS = _fields(ReportInterpretationEdit)
 CLASSIFICATION_SUMMARY_FIELDS = _fields(ReportClassificationSummary)
+PRELIMINARY_CLASSIFICATION_FIELDS = _fields(ReportPreliminaryClassification)
 DATA_SOURCE_FIELDS = _fields(ReportDataSource)
 WARNING_FIELDS = _fields(ReportWarning)
 PROVENANCE_FIELDS = _fields(ReportProvenance)
@@ -787,6 +800,61 @@ def _validate_classification_summary(value: object) -> None:
     )
 
 
+def _validate_preliminary_classification(value: object) -> None:
+    item = _mapping(
+        value,
+        PRELIMINARY_CLASSIFICATION_FIELDS,
+        "preliminary_classification",
+    )
+    status = _enum(
+        item["status"],
+        frozenset({"classified", "ambiguous", "unavailable"}),
+        "preliminary_classification.status",
+    )
+    classification = _text(
+        item["classification"],
+        "preliminary_classification.classification",
+        optional=True,
+    )
+    rationale = _text(
+        item["rationale"],
+        "preliminary_classification.rationale",
+        optional=True,
+        maximum=MAX_TEXT_CHARS,
+    )
+    _text_list(
+        item["limitations"],
+        "preliminary_classification.limitations",
+    )
+    if not _boolean(
+        item["review_required"],
+        "preliminary_classification.review_required",
+    ):
+        raise ReportDataError(
+            "Preliminary classification must require human review."
+        )
+    allowed = frozenset(
+        {
+            "Pathogenic",
+            "Likely pathogenic",
+            "Uncertain significance",
+            "Likely benign",
+            "Benign",
+        }
+    )
+    if status == "classified":
+        if classification not in allowed or rationale is None:
+            raise ReportDataError(
+                "Classified preliminary output requires an allowed label and rationale."
+            )
+    elif classification is not None:
+        raise ReportDataError(
+            "Ambiguous or unavailable preliminary output cannot contain a label."
+        )
+    if status == "ambiguous" and rationale is None:
+        raise ReportDataError("Ambiguous preliminary output requires a rationale.")
+
+
 def _validate_literature_references(value: object) -> None:
     seen: set[str] = set()
     for index, raw in enumerate(
@@ -922,14 +990,28 @@ def _validate_review_state(value: object) -> None:
 
 
 def validate_report_data(value: object) -> ReportData:
-    """Validate and copy one renderer-neutral ReportData V4 record."""
+    """Validate and copy a V5 record or a retained V4 compatibility record."""
 
-    legacy_fields = REPORT_DATA_FIELDS - {"call_quality"}
-    fields = REPORT_DATA_FIELDS if (
-        isinstance(value, Mapping) and "call_quality" in value
-    ) else legacy_fields
+    is_v5 = (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == REPORT_DATA_SCHEMA_VERSION
+    )
+    v4_fields = REPORT_DATA_FIELDS - {"preliminary_classification"}
+    legacy_fields = v4_fields - {"call_quality"}
+    fields = (
+        REPORT_DATA_FIELDS
+        if is_v5
+        else (
+            v4_fields
+            if isinstance(value, Mapping) and "call_quality" in value
+            else legacy_fields
+        )
+    )
     item = _mapping(value, fields, "report_data")
-    if item["schema_version"] != REPORT_DATA_SCHEMA_VERSION:
+    if item["schema_version"] not in {
+        REPORT_DATA_SCHEMA_VERSION,
+        LEGACY_REPORT_DATA_SCHEMA_VERSION,
+    }:
         raise ReportDataError("report_data.schema_version is unsupported.")
     _text(item["report_id"], "report_data.report_id", maximum=128)
     _text(item["analysis_id"], "report_data.analysis_id", maximum=128)
@@ -942,6 +1024,8 @@ def validate_report_data(value: object) -> ReportData:
     _validate_main_findings(item["main_findings"])
     _validate_interpretation(item["interpretation"])
     _validate_classification_summary(item["classification_summary"])
+    if "preliminary_classification" in item:
+        _validate_preliminary_classification(item["preliminary_classification"])
     _validate_source_only_classification(item)
     _validate_literature_references(item["literature_references"])
     _validate_data_sources(item["data_sources"])
@@ -973,6 +1057,7 @@ def validate_report_data(value: object) -> ReportData:
 
 __all__ = [
     "AVAILABILITY_STATUSES",
+    "LEGACY_REPORT_DATA_SCHEMA_VERSION",
     "PHENOTYPE_CONCORDANCE_VALUES",
     "REPORT_DATA_SCHEMA_VERSION",
     "ReportData",
