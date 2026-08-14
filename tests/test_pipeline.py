@@ -326,6 +326,29 @@ from frontend.ui import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _open_review_detail(app: AppTest, detail: str) -> AppTest:
+    review_surface = next(
+        (
+            control
+            for control in app.button_group
+            if control.label == "Review surface"
+        ),
+        None,
+    )
+    if review_surface is None:
+        return next(
+            control
+            for control in app.button_group
+            if control.label == "Evidence review details"
+        ).select(detail).run(timeout=10)
+    review_surface.select("Technical details").run(timeout=10)
+    return next(
+        control
+        for control in app.button_group
+        if control.label == "Technical detail"
+    ).select(detail).run(timeout=10)
 pytestmark = [
     pytest.mark.stage43_testing_v2,
     pytest.mark.stage59_testing_v3,
@@ -14372,6 +14395,7 @@ class TestStage55CanonicalReferences:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
+        _open_review_detail(app, "Draft Variant Report")
 
         displayed_urls = {
             button.url
@@ -15885,7 +15909,7 @@ class TestStage40FrontendReviewWorkflow:
             "SCN1A" in markdown.value
             for markdown in app.markdown
         )
-        assert len(app.table) >= 2
+        _open_review_detail(app, "Edit evidence draft")
 
         reviewed = deepcopy(original)
         reviewed["manual_evidence"] = {
@@ -15948,6 +15972,7 @@ class TestStage40FrontendReviewWorkflow:
             for subheader in app.subheader
         )
 
+        _open_review_detail(app, "Final confirmation")
         confirm = next(
             button
             for button in app.button
@@ -16030,10 +16055,7 @@ class TestStage40FrontendReviewWorkflow:
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
 
-        assert any(
-            "temporarily unavailable" in error.value
-            for error in app.error
-        )
+        _open_review_detail(app, "Edit evidence draft")
         assert any(
             area.label == "Reviewed evidence report (JSON)"
             for area in app.text_area
@@ -16066,6 +16088,7 @@ class TestStage40FrontendReviewWorkflow:
         )
         app.session_state["pipeline_result"] = self._draft_result()
         app.run(timeout=10)
+        _open_review_detail(app, "Final confirmation")
         next(
             checkbox
             for checkbox in app.checkbox
@@ -16081,6 +16104,12 @@ class TestStage40FrontendReviewWorkflow:
         assert app.session_state["pipeline_result"][
             "reviewed_evidence_packages"
         ]
+
+        next(
+            control
+            for control in app.button_group
+            if control.label == "Review surface"
+        ).select("Clinical report review").run(timeout=10)
 
         next(
             area
@@ -16104,7 +16133,6 @@ class TestStage40FrontendReviewWorkflow:
         assert result["reviewed_evidence_packages"] == []
         assert result["workflow_state"] == "awaiting_final_review"
         assert saved[-1]["draft_variant_reports"][0] == report
-        assert app.dataframe
 
 
 @pytest.mark.stage15_security
@@ -23013,6 +23041,11 @@ class TestStage49TaskSpecificModelUI:
         ).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
+        next(
+            control
+            for control in app.button_group
+            if control.label == "Analysis result view"
+        ).select("Analysis and provider details").run(timeout=10)
 
         assert not app.exception
         assert observed == {
@@ -23614,6 +23647,11 @@ class TestFrontendFoundation:
         ).run(timeout=10)
         app.session_state["pipeline_result"] = result
         app.run(timeout=10)
+        next(
+            control
+            for control in app.button_group
+            if control.label == "Analysis result view"
+        ).select("Analysis and provider details").run(timeout=10)
 
         assert not app.exception
         rendered = "\n".join(
@@ -23919,6 +23957,21 @@ class TestFrontendFoundation:
             "success"
         )
         assert any(
+            subheader.value
+            == "Draft Variant Review — Evidence and interpretation"
+            for subheader in app.subheader
+        )
+        next(
+            control
+            for control in app.button_group
+            if control.label == "Analysis result view"
+        ).select("Analysis and provider details").run(timeout=10)
+        next(
+            control
+            for control in app.button_group
+            if control.label == "Analysis view"
+        ).select("Evidence").run(timeout=10)
+        assert any(
             subheader.value == "Analysis results"
             for subheader in app.subheader
         )
@@ -23937,17 +23990,18 @@ class TestFrontendFoundation:
             "ClinVar": "Evidence available",
             "ClinGen/GenCC": "Evidence available",
         }
-        assert len(app.dataframe) == 6
-        assert any(
-            subheader.value
-            == "Draft Variant Review — Evidence and interpretation"
-            for subheader in app.subheader
-        )
+        assert len(app.dataframe) == 3
         assert not app.get("download_button")
         reviewed = TestEvidenceObject._complete_evidence_object()
         reviewed["manual_evidence"] = {
             "laboratory": "confirmation pending"
         }
+        next(
+            control
+            for control in app.button_group
+            if control.label == "Analysis result view"
+        ).select("Clinical report review").run(timeout=10)
+        _open_review_detail(app, "Edit evidence draft")
         next(
             area
             for area in app.text_area

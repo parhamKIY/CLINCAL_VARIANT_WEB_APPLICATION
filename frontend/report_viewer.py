@@ -172,15 +172,18 @@ def render_report_viewer(result: PipelineResult) -> None:
         st.divider()
         st.markdown(report.text)
 
-    with st.expander(
+    source = st.expander(
         "Plain-text source",
         icon=":material/text_snippet:",
-    ):
-        st.code(
-            report.text,
-            language="text",
-            wrap_lines=True,
-        )
+        on_change="rerun",
+    )
+    if getattr(source, "open", True):
+        with source:
+            st.code(
+                report.text,
+                language="text",
+                wrap_lines=True,
+            )
 
 
 def render_final_clinical_report_viewer(result: PipelineResult) -> None:

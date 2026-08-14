@@ -1770,15 +1770,20 @@ def render_app() -> None:
     if pipeline_result is not None:
         st.divider()
         _render_analysis_summary(pipeline_result)
-        report_tab, technical_tab = st.tabs(
-            ["Clinical report review", "Analysis and provider details"]
+        result_view = st.segmented_control(
+            "Analysis result view",
+            ("Clinical report review", "Analysis and provider details"),
+            default="Clinical report review",
+            required=True,
+            key="analysis_result_view",
+            persist_state="page",
         )
-        with report_tab:
+        if result_view == "Clinical report review":
             render_evidence_review(
                 pipeline_result,
                 light_model=variant_model,
                 strong_model=variant_model,
             )
-        with technical_tab:
+        else:
             _render_pipeline_status(pipeline_result)
             render_analysis_results(pipeline_result)

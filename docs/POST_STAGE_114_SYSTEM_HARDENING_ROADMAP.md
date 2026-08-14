@@ -1,9 +1,9 @@
 # Post-Stage 114 System Hardening Roadmap
 
 **Project:** Clinical Variant Interpretation  
-**Roadmap status:** Stages 116-118 implemented and verified; Stages 119-123 remain planned
+**Roadmap status:** Stages 116-121 implemented and verified; Stages 122-123 remain planned
 **Roadmap date:** 2026-08-14
-**Implemented baseline:** Stages 0-114 and Stages 116-118
+**Implemented baseline:** Stages 0-114 and Stages 116-121
 **Existing reserved stage:** Stage 115 final Word/LibreOffice visual sign-off  
 **Baseline commit:** `6126a72 fix(classification): separate source evidence from system conclusion`  
 **Baseline verification:** `1229 passed, 6 skipped`; Stage 60 gate `875 passed, 4 skipped`, `84.97%` coverage
@@ -348,7 +348,7 @@ deadline, atomic-checkpoint, cancellation, privacy, ordered-completion, and
 
 ## 9. Stage 121 — Lazy Streamlit technical surfaces
 
-**Status:** Planned  
+**Status:** Implemented
 **Priority:** Medium  
 **Dependency:** Stage 120
 

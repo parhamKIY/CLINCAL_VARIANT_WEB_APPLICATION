@@ -399,11 +399,15 @@ def test_completed_analysis_opens_report_before_provider_details(
     app.run(timeout=10)
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs[-2:]] == [
+    selector = next(
+        control
+        for control in app.button_group
+        if control.label == "Analysis result view"
+    )
+    assert selector.options == [
         "Clinical report review",
         "Analysis and provider details",
     ]
     rendered = [item.value for item in app.markdown]
-    assert rendered.index("STAGE84_REPORT_SURFACE") < rendered.index(
-        "STAGE84_TECHNICAL_SURFACE"
-    )
+    assert "STAGE84_REPORT_SURFACE" in rendered
+    assert "STAGE84_TECHNICAL_SURFACE" not in rendered

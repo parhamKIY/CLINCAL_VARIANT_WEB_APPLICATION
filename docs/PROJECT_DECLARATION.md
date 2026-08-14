@@ -1,9 +1,9 @@
 # Clinical Variant Interpretation Project Declaration
 
 **Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 and Stages 116-120 implemented as recorded below
+**Implementation status:** Stages 0-114 and Stages 116-121 implemented as recorded below
 **Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
-**Next checkpoint:** Stage 121 lazy Streamlit technical surfaces; Stage 115 final visual sign-off remains deferred
+**Next checkpoint:** Stage 122 dependency-security release gate; Stage 115 final visual sign-off remains deferred
 **Document date:** 2026-08-14
 **Primary interface:** Streamlit  
 **Primary language:** Python
@@ -1760,6 +1760,15 @@ Its summary records ordered provider-group states from `not_started` through
 `completed`, `unavailable`, or `overall_deadline_exceeded`; no raw provider response,
 credential-bearing URL, or clinical input is retained. `--skip-llm` does not create
 either LLM task.
+
+### Stage 121 lazy Streamlit technical surfaces
+
+The completed-analysis interface now defaults to Clinical report review. Explicit,
+stateful segmented controls defer analysis/provider details, provider diagnostics,
+raw original evidence, edit history, and other technical report surfaces until the
+reviewer selects them. Dynamic expanders also avoid serializing hidden source JSON,
+fallback provenance, warnings, and plain-text report sources. Reviewer-owned draft,
+selection, and confirmation state remains in session state and is not cached.
 
 ### Post-Stage 78 corrective maintenance
 

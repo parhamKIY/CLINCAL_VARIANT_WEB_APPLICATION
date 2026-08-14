@@ -118,65 +118,68 @@ def _render_technical_diagnostics(
     variant_index: int,
     diagnostics: list[ProviderDiagnostic],
 ) -> None:
-    """Render the Stage 98 developer drawer collapsed by default."""
+    """Render the Stage 98 developer drawer only when opened."""
 
-    with st.expander(
+    details = st.expander(
         "Show technical details",
         expanded=False,
+        key=f"variant_provider_diagnostics_{variant_index}",
         icon=":material/monitoring:",
-    ):
-        if not diagnostics:
-            st.caption("No provider diagnostic records are available.")
-            return
-        display_rows: list[dict[str, object]] = [
-            {
-                **diagnostic,
-                "attempt_count": (
-                    diagnostic["attempt_count"]
-                    if diagnostic["attempt_count"] is not None
-                    else "Not recorded"
+        on_change="rerun",
+    )
+    if getattr(details, "open", True):
+        with details:
+            if not diagnostics:
+                st.caption("No provider diagnostic records are available.")
+                return
+            display_rows: list[dict[str, object]] = [
+                {
+                    **diagnostic,
+                    "attempt_count": (
+                        diagnostic["attempt_count"]
+                        if diagnostic["attempt_count"] is not None
+                        else "Not recorded"
+                    ),
+                    "latency_ms": (
+                        diagnostic["latency_ms"]
+                        if diagnostic["latency_ms"] is not None
+                        else "Not recorded"
+                    ),
+                }
+                for diagnostic in diagnostics
+            ]
+            st.dataframe(
+                display_rows,
+                column_order=(
+                    "provider",
+                    "variant_identity",
+                    "status",
+                    "attempt_count",
+                    "latency_ms",
+                    "fallback_used",
+                    "failure_category",
+                    "provider_note",
                 ),
-                "latency_ms": (
-                    diagnostic["latency_ms"]
-                    if diagnostic["latency_ms"] is not None
-                    else "Not recorded"
-                ),
-            }
-            for diagnostic in diagnostics
-        ]
-        st.dataframe(
-            display_rows,
-            column_order=(
-                "provider",
-                "variant_identity",
-                "status",
-                "attempt_count",
-                "latency_ms",
-                "fallback_used",
-                "failure_category",
-                "provider_note",
-            ),
-            column_config={
-                "provider": "Provider",
-                "variant_identity": "Variant identity",
-                "status": "Status",
-                "attempt_count": "Attempt count",
-                "latency_ms": "Latency (ms)",
-                "fallback_used": "Fallback used",
-                "failure_category": "Failure category",
-                "provider_note": "Provider-specific note",
-            },
-            hide_index=True,
-            width="stretch",
-            key=f"variant_provider_diagnostics_{variant_index}",
-        )
+                column_config={
+                    "provider": "Provider",
+                    "variant_identity": "Variant identity",
+                    "status": "Status",
+                    "attempt_count": "Attempt count",
+                    "latency_ms": "Latency (ms)",
+                    "fallback_used": "Fallback used",
+                    "failure_category": "Failure category",
+                    "provider_note": "Provider-specific note",
+                },
+                hide_index=True,
+                width="stretch",
+                key=f"variant_provider_diagnostics_table_{variant_index}",
+            )
 
 
 def _render_variant_status_cards(result: PipelineResult) -> None:
     """Render Stage 96 variant-first status and warning cards."""
 
     st.markdown("### Variant status")
-    diagnostics_by_variant = build_provider_diagnostics(result)
     for card in build_variant_status_cards(result):
         with st.container(border=True):
             st.markdown(f"**{card['heading']}**")
@@ -191,10 +194,19 @@ def _render_variant_status_cards(result: PipelineResult) -> None:
                 st.write(line)
             for notice in card["notices"]:
                 _render_variant_notice(card["variant_index"], notice)
-            _render_technical_diagnostics(
-                card["variant_index"],
-                diagnostics_by_variant.get(card["variant_index"], []),
-            )
+
+
+def _render_selected_provider_diagnostics(
+    result: PipelineResult,
+    variant_index: int,
+) -> None:
+    """Render provider diagnostics for the selected variant on demand."""
+
+    diagnostics_by_variant = build_provider_diagnostics(result)
+    _render_technical_diagnostics(
+        variant_index,
+        diagnostics_by_variant.get(variant_index, []),
+    )
 
 
 def _select_review_variant(index: int) -> None:
@@ -1488,18 +1500,23 @@ def render_evidence_review(
             "Draft Variant Report V2 is unavailable for this legacy "
             "analysis state. Evidence remains readable."
         )
-        evidence_editor_tab, original_evidence_tab, history_tab = st.tabs(
-            [
+        legacy_view = st.segmented_control(
+            "Evidence review details",
+            (
                 "Edit evidence draft",
                 "Original evidence",
                 "Evidence edit history",
-            ]
+            ),
+            default="Edit evidence draft",
+            required=True,
+            key=f"{_REVIEW_WIDGET_PREFIX}legacy_detail_view",
+            persist_state="page",
         )
-        with evidence_editor_tab:
+        if legacy_view == "Edit evidence draft":
             _render_editor(report, selected, drafts, result)
-        with original_evidence_tab:
+        elif legacy_view == "Original evidence":
             st.json(report["original_machine_report"], expanded=2)
-        with history_tab:
+        else:
             _render_history(report)
         return
     draft_variant_report = cast(
@@ -1529,40 +1546,53 @@ def render_evidence_review(
         f"Final Report selection: {selected_count} of "
         f"{result['variant_count']} variants."
     )
-    _render_inclusion_control(draft_variant_report, result)
-    _render_report_editor(draft_variant_report, result)
-    _render_editable_docx_download(draft_variant_report, result)
-    st.markdown("### Technical details")
     _render_conflict_status(report)
-    (
-        report_tab,
-        compare_tab,
-        evidence_editor_tab,
-        original_evidence_tab,
-        evidence_history_tab,
-        confirm_tab,
-    ) = st.tabs(
-        [
-            "Draft Variant Report",
-            "Compare report",
-            "Edit evidence draft",
-            "Original evidence",
-            "Evidence edit history",
-            "Final confirmation",
-        ]
+    review_view = st.segmented_control(
+        "Review surface",
+        ("Clinical report review", "Technical details"),
+        default="Clinical report review",
+        required=True,
+        key=f"{_REVIEW_WIDGET_PREFIX}surface_view",
+        persist_state="page",
     )
-    with report_tab:
-        _render_draft_variant_report(result, report["variant_index"])
-    with compare_tab:
-        _render_report_comparison(draft_variant_report)
-    with evidence_editor_tab:
-        _render_editor(report, selected, drafts, result)
-    with original_evidence_tab:
-        st.json(report["original_machine_report"], expanded=2)
-    with evidence_history_tab:
-        _render_history(report)
-    with confirm_tab:
-        _render_confirmation(drafts[selected], result)
+    if review_view == "Clinical report review":
+        _render_inclusion_control(draft_variant_report, result)
+        _render_report_editor(draft_variant_report, result)
+        _render_editable_docx_download(draft_variant_report, result)
+    else:
+        technical_view = st.segmented_control(
+            "Technical detail",
+            (
+                "Provider diagnostics",
+                "Draft Variant Report",
+                "Compare report",
+                "Edit evidence draft",
+                "Original evidence",
+                "Evidence edit history",
+                "Final confirmation",
+            ),
+            default="Provider diagnostics",
+            required=True,
+            key=f"{_REVIEW_WIDGET_PREFIX}technical_detail_view",
+            persist_state="page",
+        )
+        if technical_view == "Provider diagnostics":
+            _render_selected_provider_diagnostics(
+                result,
+                report["variant_index"],
+            )
+        elif technical_view == "Draft Variant Report":
+            _render_draft_variant_report(result, report["variant_index"])
+        elif technical_view == "Compare report":
+            _render_report_comparison(draft_variant_report)
+        elif technical_view == "Edit evidence draft":
+            _render_editor(report, selected, drafts, result)
+        elif technical_view == "Original evidence":
+            st.json(report["original_machine_report"], expanded=2)
+        elif technical_view == "Evidence edit history":
+            _render_history(report)
+        else:
+            _render_confirmation(drafts[selected], result)
     _render_finalization_action(result)
     if result.get("workflow_state") == "completed":
         render_final_clinical_report_viewer(result)
