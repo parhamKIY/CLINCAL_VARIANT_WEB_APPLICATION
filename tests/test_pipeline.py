@@ -1244,6 +1244,7 @@ class FakeSession:
         clinvar_responses: list[object] | None = None,
         clingen_responses: list[object] | None = None,
         cspec_responses: list[object] | None = None,
+        ucsc_responses: list[object] | None = None,
         variantvalidator_responses: list[object] | None = None,
         ensembl_variation_responses: list[object] | None = None,
     ) -> None:
@@ -1253,6 +1254,7 @@ class FakeSession:
         self.clinvar_responses = list(clinvar_responses or [])
         self.clingen_responses = list(clingen_responses or [])
         self.cspec_responses = list(cspec_responses or [])
+        self.ucsc_responses = list(ucsc_responses or [])
         self.variantvalidator_responses = list(
             variantvalidator_responses or []
         )
@@ -1267,6 +1269,7 @@ class FakeSession:
         self.clinvar_get_calls: list[dict[str, object]] = []
         self.clingen_get_calls: list[dict[str, object]] = []
         self.cspec_get_calls: list[dict[str, object]] = []
+        self.ucsc_get_calls: list[dict[str, object]] = []
         self.variantvalidator_get_calls: list[dict[str, object]] = []
         self.ensembl_variation_get_calls: list[dict[str, object]] = []
         self.closed = False
@@ -1321,6 +1324,13 @@ class FakeSession:
         is_clingen = url == (
             f"{settings.CLINGEN_BASE_URL}/getData/track"
         )
+        params = kwargs.get("params")
+        track = params.get("track") if isinstance(params, dict) else None
+        is_ucsc_gnomad = (
+            url == f"{settings.UCSC_GNOMAD_BASE_URL}/getData/track"
+            and isinstance(track, str)
+            and track.casefold().startswith("gnomad")
+        )
         is_cspec = url.startswith(f"{settings.CSPEC_BASE_URL}/")
         is_variantvalidator = url.startswith(
             f"{settings.VARIANTVALIDATOR_BASE_URL}/"
@@ -1329,7 +1339,14 @@ class FakeSession:
         is_clinvar = url.endswith(
             ("/esearch.fcgi", "/esummary.fcgi")
         )
-        if is_ensembl_variation:
+        if is_ucsc_gnomad:
+            self.ucsc_get_calls.append(call)
+            response = (
+                self.ucsc_responses.pop(0)
+                if self.ucsc_responses
+                else FakeResponse(200, {track: []})
+            )
+        elif is_ensembl_variation:
             self.ensembl_variation_get_calls.append(call)
             response = (
                 self.ensembl_variation_responses.pop(0)
@@ -4735,6 +4752,9 @@ class TestAnnotation:
         assert evidence["annotations"]["population"][
             "population_frequency_details"
         ] == myvariant["population_frequency_details"]
+        assert evidence["annotations"]["population"][
+            "selected_frequency_source"
+        ]["provider"] == "MyVariant.info"
 
     def test_myvariant_retains_gnomad_population_details(self) -> None:
         payload = self._myvariant_response()
@@ -7453,6 +7473,7 @@ class TestAnnotation:
             "mane_plus_clinical",
             "predictors",
             "population_frequency",
+            "population_frequency_provenance",
             "identifier_bundle",
             "sources",
             "references",

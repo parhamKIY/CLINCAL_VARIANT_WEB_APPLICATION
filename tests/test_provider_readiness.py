@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from backend.provider_readiness import (
+    DEFAULT_READINESS_TIMEOUT_SECONDS,
     FALLBACK_CHAINS,
     ProviderReadinessTarget,
     ProviderReadinessResult,
     QUALITY_SOURCE_CHAINS,
+    probe_provider_readiness,
     recommend_provider_readiness,
     configured_provider_readiness_targets,
     provider_readiness_target_map,
@@ -60,7 +62,10 @@ def test_fallback_chains_preserve_the_existing_provider_contract() -> None:
         "variant_interpretation": ("llm", "llm_fallback_model"),
     }
     assert QUALITY_SOURCE_CHAINS["classification_context"] == ("genebe",)
-    assert QUALITY_SOURCE_CHAINS["normal_population_frequency"] == ("myvariant",)
+    assert QUALITY_SOURCE_CHAINS["normal_population_frequency"] == (
+        "myvariant",
+        "ucsc_gnomad",
+    )
     assert QUALITY_SOURCE_CHAINS["phenotype_extraction"] == ("llm",)
 
 
@@ -68,8 +73,12 @@ def test_normal_population_frequency_is_distinct_from_verification() -> None:
     targets = provider_readiness_target_map()
 
     assert "normal_population_frequency" in targets["myvariant"].capabilities
+    assert "normal_population_frequency" in targets["ucsc_gnomad"].capabilities
     assert targets["gnomad"].capabilities == ("population_frequency",)
-    assert targets["ucsc_gnomad"].fallback_for == ("population_frequency",)
+    assert targets["ucsc_gnomad"].fallback_for == (
+        "normal_population_frequency",
+        "population_frequency",
+    )
     assert FALLBACK_CHAINS["population_frequency"] == (
         "gnomad",
         "ucsc_gnomad",
@@ -165,6 +174,47 @@ def test_catalog_marks_credentials_without_exposing_any_secret() -> None:
     assert targets["llm"].probe_kind == "authenticated"
     assert targets["genebe"].credential_mode == "optional"
     assert all("key" not in repr(target).casefold() for target in targets.values())
+
+
+def test_readiness_uses_a_bounded_connection_and_read_timeout() -> None:
+    class FakeResponse:
+        status_code = 404
+
+        def close(self) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.timeout: object = None
+
+        def head(self, _url: str, **kwargs: object) -> FakeResponse:
+            self.timeout = kwargs["timeout"]
+            return FakeResponse()
+
+        def get(self, _url: str, **_kwargs: object) -> FakeResponse:
+            raise AssertionError("transport probe must use HEAD")
+
+    session = FakeSession()
+    target = ProviderReadinessTarget(
+        "example",
+        "Example",
+        "https://example.org/ready",
+        ("example_capability",),
+    )
+    clock_values = iter((0.0, 3.5))
+
+    result = probe_provider_readiness(
+        target,
+        session=session,  # type: ignore[arg-type]
+        timeout=DEFAULT_READINESS_TIMEOUT_SECONDS,
+        resolver=lambda *_args, **_kwargs: [],
+        clock=lambda: next(clock_values),
+    )
+
+    assert DEFAULT_READINESS_TIMEOUT_SECONDS == 5.0
+    assert session.timeout == (3.0, 5.0)
+    assert result.state == "reachable"
+    assert result.latency_ms == 3500.0
 
 
 @pytest.mark.parametrize(

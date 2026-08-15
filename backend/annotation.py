@@ -18,6 +18,7 @@ from backend.cspec_cache import (
     load_cspec_lkg,
     store_cspec_lkg,
 )
+from backend.conditional_enrichment import fetch_ucsc_gnomad_evidence
 from backend.evidence_rescue import (
     EvidenceRescueAttempt,
     EvidenceRescueIdentifier,
@@ -72,6 +73,7 @@ VARIANTVALIDATOR_PROVIDER_NAME = "VariantValidator"
 VARIANTVALIDATOR_SELECT_TRANSCRIPTS = "mane"
 GENEBE_PROVIDER_NAME = "GeneBe"
 MYVARIANT_PROVIDER_NAME = "MyVariant.info"
+UCSC_GNOMAD_PROVIDER_NAME = "UCSC gnomAD"
 MYVARIANT_API_VERSION = "v1"
 ENSEMBL_VARIATION_PROVIDER_NAME = "Ensembl REST Variation"
 GENEBE_GENOMES = {
@@ -2228,6 +2230,20 @@ def _base_annotation(
         "mane_plus_clinical": None,
         "predictors": {},
         "population_frequency": None,
+        "population_frequency_provenance": {
+            "status": "pending",
+            "provider": MYVARIANT_PROVIDER_NAME,
+            "operational_provider": "myvariant",
+            "underlying_dataset": None,
+            "assembly": settings.GENOME_ASSEMBLY,
+            "retrieved_at": None,
+            "selected_frequency": None,
+            "selection_method": "maximum_exact_alt_global_af",
+            "fallback_used": False,
+            "primary_provider": "myvariant",
+            "primary_failure": None,
+            "continuation_reason": None,
+        },
         "sources": {
             "vep": {
                 "status": status,
@@ -3261,6 +3277,24 @@ def _standardize_myvariant_response(
             upstream_sources.append(source_name)
 
     annotation["population_frequency"] = max_frequency
+    annotation["population_frequency_provenance"] = {
+        "status": (
+            "available" if max_frequency is not None else "no_usable_frequency"
+        ),
+        "provider": MYVARIANT_PROVIDER_NAME,
+        "operational_provider": "myvariant",
+        "underlying_dataset": "MyVariant.info aggregated sources",
+        "assembly": settings.GENOME_ASSEMBLY,
+        "retrieved_at": annotation["sources"]["myvariant"]["retrieved_at"],
+        "variant_id": variant_id,
+        "selected_frequency": max_frequency,
+        "selection_method": "maximum_exact_alt_global_af",
+        "available_global_af": dict(population_frequencies),
+        "fallback_used": False,
+        "primary_provider": "myvariant",
+        "primary_failure": None,
+        "continuation_reason": None,
+    }
     annotation["sources"]["myvariant"].update(
         {
             "status": "success",
@@ -3341,6 +3375,83 @@ def _annotate_with_myvariant(
         annotation,
         payload,
         variant_id,
+    )
+
+
+def _has_usable_population_frequency(value: object) -> bool:
+    """Return whether the normal-frequency field contains a valid AF."""
+
+    return _valid_frequency(value) is not None
+
+
+def _apply_ucsc_normal_population_frequency_fallback(
+    annotation: AnnotationData,
+    session: requests.Session,
+) -> None:
+    """Use strict UCSC gnomAD AF only when MyVariant has no usable AF."""
+
+    if _has_usable_population_frequency(annotation.get("population_frequency")):
+        return
+
+    myvariant = annotation["sources"]["myvariant"]
+    primary_failure = myvariant.get("primary_failure")
+    ucsc = fetch_ucsc_gnomad_evidence(annotation, session=session)
+    global_af = ucsc.get("global_af")
+    usable_af = {
+        source: frequency
+        for source, frequency in (
+            global_af.items() if isinstance(global_af, dict) else ()
+        )
+        if source in {"exome", "genome"}
+        and _valid_frequency(frequency) is not None
+    }
+    fallback_used = (
+        isinstance(primary_failure, str)
+        and should_trigger_fallback(primary_failure)
+    )
+    continuation_reason = (
+        None
+        if fallback_used
+        else "MyVariant.info returned no usable exact-allele frequency."
+    )
+    provenance: dict[str, Any] = {
+        "status": ucsc.get("status"),
+        "provider": ucsc.get("provider", UCSC_GNOMAD_PROVIDER_NAME),
+        "operational_provider": ucsc.get("operational_provider", "ucsc_gnomad"),
+        "underlying_dataset": ucsc.get("underlying_dataset", "gnomAD"),
+        "assembly": ucsc.get("assembly", annotation.get("assembly")),
+        "retrieved_at": ucsc.get("retrieved_at"),
+        "variant_id": ucsc.get("variant_id"),
+        "release": ucsc.get("release"),
+        "source_url": ucsc.get("source_url"),
+        "selected_frequency": None,
+        "selection_method": "maximum_exact_allele_global_af_across_available_exome_genome_tracks",
+        "available_global_af": usable_af,
+        "filter_status": ucsc.get("filter_status", {}),
+        "track_results": ucsc.get("track_results", []),
+        "fallback_used": fallback_used,
+        "primary_provider": "myvariant",
+        "primary_failure": primary_failure,
+        "continuation_reason": continuation_reason,
+    }
+    if not usable_af or ucsc.get("status") not in {"available", "partial"}:
+        annotation["population_frequency_provenance"] = provenance
+        return
+
+    selected_frequency = max(usable_af.values())
+    annotation["population_frequency"] = selected_frequency
+    provenance["status"] = "available"
+    provenance["selected_frequency"] = selected_frequency
+    annotation["population_frequency_provenance"] = provenance
+    source_url = ucsc.get("source_url")
+    if isinstance(source_url, str) and source_url:
+        annotation["references"].append(
+            {"source": UCSC_GNOMAD_PROVIDER_NAME, "url": source_url}
+        )
+    annotation["warnings"].append(
+        "MyVariant.info did not provide a usable exact-allele population "
+        "frequency; UCSC gnomAD strict mirror evidence supplied the normal "
+        "population-frequency fallback."
     )
 
 
@@ -5860,6 +5971,10 @@ def annotate_variants(
                     active_session,
                     ensembl_variation_circuit,
                 )
+            _apply_ucsc_normal_population_frequency_fallback(
+                annotation,
+                active_session,
+            )
         _refresh_identifier_bundles(annotations)
         myvariant_status, myvariant_message = _source_progress_summary(
             annotations,

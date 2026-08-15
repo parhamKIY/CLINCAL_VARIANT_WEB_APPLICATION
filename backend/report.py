@@ -4273,6 +4273,9 @@ def _build_v2_sections(
     vep = _candidate_mapping(sources.get("vep"))
     genebe = _candidate_mapping(sources.get("genebe"))
     myvariant = _candidate_mapping(sources.get("myvariant"))
+    population_frequency_provenance = _candidate_mapping(
+        candidate.get("population_frequency_provenance")
+    )
     clinvar = _candidate_mapping(sources.get("clinvar"))
     clingen = _candidate_mapping(sources.get("clingen"))
     cspec = _candidate_mapping(sources.get("cspec"))
@@ -4481,6 +4484,35 @@ def _build_v2_sections(
                     "population_frequency"
                 ),
                 "assembly": candidate.get("assembly"),
+                **(
+                    {
+                        "selected_frequency_source": _selected_context(
+                            population_frequency_provenance,
+                            (
+                                "status",
+                                "provider",
+                                "operational_provider",
+                                "underlying_dataset",
+                                "assembly",
+                                "retrieved_at",
+                                "variant_id",
+                                "release",
+                                "source_url",
+                                "selected_frequency",
+                                "selection_method",
+                                "available_global_af",
+                                "filter_status",
+                                "track_results",
+                                "fallback_used",
+                                "primary_provider",
+                                "primary_failure",
+                                "continuation_reason",
+                            ),
+                        )
+                    }
+                    if population_frequency_provenance
+                    else {}
+                ),
                 **_selected_context(
                     myvariant,
                     (
