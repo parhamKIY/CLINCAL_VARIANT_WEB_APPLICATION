@@ -96,7 +96,11 @@ FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
     "cspec_context": ("cspec", "local_cspec_cache"),
     "phenotype_gene_context": ("phen2gene", "local_hpo_gene"),
     "disease_hpo_context": ("mydisease", "local_hpo_disease"),
-    "population_frequency": ("gnomad", "ensembl_variation"),
+    "population_frequency": (
+        "gnomad",
+        "ucsc_gnomad",
+        "ensembl_variation",
+    ),
     "variant_literature": ("litvar2", "europe_pmc", "pubmed"),
     "gene_disease_literature": ("europe_pmc", "pubmed"),
     "variant_interpretation": ("llm", "llm_fallback_model"),
@@ -108,6 +112,7 @@ QUALITY_SOURCE_CHAINS: dict[str, tuple[str, ...]] = {
     "clinvar_evidence": FALLBACK_CHAINS["clinvar_evidence"],
     "cspec_context": FALLBACK_CHAINS["cspec_context"],
     "gene_disease_validity": ("clingen",),
+    "normal_population_frequency": ("myvariant",),
     "phenotype_gene_context": FALLBACK_CHAINS["phenotype_gene_context"],
     "disease_hpo_context": FALLBACK_CHAINS["disease_hpo_context"],
     "population_frequency": FALLBACK_CHAINS["population_frequency"],
@@ -157,7 +162,11 @@ def configured_provider_readiness_targets() -> tuple[ProviderReadinessTarget, ..
             "myvariant",
             "MyVariant.info",
             settings.MYVARIANT_BASE_URL,
-            ("variant_context", "clinvar_evidence"),
+            (
+                "variant_context",
+                "clinvar_evidence",
+                "normal_population_frequency",
+            ),
             ("clinvar_evidence",),
         ),
         ProviderReadinessTarget(
@@ -194,6 +203,13 @@ def configured_provider_readiness_targets() -> tuple[ProviderReadinessTarget, ..
             "gnomad",
             "gnomAD",
             settings.GNOMAD_BASE_URL,
+            ("population_frequency",),
+        ),
+        ProviderReadinessTarget(
+            "ucsc_gnomad",
+            "UCSC gnomAD track",
+            settings.UCSC_GNOMAD_BASE_URL,
+            ("population_frequency",),
             ("population_frequency",),
         ),
         ProviderReadinessTarget(

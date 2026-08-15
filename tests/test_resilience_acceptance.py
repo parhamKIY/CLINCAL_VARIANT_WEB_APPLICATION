@@ -215,7 +215,7 @@ def test_multi_variant_resilience_acceptance_gate(
     assert len(llm_adapter.requests) == 2
     assert len(phen2gene_session.calls) == 1
     assert len(population_session.post_calls) == 1
-    assert len(population_session.get_calls) == 2
+    assert len(population_session.get_calls) == 6
     assert len(literature_session.get_calls) == 6
 
     for evidence in analysis["evidence_objects"]:

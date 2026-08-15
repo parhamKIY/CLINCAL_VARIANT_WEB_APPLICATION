@@ -85,6 +85,7 @@ _PROVIDER_LABELS = {
     "ensembl_vep": "Ensembl",
     "genebe": "GeneBe",
     "gnomad": "Population source (gnomAD)",
+    "ucsc_gnomad": "UCSC gnomAD mirror",
     "local_hpo_disease_fallback": "MyDisease/local HPO disease context",
     "local_hpo_gene_fallback": "Phen2Gene/local HPO-Gene",
     "mydisease": "MyDisease",

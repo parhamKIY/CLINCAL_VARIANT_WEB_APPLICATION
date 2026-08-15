@@ -69,6 +69,28 @@ query Variant($variantId: String!, $dataset: DatasetId!) {
 }
 """.strip()
 
+# Verified against UCSC's hub API during the population-frequency fallback
+# audit.  The tracks are assembly-specific gnomAD mirrors, not independent
+# population cohorts.
+UCSC_GNOMAD_TRACKS: dict[str, dict[str, object]] = {
+    "GRCh37": {
+        "genome": "hg19",
+        "release": "gnomAD v2.1.1",
+        "tracks": {
+            "exome": "gnomadExomes",
+            "genome": "gnomadGenomes",
+        },
+    },
+    "GRCh38": {
+        "genome": "hg38",
+        "release": "gnomAD v4.1",
+        "tracks": {
+            "exome": "gnomadExomesVariantsV4_1",
+            "genome": "gnomadGenomesVariantsV4_1",
+        },
+    },
+}
+
 class ConditionalEnrichmentError(ValueError):
     """Raised when conditional enrichment input is invalid."""
 
@@ -463,6 +485,127 @@ def _candidate_identity(
         ref.upper(),
         alt.upper(),
         assembly,
+    )
+
+
+def _ucsc_gnomad_region(
+    identity: tuple[str, int, str, str, str],
+) -> tuple[str, int, int]:
+    """Return the exact UCSC interval for an already-normalized allele."""
+
+    chrom, position, reference, _, _ = identity
+    return (
+        "chrM" if chrom == "M" else f"chr{chrom}",
+        position - 1,
+        position - 1 + len(reference),
+    )
+
+
+def _ucsc_gnomad_record_matches(
+    record: Mapping[str, object],
+    identity: tuple[str, int, str, str, str],
+) -> bool:
+    """Require exact UCSC assembly-coordinate-REF-ALT identity."""
+
+    chromosome, start, _ = _ucsc_gnomad_region(identity)
+    returned_start = record.get("chromStart")
+    return (
+        _text(record.get("chrom"), 32) == chromosome
+        and isinstance(returned_start, int)
+        and not isinstance(returned_start, bool)
+        and returned_start == start
+        and _text(record.get("ref"), 10_000) == identity[2]
+        and _text(record.get("alt"), 10_000) == identity[3]
+    )
+
+
+def _ucsc_gnomad_count(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _ucsc_gnomad_population_rows(
+    record: Mapping[str, object],
+    *,
+    source: str,
+    alternate: str,
+) -> list[dict[str, Any]]:
+    """Retain only explicitly supplied UCSC ancestry rows."""
+
+    rows: list[dict[str, Any]] = []
+    for key, value in record.items():
+        if not isinstance(key, str) or not key.casefold().startswith("af_"):
+            continue
+        suffix = key[3:]
+        if not suffix or suffix.casefold() == "grpmax":
+            continue
+        frequency = _finite_frequency(value)
+        if frequency is None:
+            continue
+        ac = _ucsc_gnomad_count(record.get(f"AC_{suffix}"))
+        an = _ucsc_gnomad_count(record.get(f"AN_{suffix}"))
+        if ac is None or an is None or an == 0 or ac > an:
+            continue
+        rows.append(
+            {
+                "population": f"{source}:{suffix.upper()}",
+                "allele": alternate,
+                "frequency": frequency,
+                "allele_count": ac,
+                "allele_number": an,
+            }
+        )
+        if len(rows) >= MAX_POPULATIONS:
+            break
+    return rows
+
+
+def _ucsc_gnomad_block(
+    record: Mapping[str, object],
+    *,
+    source: str,
+    alternate: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate one UCSC gnomAD track record without fabricating values."""
+
+    frequency = _finite_frequency(record.get("AF"))
+    allele_count = _ucsc_gnomad_count(record.get("AC"))
+    allele_number = _ucsc_gnomad_count(record.get("AN"))
+    filter_status = _text(record.get("FILTER"), 100)
+    if filter_status != "PASS":
+        return None, "filtered_record"
+    if (
+        frequency is None
+        or allele_count is None
+        or allele_number is None
+        or allele_number == 0
+        or allele_count > allele_number
+    ):
+        return None, "insufficient_evidence"
+    return (
+        {
+            "allele_frequency": frequency,
+            "allele_count": allele_count,
+            "allele_number": allele_number,
+            "homozygote_count": _ucsc_gnomad_count(record.get("nhomalt")),
+            "filter": filter_status,
+            "popmax_frequency": _finite_frequency(
+                record.get("AF_grpmax")
+            ),
+            "popmax_population": _text(record.get("grpmax"), 100),
+            "track": source,
+            "populations": _ucsc_gnomad_population_rows(
+                record,
+                source=source,
+                alternate=alternate,
+            ),
+        },
+        None,
     )
 
 
@@ -995,13 +1138,311 @@ def fetch_gnomad_evidence(
     return evidence
 
 
+def fetch_ucsc_gnomad_evidence(
+    candidate: Mapping[str, object],
+    *,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """Fetch exact-allele gnomAD mirror evidence from UCSC tracks."""
+
+    if not isinstance(candidate, Mapping):
+        raise ConditionalEnrichmentError("Candidate must be a mapping.")
+    identity = _candidate_identity(candidate)
+    assembly = identity[4] if identity is not None else None
+    configuration = UCSC_GNOMAD_TRACKS.get(assembly or "")
+    release = (
+        configuration.get("release")
+        if isinstance(configuration, dict)
+        else None
+    )
+    tracks = (
+        configuration.get("tracks")
+        if isinstance(configuration, dict)
+        else None
+    )
+    genome = (
+        configuration.get("genome")
+        if isinstance(configuration, dict)
+        else None
+    )
+    variant_id = (
+        f"{identity[0]}-{identity[1]}-{identity[2]}-{identity[3]}"
+        if identity is not None
+        else None
+    )
+    endpoint = f"{settings.UCSC_GNOMAD_BASE_URL}/getData/track"
+    evidence: dict[str, Any] = {
+        "status": "unavailable",
+        "response_status": "unavailable",
+        "provider": "UCSC gnomAD",
+        "provider_version": release,
+        "operational_provider": "ucsc_gnomad",
+        "upstream_sources": ["gnomAD"],
+        "underlying_dataset": "gnomAD",
+        "retrieved_at": _timestamp(),
+        "assembly": assembly,
+        "dataset": release,
+        "release": release,
+        "query_identifier": variant_id,
+        "http_status": None,
+        "source_url": None,
+        "derivation": "mirror",
+        "variant_id": variant_id,
+        "global_maf": None,
+        "population_frequency": None,
+        "global_af": {},
+        "exome": None,
+        "genome": None,
+        "populations": [],
+        "filter_status": {},
+        "track_results": [],
+        "warnings": [],
+        "failure_reason": None,
+        "source": "ucsc_gnomad",
+        "fallback_for": None,
+        "request_attempts": 0,
+    }
+    provenance = build_provider_provenance(
+        capability="population_frequency",
+        provider="ucsc_gnomad",
+        provider_role="primary",
+        primary_provider="ucsc_gnomad",
+    )
+    evidence.update(
+        {key: value for key, value in provenance.items() if key != "provider"}
+    )
+    if identity is None:
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = "invalid_variant_identity"
+        return evidence
+    if (
+        not isinstance(genome, str)
+        or not isinstance(release, str)
+        or not isinstance(tracks, dict)
+    ):
+        evidence["status"] = "unsupported"
+        evidence["response_status"] = "unsupported"
+        evidence["failure_reason"] = "unsupported_assembly"
+        return evidence
+
+    chromosome, start, end = _ucsc_gnomad_region(identity)
+    evidence["source_url"] = (
+        f"{endpoint}?{urlencode({'genome': genome, 'chrom': chromosome, 'start': start, 'end': end})}"
+    )
+    owns_session = session is None
+    client = session or requests.Session()
+    valid_track_response = False
+    exact_records = 0
+    response_errors: list[str] = []
+    rejected_reasons: list[str] = []
+    try:
+        for source, track in tracks.items():
+            if source not in {"exome", "genome"} or not isinstance(track, str):
+                continue
+            params = {
+                "genome": genome,
+                "track": track,
+                "chrom": chromosome,
+                "start": start,
+                "end": end,
+            }
+            try:
+                payload, http_status, attempts = _request_json(
+                    client,
+                    endpoint,
+                    params=params,
+                    timeout=settings.UCSC_GNOMAD_TIMEOUT,
+                )
+            except requests.HTTPError as exc:
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                if isinstance(status, int) and not isinstance(status, bool):
+                    evidence["http_status"] = status
+                response_errors.append(_request_failure_reason(exc))
+                continue
+            except requests.RequestException as exc:
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                if isinstance(status, int) and not isinstance(status, bool):
+                    evidence["http_status"] = status
+                response_errors.append(_request_failure_reason(exc))
+                continue
+            except ProviderResponseError as exc:
+                evidence["http_status"] = exc.http_status
+                response_errors.append(exc.reason)
+                continue
+
+            evidence["http_status"] = http_status
+            evidence["request_attempts"] += attempts
+            if not isinstance(payload, dict):
+                response_errors.append("invalid_schema")
+                continue
+            records = payload.get(track)
+            if not isinstance(records, list):
+                response_errors.append("invalid_schema")
+                continue
+            valid_track_response = True
+            matching = [
+                record
+                for record in records
+                if isinstance(record, dict)
+                and _ucsc_gnomad_record_matches(record, identity)
+            ]
+            if not matching:
+                continue
+            exact_records += len(matching)
+            # Multiple exact records for one track would be ambiguous rather
+            # than evidence to merge.  UCSC's multiple ALT records are safely
+            # resolved by the exact match above.
+            if len(matching) != 1:
+                rejected_reasons.append("ambiguous_exact_records")
+                continue
+            block, reason = _ucsc_gnomad_block(
+                matching[0],
+                source=source,
+                alternate=identity[3],
+            )
+            if block is None:
+                rejected_reasons.append(reason or "insufficient_evidence")
+                continue
+            evidence[source] = {
+                key: value
+                for key, value in block.items()
+                if key != "populations"
+            }
+            evidence["global_af"][source] = block["allele_frequency"]
+            evidence["filter_status"][source] = block["filter"]
+            evidence["track_results"].append(
+                {
+                    "source": source,
+                    "track": track,
+                    "record_identity": {
+                        "chrom": chromosome,
+                        "pos": identity[1],
+                        "ref": identity[2],
+                        "alt": identity[3],
+                    },
+                }
+            )
+            evidence["populations"].extend(block["populations"])
+    finally:
+        if owns_session:
+            client.close()
+
+    usable_blocks = [
+        evidence[source]
+        for source in ("exome", "genome")
+        if isinstance(evidence[source], dict)
+    ]
+    if usable_blocks:
+        if response_errors or rejected_reasons:
+            evidence["status"] = "partial"
+            evidence["response_status"] = "partial"
+            evidence["warnings"] = [
+                "UCSC gnomAD returned partial mirror evidence."
+            ]
+        else:
+            evidence["status"] = "available"
+            evidence["response_status"] = "available"
+        return evidence
+    if valid_track_response and exact_records == 0 and not response_errors:
+        evidence["status"] = "no_match"
+        evidence["response_status"] = "no_match"
+        return evidence
+    if rejected_reasons:
+        evidence["status"] = "invalid_response"
+        evidence["response_status"] = "invalid_response"
+        evidence["failure_reason"] = rejected_reasons[0]
+        return evidence
+    evidence["status"] = (
+        "invalid_response" if "invalid_schema" in response_errors else "unavailable"
+    )
+    evidence["response_status"] = evidence["status"]
+    evidence["failure_reason"] = (
+        response_errors[0] if response_errors else "request_error"
+    )
+    return evidence
+
+
+def _promote_population_fallback(
+    fallback: dict[str, Any],
+    *,
+    primary: Mapping[str, object],
+    fallback_provider: str,
+    warning: str,
+    intermediate: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
+    """Attach strict operational-fallback provenance to usable evidence."""
+
+    primary_failure = primary.get("primary_failure")
+    if not isinstance(primary_failure, str) or not should_trigger_fallback(
+        primary_failure
+    ):
+        raise ConditionalEnrichmentError(
+            "Population fallback requires an operational gnomAD failure."
+        )
+    provenance = build_provider_provenance(
+        capability="population_frequency",
+        provider=fallback_provider,
+        provider_role="fallback",
+        primary_provider="gnomad",
+        primary_failure=primary_failure,
+    )
+    fallback.update(
+        {
+            **{key: value for key, value in provenance.items() if key != "provider"},
+            "capability_provider": fallback_provider,
+            "operational_provider": fallback_provider,
+            "fallback_for": "gnomad",
+            "primary_http_status": primary.get("http_status"),
+            "primary_request_attempts": primary.get("request_attempts"),
+            "primary_circuit_open": primary.get("circuit_open"),
+        }
+    )
+    if intermediate is not None:
+        fallback.update(
+            {
+                "intermediate_provider": "ucsc_gnomad",
+                "intermediate_status": intermediate.get("status"),
+                "intermediate_failure_reason": intermediate.get(
+                    "failure_reason"
+                ),
+                "intermediate_http_status": intermediate.get("http_status"),
+            }
+        )
+    fallback.setdefault("warnings", []).insert(0, warning)
+    return fallback
+
+
+def _continue_population_verification_after_no_match(
+    evidence: dict[str, Any],
+    *,
+    provider: str,
+) -> dict[str, Any]:
+    """Retain a no-match continuation without mislabeling it as failure fallback."""
+
+    evidence.update(
+        {
+            "capability_provider": provider,
+            "preceding_provider": "gnomad",
+            "preceding_status": "no_match",
+        }
+    )
+    evidence.setdefault("warnings", []).insert(
+        0,
+        "Direct gnomAD returned no usable exact record; the next verification source was checked.",
+    )
+    return evidence
+
+
 def fetch_population_evidence_with_fallback(
     candidate: Mapping[str, object],
     *,
     session: requests.Session | None = None,
     circuit_state: ProviderCircuitState | None = None,
 ) -> dict[str, Any]:
-    """Use Ensembl only after an operational gnomAD failure."""
+    """Use UCSC then Ensembl after an operational gnomAD failure."""
 
     primary = fetch_gnomad_evidence(
         candidate,
@@ -1009,10 +1450,32 @@ def fetch_population_evidence_with_fallback(
         circuit_state=circuit_state,
     )
     primary_failure = primary.get("primary_failure")
-    if primary_failure is None or not should_trigger_fallback(
-        primary_failure
+    continued_after_no_match = primary.get("status") == "no_match"
+    if (
+        not continued_after_no_match
+        and (
+            primary_failure is None
+            or not should_trigger_fallback(primary_failure)
+        )
     ):
         return primary
+
+    ucsc = fetch_ucsc_gnomad_evidence(
+        candidate,
+        session=session,
+    )
+    if ucsc.get("status") in {"available", "partial"}:
+        if continued_after_no_match:
+            return _continue_population_verification_after_no_match(
+                ucsc,
+                provider="ucsc_gnomad",
+            )
+        return _promote_population_fallback(
+            ucsc,
+            primary=primary,
+            fallback_provider="ucsc_gnomad",
+            warning="gnomAD was unavailable; UCSC gnomAD mirror fallback was used.",
+        )
 
     fallback = fetch_ensembl_population_evidence(
         candidate,
@@ -1026,6 +1489,10 @@ def fetch_population_evidence_with_fallback(
                 "fallback_status": "missing_identifier",
                 "fallback_http_status": None,
                 "fallback_failure_reason": fallback.get("failure_reason"),
+                "intermediate_provider": "ucsc_gnomad",
+                "intermediate_status": ucsc.get("status"),
+                "intermediate_failure_reason": ucsc.get("failure_reason"),
+                "intermediate_http_status": ucsc.get("http_status"),
             }
         )
         primary.setdefault("warnings", []).insert(
@@ -1045,6 +1512,10 @@ def fetch_population_evidence_with_fallback(
                 "fallback_status": fallback.get("status"),
                 "fallback_http_status": fallback.get("http_status"),
                 "fallback_failure_reason": fallback.get("failure_reason"),
+                "intermediate_provider": "ucsc_gnomad",
+                "intermediate_status": ucsc.get("status"),
+                "intermediate_failure_reason": ucsc.get("failure_reason"),
+                "intermediate_http_status": ucsc.get("http_status"),
             }
         )
         primary.setdefault("warnings", []).insert(
@@ -1053,33 +1524,18 @@ def fetch_population_evidence_with_fallback(
             "attempted but returned no usable evidence.",
         )
         return primary
-    provenance = build_provider_provenance(
-        capability="population_frequency",
-        provider="ensembl_variation",
-        provider_role="fallback",
-        primary_provider="gnomad",
-        primary_failure=primary_failure,
+    if continued_after_no_match:
+        return _continue_population_verification_after_no_match(
+            fallback,
+            provider="ensembl_variation",
+        )
+    return _promote_population_fallback(
+        fallback,
+        primary=primary,
+        fallback_provider="ensembl_variation",
+        warning="gnomAD and UCSC gnomAD were unavailable; Ensembl Variation fallback was used.",
+        intermediate=ucsc,
     )
-    fallback.update(
-        {
-            **{
-                key: value
-                for key, value in provenance.items()
-                if key != "provider"
-            },
-            "operational_provider": provenance["provider"],
-            "source": "ensembl_variation",
-            "fallback_for": "gnomad",
-            "primary_http_status": primary.get("http_status"),
-            "primary_request_attempts": primary.get("request_attempts"),
-            "primary_circuit_open": primary.get("circuit_open"),
-        }
-    )
-    fallback.setdefault("warnings", []).insert(
-        0,
-        "gnomAD was unavailable; Ensembl Variation fallback was used.",
-    )
-    return fallback
 
 
 def _candidate_identifiers(

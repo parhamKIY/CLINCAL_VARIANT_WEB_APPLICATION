@@ -209,6 +209,31 @@ def test_recommendation_rows_keep_quality_and_latency_reasoning_visible() -> Non
     ]
 
 
+def test_population_frequency_labels_distinguish_normal_and_verification() -> None:
+    rows = provider_readiness_ui.build_provider_readiness_rows(
+        (),
+        (
+            ProviderReadinessTarget(
+                "myvariant",
+                "MyVariant.info",
+                "https://example.org/myvariant",
+                ("normal_population_frequency",),
+            ),
+            ProviderReadinessTarget(
+                "gnomad",
+                "gnomAD",
+                "https://example.org/gnomad",
+                ("population_frequency",),
+            ),
+        ),
+    )
+
+    assert [row["Use"] for row in rows] == [
+        "Normal population frequency",
+        "Population-frequency verification",
+    ]
+
+
 def test_renderer_runs_checks_only_after_explicit_user_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

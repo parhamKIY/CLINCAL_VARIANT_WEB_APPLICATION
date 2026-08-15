@@ -74,6 +74,7 @@ def configured_targets() -> tuple[ProviderTarget, ...]:
         ProviderTarget("phen2gene", settings.PHEN2GENE_BASE_URL),
         ProviderTarget("mydisease", settings.MYDISEASE_BASE_URL),
         ProviderTarget("gnomad", settings.GNOMAD_BASE_URL),
+        ProviderTarget("ucsc_gnomad", settings.UCSC_GNOMAD_BASE_URL),
         ProviderTarget(
             "ensembl_variation",
             settings.ENSEMBL_VARIATION_BASE_URL,

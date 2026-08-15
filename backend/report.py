@@ -3251,6 +3251,7 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             "provider",
             "provider_version",
             "upstream_sources",
+            "underlying_dataset",
             "retrieved_at",
             "assembly",
             "dataset",
@@ -3264,13 +3265,17 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             "most_severe_consequence",
             "minor_allele",
             "global_maf",
+            "global_af",
             "population_frequency",
             "joint",
             "exome",
             "genome",
+            "filter_status",
+            "track_results",
             "warnings",
             "failure_reason",
             "capability",
+            "capability_provider",
             "operational_provider",
             "source",
             "provider_role",
@@ -3288,6 +3293,12 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
             "fallback_status",
             "fallback_http_status",
             "fallback_failure_reason",
+            "intermediate_provider",
+            "intermediate_status",
+            "intermediate_failure_reason",
+            "intermediate_http_status",
+            "preceding_provider",
+            "preceding_status",
         ),
     )
     populations = population_source.get("populations")
@@ -3860,6 +3871,10 @@ def _build_evidence_lineage(
             population.get("source") == "ensembl_variation"
             or population.get("provider") == "Ensembl REST Variation"
         )
+        population_is_ucsc = (
+            population.get("source") == "ucsc_gnomad"
+            or population.get("provider") == "UCSC gnomAD"
+        )
         records.append(
             _lineage_record(
                 "conditional_enrichment.population_frequency",
@@ -3867,7 +3882,7 @@ def _build_evidence_lineage(
                 default_provider=(
                     "Ensembl REST Variation"
                     if population_is_ensembl
-                    else "gnomAD"
+                    else "UCSC gnomAD" if population_is_ucsc else "gnomAD"
                 ),
                 default_upstream_sources=(
                     ("Ensembl",)
@@ -4207,7 +4222,7 @@ def _build_capability_results(
         ),
         (
             "population_frequency", population, "gnomad",
-            "ensembl_variation", "exact_allele_population_lookup",
+            "ucsc_gnomad", "exact_allele_population_lookup",
             "exact_mapping_population_lookup",
             "conditional_enrichment.population_frequency",
         ),
@@ -4486,6 +4501,7 @@ def _build_v2_sections(
                         "rsid",
                         "gene",
                         "population_frequencies",
+                        "population_frequency_details",
                         "max_population_frequency",
                         "ensembl_variation",
                     ),

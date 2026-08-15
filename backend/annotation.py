@@ -2305,6 +2305,7 @@ def _base_annotation(
                 "rsid": None,
                 "gene": None,
                 "population_frequencies": {},
+                "population_frequency_details": {},
                 "max_population_frequency": None,
                 "ensembl_variation": None,
             },
@@ -2936,6 +2937,46 @@ def _extract_global_frequency(source: Any) -> float | None:
     return max(frequencies) if frequencies else None
 
 
+def _extract_gnomad_frequency_records(
+    source: Any,
+) -> list[dict[str, Any]]:
+    """Retain per-record gnomAD AF values from an exact MyVariant result."""
+
+    records: list[dict[str, Any]] = []
+    for record in _iter_source_records(source):
+        raw_frequency = record.get("af")
+        global_frequency: float | None = None
+        population_frequencies: dict[str, float] = {}
+
+        if isinstance(raw_frequency, dict):
+            global_frequency = _valid_frequency(raw_frequency.get("af"))
+            for raw_label, raw_value in raw_frequency.items():
+                if (
+                    not isinstance(raw_label, str)
+                    or not raw_label.startswith("af_")
+                ):
+                    continue
+                frequency = _valid_frequency(raw_value)
+                if frequency is not None:
+                    population_frequencies[
+                        raw_label.removeprefix("af_").upper()
+                    ] = frequency
+        else:
+            global_frequency = _valid_frequency(raw_frequency)
+
+        if global_frequency is not None or population_frequencies:
+            records.append(
+                {
+                    "global_af": global_frequency,
+                    "population_allele_frequencies": (
+                        population_frequencies
+                    ),
+                }
+            )
+
+    return records
+
+
 def _extract_dbsnp_frequencies(
     dbsnp: Any,
     alternate: str,
@@ -3171,6 +3212,17 @@ def _standardize_myvariant_response(
     """Add bounded MyVariant evidence without retaining its raw payload."""
     dbsnp = payload.get("dbsnp")
     population_frequencies: dict[str, float] = {}
+    population_frequency_details = {
+        "source": "gnomAD via MyVariant.info",
+        "assembly": settings.GENOME_ASSEMBLY,
+        "variant_id": variant_id,
+        "gnomad_exome": _extract_gnomad_frequency_records(
+            payload.get("gnomad_exome")
+        ),
+        "gnomad_genome": _extract_gnomad_frequency_records(
+            payload.get("gnomad_genome")
+        ),
+    }
 
     for source_name in ("gnomad_exome", "gnomad_genome", "exac"):
         frequency = _extract_global_frequency(payload.get(source_name))
@@ -3217,6 +3269,7 @@ def _standardize_myvariant_response(
             "rsid": _first_nested_string(dbsnp, "rsid"),
             "gene": gene,
             "population_frequencies": population_frequencies,
+            "population_frequency_details": population_frequency_details,
             "max_population_frequency": max_frequency,
         }
     )

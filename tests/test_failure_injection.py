@@ -219,7 +219,7 @@ class TestStage75FailureInjection:
         ]
 
         assert len(session.post_calls) == 1
-        assert len(session.get_calls) == 2
+        assert len(session.get_calls) == 6
         assert results[1]["primary_request_attempts"] == 0
         assert all(item["fallback_used"] is True for item in results)
         assert all(item["primary_failure"] == "forbidden" for item in results)

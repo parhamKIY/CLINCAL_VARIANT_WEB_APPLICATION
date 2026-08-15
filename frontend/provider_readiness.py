@@ -28,9 +28,10 @@ _CAPABILITY_LABELS = {
     "disease_hpo_context": "Disease/HPO context",
     "gene_disease_literature": "Gene/disease literature",
     "gene_disease_validity": "Gene–disease validity",
+    "normal_population_frequency": "Normal population frequency",
     "phenotype_extraction": "Phenotype extraction",
     "phenotype_gene_context": "Phenotype–gene context",
-    "population_frequency": "Population frequency",
+    "population_frequency": "Population-frequency verification",
     "variant_annotation": "Variant annotation",
     "variant_context": "Variant context",
     "variant_interpretation": "Variant interpretation",
@@ -308,6 +309,11 @@ def render_provider_readiness(
             "Automatic preference uses source quality first and latency only "
             "between equal-quality reachable sources. It is a readiness "
             "recommendation; normal pipeline fallback provenance is unchanged."
+        )
+        st.caption(
+            "Normal population frequency is supplied through MyVariant.info. "
+            "Population-frequency verification checks the direct gnomAD, "
+            "UCSC gnomAD, and Ensembl fallback chain separately."
         )
         recommendation_table = pd.DataFrame(
             build_provider_recommendation_rows(results)

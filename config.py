@@ -267,6 +267,11 @@ class Settings:
         "https://genome-euro.ucsc.edu/cgi-bin/hubApi",
     ).strip().rstrip("/")
 
+    UCSC_GNOMAD_BASE_URL: str = os.getenv(
+        "UCSC_GNOMAD_BASE_URL",
+        CLINGEN_BASE_URL,
+    ).strip().rstrip("/")
+
     CSPEC_BASE_URL: str = os.getenv(
         "CSPEC_BASE_URL",
         "https://cspec.clinicalgenome.org/cspec",
@@ -305,6 +310,11 @@ class Settings:
     CLINGEN_TIMEOUT: int = _get_positive_int(
         "CLINGEN_TIMEOUT",
         REQUEST_TIMEOUT,
+    )
+
+    UCSC_GNOMAD_TIMEOUT: int = _get_positive_int(
+        "UCSC_GNOMAD_TIMEOUT",
+        CLINGEN_TIMEOUT,
     )
 
     CSPEC_TIMEOUT: int = _get_positive_int(
@@ -607,6 +617,7 @@ class Settings:
             "MYVARIANT_BASE_URL": cls.MYVARIANT_BASE_URL,
             "CLINVAR_BASE_URL": cls.CLINVAR_BASE_URL,
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
+            "UCSC_GNOMAD_BASE_URL": cls.UCSC_GNOMAD_BASE_URL,
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "MONARCH_BASE_URL": cls.MONARCH_BASE_URL,
@@ -731,6 +742,7 @@ class Settings:
             "MYVARIANT_TIMEOUT": cls.MYVARIANT_TIMEOUT,
             "CLINVAR_TIMEOUT": cls.CLINVAR_TIMEOUT,
             "CLINGEN_TIMEOUT": cls.CLINGEN_TIMEOUT,
+            "UCSC_GNOMAD_TIMEOUT": cls.UCSC_GNOMAD_TIMEOUT,
             "CSPEC_TIMEOUT": cls.CSPEC_TIMEOUT,
             "PHEN2GENE_TIMEOUT": cls.PHEN2GENE_TIMEOUT,
             "GNOMAD_TIMEOUT": cls.GNOMAD_TIMEOUT,

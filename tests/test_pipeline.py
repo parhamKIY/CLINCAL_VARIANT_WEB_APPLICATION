@@ -65,6 +65,7 @@ from backend.conditional_enrichment import (
     enrich_conditionally,
     fetch_ensembl_population_evidence,
     fetch_gnomad_evidence,
+    fetch_ucsc_gnomad_evidence,
     fetch_literature_evidence,
     fetch_population_evidence_with_fallback,
 )
@@ -1448,9 +1449,11 @@ class FakeConditionalSession:
         *,
         get_responses: list[object] | None = None,
         post_responses: list[object] | None = None,
+        ucsc_responses: list[object] | None = None,
     ) -> None:
         self.get_responses = list(get_responses or [])
         self.post_responses = list(post_responses or [])
+        self.ucsc_responses = list(ucsc_responses or [])
         self.get_calls: list[dict[str, object]] = []
         self.post_calls: list[dict[str, object]] = []
         self.closed = False
@@ -1465,6 +1468,14 @@ class FakeConditionalSession:
 
     def get(self, url: str, **kwargs: object) -> FakeResponse:
         self.get_calls.append({"url": url, **kwargs})
+        if url == f"{settings.UCSC_GNOMAD_BASE_URL}/getData/track":
+            if self.ucsc_responses:
+                return self._response(self.ucsc_responses)
+            params = kwargs.get("params")
+            assert isinstance(params, dict)
+            track = params.get("track")
+            assert isinstance(track, str)
+            return FakeResponse(200, {track: []})
         return self._response(self.get_responses)
 
     def post(self, url: str, **kwargs: object) -> FakeResponse:
@@ -4677,6 +4688,23 @@ class TestAnnotation:
                 "dbsnp_1000g": 0.004,
                 "dbsnp_gnomad": 0.003,
             },
+            "population_frequency_details": {
+                "source": "gnomAD via MyVariant.info",
+                "assembly": "GRCh38",
+                "variant_id": "chr1:g.100A>G",
+                "gnomad_exome": [
+                    {
+                        "global_af": 0.001,
+                        "population_allele_frequencies": {},
+                    }
+                ],
+                "gnomad_genome": [
+                    {
+                        "global_af": 0.002,
+                        "population_allele_frequencies": {},
+                    }
+                ],
+            },
             "max_population_frequency": 0.004,
             "ensembl_variation": None,
         }
@@ -4703,6 +4731,144 @@ class TestAnnotation:
         assert annotation["references"][-1]["url"].endswith(
             "chr1%3Ag.100A%3EG?assembly=hg38"
         )
+        evidence = build_evidence_object(annotation)
+        assert evidence["annotations"]["population"][
+            "population_frequency_details"
+        ] == myvariant["population_frequency_details"]
+
+    def test_myvariant_retains_gnomad_population_details(self) -> None:
+        payload = self._myvariant_response()
+        payload["gnomad_exome"] = {
+            "af": {
+                "af": 0.001,
+                "af_afr": 0.0001,
+                "af_amr": 0.0002,
+                "af_eas": 0.0003,
+            }
+        }
+        payload["gnomad_genome"] = {
+            "af": {
+                "af": 0.002,
+                "af_nfe": 0.0004,
+                "af_sas": 0.0005,
+            }
+        }
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        details = annotation["sources"]["myvariant"][
+            "population_frequency_details"
+        ]
+        assert details == {
+            "source": "gnomAD via MyVariant.info",
+            "assembly": "GRCh38",
+            "variant_id": "chr1:g.100A>G",
+            "gnomad_exome": [
+                {
+                    "global_af": 0.001,
+                    "population_allele_frequencies": {
+                        "AFR": 0.0001,
+                        "AMR": 0.0002,
+                        "EAS": 0.0003,
+                    },
+                }
+            ],
+            "gnomad_genome": [
+                {
+                    "global_af": 0.002,
+                    "population_allele_frequencies": {
+                        "NFE": 0.0004,
+                        "SAS": 0.0005,
+                    },
+                }
+            ],
+        }
+
+    def test_myvariant_missing_gnomad_frequency_is_not_zero(self) -> None:
+        payload = self._myvariant_response()
+        payload.pop("gnomad_exome")
+        payload.pop("gnomad_genome")
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        source = annotation["sources"]["myvariant"]
+        assert source["population_frequency_details"]["gnomad_exome"] == []
+        assert source["population_frequency_details"]["gnomad_genome"] == []
+        assert "gnomad_exome" not in source["population_frequencies"]
+        assert "gnomad_genome" not in source["population_frequencies"]
+
+    def test_myvariant_retains_partial_gnomad_frequency_details(self) -> None:
+        payload = self._myvariant_response()
+        payload.pop("gnomad_exome")
+        payload["gnomad_genome"] = {
+            "af": {"af_nfe": 0.0004}
+        }
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        details = annotation["sources"]["myvariant"][
+            "population_frequency_details"
+        ]
+        assert details["gnomad_exome"] == []
+        assert details["gnomad_genome"] == [
+            {
+                "global_af": None,
+                "population_allele_frequencies": {"NFE": 0.0004},
+            }
+        ]
+        assert "gnomad_genome" not in annotation["sources"][
+            "myvariant"
+        ]["population_frequencies"]
+
+    def test_myvariant_ignores_malformed_gnomad_frequency_details(
+        self,
+    ) -> None:
+        payload = self._myvariant_response()
+        payload["gnomad_exome"] = {
+            "af": {"af": "invalid", "af_afr": True, "af_amr": 1.1}
+        }
+        payload["gnomad_genome"] = {"af": []}
+        session = FakeSession(
+            [FakeResponse(200, [self._vep_response()])],
+            get_responses=[FakeResponse(200, payload)],
+        )
+
+        annotation = annotate_variants(
+            [self._variant()],
+            session=session,  # type: ignore[arg-type]
+            max_retries=0,
+        )[0]
+
+        source = annotation["sources"]["myvariant"]
+        assert source["status"] == "success"
+        assert source["population_frequency_details"]["gnomad_exome"] == []
+        assert source["population_frequency_details"]["gnomad_genome"] == []
+        assert "gnomad_exome" not in source["population_frequencies"]
+        assert "gnomad_genome" not in source["population_frequencies"]
 
     @pytest.mark.regression
     def test_successful_genebe_batch_is_independent_and_standardized(
@@ -9162,7 +9328,7 @@ class TestEvidenceObject:
         assert result["primary_failure"] == "forbidden"
         assert result["fallback_for"] == "gnomad"
         assert len(session.post_calls) == 1
-        assert len(session.get_calls) == 1
+        assert len(session.get_calls) == 3
 
     def test_stage_66_timeout_retries_once_then_falls_back(
         self,
@@ -9191,13 +9357,16 @@ class TestEvidenceObject:
         assert result["primary_failure"] == "timeout"
         assert result["primary_request_attempts"] == 2
         assert len(session.post_calls) == 2
-        assert len(session.get_calls) == 1
+        assert len(session.get_calls) == 3
 
-    def test_stage_66_valid_gnomad_no_match_is_terminal(self) -> None:
+    def test_stage_66_gnomad_no_match_continues_to_next_verifier(self) -> None:
         session = FakeConditionalSession(
             post_responses=[
                 FakeResponse(200, {"data": {"variant": None}})
-            ]
+            ],
+            get_responses=[
+                FakeResponse(200, self._ensembl_population_payload())
+            ],
         )
 
         result = fetch_population_evidence_with_fallback(
@@ -9205,11 +9374,12 @@ class TestEvidenceObject:
             session=session,  # type: ignore[arg-type]
         )
 
-        assert result["status"] == "no_match"
-        assert result["provider"] == "gnomAD"
+        assert result["status"] == "available"
+        assert result["provider"] == "Ensembl REST Variation"
         assert result["fallback_used"] is False
         assert result["primary_failure"] is None
-        assert session.get_calls == []
+        assert result["preceding_status"] == "no_match"
+        assert len(session.get_calls) == 3
 
     def test_stage_66_fallback_failure_is_explicit(
         self,
@@ -9288,7 +9458,7 @@ class TestEvidenceObject:
         assert result["fallback_attempted"] is False
         assert result["fallback_status"] == "missing_identifier"
         assert result["fallback_failure_reason"] == "missing_rsid"
-        assert session.get_calls == []
+        assert len(session.get_calls) == 2
 
         candidate["conditional_enrichment"] = {
             "triggered": True,
@@ -9369,7 +9539,7 @@ class TestEvidenceObject:
         assert second["primary_circuit_open"] is True
         assert second["primary_request_attempts"] == 0
         assert len(session.post_calls) == 1
-        assert len(session.get_calls) == 2
+        assert len(session.get_calls) == 6
 
     def test_stage_66_ensembl_source_survives_report_boundary(self) -> None:
         candidate = self._candidate_with_rsid()

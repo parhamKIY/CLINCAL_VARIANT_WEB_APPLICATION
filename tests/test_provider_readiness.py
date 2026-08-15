@@ -30,6 +30,7 @@ def test_catalog_covers_active_providers_and_the_existing_probe_targets() -> Non
         "phen2gene",
         "mydisease",
         "gnomad",
+        "ucsc_gnomad",
         "ensembl_variation",
         "litvar2",
         "europe_pmc",
@@ -49,13 +50,31 @@ def test_fallback_chains_preserve_the_existing_provider_contract() -> None:
         "cspec_context": ("cspec", "local_cspec_cache"),
         "phenotype_gene_context": ("phen2gene", "local_hpo_gene"),
         "disease_hpo_context": ("mydisease", "local_hpo_disease"),
-        "population_frequency": ("gnomad", "ensembl_variation"),
+        "population_frequency": (
+            "gnomad",
+            "ucsc_gnomad",
+            "ensembl_variation",
+        ),
         "variant_literature": ("litvar2", "europe_pmc", "pubmed"),
         "gene_disease_literature": ("europe_pmc", "pubmed"),
         "variant_interpretation": ("llm", "llm_fallback_model"),
     }
     assert QUALITY_SOURCE_CHAINS["classification_context"] == ("genebe",)
+    assert QUALITY_SOURCE_CHAINS["normal_population_frequency"] == ("myvariant",)
     assert QUALITY_SOURCE_CHAINS["phenotype_extraction"] == ("llm",)
+
+
+def test_normal_population_frequency_is_distinct_from_verification() -> None:
+    targets = provider_readiness_target_map()
+
+    assert "normal_population_frequency" in targets["myvariant"].capabilities
+    assert targets["gnomad"].capabilities == ("population_frequency",)
+    assert targets["ucsc_gnomad"].fallback_for == ("population_frequency",)
+    assert FALLBACK_CHAINS["population_frequency"] == (
+        "gnomad",
+        "ucsc_gnomad",
+        "ensembl_variation",
+    )
 
 
 def _readiness_result(

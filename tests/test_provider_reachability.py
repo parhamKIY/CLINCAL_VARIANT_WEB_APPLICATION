@@ -63,6 +63,7 @@ class TestProviderReachability:
             "phen2gene",
             "mydisease",
             "gnomad",
+            "ucsc_gnomad",
             "ensembl_variation",
             "litvar2",
             "europe_pmc",

@@ -35,6 +35,7 @@ PROVIDER_LABELS = {
     "mydisease": "MyDisease.info",
     "local_hpo_disease_fallback": "local HPO disease-context",
     "gnomad": "gnomAD",
+    "ucsc_gnomad": "UCSC gnomAD track",
     "litvar": "LitVar2",
     "europe_pmc": "Europe PMC",
     "pubmed": "PubMed",
