@@ -62,6 +62,10 @@ from frontend.evidence_review import (
     clear_evidence_review_state,
     render_evidence_review,
 )
+from frontend.provider_readiness import (
+    initialize_provider_readiness_state,
+    render_provider_readiness,
+)
 from frontend.results import render_analysis_results
 
 
@@ -301,6 +305,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     st.session_state.setdefault(LLM_PROVIDER_MODELS_KEY, ())
     st.session_state.setdefault(LLM_PROVIDER_MODELS_ERROR_KEY, False)
+    initialize_provider_readiness_state()
     _initialize_task_model(
         PHENOTYPE_MODEL_KEY,
         settings.PHENOTYPE_EXTRACTION_MODEL,
@@ -1729,6 +1734,7 @@ def render_app() -> None:
     st.divider()
     phenotype_model, variant_model = _render_task_model_selectors()
     _render_hpo_picker(phenotype_model)
+    render_provider_readiness(job_active=_analysis_job() is not None)
     submission = _render_variant_input(phenotype_model, variant_model)
     st.divider()
 

@@ -6,15 +6,23 @@ not change evidence collection, fallback activation, or clinical provenance.
 
 from __future__ import annotations
 
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Literal
+from time import perf_counter
+from typing import Callable, Literal, Protocol, Sequence
 from urllib.parse import urlsplit
+
+import requests
 
 from config import settings
 
 
 ProbeKind = Literal["transport", "authenticated"]
 CredentialMode = Literal["none", "optional", "required"]
+ReadinessState = Literal["reachable", "unreachable"]
+DEFAULT_READINESS_TIMEOUT_SECONDS = 5.0
+MAX_READINESS_WORKERS = 5
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,27 @@ class ProviderReadinessTarget:
             raise ValueError("Unsupported provider credential mode.")
         if self.probe_kind not in {"transport", "authenticated"}:
             raise ValueError("Unsupported provider probe kind.")
+
+
+@dataclass(frozen=True)
+class ProviderReadinessResult:
+    """Secret-free outcome of one bounded, pre-analysis provider probe."""
+
+    provider: str
+    state: ReadinessState
+    dns_status: str
+    http_status: int | None
+    latency_ms: float | None
+    failure_category: str
+    probe_kind: ProbeKind
+
+
+class ProviderReadinessSession(Protocol):
+    """Small HTTP surface needed for deterministic readiness tests."""
+
+    def head(self, url: str, **kwargs: object) -> requests.Response: ...
+
+    def get(self, url: str, **kwargs: object) -> requests.Response: ...
 
 
 FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
@@ -177,11 +206,197 @@ def provider_readiness_target_map() -> dict[str, ProviderReadinessTarget]:
     return result
 
 
+def _http_failure_category(
+    status_code: int,
+    *,
+    probe_kind: ProbeKind,
+) -> str:
+    if 200 <= status_code < 400:
+        return "none"
+    if probe_kind == "transport" and status_code in {404, 405}:
+        return "none"
+    if status_code == 401:
+        return "configuration_error"
+    if status_code == 403:
+        return "forbidden"
+    if status_code == 408:
+        return "timeout"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code >= 500:
+        return "server_error"
+    return "client_error"
+
+
+def _request_failure_category(error: requests.RequestException) -> str:
+    if isinstance(error, requests.Timeout):
+        return "timeout"
+    if isinstance(error, requests.exceptions.SSLError):
+        return "tls_failure"
+    if isinstance(error, requests.ConnectionError):
+        return "connection_error"
+    return "request_error"
+
+
+def _authenticated_probe_url(target: ProviderReadinessTarget) -> str:
+    """Return the OpenAI-compatible, key-validating discovery endpoint."""
+
+    if target.provider != "llm":
+        raise ValueError("No authenticated readiness probe is defined.")
+    return f"{target.url}/models"
+
+
+def probe_provider_readiness(
+    target: ProviderReadinessTarget,
+    *,
+    session: ProviderReadinessSession,
+    timeout: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
+    resolver: Callable[..., object] = socket.getaddrinfo,
+    clock: Callable[[], float] = perf_counter,
+) -> ProviderReadinessResult:
+    """Probe one endpoint without submitting variants or clinical text.
+
+    Transport probes use one HTTP HEAD request. The configured LLM endpoint
+    uses its OpenAI-compatible model-discovery path with the configured API key;
+    neither credentials nor response content are retained in the result.
+    """
+
+    if not 0 < timeout <= 20:
+        raise ValueError("Readiness timeout must be greater than 0 and at most 20.")
+    hostname = urlsplit(target.url).hostname
+    if not hostname:
+        return ProviderReadinessResult(
+            provider=target.provider,
+            state="unreachable",
+            dns_status="invalid_host",
+            http_status=None,
+            latency_ms=None,
+            failure_category="configuration_error",
+            probe_kind=target.probe_kind,
+        )
+
+    try:
+        resolver(hostname, 443, type=socket.SOCK_STREAM)
+    except OSError:
+        return ProviderReadinessResult(
+            provider=target.provider,
+            state="unreachable",
+            dns_status="failed",
+            http_status=None,
+            latency_ms=None,
+            failure_category="dns_failure",
+            probe_kind=target.probe_kind,
+        )
+
+    started_at = clock()
+    try:
+        if target.probe_kind == "authenticated":
+            response = session.get(
+                _authenticated_probe_url(target),
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {settings.LLM_API_KEY}",
+                    "User-Agent": "clinical-variant-provider-readiness/1.0",
+                },
+                timeout=(min(timeout, 3.0), timeout),
+            )
+        else:
+            response = session.head(
+                target.url,
+                headers={
+                    "User-Agent": "clinical-variant-provider-readiness/1.0",
+                },
+                allow_redirects=True,
+                timeout=(min(timeout, 3.0), timeout),
+            )
+    except requests.RequestException as exc:
+        elapsed = round(max(0.0, clock() - started_at) * 1_000, 1)
+        return ProviderReadinessResult(
+            provider=target.provider,
+            state="unreachable",
+            dns_status="resolved",
+            http_status=None,
+            latency_ms=elapsed,
+            failure_category=_request_failure_category(exc),
+            probe_kind=target.probe_kind,
+        )
+
+    elapsed = round(max(0.0, clock() - started_at) * 1_000, 1)
+    try:
+        status_code = response.status_code
+    finally:
+        response.close()
+    failure_category = _http_failure_category(
+        status_code,
+        probe_kind=target.probe_kind,
+    )
+    return ProviderReadinessResult(
+        provider=target.provider,
+        state="reachable" if failure_category == "none" else "unreachable",
+        dns_status="resolved",
+        http_status=status_code,
+        latency_ms=elapsed,
+        failure_category=failure_category,
+        probe_kind=target.probe_kind,
+    )
+
+
+def _probe_with_new_session(
+    target: ProviderReadinessTarget,
+    *,
+    timeout: float,
+) -> ProviderReadinessResult:
+    with requests.Session() as session:
+        return probe_provider_readiness(
+            target,
+            session=session,
+            timeout=timeout,
+        )
+
+
+def run_provider_readiness_checks(
+    targets: Sequence[ProviderReadinessTarget] | None = None,
+    *,
+    timeout: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
+    max_workers: int = MAX_READINESS_WORKERS,
+) -> tuple[ProviderReadinessResult, ...]:
+    """Run bounded connectivity checks concurrently in stable catalog order."""
+
+    if not 0 < timeout <= 20:
+        raise ValueError("Readiness timeout must be greater than 0 and at most 20.")
+    if not 1 <= max_workers <= MAX_READINESS_WORKERS:
+        raise ValueError(
+            f"Readiness workers must be from 1 to {MAX_READINESS_WORKERS}."
+        )
+    selected_targets = (
+        tuple(targets)
+        if targets is not None
+        else configured_provider_readiness_targets()
+    )
+    if not selected_targets:
+        return ()
+
+    worker_count = min(max_workers, len(selected_targets))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(_probe_with_new_session, target, timeout=timeout)
+            for target in selected_targets
+        ]
+        return tuple(future.result() for future in futures)
+
+
 __all__ = [
     "CredentialMode",
+    "DEFAULT_READINESS_TIMEOUT_SECONDS",
     "FALLBACK_CHAINS",
+    "MAX_READINESS_WORKERS",
     "ProbeKind",
+    "ProviderReadinessResult",
+    "ProviderReadinessSession",
     "ProviderReadinessTarget",
+    "ReadinessState",
     "configured_provider_readiness_targets",
+    "probe_provider_readiness",
     "provider_readiness_target_map",
+    "run_provider_readiness_checks",
 ]
