@@ -7,6 +7,9 @@ import pytest
 from backend.provider_readiness import (
     FALLBACK_CHAINS,
     ProviderReadinessTarget,
+    ProviderReadinessResult,
+    QUALITY_SOURCE_CHAINS,
+    recommend_provider_readiness,
     configured_provider_readiness_targets,
     provider_readiness_target_map,
 )
@@ -51,6 +54,89 @@ def test_fallback_chains_preserve_the_existing_provider_contract() -> None:
         "gene_disease_literature": ("europe_pmc", "pubmed"),
         "variant_interpretation": ("llm", "llm_fallback_model"),
     }
+    assert QUALITY_SOURCE_CHAINS["classification_context"] == ("genebe",)
+    assert QUALITY_SOURCE_CHAINS["phenotype_extraction"] == ("llm",)
+
+
+def _readiness_result(
+    provider: str,
+    *,
+    state: str,
+    latency_ms: float | None,
+) -> ProviderReadinessResult:
+    return ProviderReadinessResult(
+        provider=provider,
+        state=state,  # type: ignore[arg-type]
+        dns_status="resolved",
+        http_status=200 if state == "reachable" else None,
+        latency_ms=latency_ms,
+        failure_category="none" if state == "reachable" else "timeout",
+        probe_kind="transport",
+    )
+
+
+def test_recommendation_keeps_the_higher_quality_source_when_reachable() -> None:
+    recommendation = recommend_provider_readiness(
+        "variant_annotation",
+        (
+            _readiness_result("vep", state="reachable", latency_ms=100),
+            _readiness_result(
+                "variantvalidator",
+                state="reachable",
+                latency_ms=5,
+            ),
+        ),
+    )
+
+    assert recommendation.provider == "vep"
+    assert recommendation.state == "preferred"
+    assert recommendation.latency_ms == 100
+
+
+def test_recommendation_uses_latency_only_inside_an_equal_quality_tier() -> None:
+    recommendation = recommend_provider_readiness(
+        "variant_annotation",
+        (
+            _readiness_result("vep", state="reachable", latency_ms=100),
+            _readiness_result(
+                "variantvalidator",
+                state="reachable",
+                latency_ms=5,
+            ),
+        ),
+        quality_tiers=(("vep", "variantvalidator"),),
+    )
+
+    assert recommendation.provider == "variantvalidator"
+    assert recommendation.reason == "Highest evidence-quality reachable source."
+
+
+def test_recommendation_prefers_a_reachable_fallback_after_primary_outage() -> None:
+    recommendation = recommend_provider_readiness(
+        "variant_annotation",
+        (
+            _readiness_result("vep", state="unreachable", latency_ms=None),
+            _readiness_result(
+                "variantvalidator",
+                state="reachable",
+                latency_ms=5,
+            ),
+        ),
+    )
+
+    assert recommendation.provider == "variantvalidator"
+    assert recommendation.state == "preferred"
+    assert "Higher-quality source is unreachable" in recommendation.reason
+
+
+def test_recommendation_waits_for_an_unchecked_higher_quality_source() -> None:
+    recommendation = recommend_provider_readiness(
+        "variant_annotation",
+        (_readiness_result("variantvalidator", state="reachable", latency_ms=5),),
+    )
+
+    assert recommendation.provider == "vep"
+    assert recommendation.state == "awaiting_check"
 
 
 def test_catalog_marks_credentials_without_exposing_any_secret() -> None:

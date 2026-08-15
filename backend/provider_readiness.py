@@ -21,6 +21,12 @@ from config import settings
 ProbeKind = Literal["transport", "authenticated"]
 CredentialMode = Literal["none", "optional", "required"]
 ReadinessState = Literal["reachable", "unreachable"]
+RecommendationState = Literal[
+    "preferred",
+    "awaiting_check",
+    "runtime_only",
+    "unavailable",
+]
 DEFAULT_READINESS_TIMEOUT_SECONDS = 5.0
 MAX_READINESS_WORKERS = 5
 
@@ -64,6 +70,17 @@ class ProviderReadinessResult:
     probe_kind: ProbeKind
 
 
+@dataclass(frozen=True)
+class ProviderReadinessRecommendation:
+    """One quality-first, non-clinical source recommendation."""
+
+    capability: str
+    provider: str | None
+    state: RecommendationState
+    reason: str
+    latency_ms: float | None
+
+
 class ProviderReadinessSession(Protocol):
     """Small HTTP surface needed for deterministic readiness tests."""
 
@@ -83,6 +100,27 @@ FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
     "variant_literature": ("litvar2", "europe_pmc", "pubmed"),
     "gene_disease_literature": ("europe_pmc", "pubmed"),
     "variant_interpretation": ("llm", "llm_fallback_model"),
+}
+QUALITY_SOURCE_CHAINS: dict[str, tuple[str, ...]] = {
+    "classification_context": ("genebe",),
+    "variant_annotation": FALLBACK_CHAINS["variant_annotation"],
+    "variant_context": FALLBACK_CHAINS["variant_context"],
+    "clinvar_evidence": FALLBACK_CHAINS["clinvar_evidence"],
+    "cspec_context": FALLBACK_CHAINS["cspec_context"],
+    "gene_disease_validity": ("clingen",),
+    "phenotype_gene_context": FALLBACK_CHAINS["phenotype_gene_context"],
+    "disease_hpo_context": FALLBACK_CHAINS["disease_hpo_context"],
+    "population_frequency": FALLBACK_CHAINS["population_frequency"],
+    "variant_literature": FALLBACK_CHAINS["variant_literature"],
+    "gene_disease_literature": FALLBACK_CHAINS["gene_disease_literature"],
+    "phenotype_extraction": ("llm",),
+    "variant_interpretation": FALLBACK_CHAINS["variant_interpretation"],
+}
+LOCAL_FALLBACK_LABELS = {
+    "local_cspec_cache": "Local CSpec last-known-good cache",
+    "local_hpo_disease": "Local HPO disease annotations",
+    "local_hpo_gene": "Local direct HPO-gene overlap",
+    "llm_fallback_model": "Configured interpretation fallback model",
 }
 
 
@@ -385,18 +423,152 @@ def run_provider_readiness_checks(
         return tuple(future.result() for future in futures)
 
 
+def _quality_tiers(capability: str) -> tuple[tuple[str, ...], ...]:
+    """Return quality tiers, preserving the existing fallback order."""
+
+    try:
+        return tuple(
+            (provider,) for provider in QUALITY_SOURCE_CHAINS[capability]
+        )
+    except KeyError as exc:
+        raise ValueError(f"Unsupported readiness capability: {capability}.") from exc
+
+
+def _lowest_latency(
+    providers: Sequence[str],
+    results: dict[str, ProviderReadinessResult],
+) -> str:
+    """Return the quickest provider inside one equal-quality tier."""
+
+    return min(
+        providers,
+        key=lambda provider: (
+            results[provider].latency_ms is None,
+            results[provider].latency_ms or float("inf"),
+            provider,
+        ),
+    )
+
+
+def recommend_provider_readiness(
+    capability: str,
+    results: Sequence[ProviderReadinessResult],
+    *,
+    quality_tiers: Sequence[Sequence[str]] | None = None,
+) -> ProviderReadinessRecommendation:
+    """Choose a readiness recommendation by quality tier then latency.
+
+    A readiness probe can only recommend a source. It cannot suppress an
+    evidence-provider call or claim fallback provenance; those decisions remain
+    inside the provider-specific pipeline after an operational failure.
+    """
+
+    targets = provider_readiness_target_map()
+    result_by_provider = {result.provider: result for result in results}
+    tiers = (
+        tuple(tuple(tier) for tier in quality_tiers)
+        if quality_tiers is not None
+        else _quality_tiers(capability)
+    )
+    if not tiers or any(not tier for tier in tiers):
+        raise ValueError("Readiness quality tiers must contain providers.")
+
+    for tier_index, tier in enumerate(tiers):
+        network_providers = tuple(
+            provider for provider in tier if provider in targets
+        )
+        reachable = tuple(
+            provider
+            for provider in network_providers
+            if result_by_provider.get(provider) is not None
+            and result_by_provider[provider].state == "reachable"
+        )
+        if reachable:
+            selected = _lowest_latency(reachable, result_by_provider)
+            result = result_by_provider[selected]
+            reason = (
+                "Highest evidence-quality reachable source."
+                if tier_index == 0
+                else "Higher-quality source is unreachable; selected the "
+                "lowest-latency reachable alternative."
+            )
+            return ProviderReadinessRecommendation(
+                capability=capability,
+                provider=selected,
+                state="preferred",
+                reason=reason,
+                latency_ms=result.latency_ms,
+            )
+
+        unchecked = tuple(
+            provider
+            for provider in network_providers
+            if provider not in result_by_provider
+        )
+        if unchecked:
+            return ProviderReadinessRecommendation(
+                capability=capability,
+                provider=unchecked[0],
+                state="awaiting_check",
+                reason=(
+                    "This higher-quality source has not been checked yet."
+                ),
+                latency_ms=None,
+            )
+
+        local_providers = tuple(
+            provider for provider in tier if provider in LOCAL_FALLBACK_LABELS
+        )
+        if local_providers:
+            return ProviderReadinessRecommendation(
+                capability=capability,
+                provider=local_providers[0],
+                state="runtime_only",
+                reason=(
+                    "Local fallback eligibility is validated during the "
+                    "analysis after an operational primary failure."
+                ),
+                latency_ms=None,
+            )
+
+    return ProviderReadinessRecommendation(
+        capability=capability,
+        provider=None,
+        state="unavailable",
+        reason="No configured network source is currently reachable.",
+        latency_ms=None,
+    )
+
+
+def build_provider_readiness_recommendations(
+    results: Sequence[ProviderReadinessResult],
+) -> tuple[ProviderReadinessRecommendation, ...]:
+    """Build stable, quality-first recommendations for every capability."""
+
+    return tuple(
+        recommend_provider_readiness(capability, results)
+        for capability in QUALITY_SOURCE_CHAINS
+    )
+
+
 __all__ = [
     "CredentialMode",
     "DEFAULT_READINESS_TIMEOUT_SECONDS",
     "FALLBACK_CHAINS",
+    "LOCAL_FALLBACK_LABELS",
     "MAX_READINESS_WORKERS",
     "ProbeKind",
     "ProviderReadinessResult",
+    "ProviderReadinessRecommendation",
     "ProviderReadinessSession",
     "ProviderReadinessTarget",
+    "QUALITY_SOURCE_CHAINS",
     "ReadinessState",
+    "RecommendationState",
+    "build_provider_readiness_recommendations",
     "configured_provider_readiness_targets",
     "probe_provider_readiness",
     "provider_readiness_target_map",
+    "recommend_provider_readiness",
     "run_provider_readiness_checks",
 ]

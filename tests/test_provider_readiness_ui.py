@@ -184,6 +184,31 @@ def test_rows_expose_safe_status_latency_and_fallback_role() -> None:
     ]
 
 
+def test_recommendation_rows_keep_quality_and_latency_reasoning_visible() -> None:
+    rows = provider_readiness_ui.build_provider_recommendation_rows(
+        (),
+        recommendations=(
+            provider_readiness_ui.ProviderReadinessRecommendation(
+                capability="variant_annotation",
+                provider="variantvalidator",
+                state="preferred",
+                reason="Higher-quality source is unreachable; selected the lowest-latency reachable alternative.",
+                latency_ms=12.5,
+            ),
+        ),
+    )
+
+    assert rows == [
+        {
+            "Use": "Variant annotation",
+            "Recommended source": "VariantValidator",
+            "Status": "Preferred",
+            "Latency": "12 ms",
+            "Basis": "Higher-quality source is unreachable; selected the lowest-latency reachable alternative.",
+        }
+    ]
+
+
 def test_renderer_runs_checks_only_after_explicit_user_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -209,15 +234,22 @@ def test_renderer_runs_checks_only_after_explicit_user_action(
     monkeypatch.setattr(provider_readiness_ui.st, "info", lambda *_args: None)
     monkeypatch.setattr(provider_readiness_ui.st, "dataframe", fake_dataframe)
     monkeypatch.setattr(provider_readiness_ui.st, "button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "selectbox",
+        lambda *_args, **_kwargs: "variantvalidator",
+    )
 
     provider_readiness_ui.initialize_provider_readiness_state()
     provider_readiness_ui.render_provider_readiness(
         job_active=False,
         checker=lambda: (_result("vep"),),
+        single_checker=lambda target: _result(target.provider),
     )
 
     assert state[provider_readiness_ui.PROVIDER_READINESS_RESULTS_KEY] == (
         _result("vep"),
+        _result("variantvalidator"),
     )
     assert state[provider_readiness_ui.PROVIDER_READINESS_CHECKED_AT_KEY]
     assert observed["dataframe"]

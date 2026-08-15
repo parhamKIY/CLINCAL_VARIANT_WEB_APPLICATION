@@ -9,8 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from backend.provider_readiness import (
+    LOCAL_FALLBACK_LABELS,
+    ProviderReadinessRecommendation,
     ProviderReadinessResult,
     ProviderReadinessTarget,
+    build_provider_readiness_recommendations,
     configured_provider_readiness_targets,
     run_provider_readiness_checks,
 )
@@ -129,6 +132,57 @@ def build_provider_readiness_rows(
     return rows
 
 
+def build_provider_recommendation_rows(
+    results: Sequence[ProviderReadinessResult],
+    recommendations: Sequence[ProviderReadinessRecommendation] | None = None,
+) -> list[dict[str, str]]:
+    """Return safe quality-first recommendations for the readiness screen."""
+
+    targets = {
+        target.provider: target
+        for target in configured_provider_readiness_targets()
+    }
+    selected_recommendations = (
+        tuple(recommendations)
+        if recommendations is not None
+        else build_provider_readiness_recommendations(results)
+    )
+    rows: list[dict[str, str]] = []
+    for recommendation in selected_recommendations:
+        provider_label = (
+            targets[recommendation.provider].label
+            if recommendation.provider in targets
+            else LOCAL_FALLBACK_LABELS.get(
+                recommendation.provider or "",
+                "No available provider",
+            )
+        )
+        status = {
+            "awaiting_check": "Awaiting check",
+            "preferred": "Preferred",
+            "runtime_only": "Runtime fallback",
+            "unavailable": "Unavailable",
+        }[recommendation.state]
+        latency = (
+            f"{recommendation.latency_ms:.0f} ms"
+            if recommendation.latency_ms is not None
+            else "—"
+        )
+        rows.append(
+            {
+                "Use": _CAPABILITY_LABELS.get(
+                    recommendation.capability,
+                    recommendation.capability.replace("_", " "),
+                ),
+                "Recommended source": provider_label,
+                "Status": status,
+                "Latency": latency,
+                "Basis": recommendation.reason,
+            }
+        )
+    return rows
+
+
 def _status_style(value: object) -> str:
     if value == "Reachable":
         return "color: #1b7f3a; font-weight: 600"
@@ -137,12 +191,48 @@ def _status_style(value: object) -> str:
     return "color: #667085"
 
 
+def _recommendation_status_style(value: object) -> str:
+    if value == "Preferred":
+        return "color: #1b7f3a; font-weight: 600"
+    if value == "Unavailable":
+        return "color: #b42318; font-weight: 600"
+    return "color: #667085"
+
+
+def _replace_provider_result(
+    existing: Sequence[ProviderReadinessResult],
+    replacement: ProviderReadinessResult,
+) -> tuple[ProviderReadinessResult, ...]:
+    """Replace one manual recheck result without discarding other probes."""
+
+    results = {
+        result.provider: result for result in existing
+    }
+    results[replacement.provider] = replacement
+    return tuple(
+        results[target.provider]
+        for target in configured_provider_readiness_targets()
+        if target.provider in results
+    )
+
+
+def _check_one_provider(
+    target: ProviderReadinessTarget,
+) -> ProviderReadinessResult:
+    """Run one manual recheck through the same bounded backend policy."""
+
+    return run_provider_readiness_checks((target,))[0]
+
+
 def render_provider_readiness(
     *,
     job_active: bool,
     checker: Callable[[], tuple[ProviderReadinessResult, ...]] = (
         run_provider_readiness_checks
     ),
+    single_checker: Callable[
+        [ProviderReadinessTarget], ProviderReadinessResult
+    ] = _check_one_provider,
 ) -> None:
     """Render the user-triggered pre-upload connectivity table."""
 
@@ -165,6 +255,33 @@ def render_provider_readiness(
             )
 
         results = tuple(st.session_state[PROVIDER_READINESS_RESULTS_KEY])
+        targets = configured_provider_readiness_targets()
+        target_by_provider = {target.provider: target for target in targets}
+        selected_provider = st.selectbox(
+            "Manual provider recheck",
+            tuple(target_by_provider),
+            format_func=lambda provider: target_by_provider[provider].label,
+            key="manual_provider_recheck",
+            disabled=job_active,
+            help=(
+                "Rechecks one provider only. This does not override the "
+                "clinical evidence pipeline."
+            ),
+        )
+        if st.button(
+            "Recheck selected provider",
+            key="recheck_selected_provider",
+            icon=":material/refresh:",
+            disabled=job_active,
+        ):
+            with st.spinner("Rechecking provider...", show_time=True):
+                refreshed = single_checker(target_by_provider[selected_provider])
+            results = _replace_provider_result(results, refreshed)
+            st.session_state[PROVIDER_READINESS_RESULTS_KEY] = results
+            st.session_state[PROVIDER_READINESS_CHECKED_AT_KEY] = (
+                datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            )
+
         checked_at = st.session_state[PROVIDER_READINESS_CHECKED_AT_KEY]
         if checked_at is None:
             st.info("Provider readiness has not been checked in this session.")
@@ -186,4 +303,27 @@ def render_provider_readiness(
                 "Details",
             ),
             key="provider_readiness_table",
+        )
+        st.caption(
+            "Automatic preference uses source quality first and latency only "
+            "between equal-quality reachable sources. It is a readiness "
+            "recommendation; normal pipeline fallback provenance is unchanged."
+        )
+        recommendation_table = pd.DataFrame(
+            build_provider_recommendation_rows(results)
+        )
+        st.dataframe(
+            recommendation_table.style.map(
+                _recommendation_status_style,
+                subset=["Status"],
+            ),
+            hide_index=True,
+            column_order=(
+                "Use",
+                "Recommended source",
+                "Status",
+                "Latency",
+                "Basis",
+            ),
+            key="provider_readiness_recommendations",
         )
