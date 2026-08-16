@@ -2,11 +2,11 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stages 1–2 are COMPLETE / APPROVED; Stage 3 is COMPLETE / PENDING review.
+**Status:** Active execution roadmap. Stages 1–3 are COMPLETE / APPROVED.
 
 **Current completed stage:** Stage 3 — Shared MedGen client plus disease/HPO role.
 
-**Current implementation permission:** NONE — Stage 3 is complete and awaiting architecture review.
+**Current implementation permission:** NONE — Stage 3 is approved; Stage 4 requires explicit authorization.
 
 **Next eligible stage:** Stage 4 — MedGen phenotype-gene supporting evidence, only after Stage 3 review approval and explicit authorization.
 
@@ -384,8 +384,9 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 | Stage | Status | Review | Authorization |
 |---|---|---|---|
 | 1 — ERepo contract freeze | COMPLETE | APPROVED | CLOSED |
-| 2 — ERepo integration | COMPLETE | PENDING | STOP FOR REVIEW |
-| 3–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until Stage 2 approval |
+| 2 — ERepo integration | COMPLETE | APPROVED | CLOSED |
+| 3 — Shared MedGen disease/HPO role | COMPLETE | APPROVED | CLOSED |
+| 4–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit Stage 4 authorization |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -450,11 +451,11 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stage 1 is not technically required; Stage 2 is independent but remains earlier in the approved sequence.
 - **Definition of Done:** MedGen disease/HPO context is evidence-gap-driven, bounded, source-separated, provenance-complete, and cannot overwrite MyDisease.
 - **Status:** COMPLETE
-- **Review:** PENDING
+- **Review:** APPROVED
 - **Implementation notes:** The bounded shared `backend/medgen.py` NCBI E-utilities client remains behind `MEDGEN_BASE_URL`, `MEDGEN_TIMEOUT`, `MEDGEN_MAX_RETRIES`, and `ENABLE_MEDGEN`. Its `GENE[All Fields]` ESearch result is discovery-only: an ESummary candidate is accepted only when ConceptMeta `AssociatedGenes` deterministically contains the exact normalized query symbol. Candidates with missing association metadata or a non-matching symbol are bounded diagnostics, never accepted disease evidence. Structured ConceptMeta source metadata and deterministic HPO-ID feature overlaps are retained when exposed; absent accepted HPO input keeps the result explicitly gene-only. It performs one normalized same-gene query after the source-labelled MyDisease disease/HPO node is insufficient and fans immutable additive context back to input-ordered variants. Historical EvidenceObject `2.5` records remain readable without MedGen context; the MedGen context schema is additive `1.1` and its legacy `1.0` representation remains readable. MedGen cannot overwrite MyDisease, populate Phen2Gene rank/score, populate GenCC validity, or make a causal/pathogenicity claim. No SQLite or pipeline schema migration was made.
 - **Validation evidence:** `tests/test_medgen.py` passed (`17 passed in 0.13s`) for exact association acceptance/rejection, structured ConceptMeta provenance, accepted/no accepted HPO semantics, primary no-match and partial/operational evidence-gap triggers, prerequisite non-triggering, deduplication/fan-out, timeout/`403`/`429`, malformed/schema-drift responses, EvidenceObject serialization, semantic isolation, shared-upstream retention, and legacy MedGen-context readability. The focused Stage 2/3, persistence, and ERC suite passed (`50 passed in 24.61s`); compilation passed. `python tests/run_stage78_resilience_acceptance.py` completed with `1308 passed, 2 failed, 6 skipped in 151.94s`; the only failures remain the manual-table Streamlit dataframe count and missing `docs/acceptance_failures_v1.md`. Bounded public live validation before the correction used only `SCN1A` and `FBN1`; raw provider responses and private data were not retained.
 
-**STOP FOR REVIEW.**
+**STAGE CLOSED — APPROVED. Stage 4 requires explicit authorization.**
 
 ### Stage 4 — MedGen phenotype-gene supporting evidence
 
