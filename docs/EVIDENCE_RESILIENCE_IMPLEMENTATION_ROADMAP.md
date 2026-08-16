@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stages 1–5 and Stage 6A are approved; Stage 6B is COMPLETE / PENDING architecture review.
+**Status:** Active execution roadmap. Stages 1–6 are approved; Stage 7 is COMPLETE / PENDING architecture review.
 
-**Current completed stage:** Stage 6B — controlled active promotion of exact field-level annotation evidence.
+**Current completed stage:** Stage 7 — runtime-only per-variant Evidence Coverage Calculator.
 
-**Current implementation permission:** NONE — Stage 6B architecture review is pending.
+**Current implementation permission:** NONE — Stage 7 architecture review is pending.
 
-**Next eligible stage:** NONE — Stage 7 remains unauthorized pending Stage 6B architecture review.
+**Next eligible stage:** NONE — Stage 8 remains unauthorized pending Stage 7 architecture review.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -386,7 +386,9 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 | 1 — ERepo contract freeze | COMPLETE | APPROVED | CLOSED |
 | 2 — ERepo integration | COMPLETE | APPROVED | CLOSED |
 | 3 — Shared MedGen disease/HPO role | COMPLETE | APPROVED | CLOSED |
-| 4–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit Stage 4 authorization |
+| 4–6 | COMPLETE | APPROVED | CLOSED |
+| 7 — Evidence Coverage Calculator | COMPLETE | PENDING | CLOSED pending architecture review |
+| 8–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit authorization |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -520,11 +522,11 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stages 2–5 are independent of composition but precede it by approved order.
 - **Definition of Done:** Stage 6A shadow/observation comparisons pass first. Any subsequently promoted canonical field requires separate Stage 6B authorization, exact validation, transcript coherence, provenance completeness, and no unexplained Golden Case regression.
 - **Stage 6A — SHADOW / OBSERVATION:** COMPLETE / APPROVED
-- **Stage 6B — CONTROLLED ACTIVE PROMOTION:** COMPLETE
-- **Architecture Review:** PENDING
-- **Stage 7:** NOT STARTED
+- **Stage 6B — CONTROLLED ACTIVE PROMOTION:** COMPLETE / APPROVED
+- **Architecture Review:** APPROVED
+- **Stage 7:** COMPLETE / PENDING architecture review
 - **Implementation notes:** Added `backend/shadow_composition.py`, a pure bounded composer that accepts explicit VEP state/field gaps and normalized fallback evidence without inspecting VEP values. It keeps `usable`, `operational_failure`, `valid_no_match`, `partial`, and `insufficient` distinct; requires exact assembly/CPRA proof per provider; requires exact versioned transcript equality for cross-provider coherence; binds HGVS.c/HGVS.p to one selected provider transcript context; permits GeneBe consequence only from an exact transcript-bound normalized consequence record with one recognized SO term; and rejects raw effect-only, unknown, ambiguous, and unproven identity evidence. `impact`, `MANE`, and canonical remain structurally `NOT_COMPOSED`. `backend/report.py` persists optional `shadow_composition` schema `1.0` while EvidenceObject remains `2.5`; `backend/variant_interpretation.py` removes that node through the real semantic prompt projection. The production path creates no shadow for usable VEP and makes no additional VariantValidator/GeneBe call for auditing. No canonical annotation, readiness, disposition, UI, SQLite schema, or pipeline schema behavior was changed.
-- **Stage 6B implementation notes:** Added `backend/active_annotation_promotion.py` and an optional `annotation_promotion` EvidenceObject node (`1.0`) without changing EvidenceObject `2.5`, SQLite `4`, or pipeline `3.2`. For a legacy VariantValidator VEP-fallback candidate, the active EvidenceObject projection first removes inherited fallback annotation values; promotion then restores only `gene`, and only restores `transcript`/`HGVS.c`/`HGVS.p` as one complete exact, versioned, same-provider-record bundle. Each promoted field retains actual source, exact CPRA proof, transcript context where present, composable state, promotion state, policy, and limitation. A divergent fallback gene blocks gene selection; a competing or mismatched transcript, unversioned transcript, mismatched HGVS.c accession/version, missing HGVS.p, or cross-provider transcript conflict blocks the complete transcript/HGVS bundle. VEP-success output remains unmodified. GeneBe consequence, impact, MANE, canonical, gene ID, readiness, coverage, disposition, UI, SQLite, and pipeline behavior remain unpromoted/unchanged. The Stage 6A shadow node remains excluded from the LLM projection; only active canonical fields naturally reach it.
+- **Stage 6B implementation notes:** Added `backend/active_annotation_promotion.py` and an optional `annotation_promotion` EvidenceObject node (`1.0`) without changing EvidenceObject `2.5`, SQLite `4`, or pipeline `3.2`. The legacy direct VariantValidator canonical projection is superseded by the reviewed Stage 6 gated-promotion path; its normalized source evidence remains intact. For a legacy VariantValidator VEP-fallback candidate, the active EvidenceObject projection first removes inherited fallback annotation values; promotion then restores only `gene`, and only restores `transcript`/`HGVS.c`/`HGVS.p` as one complete exact, versioned, same-provider-record bundle. Each promoted field retains actual source, exact CPRA proof, transcript context where present, composable state, promotion state, policy, and limitation. A divergent fallback gene blocks gene selection; a competing or mismatched transcript, unversioned transcript, mismatched HGVS.c accession/version, missing HGVS.p, or cross-provider transcript conflict blocks the complete transcript/HGVS bundle. VEP-success output remains unmodified. GeneBe consequence, impact, MANE, canonical, gene ID, readiness, coverage, disposition, UI, SQLite, and pipeline behavior remain unpromoted/unchanged. The Stage 6A shadow node remains excluded from the LLM projection; only active canonical fields naturally reach it.
 - **Validation evidence:** `tests/test_stage6b_active_promotion.py` added deterministic exact-identity, actual-source, VEP-success, explicit versioned-bundle, unversioned, accession/version mismatch, cross-transcript, valid-no-match, partial, conflict, structural-block, and LLM-isolation coverage. Focused Stage 6A/6B, annotation, EvidenceObject, Golden, and persistence tests passed `265 passed, 1 skipped`; relevant Stage 1–5 resilience tests passed `84`; the frozen Stage 6A counterfactual artifact passed its deterministic check. `tests/run_stage78_resilience_acceptance.py` completed with `1382 passed, 2 failed, 6 skipped`; the two failures are the frozen baseline failures only: `TestFrontendFoundation::test_manual_table_executes_pipeline` (expects 6 Streamlit dataframes, observes 8) and `test_acceptance_registry_freezes_all_stage79_defects` (missing `docs/acceptance_failures_v1.md`).
 
 **STOP FOR REVIEW.**
@@ -545,10 +547,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Collapsing non-equivalent semantic nodes in an umbrella summary.
 - **Dependencies:** Stages 2–6.
 - **Definition of Done:** Coverage is deterministic, per-variant, provenance-linked, keeps raw semantic nodes distinct, and initially remains observational without changing readiness/LLM gating.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Added `backend/evidence_coverage.py`, a bounded runtime-only calculator with coverage schema `1.0`. It derives one input-ordered record per EvidenceObject without changing EvidenceObject `2.5`, SQLite `4`, or pipeline `3.2`. Its twelve semantic targets are annotation, automated ACMG context, ERepo expert-curated context, ClinVar clinical evidence, CSpec context, GenCC validity, MedGen gene-disease support, Phen2Gene ranking, MedGen/local phenotype support, MyDisease/MedGen disease-HPO context, population evidence, and literature evidence. It records semantic state, evidence paths, detailed retrieval states, direct/composed annotation state, actual sources, existing shared-upstream groups, limitations, and missing targets. It counts only active canonical annotation fields and approved promoted fields; shadow-only candidates never count. Provider operational state is retained as retrieval detail rather than used as a coverage score. The module is intentionally not wired into readiness, interpretation eligibility, prompts, canonical evidence, provider invocation, persistence, or UI.
+- **Validation evidence:** TDD began with the expected missing-module import failure, then `tests/test_stage7_evidence_coverage.py` passed `22`. The Stage 7/6A/6B, annotation/EvidenceObject, Stage 1–5 resilience, ERC-01..ERC-07, and schema-4 persistence/recovery regression command passed `368 passed, 1 skipped in 18.79s`. ERC-01..ERC-07 passed `1 passed in 6.15s`; schema-4 persistence/recovery passed `8 passed in 5.69s`. `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets, and its Stage 78 scenario (`1 passed, 1411 deselected in 3.10s`), then completed with `1404 passed, 2 failed, 6 skipped in 155.98s`. The only failures are the frozen baseline manual-table Streamlit dataframe count (`expected 6`, observed `8`) and missing `docs/acceptance_failures_v1.md` registry; no Stage 7 failure occurred.
 
 **STOP FOR REVIEW.**
 
