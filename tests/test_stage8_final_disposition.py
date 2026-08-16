@@ -21,7 +21,10 @@ from tests.test_stage6b_active_promotion import _fallback_candidate
 from tests.test_pipeline import TestEvidenceObject as EvidenceFactory
 
 
-pytestmark = pytest.mark.stage8_final_disposition
+pytestmark = [
+    pytest.mark.stage8_final_disposition,
+    pytest.mark.stage59_testing_v3,
+]
 
 
 def _evidence() -> dict[str, object]:

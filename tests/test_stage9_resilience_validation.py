@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 
+pytestmark = pytest.mark.stage59_testing_v3
+
+
 RUNNER_PATH = Path(__file__).with_name("run_stage9_live_validation.py")
 SPEC = importlib.util.spec_from_file_location("stage9_live_runner", RUNNER_PATH)
 assert SPEC is not None and SPEC.loader is not None

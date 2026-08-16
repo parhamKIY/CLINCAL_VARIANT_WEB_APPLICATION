@@ -19,6 +19,9 @@ from backend.variant_interpretation import _build_prompt
 from tests.test_pipeline import TestEvidenceObject as EvidenceFactory
 
 
+pytestmark = pytest.mark.stage59_testing_v3
+
+
 def _evidence() -> dict[str, object]:
     return deepcopy(EvidenceFactory._complete_evidence_object())
 

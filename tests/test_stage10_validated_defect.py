@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from backend.evidence_readiness import build_evidence_readiness_audit
 from backend.evidence_coverage import build_evidence_coverage
 from backend.medgen import enrich_with_medgen_gene_disease
@@ -18,6 +20,9 @@ from tests.test_medgen_gene_disease import (
     _mock_response,
     _variant,
 )
+
+
+pytestmark = pytest.mark.stage59_testing_v3
 
 
 def _prompt_contains_rejected_medgen_diagnostics(prompt: str) -> bool:

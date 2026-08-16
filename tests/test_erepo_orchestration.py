@@ -15,6 +15,7 @@ from config import settings
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "erepo"
+pytestmark = pytest.mark.stage59_testing_v3
 
 
 class _Response:

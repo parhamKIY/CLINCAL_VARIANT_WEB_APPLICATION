@@ -18,6 +18,7 @@ from backend.report import build_evidence_object, validate_evidence_object
 
 FIXTURES = Path(__file__).parent / "fixtures" / "erepo"
 EXACT_HGVS = "NC_000012.12:g.102894804T>A"
+pytestmark = pytest.mark.stage59_testing_v3
 
 
 class _Response:

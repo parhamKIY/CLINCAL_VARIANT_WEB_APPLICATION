@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from backend.report import build_evidence_object
 from backend.shadow_composition import shadow_free_evidence_for_llm
 from tests.test_pipeline import TestEvidenceObject as EvidenceFactory
@@ -19,6 +21,9 @@ IDENTITY = {
 TRANSCRIPT = "NM_000001.5"
 HGVS_C = "NM_000001.5:c.100A>G"
 HGVS_P = "NP_000001.1:p.(Lys34Arg)"
+
+
+pytestmark = pytest.mark.stage59_testing_v3
 
 
 def _genebe_source(

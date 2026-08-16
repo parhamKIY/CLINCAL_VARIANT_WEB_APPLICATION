@@ -25,6 +25,9 @@ from backend.shadow_composition import (
     shadow_free_evidence_for_llm,
     validate_shadow_composition,
 )
+
+
+pytestmark = pytest.mark.stage59_testing_v3
 from backend.variant_interpretation import _build_prompt
 from tests.test_pipeline import (
     FakeResponse,

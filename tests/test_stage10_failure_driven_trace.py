@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from backend.evidence_readiness import build_evidence_readiness_audit, validate_evidence_readiness_audit
 from backend.llm import LLMClient
 from backend.report import build_evidence_object
@@ -11,6 +13,9 @@ from backend.variant_interpretation import interpret_variants
 from tests.stage10_trace import TRACE_SCHEMA_VERSION, build_redacted_trace
 from tests.test_pipeline import FakeLLMAdapter, TestEvidenceObject as EvidenceFactory, _variant_interpretation_response
 from tests.test_stage6b_active_promotion import _fallback_candidate, _genebe_source
+
+
+pytestmark = pytest.mark.stage59_testing_v3
 
 
 def _audit(evidence: dict[str, object], state: str | None = None) -> dict[str, object]:

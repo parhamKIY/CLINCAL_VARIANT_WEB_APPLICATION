@@ -12,6 +12,9 @@ from backend.medgen import enrich_with_medgen
 from backend.report import build_evidence_object, validate_evidence_object
 
 
+pytestmark = pytest.mark.stage59_testing_v3
+
+
 class _Response:
     def __init__(self, status_code: int, payload: object) -> None:
         self.status_code = status_code
