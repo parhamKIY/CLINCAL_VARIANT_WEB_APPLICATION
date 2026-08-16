@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stage 1 is COMPLETE / APPROVED; Stage 2 has not yet been authorized.
+**Status:** Active execution roadmap. Stage 1 is COMPLETE / APPROVED; Stage 2 is COMPLETE / PENDING review.
 
-**Current completed stage:** Stage 1 — Freeze ERepo response and exact-identity contract.
+**Current completed stage:** Stage 2 — ERepo integration.
 
-**Current implementation permission:** SAFETY BASELINE / ROADMAP PREPARATION ONLY. No Stage 2 production implementation is authorized by this document update.
+**Current implementation permission:** NONE — Stage 2 is complete and awaiting architecture review.
 
-**Next eligible stage:** Stage 2 — ERepo integration, only after the pre-Stage-2 rollback/regression safety gate is satisfied and explicit approval is given.
+**Next eligible stage:** Stage 3 — Shared MedGen client plus disease/HPO role, only after Stage 2 review approval and explicit authorization.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -384,8 +384,8 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 | Stage | Status | Review | Authorization |
 |---|---|---|---|
 | 1 — ERepo contract freeze | COMPLETE | APPROVED | CLOSED |
-| 2 — ERepo integration | NOT_STARTED | NOT_REQUIRED | NOT YET AUTHORIZED — Section 8.9 safety gate first |
-| 3–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until prior stage approval |
+| 2 — ERepo integration | COMPLETE | PENDING | STOP FOR REVIEW |
+| 3–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until Stage 2 approval |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -426,10 +426,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Strict classification audit currently expects three source outcomes; extension must preserve semantic separation and correlation rules.
 - **Dependencies:** Stage 1 APPROVED plus completion/review of the pre-Stage-2 safety gate in Section 8.9.
 - **Definition of Done:** Exact ERepo context is source-attributed, serializable, persistent, non-equivalent to GeneBe, covered by deterministic tests, and introduces no unexplained regression in the frozen Golden Cases or pre-Stage-2 baseline.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Added the bounded `backend/erepo.py` client behind `EREPO_BASE_URL`, `EREPO_TIMEOUT`, `EREPO_MAX_RETRIES`, and `ENABLE_EREPO`. It executes only approved exact genomic-HGVS, ClinVar Variation ID, and transcript-HGVS discovery strategies; it accepts a record only after exact genomic-HGVS and detailed UUID/document-version verification. The resulting additive `schema_version: "1.0"` `expert_curated_variant_context` is source-attributed to `clingen_erepo`, compact, serializable, lineage-tracked, reference-model projected, and separately conflict-audited. It does not populate GeneBe automated ACMG fields, replace direct ClinVar, or change readiness. Historical EvidenceObjects without the optional context remain valid and project an empty context.
+- **Validation evidence:** `tests/test_erepo.py` passed (`10 passed`), covering exact success, all-strategy final no-match, timeout, `403`, `429`, malformed success, assembly/identity mismatch, detailed UUID/version mismatches, deterministic padded-indel representation, incomplete identity, source attribution, persistence-safe EvidenceObject validation, conflict retention, and reference projection. The focused EvidenceObject/annotation suite passed (`221 passed, 1 skipped`); Stage 105 Golden Cases passed (`4 passed`); Stage 99 persistence recovery passed (`8 passed`); resilience/Stage-1 compatibility checks passed (`6 passed`). `python tests/run_stage78_resilience_acceptance.py` compiled and passed its secrets/Stage-78 gate, then ran `1280 passed, 2 failed, 6 skipped in 150.66s`; both failures match the recorded pre-Stage-2 baseline: the manual-table Streamlit dataframe-count assertion and the missing `docs/acceptance_failures_v1.md` registry. Bounded live verification on 2026-08-16: `NC_000012.12:g.102894804T>A` returned accepted record `CA229507`; `NC_000001.11:g.1A>G` returned structured final `no_match`.
 
 **STOP FOR REVIEW.**
 

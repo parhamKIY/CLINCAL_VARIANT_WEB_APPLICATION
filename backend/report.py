@@ -440,6 +440,9 @@ EVIDENCE_ANNOTATION_FIELDS = frozenset(
 EVIDENCE_PATHOGENICITY_FIELDS = frozenset(
     EvidencePathogenicity.__required_keys__
 )
+EVIDENCE_OPTIONAL_PATHOGENICITY_FIELDS = frozenset(
+    {"expert_curated_variant_context"}
+)
 EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS = frozenset(
     EvidencePhenotypeRelationship.__required_keys__
 )
@@ -962,6 +965,135 @@ def _validate_evidence_lineage(provenance: dict[str, Any]) -> None:
         )
 
 
+def _validate_erepo_context(value: object) -> None:
+    """Validate the optional, versioned ERepo context without raw payloads."""
+
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity.expert_curated_variant_context must be a dictionary."
+        )
+    expected = {
+        "schema_version",
+        "provider",
+        "status",
+        "retrieval_state",
+        "context_available",
+        "records",
+        "strategy_results",
+        "capability_result",
+    }
+    if set(value) != expected:
+        raise EvidenceObjectError(
+            "evidence.pathogenicity.expert_curated_variant_context fields are invalid."
+        )
+    if value["schema_version"] != "1.0" or value["provider"] != "clingen_erepo":
+        raise EvidenceObjectError("ERepo context schema or provider is invalid.")
+    if not isinstance(value["status"], str) or not isinstance(
+        value["retrieval_state"], str
+    ) or not isinstance(value["context_available"], bool):
+        raise EvidenceObjectError("ERepo context state is invalid.")
+    records = value["records"]
+    strategies = value["strategy_results"]
+    if not isinstance(records, list) or len(records) > 10:
+        raise EvidenceObjectError("ERepo records must be a bounded list.")
+    if not isinstance(strategies, list) or len(strategies) > 7:
+        raise EvidenceObjectError("ERepo strategies must be a bounded list.")
+    if value["context_available"] != bool(records):
+        raise EvidenceObjectError("ERepo context availability is inconsistent.")
+    try:
+        capability = validate_capability_result(value["capability_result"])
+    except ProviderContractError as exc:
+        raise EvidenceObjectError("ERepo capability result is invalid.") from exc
+    if (
+        capability["capability"] != "expert_curated_variant_context"
+        or capability["provider"] != "clingen_erepo"
+    ):
+        raise EvidenceObjectError("ERepo capability attribution is invalid.")
+    for index, record in enumerate(records):
+        path = f"evidence.pathogenicity.expert_curated_variant_context.records[{index}]"
+        if not isinstance(record, dict):
+            raise EvidenceObjectError(f"{path} must be a dictionary.")
+        required = {"uuid", "ca_id", "doc_version", "acceptance_state", "query_strategy", "query_identifier"}
+        if not required <= set(record) or set(record) - {
+            *required,
+            "classification", "condition", "mondo_id", "mode_of_inheritance",
+            "expert_panel", "approved_date", "published_date", "met_codes",
+            "unmet_codes", "clinvar_variation_id", "preferred_variant_title",
+            "summary_description", "statement_outcome", "assertion_method",
+            "detail_attempts", "detail_http_status",
+        }:
+            raise EvidenceObjectError(f"{path} contains unsupported fields.")
+        for field in required:
+            _validate_required_string(record[field], f"{path}.{field}")
+        if record["acceptance_state"] not in {
+            "EXACT_MATCH", "EXACT_MATCH_EQUIVALENT_REPRESENTATION",
+        }:
+            raise EvidenceObjectError(f"{path}.acceptance_state is invalid.")
+        for field in (
+            "classification", "condition", "mondo_id", "mode_of_inheritance",
+            "expert_panel", "approved_date", "published_date",
+            "clinvar_variation_id", "preferred_variant_title",
+            "summary_description", "statement_outcome", "assertion_method",
+        ):
+            if field in record:
+                _validate_optional_string(record[field], f"{path}.{field}")
+        for field in ("met_codes", "unmet_codes"):
+            if field in record:
+                _validate_unique_strings(record[field], f"{path}.{field}")
+        for field in ("detail_attempts", "detail_http_status"):
+            if field in record and (
+                not isinstance(record[field], int)
+                or isinstance(record[field], bool)
+                or record[field] < 0
+            ):
+                raise EvidenceObjectError(f"{path}.{field} is invalid.")
+    for index, strategy in enumerate(strategies):
+        path = f"evidence.pathogenicity.expert_curated_variant_context.strategy_results[{index}]"
+        if not isinstance(strategy, dict):
+            raise EvidenceObjectError(f"{path} must be a dictionary.")
+        required = {
+            "strategy_id", "query_column", "query_identifier", "identifier_provenance",
+            "endpoint", "retrieved_at", "candidate_count", "candidate_rejections",
+            "accepted_uuids", "status", "attempts", "http_status",
+        }
+        if set(strategy) != required:
+            raise EvidenceObjectError(f"{path} fields are invalid.")
+        for field in ("strategy_id", "query_column", "query_identifier", "endpoint", "retrieved_at", "status"):
+            _validate_required_string(strategy[field], f"{path}.{field}")
+        if not isinstance(strategy["identifier_provenance"], list) or not isinstance(
+            strategy["candidate_rejections"], list
+        ) or not isinstance(strategy["accepted_uuids"], list):
+            raise EvidenceObjectError(f"{path} lists are invalid.")
+        if not isinstance(strategy["candidate_count"], int) or isinstance(strategy["candidate_count"], bool) or strategy["candidate_count"] < 0:
+            raise EvidenceObjectError(f"{path}.candidate_count is invalid.")
+        for field in ("candidate_rejections", "accepted_uuids"):
+            _validate_unique_strings(strategy[field], f"{path}.{field}")
+        for provenance_index, provenance in enumerate(
+            strategy["identifier_provenance"]
+        ):
+            provenance_path = f"{path}.identifier_provenance[{provenance_index}]"
+            if not isinstance(provenance, dict) or set(provenance) != {
+                "source", "scope", "validation"
+            }:
+                raise EvidenceObjectError(f"{provenance_path} is invalid.")
+            for field in ("source", "scope", "validation"):
+                _validate_required_string(
+                    provenance[field], f"{provenance_path}.{field}"
+                )
+        for field in ("attempts",):
+            if not isinstance(strategy[field], int) or isinstance(strategy[field], bool) or strategy[field] < 0:
+                raise EvidenceObjectError(f"{path}.{field} is invalid.")
+        if strategy["http_status"] is not None and (
+            not isinstance(strategy["http_status"], int)
+            or isinstance(strategy["http_status"], bool)
+            or strategy["http_status"] < 100
+            or strategy["http_status"] > 599
+        ):
+            raise EvidenceObjectError(f"{path}.http_status is invalid.")
+
+
 def _validate_v2_sections(value: dict[str, Any]) -> None:
     """Validate the additive Evidence Object V2 sections."""
 
@@ -1038,11 +1170,16 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         raise EvidenceObjectError(
             "evidence.pathogenicity must be a dictionary."
         )
-    _validate_exact_fields(
-        pathogenicity,
-        EVIDENCE_PATHOGENICITY_FIELDS,
-        "evidence.pathogenicity",
-    )
+    pathogenicity_fields = set(pathogenicity)
+    if not (
+        EVIDENCE_PATHOGENICITY_FIELDS <= pathogenicity_fields
+        and pathogenicity_fields
+        <= EVIDENCE_PATHOGENICITY_FIELDS
+        | EVIDENCE_OPTIONAL_PATHOGENICITY_FIELDS
+    ):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity fields do not match the contract."
+        )
     _validate_optional_string(
         pathogenicity["automated_acmg_classification"],
         "evidence.pathogenicity.automated_acmg_classification",
@@ -1076,6 +1213,9 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         raise EvidenceObjectError(
             "evidence.pathogenicity.cspec_context must be a list."
         )
+    _validate_erepo_context(
+        pathogenicity.get("expert_curated_variant_context")
+    )
     _validate_unique_strings(
         pathogenicity["warnings"],
         "evidence.pathogenicity.warnings",
@@ -2326,25 +2466,47 @@ def _build_clinical_evidence(evidence: EvidenceObject) -> str:
     ]
     if not evidence["clingen_curations"]:
         lines.append("- Not available in the supplied evidence.")
-        return "\n".join(lines)
-
-    for curation in evidence["clingen_curations"]:
-        curation_parts = [
-            f"Disease: {_markdown_value(curation['disease'])}",
-            (
-                "Disease ID: "
-                f"{_markdown_value(curation['disease_id'])}"
-            ),
-            (
-                "Classification: "
-                f"{_markdown_value(curation['classification'])}"
-            ),
-            (
-                "Mode of inheritance: "
-                f"{_markdown_value(curation['mode_of_inheritance'])}"
-            ),
-        ]
-        lines.append(f"- {'; '.join(curation_parts)}")
+    else:
+        for curation in evidence["clingen_curations"]:
+            curation_parts = [
+                f"Disease: {_markdown_value(curation['disease'])}",
+                (
+                    "Disease ID: "
+                    f"{_markdown_value(curation['disease_id'])}"
+                ),
+                (
+                    "Classification: "
+                    f"{_markdown_value(curation['classification'])}"
+                ),
+                (
+                    "Mode of inheritance: "
+                    f"{_markdown_value(curation['mode_of_inheritance'])}"
+                ),
+            ]
+            lines.append(f"- {'; '.join(curation_parts)}")
+    erepo_context = evidence["pathogenicity"].get(
+        "expert_curated_variant_context",
+        {},
+    )
+    if isinstance(erepo_context, dict):
+        lines.extend(("", "### ClinGen ERepo expert-curated context"))
+        erepo_records = erepo_context.get("records")
+        if not isinstance(erepo_records, list) or not erepo_records:
+            lines.append(
+                "- No accepted exact ERepo record is available for this variant."
+            )
+        else:
+            for record in erepo_records:
+                if not isinstance(record, dict):
+                    continue
+                lines.append(
+                    "- Classification: "
+                    f"{_markdown_value(record.get('classification'))}; "
+                    "condition: "
+                    f"{_markdown_value(record.get('condition'))}; "
+                    "record: "
+                    f"{_markdown_value(record.get('ca_id'))}."
+                )
     return "\n".join(lines)
 
 
@@ -3588,6 +3750,7 @@ def _build_evidence_lineage(
     clinvar: dict[str, Any],
     clingen: dict[str, Any],
     cspec: dict[str, Any],
+    erepo: dict[str, Any],
     phen2gene: dict[str, Any],
     mydisease: dict[str, Any],
     conditional_enrichment: dict[str, Any],
@@ -3896,6 +4059,34 @@ def _build_evidence_lineage(
                 ),
             )
         )
+    if erepo:
+        context = _candidate_mapping(
+            erepo.get("expert_curated_variant_context")
+        )
+        erepo_records = context.get("records")
+        if isinstance(erepo_records, list):
+            for index, record in enumerate(erepo_records):
+                if not isinstance(record, dict):
+                    continue
+                records.append(
+                    _lineage_record(
+                        (
+                            "pathogenicity.expert_curated_variant_context."
+                            f"records[{index}]"
+                        ),
+                        {
+                            "provider": _lineage_text(erepo.get("provider"))
+                            or "ClinGen ERepo",
+                            "provider_version": record.get("doc_version"),
+                            "retrieved_at": erepo.get("retrieved_at"),
+                            "status": context.get("status"),
+                        },
+                        default_provider="ClinGen ERepo",
+                        default_upstream_sources=("ClinGen ERepo",),
+                        derivation="direct",
+                        evidence_present=True,
+                    )
+                )
     literature = _candidate_mapping(
         conditional_enrichment.get("literature")
     )
@@ -4279,6 +4470,10 @@ def _build_v2_sections(
     clinvar = _candidate_mapping(sources.get("clinvar"))
     clingen = _candidate_mapping(sources.get("clingen"))
     cspec = _candidate_mapping(sources.get("cspec"))
+    erepo = _candidate_mapping(sources.get("erepo"))
+    erepo_context = _candidate_mapping(
+        erepo.get("expert_curated_variant_context")
+    )
     phen2gene = _candidate_mapping(candidate.get("phen2gene"))
     mydisease = _compact_mydisease_context(
         candidate.get("mydisease")
@@ -4321,6 +4516,7 @@ def _build_v2_sections(
         "clinvar": "NCBI ClinVar",
         "clingen": "ClinGen/GenCC",
         "cspec": "ClinGen CSpec Registry",
+        "erepo": "ClinGen ERepo",
     }
     for source_name, payload in (
         ("vep", vep),
@@ -4329,6 +4525,7 @@ def _build_v2_sections(
         ("clinvar", clinvar),
         ("clingen", clingen),
         ("cspec", cspec),
+        ("erepo", erepo),
         ("phen2gene", phen2gene),
         (
             "mydisease",
@@ -4389,6 +4586,7 @@ def _build_v2_sections(
         clinvar=clinvar,
         clingen=clingen,
         cspec=cspec,
+        erepo=erepo,
         phen2gene=phen2gene,
         mydisease=(
             mydisease
@@ -4576,6 +4774,15 @@ def _build_v2_sections(
             ),
             "clingen_context": deepcopy(clingen_curations),
             "cspec_context": _compact_cspec_context(cspec),
+            **(
+                {
+                    "expert_curated_variant_context": deepcopy(
+                        erepo_context
+                    )
+                }
+                if erepo_context
+                else {}
+            ),
             "warnings": deepcopy(warnings[:MAX_EVIDENCE_WARNINGS]),
         },
         "phenotype_relationship": {

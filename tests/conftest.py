@@ -7,6 +7,8 @@ import os
 import pytest
 import requests
 
+from config import settings
+
 
 @pytest.fixture(autouse=True)
 def block_live_http_requests(
@@ -16,6 +18,8 @@ def block_live_http_requests(
 
     if os.getenv("RUN_LIVE_PROVIDER_TESTS") == "1":
         return
+
+    monkeypatch.setattr(settings, "ENABLE_EREPO", False)
 
     def blocked_request(
         _session: requests.Session,

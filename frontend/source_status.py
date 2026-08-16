@@ -44,7 +44,10 @@ _NOT_QUERIED = frozenset(
     {"not_assessed", "not_triggered", "not_applicable", "skipped"}
 )
 _EXPECTED_ABSENCE_CAPABILITIES = frozenset(
-    {"cspec_context", "literature", "phenotype_gene", "disease_context"}
+    {
+        "cspec_context", "literature", "phenotype_gene", "disease_context",
+        "expert_curated_variant_context",
+    }
 )
 _CAPABILITY_LABELS = {
     "variant_annotation": "variant annotation",
@@ -53,6 +56,7 @@ _CAPABILITY_LABELS = {
     "gene_disease_validity": "gene-disease",
     "automated_classification": "automated classification",
     "cspec_context": "ClinGen CSpec",
+    "expert_curated_variant_context": "ClinGen ERepo expert-curated context",
     "phenotype_gene": "phenotype-gene",
     "disease_context": "disease-context",
     "population_frequency": "population-frequency",
@@ -70,6 +74,8 @@ def _normalized(value: object) -> str:
 
 def _capability_from_source(source: str) -> str | None:
     normalized = source.casefold()
+    if "erepo" in normalized:
+        return "expert_curated_variant_context"
     if "clinvar" in normalized:
         return "clinvar_evidence"
     if "cspec" in normalized:

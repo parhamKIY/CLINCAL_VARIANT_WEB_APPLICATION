@@ -80,6 +80,7 @@ REFERENCE_MODEL_FIELDS = frozenset(ReferenceModelV2.__required_keys__)
 _PROVIDER_LABELS = {
     "cached_cspec": "CSpec",
     "clingen": "ClinGen / GenCC",
+    "clingen_erepo": "ClinGen ERepo",
     "clingen_cspec": "CSpec",
     "ensembl_variation": "Ensembl",
     "ensembl_vep": "Ensembl",
@@ -168,6 +169,8 @@ def _optional_provenance_text(
 
 def _reference_group(source: str) -> str:
     normalized = source.casefold()
+    if "erepo" in normalized:
+        return "erepo"
     if "clinvar" in normalized:
         return "clinvar"
     if "cspec" in normalized:
@@ -185,6 +188,8 @@ def _reference_group(source: str) -> str:
 
 def _provider_group(provider: str) -> str:
     normalized = provider.casefold()
+    if normalized == "clingen_erepo":
+        return "erepo"
     if normalized in {"clinvar", "ncbi_clinvar"}:
         return "clinvar"
     if normalized in {"clingen_cspec", "cached_cspec", "cspec"}:
@@ -364,6 +369,32 @@ def build_reference_model_v2(
                 primary_failure=item["primary_failure"],
                 dataset=_optional_provenance_text(item, "dataset"),
                 retrieved_at=_optional_provenance_text(item, "retrieved_at"),
+            )
+
+    pathogenicity = evidence.get("pathogenicity")
+    erepo_context = (
+        pathogenicity.get("expert_curated_variant_context")
+        if isinstance(pathogenicity, Mapping)
+        else None
+    )
+    if isinstance(erepo_context, Mapping):
+        raw_capability = erepo_context.get("capability_result")
+        if isinstance(raw_capability, Mapping):
+            try:
+                item = validate_capability_result(raw_capability)
+            except ProviderContractError as exc:
+                raise ReferenceModelError(
+                    "Invalid ERepo capability provenance."
+                ) from exc
+            add(
+                provider=item["provider"],
+                capability=item["capability"],
+                status=item["status"],
+                operational_status=item["status"],
+                provider_role=item["provider_role"],
+                method=item["method"],
+                fallback_used=item["fallback_used"],
+                primary_failure=item["primary_failure"],
             )
 
     source_statuses = evidence.get("source_statuses")
