@@ -429,3 +429,192 @@ def test_historical_evidence_object_without_medgen_pg_remains_valid() -> None:
     evidence = build_evidence_object(original)
     assert "medgen_phenotype_gene_context" not in evidence["phenotype_relationship"]
     assert validate_evidence_object(evidence) == evidence
+
+
+# ---------------------------------------------------------------------------
+# Corrective Tests: Phen2Gene valid no-match & Target-node sufficiency
+# ---------------------------------------------------------------------------
+
+def test_phen2gene_valid_no_match_triggers_medgen_enrichment() -> None:
+    """A valid Phen2Gene no-match is an explicit evidence gap that triggers MedGen."""
+    item = _variant(gene="SCN1A", availability="no_match")
+    item["phen2gene"]["status"] = "not_found"
+    item["matched_patient_hpo_terms"] = []
+    item["local_phenotype_score"] = None
+    session = _Session([
+        _Response(200, _search(["607208"])),
+        _Response(200, _summary("607208", genes=("SCN1A",), hpo_id="HP:0001250")),
+    ])
+    result = enrich_with_medgen_phenotype_gene(
+        [item],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+    context = result["variants"][0]["medgen_phenotype_gene_context"][0]
+    assert context["status"] == "success"
+    assert context["retrieval_state"] == "accepted_records"
+    decision = context["enrichment_decision"]
+    assert decision["triggered"] is True
+    assert decision["primary_retrieval_state"] == "no_match"
+    assert "primary_no_match" in decision["reason_codes"]
+    assert "phenotype_gene_support_gap" in decision["reason_codes"]
+    assert decision["required_fields_missing"] == ["phen2gene_result"]
+    assert len(context["records"]) == 1
+
+
+def test_phen2gene_unavailable_local_support_sufficient_not_triggered() -> None:
+    """When Phen2Gene fails operationally but local support is sufficient, MedGen is NOT_NEEDED."""
+    item = _variant(gene="SCN1A", availability="unavailable")
+    # Provide sufficient local phenotype-gene support on the variant
+    item["matched_patient_hpo_terms"] = ["HP:0001250"]
+    item["local_phenotype_score"] = 0.8
+    session = _Session([])
+    result = enrich_with_medgen_phenotype_gene(
+        [item],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+    context = result["variants"][0]["medgen_phenotype_gene_context"][0]
+    assert context["status"] == "not_applicable"
+    assert context["retrieval_state"] == "not_needed"
+    decision = context["enrichment_decision"]
+    assert decision["triggered"] is False
+    assert decision["primary_retrieval_state"] == "unavailable"
+    assert "local_support_sufficient" in decision["reason_codes"]
+    assert not session.requests
+
+
+def test_phen2gene_unavailable_local_support_insufficient_triggered() -> None:
+    """When Phen2Gene fails and local support is insufficient, MedGen is triggered."""
+    item = _variant(gene="SCN1A", availability="unavailable")
+    item["matched_patient_hpo_terms"] = []
+    item["local_phenotype_score"] = None
+    session = _Session([
+        _Response(200, _search(["607208"])),
+        _Response(200, _summary("607208", genes=("SCN1A",), hpo_id="HP:0001250")),
+    ])
+    result = enrich_with_medgen_phenotype_gene(
+        [item],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+    context = result["variants"][0]["medgen_phenotype_gene_context"][0]
+    assert context["status"] == "success"
+    decision = context["enrichment_decision"]
+    assert decision["triggered"] is True
+    assert "primary_operational_failure" in decision["reason_codes"]
+    assert "phenotype_gene_support_gap" in decision["reason_codes"]
+
+
+def test_phen2gene_valid_no_match_support_node_insufficient_triggered() -> None:
+    """When Phen2Gene reports no match and local support is empty, MedGen is triggered."""
+    item = _variant(gene="SCN1A", availability="no_match")
+    item["matched_patient_hpo_terms"] = []
+    session = _Session([
+        _Response(200, _search(["607208"])),
+        _Response(200, _summary("607208", genes=("SCN1A",), hpo_id="HP:0001250")),
+    ])
+    result = enrich_with_medgen_phenotype_gene(
+        [item],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+    context = result["variants"][0]["medgen_phenotype_gene_context"][0]
+    assert context["status"] == "success"
+    assert context["enrichment_decision"]["triggered"] is True
+    assert "primary_no_match" in context["enrichment_decision"]["reason_codes"]
+
+
+def test_phen2gene_fallback_match_is_sufficient_and_does_not_fabricate_ranking() -> None:
+    """Local HPO-gene fallback match sufficiently populates support; rank/score are not fabricated."""
+    item = _variant(gene="SCN1A", availability="available")
+    item["phen2gene"] = {
+        "availability": "available",
+        "gene": "SCN1A",
+        "gene_id": None,
+        "rank": 1,
+        "score": 0.5,
+        "status": "direct_match",
+        "hpo_terms": ["HP:0001250"],
+        "weight_model": "not_applicable",
+        "provider": "local_hpo_gene_fallback",
+        "provider_version": None,
+        "retrieved_at": "2026-08-16T12:00:00Z",
+        "cache_hit": False,
+        "warnings": [],
+        "fallback_used": True,
+        "matched_hpos": ["HP:0001250"],
+    }
+    session = _Session([])
+    result = enrich_with_medgen_phenotype_gene(
+        [item],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+    context = result["variants"][0]["medgen_phenotype_gene_context"][0]
+    assert context["retrieval_state"] == "not_needed"
+    assert context["enrichment_decision"]["triggered"] is False
+    assert "local_support_sufficient" in context["enrichment_decision"]["reason_codes"]
+    assert not session.requests
+
+    evidence = build_evidence_object(result["variants"][0])
+    assert evidence["phenotype_relationship"]["phen2gene"]["provider"] == "local_hpo_gene_fallback"
+    assert evidence["phenotype_relationship"]["phen2gene"]["weight_model"] == "not_applicable"
+
+
+def test_same_query_gene_hpo_deduplicated_across_multiple_variants_order_preserved() -> None:
+    """Same normalized (gene, HPO) is queried once and fanned back with preserved order and cardinality."""
+    v1 = _variant(gene="SCN1A")
+    v1["variant"]["pos"] = 100
+    v2 = _variant(gene="SCN1A")
+    v2["variant"]["pos"] = 200
+    v3 = _variant(gene="FBN1")
+    v3["variant"]["pos"] = 300
+    v4 = _variant(gene="SCN1A")
+    v4["variant"]["pos"] = 400
+
+    session = _Session([
+        # 1st unique tuple: (scn1a, HP:0001250)
+        _Response(200, _search(["607208"])),
+        _Response(200, _summary("607208", genes=("SCN1A",), hpo_id="HP:0001250")),
+        # 2nd unique tuple: (fbn1, HP:0001250) - mismatch in conceptmeta
+        _Response(200, _search(["154700"])),
+        _Response(200, _summary("154700", genes=("FBN1",), hpo_id="HP:0001083")),
+    ])
+
+    result = enrich_with_medgen_phenotype_gene(
+        [v1, v2, v3, v4],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+
+    # Dedup verification: exactly 2 tuples queried (SCN1A, FBN1)
+    assert result["queried_tuple_count"] == 2
+    assert len(session.requests) == 4  # 2 esearch + 2 esummary
+
+    # Cardinality & order verification
+    variants = result["variants"]
+    assert len(variants) == 4
+    assert [v["variant"]["pos"] for v in variants] == [100, 200, 300, 400]
+    assert [v["gene"] for v in variants] == ["SCN1A", "SCN1A", "FBN1", "SCN1A"]
+
+    # Content verification: SCN1A variants (0, 1, 3) have identical accepted records
+    ctx1 = variants[0]["medgen_phenotype_gene_context"][0]
+    ctx2 = variants[1]["medgen_phenotype_gene_context"][0]
+    ctx3 = variants[2]["medgen_phenotype_gene_context"][0]
+    ctx4 = variants[3]["medgen_phenotype_gene_context"][0]
+
+    assert ctx1["status"] == "success"
+    assert ctx1["records"] == ctx2["records"] == ctx4["records"]
+    assert len(ctx1["records"]) == 1
+    assert ctx1["records"][0]["concept_id"] == "C607208"
+
+    # FBN1 variant (2) has its own distinct context
+    assert ctx3["query_gene"] == "FBN1"
+

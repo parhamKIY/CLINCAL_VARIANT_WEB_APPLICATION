@@ -556,33 +556,101 @@ def enrich_with_medgen(
 MEDGEN_PHENOTYPE_GENE_SCHEMA_VERSION = "1.0"
 
 
-def _phen2gene_state(
-    value: object,
-) -> tuple[str, bool, list[str], list[str]]:
-    """Return (primary_state, triggered, reason_codes, missing) for phen2gene node.
+def _is_local_support_sufficient(
+    item: Mapping[str, object],
+    phen2gene: Mapping[str, object],
+) -> bool:
+    """Check if semantically valid local phenotype-gene support is already sufficient.
 
-    The phen2gene evidence is insufficient when:
-    - The node is absent entirely
-    - availability is 'unavailable' (provider operational failure)
-    - availability is 'partial' (provider returned no match for this gene)
-    A sufficient 'available' result suppresses Stage 4 enrichment.
+    Preserves the distinction:
+    - phenotype_gene_ranking is Phen2Gene only (never fabricated by local support)
+    - phenotype_gene_support is populated by local support and/or MedGen
+
+    Returns True when:
+    1. phen2gene fallback was used and found a direct HPO-gene match.
+    2. Explicit local_phenotype_support / local_support on the variant indicates a match.
+    3. matched_patient_hpo_terms or local_phenotype_score on the variant is non-empty / positive.
     """
-    primary = value if isinstance(value, Mapping) else {}
-    availability = _text(primary.get("availability")) or "not_applicable"
-    if availability == "available":
-        return availability, False, ["primary_sufficient"], []
-    reasons: list[str] = []
-    missing: list[str] = []
-    if availability == "unavailable":
-        reasons.append("primary_operational_failure")
-        missing.append("phen2gene_result")
-    elif availability == "partial":
-        reasons.append("primary_partial")
-        missing.append("phen2gene_result")
+    if phen2gene.get("fallback_used") is True:
+        matched = phen2gene.get("matched_hpos")
+        if isinstance(matched, (list, tuple, set)) and len(matched) > 0:
+            return True
+        if phen2gene.get("status") in {"direct_match", "success"}:
+            return True
+        score = phen2gene.get("score")
+        if isinstance(score, (int, float)) and not isinstance(score, bool) and score > 0:
+            return True
+
+    for key in ("local_phenotype_support", "local_support", "local_hpo_gene_support"):
+        val = item.get(key)
+        if isinstance(val, Mapping):
+            if val.get("status") in {"success", "matched", "available", "direct_match"} or bool(val.get("matched_hpos")):
+                return True
+        elif isinstance(val, bool) and val is True:
+            return True
+
+    matched_hpos = item.get("matched_patient_hpo_terms")
+    if isinstance(matched_hpos, (list, tuple, set)) and len(matched_hpos) > 0:
+        return True
+
+    local_score = item.get("local_phenotype_score") or item.get("phenotype_score")
+    if isinstance(local_score, (int, float)) and not isinstance(local_score, bool) and local_score > 0:
+        return True
+
+    return False
+
+
+def _phen2gene_state(
+    phen2gene_value: object,
+    item_value: object = None,
+) -> tuple[str, bool, list[str], list[str]]:
+    """Return (primary_state, triggered, reason_codes, missing) for phenotype_gene_support node.
+
+    Explicitly distinguishes:
+    - Phen2Gene usable / primary_sufficient (availability == 'available' and fallback_used is not True)
+    - Phen2Gene operational failure (availability == 'unavailable' or primary_failure is not None)
+    - Phen2Gene valid no_match (availability in {'no_match', 'not_found', 'no_association'} or status in {'not_found', 'no_match'})
+    - Phen2Gene partial / insufficient (availability == 'partial')
+
+    Target-node sufficiency:
+    Before triggering MedGen, evaluates whether existing semantically valid local
+    phenotype-gene support already sufficiently populates the phenotype_gene_support node.
+    If local support is already sufficient -> NOT_NEEDED.
+    """
+    primary = phen2gene_value if isinstance(phen2gene_value, Mapping) else {}
+    item = item_value if isinstance(item_value, Mapping) else {}
+
+    availability_raw = _text(primary.get("availability")) or "not_applicable"
+    status_raw = _text(primary.get("status")) or ""
+    fallback_used = primary.get("fallback_used") is True
+
+    # 1. Determine Phen2Gene primary state
+    if availability_raw == "available" and not fallback_used:
+        primary_state = "available"
+        return primary_state, False, ["primary_sufficient"], []
+
+    if (
+        availability_raw in {"no_match", "not_found", "no_association"}
+        or status_raw in {"not_found", "no_match", "no_association", "no_result"}
+    ):
+        primary_state = "no_match"
+        gap_reason = "primary_no_match"
+    elif availability_raw == "unavailable" or primary.get("primary_failure") is not None:
+        primary_state = "unavailable"
+        gap_reason = "primary_operational_failure"
+    elif availability_raw == "partial":
+        primary_state = "partial"
+        gap_reason = "primary_partial"
     else:
-        reasons.append("primary_non_applicable")
-        missing.append("phen2gene_result")
-    return availability, True, reasons, missing
+        primary_state = "not_applicable"
+        gap_reason = "primary_non_applicable"
+
+    # 2. Target-node sufficiency: check if local phenotype-gene support is already sufficient
+    if _is_local_support_sufficient(item, primary):
+        return primary_state, False, [gap_reason, "local_support_sufficient"], []
+
+    # 3. Support node is insufficient -> trigger MedGen
+    return primary_state, True, [gap_reason, "phenotype_gene_support_gap"], ["phen2gene_result"]
 
 
 def _phenotype_gene_context(
@@ -708,7 +776,8 @@ def enrich_with_medgen_phenotype_gene(
     for item in items:
         gene = _normalized_gene(item.get("gene"))
         primary_state, triggered, reasons, missing = _phen2gene_state(
-            item.get("phen2gene")
+            item.get("phen2gene"),
+            item,
         )
 
         if gene is None:
