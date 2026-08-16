@@ -370,7 +370,7 @@ def test_outage_path_persists_observational_shadow_without_promoting_it() -> Non
     assert shadow["fields"]["consequence"]["source"] == "GeneBe"
 
 
-def test_gap_driven_shadow_is_additive_and_preserves_active_annotation() -> None:
+def test_gap_driven_shadow_remains_additive_before_stage6b_promotion() -> None:
     candidate = _outage_candidate()
     before = deepcopy(candidate)
 
@@ -378,13 +378,16 @@ def test_gap_driven_shadow_is_additive_and_preserves_active_annotation() -> None
 
     assert candidate == before
     assert evidence["schema_version"] == "2.5"
-    assert evidence["gene"] is None
-    assert evidence["transcript"] is None
+    assert evidence["gene"] == "SCN1A"
+    assert evidence["transcript"] == "NM_001165963.4"
     assert evidence["consequence"] is None
     shadow = evidence["shadow_composition"]
     assert shadow["evaluation_mode"] == "gap_driven"
     assert shadow["fields"]["gene"]["candidate"] == "SCN1A"
     assert shadow["fields"]["impact"]["decision"] == "NOT_COMPOSED"
+    promotion = evidence["annotation_promotion"]
+    assert promotion["fields"]["gene"]["source"] == "GeneBe"
+    assert promotion["fields"]["transcript"]["source"] == "GeneBe"
 
 
 def test_shadow_does_not_change_readiness_or_real_prompt_payload() -> None:
@@ -392,6 +395,7 @@ def test_shadow_does_not_change_readiness_or_real_prompt_payload() -> None:
     evidence_with_shadow = build_evidence_object(candidate)
     evidence_without_shadow = deepcopy(evidence_with_shadow)
     evidence_without_shadow.pop("shadow_composition")
+    evidence_without_shadow.pop("annotation_promotion")
 
     readiness_with = build_evidence_readiness_audit(
         evidence_with_shadow,

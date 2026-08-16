@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stages 1–5 are approved; Stage 6A is COMPLETE / PENDING architecture review.
+**Status:** Active execution roadmap. Stages 1–5 and Stage 6A are approved; Stage 6B is COMPLETE / PENDING architecture review.
 
-**Current completed stage:** Stage 6A — VEP-outage field-level annotation composition, shadow / observation mode.
+**Current completed stage:** Stage 6B — controlled active promotion of exact field-level annotation evidence.
 
-**Current implementation permission:** NONE — Stage 6A architecture review is pending.
+**Current implementation permission:** NONE — Stage 6B architecture review is pending.
 
-**Next eligible stage:** NONE — Stage 6B promotion authorization is not granted.
+**Next eligible stage:** NONE — Stage 7 remains unauthorized pending Stage 6B architecture review.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -519,12 +519,13 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Mixing HGVS.c/HGVS.p values across transcripts is structurally unsafe.
 - **Dependencies:** Stages 2–5 are independent of composition but precede it by approved order.
 - **Definition of Done:** Stage 6A shadow/observation comparisons pass first. Any subsequently promoted canonical field requires separate Stage 6B authorization, exact validation, transcript coherence, provenance completeness, and no unexplained Golden Case regression.
-- **Stage 6A — SHADOW / OBSERVATION:** COMPLETE
+- **Stage 6A — SHADOW / OBSERVATION:** COMPLETE / APPROVED
+- **Stage 6B — CONTROLLED ACTIVE PROMOTION:** COMPLETE
 - **Architecture Review:** PENDING
-- **Stage 6B promotion authorization:** NOT GRANTED
 - **Stage 7:** NOT STARTED
 - **Implementation notes:** Added `backend/shadow_composition.py`, a pure bounded composer that accepts explicit VEP state/field gaps and normalized fallback evidence without inspecting VEP values. It keeps `usable`, `operational_failure`, `valid_no_match`, `partial`, and `insufficient` distinct; requires exact assembly/CPRA proof per provider; requires exact versioned transcript equality for cross-provider coherence; binds HGVS.c/HGVS.p to one selected provider transcript context; permits GeneBe consequence only from an exact transcript-bound normalized consequence record with one recognized SO term; and rejects raw effect-only, unknown, ambiguous, and unproven identity evidence. `impact`, `MANE`, and canonical remain structurally `NOT_COMPOSED`. `backend/report.py` persists optional `shadow_composition` schema `1.0` while EvidenceObject remains `2.5`; `backend/variant_interpretation.py` removes that node through the real semantic prompt projection. The production path creates no shadow for usable VEP and makes no additional VariantValidator/GeneBe call for auditing. No canonical annotation, readiness, disposition, UI, SQLite schema, or pipeline schema behavior was changed.
-- **Validation evidence:** `tests/test_stage6a_shadow_composition.py` passed `23`; focused annotation/EvidenceObject/Stage-105 tests passed `223 passed, 1 skipped`; the frozen counterfactual artifact `docs/stage_6a_counterfactual_audit.md` passed its deterministic check; ERC-01..ERC-07 Golden projection plus Stage 99 persistence/recovery passed `9`; and `tests/run_stage78_resilience_acceptance.py` ran `1371 passed, 2 failed, 6 skipped` in the complete offline suite. The two failures are the frozen baseline failures only: `TestFrontendFoundation::test_manual_table_executes_pipeline` (expects 6 Streamlit dataframes, observes 8) and `test_acceptance_registry_freezes_all_stage79_defects` (missing `docs/acceptance_failures_v1.md`).
+- **Stage 6B implementation notes:** Added `backend/active_annotation_promotion.py` and an optional `annotation_promotion` EvidenceObject node (`1.0`) without changing EvidenceObject `2.5`, SQLite `4`, or pipeline `3.2`. For a legacy VariantValidator VEP-fallback candidate, the active EvidenceObject projection first removes inherited fallback annotation values; promotion then restores only `gene`, and only restores `transcript`/`HGVS.c`/`HGVS.p` as one complete exact, versioned, same-provider-record bundle. Each promoted field retains actual source, exact CPRA proof, transcript context where present, composable state, promotion state, policy, and limitation. A divergent fallback gene blocks gene selection; a competing or mismatched transcript, unversioned transcript, mismatched HGVS.c accession/version, missing HGVS.p, or cross-provider transcript conflict blocks the complete transcript/HGVS bundle. VEP-success output remains unmodified. GeneBe consequence, impact, MANE, canonical, gene ID, readiness, coverage, disposition, UI, SQLite, and pipeline behavior remain unpromoted/unchanged. The Stage 6A shadow node remains excluded from the LLM projection; only active canonical fields naturally reach it.
+- **Validation evidence:** `tests/test_stage6b_active_promotion.py` added deterministic exact-identity, actual-source, VEP-success, explicit versioned-bundle, unversioned, accession/version mismatch, cross-transcript, valid-no-match, partial, conflict, structural-block, and LLM-isolation coverage. Focused Stage 6A/6B, annotation, EvidenceObject, Golden, and persistence tests passed `265 passed, 1 skipped`; relevant Stage 1–5 resilience tests passed `84`; the frozen Stage 6A counterfactual artifact passed its deterministic check. `tests/run_stage78_resilience_acceptance.py` completed with `1382 passed, 2 failed, 6 skipped`; the two failures are the frozen baseline failures only: `TestFrontendFoundation::test_manual_table_executes_pipeline` (expects 6 Streamlit dataframes, observes 8) and `test_acceptance_registry_freezes_all_stage79_defects` (missing `docs/acceptance_failures_v1.md`).
 
 **STOP FOR REVIEW.**
 

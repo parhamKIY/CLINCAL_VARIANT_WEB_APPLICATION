@@ -18,6 +18,12 @@ from backend.conflict_auditor import (
     ConflictAuditResult,
     audit_evidence_conflicts,
 )
+from backend.active_annotation_promotion import (
+    ActiveAnnotationPromotionError,
+    controlled_active_annotation_candidate,
+    promote_active_annotation_fields,
+    validate_active_annotation_promotion,
+)
 from backend.evidence_rescue import (
     EvidenceRescueContractError,
     validate_evidence_rescue_trace,
@@ -354,6 +360,7 @@ class EvidenceObject(TypedDict):
     conditional_enrichment: EvidenceConditionalEnrichment
     capability_results: dict[str, CapabilityResult]
     shadow_composition: NotRequired[dict[str, Any]]
+    annotation_promotion: NotRequired[dict[str, Any]]
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -420,7 +427,7 @@ class ValidatedClinicalInterpretation(TypedDict):
 EVIDENCE_OBJECT_FIELDS = frozenset(
     field
     for field in EvidenceObject.__required_keys__
-    if field != "shadow_composition"
+    if field not in {"shadow_composition", "annotation_promotion"}
 )
 EVIDENCE_VARIANT_FIELDS = frozenset(EvidenceVariant.__required_keys__)
 EVIDENCE_REFERENCE_FIELDS = frozenset(EvidenceReference.__required_keys__)
@@ -1870,6 +1877,13 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
             raise EvidenceObjectError(
                 "evidence.shadow_composition is invalid."
             ) from exc
+    if "annotation_promotion" in value:
+        try:
+            validate_active_annotation_promotion(value["annotation_promotion"])
+        except ActiveAnnotationPromotionError as exc:
+            raise EvidenceObjectError(
+                "evidence.annotation_promotion is invalid."
+            ) from exc
 
 
 def validate_evidence_object(value: object) -> EvidenceObject:
@@ -1888,7 +1902,7 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         {"shadow_composition"}
         if "shadow_composition" in value
         else set()
-    )
+    ) | ({"annotation_promotion"} if "annotation_promotion" in value else set())
     _validate_exact_fields(value, expected_fields, "evidence")
     if value["schema_version"] != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceObjectError(
@@ -2748,6 +2762,13 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
             _sanitize_context_tree(
                 evidence["shadow_composition"],
                 "evidence.shadow_composition",
+            )
+        )
+    if "annotation_promotion" in evidence:
+        clean_evidence["annotation_promotion"] = validate_active_annotation_promotion(
+            _sanitize_context_tree(
+                evidence["annotation_promotion"],
+                "evidence.annotation_promotion",
             )
         )
     clean_evidence = validate_evidence_object(clean_evidence)
@@ -5319,8 +5340,12 @@ def _build_v2_sections(
                         "assembly",
                         "normalized_variant",
                         "validated_genomic_hgvs",
+                        "validated_gene",
+                        "validated_gene_id",
+                        "validated_transcript",
                         "validated_transcript_hgvs",
                         "validated_protein_hgvs",
+                        "selected_record",
                         "consequence_available",
                         "validation_warnings",
                         "most_severe_consequence",
@@ -5535,6 +5560,7 @@ def _build_v2_sections(
 def build_evidence_object(candidate: object) -> EvidenceObject:
     """Convert one Stage 5/6 candidate to the Stage 7 schema."""
     candidate_data = _require_candidate_mapping(candidate, "candidate")
+    active_candidate_data = controlled_active_annotation_candidate(candidate_data)
     variant = _require_candidate_mapping(
         candidate_data.get("variant"),
         "candidate.variant",
@@ -5567,7 +5593,7 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
         "candidate.warnings",
     )
     v2_sections = _build_v2_sections(
-        candidate_data,
+        active_candidate_data,
         variant=variant,
         sources=sources,
         clinvar_conditions=clinvar_conditions,
@@ -5586,12 +5612,12 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             "alt": variant.get("alt"),
         },
         "assembly": candidate_data.get("assembly"),
-        "gene": candidate_data.get("gene"),
-        "gene_id": candidate_data.get("gene_id"),
-        "transcript": candidate_data.get("transcript"),
-        "consequence": candidate_data.get("consequence"),
-        "impact": candidate_data.get("impact"),
-        "protein_change": candidate_data.get("protein_change"),
+        "gene": active_candidate_data.get("gene"),
+        "gene_id": active_candidate_data.get("gene_id"),
+        "transcript": active_candidate_data.get("transcript"),
+        "consequence": active_candidate_data.get("consequence"),
+        "impact": active_candidate_data.get("impact"),
+        "protein_change": active_candidate_data.get("protein_change"),
         "population_frequency": candidate_data.get(
             "population_frequency"
         ),
@@ -5634,6 +5660,13 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
     shadow = build_shadow_composition(candidate_data)
     if shadow is not None:
         evidence["shadow_composition"] = shadow
+        promotion = promote_active_annotation_fields(
+            evidence,
+            candidate=candidate_data,
+            shadow=shadow,
+        )
+        if promotion is not None:
+            evidence["annotation_promotion"] = promotion
     evidence["conflict_audit"]["pre_review"] = audit_evidence_conflicts(
         evidence,
         phase="pre_review",

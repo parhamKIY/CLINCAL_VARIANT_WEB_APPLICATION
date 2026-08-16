@@ -534,10 +534,11 @@ def build_shadow_composition(candidate: Mapping[str, object]) -> ShadowCompositi
 
 
 def shadow_free_evidence_for_llm(evidence: Mapping[str, object]) -> dict[str, object]:
-    """Return the exact semantic Evidence Object projection sent to the LLM."""
+    """Return canonical active evidence without composition-only metadata."""
 
     result = deepcopy(dict(evidence))
     result.pop("shadow_composition", None)
+    result.pop("annotation_promotion", None)
     return result
 
 
