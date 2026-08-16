@@ -2,16 +2,19 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Evidence-resilience workstream closed. Stages 1–10 are COMPLETE /
-APPROVED; Stage 11 is COMPLETE / REVIEW PENDING.
+**Status:** Evidence-Resilience Workstream — CLOSED. Stages 1–10 are COMPLETE /
+APPROVED; Stage 11 is COMPLETE / APPROVED.
 
 **Current completed stage:** Stage 11 — documentation and evidence-resilience closeout.
 
-**Current implementation permission:** NONE — closeout review is pending.
+**Current implementation permission:** NONE — workstream is closed.
 
 **Next eligible stage:** NONE — this workstream has no automatic successor.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
+
+**Closeout declaration:** Evidence-Resilience Workstream — CLOSED. No automatic
+Stage 12.
 
 **Authoritative context:**
 
@@ -658,7 +661,7 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stages 1–10.
 - **Definition of Done:** Documentation accurately reflects code, tests, validation, open issues, and the final provider decision record.
 - **Status:** COMPLETE
-- **Review:** PENDING
+- **Review:** APPROVED
 - **Implementation notes:** Reconciled current scope, provider roles, semantic Evidence Graph map, Stage 6 composition/promotion, Stage 7 coverage, Stage 8 disposition, Stage 10 LLM boundary, schemas, persistence limits, configuration controls, bounded-live observation limits, and frozen issues in the declaration, handoff, README, and environment template. Added a focused documentation-consistency test. Historical planning snapshots are explicitly labelled and do not override current closeout facts.
 - **Validation evidence:** The Stage-11 documentation consistency test passed (`3 passed in 0.11s`). The required Stage 6–10, Golden/ERC-01..ERC-07, and schema-4 persistence/recovery command passed (`174 passed in 25.94s`). `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets audit, and Stage 78 (`1 passed, 1441 deselected in 3.24s`); its complete offline regression reached `1434 passed, 2 failed, 6 skipped in 150.54s`. The only failures are the frozen manual-table dataframe mismatch (expected 6, observed 8) and missing `docs/acceptance_failures_v1.md` historical registry.
 
