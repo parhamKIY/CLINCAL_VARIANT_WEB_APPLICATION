@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, NotRequired, TypedDict, cast
 from urllib.parse import urlsplit
 
 from backend.conflict_auditor import (
@@ -43,6 +43,11 @@ from backend.retrieval_intelligence import (
     RetrievalIntelligenceError,
     build_retrieval_assessment,
     validate_retrieval_assessment,
+)
+from backend.shadow_composition import (
+    ShadowCompositionError,
+    build_shadow_composition,
+    validate_shadow_composition,
 )
 from config import (
     PRIVATE_DIRECTORY_MODE,
@@ -348,6 +353,7 @@ class EvidenceObject(TypedDict):
     conflict_audit: EvidenceConflictAudit
     conditional_enrichment: EvidenceConditionalEnrichment
     capability_results: dict[str, CapabilityResult]
+    shadow_composition: NotRequired[dict[str, Any]]
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -411,7 +417,11 @@ class ValidatedClinicalInterpretation(TypedDict):
     sections: ClinicalInterpretationSections
 
 
-EVIDENCE_OBJECT_FIELDS = frozenset(EvidenceObject.__required_keys__)
+EVIDENCE_OBJECT_FIELDS = frozenset(
+    field
+    for field in EvidenceObject.__required_keys__
+    if field != "shadow_composition"
+)
 EVIDENCE_VARIANT_FIELDS = frozenset(EvidenceVariant.__required_keys__)
 EVIDENCE_REFERENCE_FIELDS = frozenset(EvidenceReference.__required_keys__)
 EVIDENCE_CLINGEN_FIELDS = frozenset(
@@ -1853,6 +1863,13 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         "conditional_enrichment",
     ):
         _validate_context_tree(value[field], f"evidence.{field}")
+    if "shadow_composition" in value:
+        try:
+            validate_shadow_composition(value["shadow_composition"])
+        except ShadowCompositionError as exc:
+            raise EvidenceObjectError(
+                "evidence.shadow_composition is invalid."
+            ) from exc
 
 
 def validate_evidence_object(value: object) -> EvidenceObject:
@@ -1867,7 +1884,12 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         raise EvidenceObjectError(
             "Evidence object must be a dictionary."
         )
-    _validate_exact_fields(value, EVIDENCE_OBJECT_FIELDS, "evidence")
+    expected_fields = EVIDENCE_OBJECT_FIELDS | (
+        {"shadow_composition"}
+        if "shadow_composition" in value
+        else set()
+    )
+    _validate_exact_fields(value, expected_fields, "evidence")
     if value["schema_version"] != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceObjectError(
             "evidence.schema_version must be "
@@ -2721,6 +2743,13 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
             for capability, result in evidence["capability_results"].items()
         },
     }
+    if "shadow_composition" in evidence:
+        clean_evidence["shadow_composition"] = validate_shadow_composition(
+            _sanitize_context_tree(
+                evidence["shadow_composition"],
+                "evidence.shadow_composition",
+            )
+        )
     clean_evidence = validate_evidence_object(clean_evidence)
     serialized_size = len(
         json.dumps(
@@ -5602,6 +5631,9 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             sources,
         ),
     }
+    shadow = build_shadow_composition(candidate_data)
+    if shadow is not None:
+        evidence["shadow_composition"] = shadow
     evidence["conflict_audit"]["pre_review"] = audit_evidence_conflicts(
         evidence,
         phase="pre_review",

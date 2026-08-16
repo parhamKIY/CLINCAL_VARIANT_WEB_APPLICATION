@@ -44,6 +44,7 @@ from backend.report import (
     EvidenceObjectError,
     sanitize_evidence_object,
 )
+from backend.shadow_composition import shadow_free_evidence_for_llm
 from backend.variant_integrity import stable_allele_identity
 from config import settings
 
@@ -381,15 +382,16 @@ def _build_prompt(
     prompt_mode: InterpretationPromptMode,
     readiness_audit: Mapping[str, object],
 ) -> str:
+    semantic_evidence = shadow_free_evidence_for_llm(evidence)
     try:
-        validate_llm_payload(evidence)
+        validate_llm_payload(semantic_evidence)
     except ClinicalDataPrivacyError as exc:
         raise VariantInterpretationError(
             "Evidence contains data prohibited from LLM processing."
         ) from exc
     try:
         serialized = json.dumps(
-            evidence,
+            semantic_evidence,
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
@@ -423,7 +425,7 @@ def _build_prompt(
         else "Synthesize the evidence conservatively; do not manufacture a "
         "conflict or overstate agreement."
     )
-    phenotype_conclusion = _expected_phenotype_conclusion(evidence)
+    phenotype_conclusion = _expected_phenotype_conclusion(semantic_evidence)
     reference_catalog = [
         {
             "reference_id": reference["reference_id"],
@@ -432,7 +434,7 @@ def _build_prompt(
             "identifier": reference["identifier"],
             "title": reference["title"],
         }
-        for reference in build_reference_model_v2(evidence)[
+        for reference in build_reference_model_v2(semantic_evidence)[
             "literature_references"
         ]
     ]
@@ -441,7 +443,7 @@ def _build_prompt(
             {
                 "task": VARIANT_INTERPRETATION_TASK,
                 "prompt_mode": prompt_mode,
-                "evidence": evidence,
+                "evidence": semantic_evidence,
                 "reference_catalog": reference_catalog,
             }
         )
