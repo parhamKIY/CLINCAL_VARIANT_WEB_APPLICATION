@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
+from xml.etree import ElementTree
 
 import requests
 
@@ -22,9 +23,11 @@ from config import settings
 
 MEDGEN_PROVIDER = "ncbi_medgen"
 MEDGEN_PROVIDER_NAME = "NCBI MedGen"
-MEDGEN_CONTEXT_SCHEMA_VERSION = "1.0"
+MEDGEN_CONTEXT_SCHEMA_VERSION = "1.1"
 MEDGEN_MAX_RECORDS = 10
 MEDGEN_GENE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+MEDGEN_HPO_PATTERN = re.compile(r"^HP:\d{7}$")
+MEDGEN_CONCEPTMETA_MAX_BYTES = 20_000
 
 MedGenStatus = Literal[
     "success", "no_match", "unavailable", "timeout", "forbidden",
@@ -58,6 +61,140 @@ def _text(value: object, *, limit: int = 500) -> str | None:
 def _normalized_gene(value: object) -> str | None:
     gene = _text(value, limit=64)
     return gene.upper() if gene and MEDGEN_GENE_PATTERN.fullmatch(gene) else None
+
+
+def _local_name(value: str) -> str:
+    """Return an XML local name without trusting namespace prefixes."""
+    return value.rsplit("}", 1)[-1]
+
+
+def _normalized_hpo_terms(value: object) -> list[dict[str, str | None]]:
+    """Keep only already-accepted canonical HPO identifiers and labels."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    terms: list[dict[str, str | None]] = []
+    seen: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            hpo_id, label = item, None
+        elif isinstance(item, Mapping):
+            hpo_id = item.get("hpo_id", item.get("id"))
+            label = item.get("label", item.get("hpo_name"))
+        else:
+            continue
+        if not isinstance(hpo_id, str) or MEDGEN_HPO_PATTERN.fullmatch(hpo_id) is None:
+            continue
+        if hpo_id in seen:
+            continue
+        normalized_label = _text(label, limit=200)
+        terms.append({"hpo_id": hpo_id, "label": normalized_label})
+        seen.add(hpo_id)
+    return terms[:10]
+
+
+def _summary_text(value: object, *, limit: int = 500) -> str | None:
+    """Normalize scalar ESummary fields and its documented value wrapper."""
+    if isinstance(value, Mapping):
+        value = value.get("value")
+    return _text(value, limit=limit)
+
+
+def _conceptmeta(value: object) -> tuple[set[str] | None, list[dict[str, str | None]], dict[str, str | None]]:
+    """Parse only deterministic ConceptMeta association/provenance fields.
+
+    MedGen ESummary exposes `conceptmeta` as XML.  A missing or malformed
+    value cannot establish a gene association and is therefore deliberately
+    returned as unverified rather than guessed from titles or definitions.
+    """
+    raw = _text(value, limit=MEDGEN_CONCEPTMETA_MAX_BYTES)
+    if raw is None:
+        return None, [], {}
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        return None, [], {}
+
+    associated_genes: set[str] = set()
+    found_associated_genes = False
+    metadata: dict[tuple[str, str | None, str | None, str | None], dict[str, str | None]] = {}
+    hpo_terms: dict[str, str | None] = {}
+    for element in root.iter():
+        name = _local_name(element.tag)
+        attributes = {
+            _local_name(str(key)).casefold(): _text(item, limit=200)
+            for key, item in element.attrib.items()
+        }
+        database = (
+            attributes.get("sab")
+            or attributes.get("source")
+            or attributes.get("database")
+        )
+        code = attributes.get("code") or attributes.get("cui")
+        scui = attributes.get("scui") or attributes.get("saui")
+        if database:
+            key = (database, code, scui, attributes.get("tty"))
+            metadata[key] = {
+                "database": database,
+                "code": code,
+                "scui": scui,
+                "term_type": attributes.get("tty"),
+            }
+
+    for section in root.iter():
+        section_name = _local_name(section.tag)
+        if section_name == "AssociatedGenes":
+            found_associated_genes = True
+            for element in section.iter():
+                attributes = {
+                    _local_name(str(key)).casefold(): _text(item, limit=200)
+                    for key, item in element.attrib.items()
+                }
+                for candidate in (
+                    attributes.get("symbol"), attributes.get("genesymbol"),
+                    attributes.get("gene"),
+                ):
+                    gene = _normalized_gene(candidate)
+                    if gene:
+                        associated_genes.add(gene)
+                if _local_name(element.tag).casefold() in {"gene", "associatedgene"}:
+                    gene = _normalized_gene(_text(element.text, limit=200))
+                    if gene:
+                        associated_genes.add(gene)
+        if section_name not in {"ClinicalFeatures", "PhenotypicAbnormalities"}:
+            continue
+        for element in section.iter():
+            attributes = {
+                _local_name(str(key)).casefold(): _text(item, limit=200)
+                for key, item in element.attrib.items()
+            }
+            text = _text(element.text, limit=200)
+            hpo_id = next(
+                (
+                    candidate
+                    for candidate in (
+                        attributes.get("hpo_id"), attributes.get("hpoid"),
+                        attributes.get("id"), attributes.get("code"), text,
+                    )
+                    if isinstance(candidate, str)
+                    and MEDGEN_HPO_PATTERN.fullmatch(candidate) is not None
+                ),
+                None,
+            )
+            if hpo_id:
+                label = (
+                    attributes.get("name")
+                    or attributes.get("label")
+                    or (text if text != hpo_id else None)
+                )
+                hpo_terms.setdefault(hpo_id, _text(label, limit=200))
+
+    return (
+        associated_genes if found_associated_genes else None,
+        sorted(metadata.values(), key=lambda item: (
+            item["database"] or "", item["code"] or "", item["scui"] or ""
+        ))[:10],
+        {identifier: hpo_terms[identifier] for identifier in sorted(hpo_terms)[:10]},
+    )
 
 
 def _primary_state(value: object) -> tuple[str, bool, list[str], list[str]]:
@@ -132,11 +269,21 @@ def _source_names(value: object) -> list[str]:
     return sorted(name for name in names if name is not None)[:10]
 
 
-def _records(payload: Mapping[str, object], identifiers: list[str]) -> list[dict[str, Any]] | None:
+def _records(
+    payload: Mapping[str, object],
+    identifiers: list[str],
+    *,
+    query_gene: str,
+    queried_hpo_terms: list[dict[str, str | None]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
     result = payload.get("result")
     if not isinstance(result, Mapping):
         return None
     records: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    queried_hpo_by_id = {
+        term["hpo_id"]: term for term in queried_hpo_terms
+    }
     for identifier in identifiers:
         item = result.get(identifier)
         if not isinstance(item, Mapping):
@@ -146,21 +293,67 @@ def _records(payload: Mapping[str, object], identifiers: list[str]) -> list[dict
         concept_id = _text(item.get("conceptid"), limit=128)
         if title is None:
             continue
+        associated_genes, concept_metadata, concept_hpo = _conceptmeta(
+            item.get("conceptmeta")
+        )
+        if associated_genes is None:
+            association_state = "gene_association_unverified"
+            rejection_reason = "conceptmeta_associated_genes_unavailable"
+        elif query_gene not in associated_genes:
+            association_state = "gene_mismatch"
+            rejection_reason = "conceptmeta_associated_genes_no_exact_match"
+        else:
+            association_state = "exact_gene_association"
+            rejection_reason = None
         sources = _source_names(item.get("sources") or item.get("source"))
+        sources.extend(
+            item["database"]
+            for item in concept_metadata
+            if item["database"] is not None
+        )
+        sources = sorted(set(sources))[:10]
+        if association_state != "exact_gene_association":
+            diagnostics.append(
+                {
+                    "medgen_uid": uid,
+                    "concept_id": concept_id,
+                    "title": title,
+                    "gene_association_match_state": association_state,
+                    "rejection_reason": rejection_reason,
+                }
+            )
+            continue
+        matched_hpo_terms = [
+            {
+                "hpo_id": hpo_id,
+                "label": concept_hpo[hpo_id] or queried_hpo_by_id[hpo_id]["label"],
+            }
+            for hpo_id in queried_hpo_by_id
+            if hpo_id in concept_hpo
+        ]
         records.append(
             {
                 "medgen_uid": uid,
                 "concept_id": concept_id,
                 "title": title,
-                "semantic_type": _text(item.get("semantic_type"), limit=200),
-                "definition": _text(item.get("definition"), limit=500),
-                "source_metadata": sources,
+                "semantic_type": _summary_text(
+                    item.get("semantic_type") or item.get("semantictype"),
+                    limit=200,
+                ),
+                "definition": _summary_text(item.get("definition"), limit=500),
+                "gene_association_match_state": association_state,
+                "gene_association_basis": "conceptmeta_associated_genes_exact_symbol",
+                "matched_hpo_terms": matched_hpo_terms,
+                "hpo_match_method": (
+                    "exact_hpo_id_conceptmeta" if matched_hpo_terms else "not_available"
+                ),
+                "source_metadata": concept_metadata,
                 "upstream_sources": sources,
             }
         )
         if len(records) == MEDGEN_MAX_RECORDS:
             break
-    return records
+    return records, diagnostics[:MEDGEN_MAX_RECORDS]
 
 
 def _context(
@@ -175,6 +368,8 @@ def _context(
     attempts: int = 0,
     http_status: int | None = None,
     records: list[dict[str, Any]] | None = None,
+    candidate_diagnostics: list[dict[str, Any]] | None = None,
+    queried_hpo_terms: list[dict[str, str | None]] | None = None,
 ) -> dict[str, Any]:
     returned = records or []
     return {
@@ -193,6 +388,8 @@ def _context(
         "attempts": attempts,
         "http_status": http_status,
         "records": returned,
+        "candidate_diagnostics": candidate_diagnostics or [],
+        "queried_hpo_terms": queried_hpo_terms or [],
         "upstream_sources": sorted({
             source for record in returned for source in record["upstream_sources"]
         }),
@@ -212,11 +409,13 @@ def enrich_with_medgen(
     *,
     session: requests.Session | None = None,
     enabled: bool = True,
+    accepted_hpo_terms: Sequence[object] = (),
 ) -> MedGenEnrichmentResult:
     """Attach one bounded MedGen disease/HPO context per unique eligible gene."""
     if not isinstance(variants, Sequence) or isinstance(variants, (str, bytes)):
         raise MedGenError("MedGen variants must be a sequence.")
     items = [dict(item) for item in variants]
+    queried_hpo_terms = _normalized_hpo_terms(accepted_hpo_terms)
     queries: dict[str, tuple[str, str, list[str], list[str]]] = {}
     contexts: list[dict[str, Any] | None] = []
     for item in items:
@@ -290,7 +489,10 @@ def enrich_with_medgen(
                 }, circuit=circuit,
             )
             attempts += summary_used
-            normalized = _records(summary, identifiers) if summary is not None else None
+            normalized = _records(
+                summary, identifiers, query_gene=gene,
+                queried_hpo_terms=queried_hpo_terms,
+            ) if summary is not None else None
             if summary_status != "success" or normalized is None:
                 context_by_gene[key] = _context(
                     gene=gene,
@@ -300,12 +502,18 @@ def enrich_with_medgen(
                     missing=missing, attempts=used + summary_used, http_status=summary_http,
                 )
                 continue
+            accepted_records, diagnostics = normalized
             context_by_gene[key] = _context(
-                gene=gene, status="success" if normalized else "no_match",
-                retrieval_state="accepted_records" if normalized else "no_match",
+                gene=gene, status="success" if accepted_records else "no_match",
+                retrieval_state=(
+                    "accepted_records" if accepted_records
+                    else "no_verified_gene_association"
+                ),
                 triggered=True, reason_codes=reasons, primary_state=primary_state,
                 missing=missing, attempts=used + summary_used, http_status=summary_http,
-                records=normalized,
+                records=accepted_records,
+                candidate_diagnostics=diagnostics,
+                queried_hpo_terms=queried_hpo_terms,
             )
     finally:
         if owns_session:
@@ -315,7 +523,9 @@ def enrich_with_medgen(
     for item, context in zip(items, contexts):
         gene = _normalized_gene(item.get("gene"))
         attached = context if context is not None else context_by_gene[gene.casefold()]  # type: ignore[union-attr]
-        enriched.append({**deepcopy(item), "medgen_disease_hpo_context": deepcopy(attached)})
+        normalized_context = deepcopy(attached)
+        normalized_context["queried_hpo_terms"] = deepcopy(queried_hpo_terms)
+        enriched.append({**deepcopy(item), "medgen_disease_hpo_context": normalized_context})
     statuses = [item["medgen_disease_hpo_context"]["status"] for item in enriched]
     overall: MedGenStatus = "success" if "success" in statuses else (
         "no_match" if statuses and all(status in {"no_match", "not_applicable"} for status in statuses) else "not_applicable"

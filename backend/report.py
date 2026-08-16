@@ -1122,17 +1122,40 @@ def _validate_erepo_context(value: object) -> None:
             raise EvidenceObjectError(f"{path}.http_status is invalid.")
 
 
+def _validate_medgen_hpo_terms(value: object, path: str) -> None:
+    """Validate bounded canonical HPO terms retained by MedGen provenance."""
+    if not isinstance(value, list) or len(value) > 10:
+        raise EvidenceObjectError(f"{path} must be a bounded list.")
+    seen: set[str] = set()
+    for index, term in enumerate(value):
+        term_path = f"{path}[{index}]"
+        if not isinstance(term, dict) or set(term) != {"hpo_id", "label"}:
+            raise EvidenceObjectError(f"{term_path} fields are invalid.")
+        _validate_required_string(term["hpo_id"], f"{term_path}.hpo_id")
+        if HPO_ID_PATTERN.fullmatch(term["hpo_id"]) is None or term["hpo_id"] in seen:
+            raise EvidenceObjectError(f"{term_path}.hpo_id is invalid.")
+        _validate_optional_string(term["label"], f"{term_path}.label")
+        seen.add(term["hpo_id"])
+
+
 def _validate_medgen_disease_hpo_context(value: object) -> None:
     """Validate compact, source-separated MedGen context without raw payloads."""
     if not isinstance(value, dict):
         raise EvidenceObjectError("MedGen disease/HPO context must be a dictionary.")
-    expected = {
+    legacy_expected = {
         "schema_version", "provider", "provider_id", "provider_role", "fallback_used",
         "primary_provider", "primary_retrieval_state", "status", "retrieval_state",
         "retrieved_at", "query_gene", "query_key", "attempts", "http_status", "records",
         "upstream_sources", "enrichment_decision",
     }
-    if set(value) != expected or value["schema_version"] != "1.0" or value["provider_id"] != "ncbi_medgen":
+    current_expected = legacy_expected | {"candidate_diagnostics", "queried_hpo_terms"}
+    schema_version = value.get("schema_version")
+    if (
+        (schema_version == "1.0" and set(value) != legacy_expected)
+        or (schema_version == "1.1" and set(value) != current_expected)
+        or schema_version not in {"1.0", "1.1"}
+        or value.get("provider_id") != "ncbi_medgen"
+    ):
         raise EvidenceObjectError("MedGen disease/HPO context fields are invalid.")
     for field in ("provider", "provider_role", "primary_provider", "primary_retrieval_state", "status", "retrieval_state", "retrieved_at"):
         _validate_required_string(value[field], f"medgen.{field}")
@@ -1146,14 +1169,59 @@ def _validate_medgen_disease_hpo_context(value: object) -> None:
     if not isinstance(value["records"], list) or len(value["records"]) > 10:
         raise EvidenceObjectError("MedGen disease/HPO records are invalid.")
     for index, record in enumerate(value["records"]):
-        if not isinstance(record, dict) or set(record) != {"medgen_uid", "concept_id", "title", "semantic_type", "definition", "source_metadata", "upstream_sources"}:
+        legacy_record_fields = {"medgen_uid", "concept_id", "title", "semantic_type", "definition", "source_metadata", "upstream_sources"}
+        current_record_fields = legacy_record_fields | {
+            "gene_association_match_state", "gene_association_basis",
+            "matched_hpo_terms", "hpo_match_method",
+        }
+        if (
+            not isinstance(record, dict)
+            or (schema_version == "1.0" and set(record) != legacy_record_fields)
+            or (schema_version == "1.1" and set(record) != current_record_fields)
+        ):
             raise EvidenceObjectError(f"medgen.records[{index}] fields are invalid.")
         _validate_required_string(record["medgen_uid"], f"medgen.records[{index}].medgen_uid")
         for field in ("concept_id", "semantic_type", "definition"):
             _validate_optional_string(record[field], f"medgen.records[{index}].{field}")
         _validate_required_string(record["title"], f"medgen.records[{index}].title")
-        _validate_unique_strings(record["source_metadata"], f"medgen.records[{index}].source_metadata")
         _validate_unique_strings(record["upstream_sources"], f"medgen.records[{index}].upstream_sources")
+        if schema_version == "1.0":
+            _validate_unique_strings(record["source_metadata"], f"medgen.records[{index}].source_metadata")
+            continue
+        if record["gene_association_match_state"] != "exact_gene_association":
+            raise EvidenceObjectError("Accepted MedGen records require exact gene association.")
+        _validate_required_string(record["gene_association_basis"], f"medgen.records[{index}].gene_association_basis")
+        if record["hpo_match_method"] not in {"exact_hpo_id_conceptmeta", "not_available"}:
+            raise EvidenceObjectError("MedGen HPO match method is invalid.")
+        if not isinstance(record["source_metadata"], list) or len(record["source_metadata"]) > 10:
+            raise EvidenceObjectError("MedGen structured source metadata is invalid.")
+        for metadata_index, metadata in enumerate(record["source_metadata"]):
+            metadata_path = f"medgen.records[{index}].source_metadata[{metadata_index}]"
+            if not isinstance(metadata, dict) or set(metadata) != {"database", "code", "scui", "term_type"}:
+                raise EvidenceObjectError(f"{metadata_path} fields are invalid.")
+            _validate_required_string(metadata["database"], f"{metadata_path}.database")
+            for field in ("code", "scui", "term_type"):
+                _validate_optional_string(metadata[field], f"{metadata_path}.{field}")
+        _validate_medgen_hpo_terms(record["matched_hpo_terms"], f"medgen.records[{index}].matched_hpo_terms")
+        if record["hpo_match_method"] == "exact_hpo_id_conceptmeta" and not record["matched_hpo_terms"]:
+            raise EvidenceObjectError("MedGen exact HPO matching requires matched terms.")
+    if schema_version == "1.1":
+        _validate_medgen_hpo_terms(value["queried_hpo_terms"], "medgen.queried_hpo_terms")
+        diagnostics = value["candidate_diagnostics"]
+        if not isinstance(diagnostics, list) or len(diagnostics) > 10:
+            raise EvidenceObjectError("MedGen candidate diagnostics are invalid.")
+        for index, diagnostic in enumerate(diagnostics):
+            path = f"medgen.candidate_diagnostics[{index}]"
+            if not isinstance(diagnostic, dict) or set(diagnostic) != {
+                "medgen_uid", "concept_id", "title", "gene_association_match_state", "rejection_reason",
+            }:
+                raise EvidenceObjectError(f"{path} fields are invalid.")
+            _validate_required_string(diagnostic["medgen_uid"], f"{path}.medgen_uid")
+            _validate_required_string(diagnostic["title"], f"{path}.title")
+            _validate_optional_string(diagnostic["concept_id"], f"{path}.concept_id")
+            if diagnostic["gene_association_match_state"] not in {"gene_association_unverified", "gene_mismatch"}:
+                raise EvidenceObjectError(f"{path}.gene_association_match_state is invalid.")
+            _validate_required_string(diagnostic["rejection_reason"], f"{path}.rejection_reason")
     decision = value["enrichment_decision"]
     if not isinstance(decision, dict) or set(decision) != {"triggered", "reason_codes", "target_semantic_node", "primary_retrieval_state", "required_fields_missing", "query_key"}:
         raise EvidenceObjectError("MedGen enrichment decision is invalid.")
@@ -3429,7 +3497,7 @@ def _compact_medgen_disease_hpo_context(value: object) -> dict[str, Any]:
                 "fallback_used", "primary_provider", "primary_retrieval_state",
                 "status", "retrieval_state", "retrieved_at", "query_gene",
                 "query_key", "attempts", "http_status", "upstream_sources",
-                "enrichment_decision",
+                "enrichment_decision", "candidate_diagnostics", "queried_hpo_terms",
             ),
         ),
         "records": [
@@ -3437,7 +3505,9 @@ def _compact_medgen_disease_hpo_context(value: object) -> dict[str, Any]:
                 record,
                 (
                     "medgen_uid", "concept_id", "title", "semantic_type",
-                    "definition", "source_metadata", "upstream_sources",
+                    "definition", "gene_association_match_state",
+                    "gene_association_basis", "matched_hpo_terms",
+                    "hpo_match_method", "source_metadata", "upstream_sources",
                 ),
             )
             for record in records[:10]

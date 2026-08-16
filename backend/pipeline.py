@@ -2250,6 +2250,7 @@ def _annotate_and_match(
                 result["phenotype_results"],
                 session=mydisease_session,
                 enabled=True,
+                accepted_hpo_terms=request["phenotypes"],
             )
             public_medgen_results = [
                 dict(variant) for variant in medgen_result["variants"]
