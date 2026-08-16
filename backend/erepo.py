@@ -21,6 +21,10 @@ from backend.provider_resilience import (
     call_provider_with_policy,
 )
 from backend.retrieval_intelligence import VariantIdentifierBundle
+from backend.variant_identity import (
+    normalized_genomic_hgvs,
+    parse_normalized_genomic_hgvs,
+)
 from config import settings
 
 
@@ -43,6 +47,13 @@ _STRUCTURED_NO_MATCH = {
 class _DecodedResponse(NamedTuple):
     payload: dict[str, Any]
     http_status: int
+
+
+class _ExpectedIdentity(NamedTuple):
+    hgvs: str
+    normalized_edit: tuple[str, int, str, str]
+    equivalent_representation: bool
+    normalized_identity: dict[str, object] | None
 
 
 def _timestamp() -> str:
@@ -182,6 +193,50 @@ def _eligible_strategies(
     )
 
 
+def _verified_expected_identity(
+    bundle: VariantIdentifierBundle,
+    selected_hgvs: str,
+    equivalent_representation_allowed: bool,
+) -> _ExpectedIdentity | None:
+    """Independently bind expected HGVS to the declared CPRA/build input."""
+    normalized = normalized_genomic_hgvs(
+        {
+            "chrom": bundle.get("chromosome"),
+            "pos": bundle.get("position"),
+            "ref": bundle.get("reference"),
+            "alt": bundle.get("alternate"),
+        },
+        str(bundle.get("genome_build", "")),
+    )
+    if normalized is None:
+        return None
+    expected_hgvs, edit = normalized
+    if expected_hgvs.upper() != selected_hgvs.strip().upper():
+        return None
+    chromosome, position, reference, alternate = edit
+    original = (
+        str(bundle.get("chromosome", "")).upper(),
+        bundle.get("position"),
+        str(bundle.get("reference", "")).upper(),
+        str(bundle.get("alternate", "")).upper(),
+    )
+    equivalent = equivalent_representation_allowed and original != edit
+    normalized_identity: dict[str, object] | None = None
+    if equivalent:
+        normalized_identity = {
+            "schema_version": "1.0",
+            "assembly": bundle["genome_build"],
+            "chromosome": chromosome,
+            "position": position,
+            "reference": reference,
+            "alternate": alternate,
+            "normalizer": "backend.annotation._normalize_variant_edit",
+            "normalization_provenance": "deterministic_normalization",
+            "representation_basis": "deterministically_trimmed_vcf_padding",
+        }
+    return _ExpectedIdentity(expected_hgvs, edit, equivalent, normalized_identity)
+
+
 def _request_json(
     *,
     session: requests.Session,
@@ -272,9 +327,7 @@ def _is_structured_no_match(payload: object) -> bool:
 
 def _candidate_rejection(
     candidate: object,
-    expected_hgvs: str,
-    *,
-    equivalent_representation_allowed: bool,
+    expected: _ExpectedIdentity,
 ) -> tuple[str | None, dict[str, Any] | None]:
     if not isinstance(candidate, dict):
         return "malformed_field_type", None
@@ -291,20 +344,34 @@ def _candidate_rejection(
         return "malformed_field_type", None
     if candidate["retracted"]:
         return "retracted_record", None
-    normalized_expected = expected_hgvs.strip().upper()
+    normalized_expected = expected.hgvs.strip().upper()
     if normalized_expected not in {item.strip().upper() for item in candidate_hgvs}:
-        expected_accession = expected_hgvs.split(":", 1)[0].split(".", 1)[0]
-        if any(
-            item.split(":", 1)[0].split(".", 1)[0] == expected_accession
-            for item in candidate_hgvs
-            if item.startswith("NC_")
-        ):
-            return "assembly_mismatch", None
+        expected_accession, expected_position, expected_ref, expected_alt = (
+            parse_normalized_genomic_hgvs(expected.hgvs) or ("", 0, "", "")
+        )
+        for item in candidate_hgvs:
+            parsed = parse_normalized_genomic_hgvs(item)
+            if parsed is None:
+                continue
+            candidate_accession, candidate_position, candidate_ref, candidate_alt = parsed
+            if candidate_accession.split(".", 1)[0] != expected_accession.split(".", 1)[0]:
+                continue
+            if candidate_accession != expected_accession:
+                return "assembly_mismatch", None
+            expected_is_indel = not expected_ref or not expected_alt or len(expected_ref) != len(expected_alt)
+            candidate_is_indel = not candidate_ref or not candidate_alt or len(candidate_ref) != len(candidate_alt)
+            if expected_is_indel and candidate_is_indel and candidate_position != expected_position:
+                return "representation_unresolved", None
+            if candidate_position != expected_position:
+                return "coordinate_mismatch", None
+            if candidate_ref != "?" * len(candidate_ref) and candidate_ref != expected_ref:
+                return "reference_mismatch", None
+            if candidate_alt != expected_alt:
+                return "alternate_mismatch", None
         return "hgvs_mismatch", None
     acceptance_state = (
         "EXACT_MATCH_EQUIVALENT_REPRESENTATION"
-        if equivalent_representation_allowed
-        and any(token in expected_hgvs for token in ("del", "ins"))
+        if expected.equivalent_representation
         else "EXACT_MATCH"
     )
     return None, {
@@ -324,6 +391,8 @@ def _candidate_rejection(
         "clinvar_variation_id": _text(candidate.get("cvId"), limit=128),
         "preferred_variant_title": _text(candidate.get("preferredVarTitle")),
         "summary_description": _text(candidate.get("summaryDesc")),
+        **({"normalized_identity": expected.normalized_identity}
+           if expected.normalized_identity is not None else {}),
     }
 
 
@@ -425,6 +494,16 @@ def retrieve_expert_curated_context(
         return _context(
             status="not_applicable", retrieval_state="unattempted", records=[], strategy_results=[]
         )
+    expected = _verified_expected_identity(
+        bundle, expected_hgvs, equivalent_representation_allowed
+    )
+    if expected is None:
+        return _context(
+            status="not_applicable",
+            retrieval_state="identity_unverifiable",
+            records=[],
+            strategy_results=[],
+        )
 
     base = (base_url or settings.EREPO_BASE_URL).rstrip("/")
     resolved_timeout = timeout if timeout is not None else settings.EREPO_TIMEOUT
@@ -484,8 +563,7 @@ def retrieve_expert_curated_context(
         for candidate in candidates[:MAX_CANDIDATES_PER_STRATEGY]:
             rejection, summary = _candidate_rejection(
                 candidate,
-                expected_hgvs,
-                equivalent_representation_allowed=equivalent_representation_allowed,
+                expected,
             )
             if rejection is not None or summary is None:
                 query_result["candidate_rejections"].append(rejection or "malformed_field_type")

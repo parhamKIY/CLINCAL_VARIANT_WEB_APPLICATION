@@ -1022,7 +1022,7 @@ def _validate_erepo_context(value: object) -> None:
             "expert_panel", "approved_date", "published_date", "met_codes",
             "unmet_codes", "clinvar_variation_id", "preferred_variant_title",
             "summary_description", "statement_outcome", "assertion_method",
-            "detail_attempts", "detail_http_status",
+            "detail_attempts", "detail_http_status", "normalized_identity",
         }:
             raise EvidenceObjectError(f"{path} contains unsupported fields.")
         for field in required:
@@ -1031,6 +1031,31 @@ def _validate_erepo_context(value: object) -> None:
             "EXACT_MATCH", "EXACT_MATCH_EQUIVALENT_REPRESENTATION",
         }:
             raise EvidenceObjectError(f"{path}.acceptance_state is invalid.")
+        normalized_identity = record.get("normalized_identity")
+        if record["acceptance_state"] == "EXACT_MATCH_EQUIVALENT_REPRESENTATION":
+            if not isinstance(normalized_identity, dict) or set(normalized_identity) != {
+                "schema_version", "assembly", "chromosome", "position", "reference",
+                "alternate", "normalizer", "normalization_provenance",
+                "representation_basis",
+            }:
+                raise EvidenceObjectError(f"{path}.normalized_identity is invalid.")
+            if normalized_identity["schema_version"] != "1.0":
+                raise EvidenceObjectError(f"{path}.normalized_identity schema is invalid.")
+            for field in (
+                "assembly", "chromosome", "normalizer",
+                "normalization_provenance", "representation_basis",
+            ):
+                _validate_required_string(normalized_identity[field], f"{path}.normalized_identity.{field}")
+            if (not isinstance(normalized_identity["reference"], str)
+                    or not isinstance(normalized_identity["alternate"], str)
+                    or not normalized_identity["reference"] and not normalized_identity["alternate"]):
+                raise EvidenceObjectError(f"{path}.normalized_identity alleles are invalid.")
+            if (not isinstance(normalized_identity["position"], int)
+                    or isinstance(normalized_identity["position"], bool)
+                    or normalized_identity["position"] < 1):
+                raise EvidenceObjectError(f"{path}.normalized_identity.position is invalid.")
+        elif normalized_identity is not None:
+            raise EvidenceObjectError(f"{path}.normalized_identity requires equivalent acceptance.")
         for field in (
             "classification", "condition", "mondo_id", "mode_of_inheritance",
             "expert_panel", "approved_date", "published_date",
@@ -1985,6 +2010,11 @@ def _sanitize_context_tree(value: Any, path: str) -> Any:
     """Sanitize strings inside an already validated context tree."""
 
     if isinstance(value, str):
+        if (value == "" and path.endswith((
+            ".normalized_identity.reference",
+            ".normalized_identity.alternate",
+        ))):
+            return value
         return _sanitize_text(
             value,
             max_length=(

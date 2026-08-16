@@ -243,6 +243,124 @@ def test_deterministically_normalized_padded_indel_is_retained_as_equivalent() -
     assert result["expert_curated_variant_context"]["records"][0]["acceptance_state"] == (
         "EXACT_MATCH_EQUIVALENT_REPRESENTATION"
     )
+    assert result["expert_curated_variant_context"]["records"][0]["normalized_identity"] == {
+        "schema_version": "1.0", "assembly": "GRCh38", "chromosome": "1",
+        "position": 101, "reference": "T", "alternate": "",
+        "normalizer": "backend.annotation._normalize_variant_edit",
+        "normalization_provenance": "deterministic_normalization",
+        "representation_basis": "deterministically_trimmed_vcf_padding",
+    }
+    equivalent_candidate = {
+        "variant": {"chrom": "1", "pos": 100, "ref": "AT", "alt": "A"},
+        "assembly": "GRCh38", "gene": None, "gene_id": None, "transcript": None,
+        "consequence": None, "impact": None, "protein_change": None,
+        "population_frequency": None, "warnings": [],
+        "sources": {
+            "vep": {"status": "success"}, "myvariant": {"status": "success"},
+            "clinvar": {"status": "not_found", "conditions": []},
+            "clingen": {"status": "not_found", "curations": []}, "erepo": result,
+        },
+    }
+    equivalent_evidence = build_evidence_object(equivalent_candidate)
+    assert validate_evidence_object(equivalent_evidence) == equivalent_evidence
+
+
+def test_clinvar_id_and_transcript_discovery_are_detail_verified() -> None:
+    no_match = _fixture("summary_classification_exact_no_match.json")
+    summary = _fixture("summary_classification_exact_success_ca229507.json")
+    detail = _fixture("detail_classification_exact_success_ca229507.json")
+    cv_session = _Session([_Response(404, no_match), _Response(200, summary), _Response(200, detail)])
+    cv_result = _retrieve(cv_session, _bundle(include_secondary=True))
+    assert cv_result["expert_curated_variant_context"]["records"][0]["query_strategy"] == "exact_clinvar_variation_id"
+    assert cv_session.requests[1][1]["columns"] == "cvId"
+
+    transcript_bundle = _bundle(include_secondary=True)
+    transcript_bundle["clinvar_variation_ids"] = []
+    transcript_bundle["provenance"] = [
+        item for item in transcript_bundle["provenance"]
+        if item["identifier_type"] != "clinvar_variation_id"
+    ]
+    transcript_session = _Session([_Response(404, no_match), _Response(200, summary), _Response(200, detail)])
+    transcript_result = _retrieve(transcript_session, transcript_bundle)
+    assert transcript_result["expert_curated_variant_context"]["records"][0]["query_strategy"] == "exact_transcript_hgvs"
+    assert transcript_session.requests[1][1]["values"] == "NM_000277.3:c.283A>T"
+
+
+def _summary_with_hgvs(hgvs: list[str]) -> dict[str, Any]:
+    summary = _fixture("summary_classification_exact_success_ca229507.json")
+    summary["data"][0]["hgvs"] = hgvs
+    return summary
+
+
+@pytest.mark.parametrize(
+    ("hgvs", "reason"),
+    [
+        (["NM_000277.3:c.283A>T"], "hgvs_mismatch"),
+        (["NC_000012.12:g.102894805T>A"], "coordinate_mismatch"),
+        (["NC_000012.12:g.102894804C>A"], "reference_mismatch"),
+        (["NC_000012.12:g.102894804T>C"], "alternate_mismatch"),
+    ],
+)
+def test_candidate_rejections_have_distinct_deterministic_reasons(
+    hgvs: list[str], reason: str
+) -> None:
+    result = _retrieve(_Session([_Response(200, _summary_with_hgvs(hgvs))]))
+    assert result["expert_curated_variant_context"]["strategy_results"][0]["candidate_rejections"] == [reason]
+
+
+def test_retracted_schema_drift_and_unresolved_indel_representation_are_rejected() -> None:
+    retracted = _summary_with_hgvs([EXACT_HGVS])
+    retracted["data"][0]["retracted"] = True
+    retracted_result = _retrieve(_Session([_Response(200, retracted)]))
+    assert retracted_result["expert_curated_variant_context"]["strategy_results"][0]["candidate_rejections"] == ["retracted_record"]
+
+    schema_drift = _fixture("summary_classification_exact_success_ca229507.json")
+    schema_drift["status"] = {"code": 200, "name": "CHANGED"}
+    schema_result = _retrieve(_Session([_Response(200, schema_drift)]))
+    assert schema_result["status"] == "invalid_response"
+
+    indel = _bundle()
+    indel.update({
+        "chromosome": "1", "position": 100, "reference": "AT", "alternate": "A",
+        "minimal_representation_status": "applied",
+        "left_normalization_status": "unverified_without_reference",
+        "genomic_hgvs": ["NC_000001.11:g.101del"],
+        "provenance": [{"identifier_type": "genomic_hgv", "value": "NC_000001.11:g.101del", "source": "input_normalization", "scope": "allele", "validation": "deterministic_normalization"}],
+    })
+    unresolved = _summary_with_hgvs(["NC_000001.11:g.100del"])
+    unresolved_result = _retrieve(_Session([_Response(200, unresolved)]), indel)
+    assert unresolved_result["expert_curated_variant_context"]["strategy_results"][0]["candidate_rejections"] == ["representation_unresolved"]
+
+
+def test_multiple_condition_separated_records_are_retained_after_detail_verification() -> None:
+    summary = _fixture("summary_classification_exact_success_ca229507.json")
+    second = deepcopy(summary["data"][0])
+    second.update({"uuid": "second-condition-uuid", "caId": "CA000000002", "condition": "second condition"})
+    summary["data"].append(second)
+    first_detail = _fixture("detail_classification_exact_success_ca229507.json")
+    second_detail = deepcopy(first_detail)
+    second_detail["data"]["uuid"] = "second-condition-uuid"
+    second_detail["data"]["@id"] = second_detail["data"]["@id"].replace(
+        "c61fa227-893e-4be0-9e02-2d7c1494af20", "second-condition-uuid"
+    )
+    result = _retrieve(_Session([
+        _Response(200, summary), _Response(200, first_detail), _Response(200, second_detail),
+    ]))
+    records = result["expert_curated_variant_context"]["records"]
+    assert [(record["ca_id"], record["condition"]) for record in records] == [
+        ("CA229507", "phenylketonuria"), ("CA000000002", "second condition"),
+    ]
+
+
+def test_bundle_hgvs_not_independently_derivable_is_not_queried() -> None:
+    bundle = _bundle()
+    bundle["genomic_hgvs"] = ["NC_000012.12:g.102894805T>A"]
+    bundle["provenance"][0]["value"] = bundle["genomic_hgvs"][0]
+    session = _Session([])
+    result = _retrieve(session, bundle)
+    assert result["status"] == "not_applicable"
+    assert result["expert_curated_variant_context"]["retrieval_state"] == "identity_unverifiable"
+    assert not session.requests
 
 
 def test_identity_incomplete_input_is_unattempted_without_http() -> None:

@@ -44,6 +44,11 @@ from backend.retrieval_intelligence import (
     build_retrieval_assessment,
     build_variant_identifier_bundle,
 )
+from backend.variant_identity import (
+    format_genomic_hgvs as _shared_format_genomic_hgvs,
+    normalize_chromosome as _shared_normalize_chromosome,
+    normalize_variant_edit as _shared_normalize_variant_edit,
+)
 from backend.vcf_processing import VariantData
 from config import settings
 
@@ -784,55 +789,15 @@ def _post_genebe_batch(
 # ---------------------------------------------------------------------------
 
 def _normalize_chromosome(chromosome: Any) -> str | None:
-    """Convert a VCF chromosome to a standard human chromosome name."""
-    normalized = str(chromosome).strip()
-    if normalized.lower().startswith("chr"):
-        normalized = normalized[3:]
-
-    normalized = normalized.upper()
-    if normalized == "M":
-        normalized = "MT"
-
-    if normalized in {"X", "Y", "MT"}:
-        return normalized
-
-    if normalized.isdigit() and 1 <= int(normalized) <= 22:
-        return str(int(normalized))
-
-    return None
+    """Compatibility wrapper for the shared deterministic normalizer."""
+    return _shared_normalize_chromosome(chromosome)
 
 
 def _normalize_variant_edit(
     variant: VariantData,
 ) -> tuple[str, int, str, str] | None:
-    """Remove shared VCF padding from one exact small-variant edit."""
-    chromosome = _normalize_chromosome(variant["chrom"])
-    reference = str(variant["ref"]).strip().upper()
-    alternate = str(variant["alt"]).strip().upper()
-
-    if (
-        chromosome is None
-        or not reference
-        or not alternate
-        or not set(reference).issubset({"A", "C", "G", "T"})
-        or not set(alternate).issubset({"A", "C", "G", "T"})
-        or reference == alternate
-    ):
-        return None
-
-    start = int(variant["pos"])
-
-    # Remove shared VCF padding so indels use HGVS coordinates and alleles.
-    while reference and alternate and reference[0] == alternate[0]:
-        reference = reference[1:]
-        alternate = alternate[1:]
-        start += 1
-
-    while reference and alternate and reference[-1] == alternate[-1]:
-        reference = reference[:-1]
-        alternate = alternate[:-1]
-
-    return chromosome, start, reference, alternate
+    """Compatibility wrapper for the shared deterministic normalizer."""
+    return _shared_normalize_variant_edit(variant)
 
 
 def _format_genomic_hgvs(
@@ -841,23 +806,8 @@ def _format_genomic_hgvs(
     reference: str,
     alternate: str,
 ) -> str:
-    """Format one normalized small-variant edit as genomic HGVS."""
-    prefix = f"{sequence}:g."
-
-    if not reference and alternate:
-        return f"{prefix}{start - 1}_{start}ins{alternate}"
-
-    if reference and not alternate:
-        end = start + len(reference) - 1
-        location = str(start) if start == end else f"{start}_{end}"
-        return f"{prefix}{location}del"
-
-    if len(reference) == 1 and len(alternate) == 1:
-        return f"{prefix}{start}{reference}>{alternate}"
-
-    end = start + len(reference) - 1
-    location = str(start) if start == end else f"{start}_{end}"
-    return f"{prefix}{location}delins{alternate}"
+    """Compatibility wrapper for shared deterministic HGVS formatting."""
+    return _shared_format_genomic_hgvs(sequence, start, reference, alternate)
 
 
 def _to_myvariant_hgvs(variant: VariantData) -> str | None:
