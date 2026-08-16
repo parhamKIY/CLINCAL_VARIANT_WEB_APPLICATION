@@ -1031,8 +1031,7 @@ MEDGEN_GENE_DISEASE_SCHEMA_VERSION = "1.0"
 
 
 def _is_local_gene_disease_support_sufficient(
-    item: Mapping[str, object],
-    clingen: Mapping[str, object],
+    item: Mapping[str, object] | None,
 ) -> bool:
     """Check if semantically valid local gene-disease support is already sufficient.
 
@@ -1040,13 +1039,13 @@ def _is_local_gene_disease_support_sufficient(
     - gene_disease_validity is ClinGen/GenCC only (never fabricated by MedGen or local support)
     - gene_disease_support is populated by local support and/or MedGen
 
-    Returns True when:
-    1. clingen curations list is non-empty with valid claims.
-    2. Explicit local_gene_disease_support / gene_disease_support on the variant indicates a match.
+    GenCC / ClinGen validity evidence populates `gene_disease_validity` and must
+    NOT by itself count as sufficient `gene_disease_support`.
+    Returns True ONLY when semantically valid local gene-disease support evidence
+    is present and valid.
     """
-    curations = clingen.get("curations")
-    if isinstance(curations, (list, tuple)) and len(curations) > 0:
-        return True
+    if not isinstance(item, Mapping):
+        return False
 
     for key in ("local_gene_disease_support", "gene_disease_support", "local_disease_context"):
         val = item.get(key)
@@ -1066,14 +1065,21 @@ def _clingen_primary_state(
     """Return (primary_state, triggered, reason_codes, missing) for gene_disease_support node.
 
     Explicitly distinguishes:
-    - ClinGen usable / primary_sufficient (status == 'success' and curations is non-empty)
+    - ClinGen validity usable / available (status == 'success' and curations is non-empty)
     - ClinGen operational failure (status in {'error', 'unavailable', 'timeout', 'rate_limited'} or primary_failure is not None)
     - ClinGen valid no_match (status in {'not_found', 'no_match'} or (status == 'success' and not curations))
     - ClinGen partial / insufficient (status == 'partial')
 
+    Semantic separation:
+    GenCC / ClinGen validity evidence populates `gene_disease_validity` but does NOT
+    by itself satisfy the distinct `gene_disease_support` semantic node.
+    Therefore, even when GenCC validity is available, if local gene-disease support
+    is missing, MedGen gene-disease enrichment is triggered.
+
     Target-node sufficiency:
     Before triggering MedGen, evaluates whether existing semantically valid local
-    gene-disease support already sufficiently populates the gene_disease_support node.
+    gene-disease support (e.g. local_gene_disease_support / gene_disease_support)
+    already sufficiently populates the gene_disease_support node.
     If local support is already sufficient -> NOT_NEEDED.
     """
     primary = clingen_value if isinstance(clingen_value, Mapping) else {}
@@ -1085,9 +1091,8 @@ def _clingen_primary_state(
 
     if status_raw == "success" and has_curations:
         primary_state = "available"
-        return primary_state, False, ["primary_sufficient"], []
-
-    if status_raw in {"not_found", "no_match"} or (status_raw == "success" and not has_curations):
+        gap_reason = "primary_validity_available"
+    elif status_raw in {"not_found", "no_match"} or (status_raw == "success" and not has_curations):
         primary_state = "no_match"
         gap_reason = "primary_no_match"
     elif status_raw in {"error", "unavailable", "timeout", "rate_limited", "server_error"} or primary.get("primary_failure") is not None:
@@ -1100,12 +1105,51 @@ def _clingen_primary_state(
         primary_state = "not_applicable"
         gap_reason = "primary_non_applicable"
 
-    # 2. Target-node sufficiency: check if local gene-disease support is already sufficient
-    if _is_local_gene_disease_support_sufficient(item, primary):
+    # Target-node sufficiency: check if local gene-disease support is already sufficient
+    if _is_local_gene_disease_support_sufficient(item):
         return primary_state, False, [gap_reason, "local_support_sufficient"], []
 
-    # 3. Support node is insufficient -> trigger MedGen
+    # Support node is insufficient -> trigger MedGen
     return primary_state, True, [gap_reason, "gene_disease_support_gap"], ["gene_disease_support"]
+
+
+def _deterministic_upstream_sources(
+    concept_metadata: list[dict[str, str | None]],
+) -> list[str]:
+    """Extract deterministic upstream identifiers (e.g. OMIM:607208, MONDO:0011933).
+
+    If metadata has database and code/scui, builds deterministic identifier CURIEs.
+    Database names without code/scui are NOT formatted as deterministic identifiers.
+    """
+    sources: list[str] = ["NCBI MedGen"]
+    for meta in concept_metadata:
+        db = meta.get("database")
+        code = meta.get("code") or meta.get("scui")
+        if not db or not code:
+            continue
+        db_clean = db.strip()
+        code_clean = code.strip()
+        db_lower = db_clean.casefold()
+
+        if db_lower in {"omim", "mim"}:
+            ident = f"OMIM:{code_clean}"
+        elif db_lower == "mondo":
+            ident = code_clean if code_clean.upper().startswith("MONDO:") else f"MONDO:{code_clean}"
+        elif db_lower in {"orphanet", "orpha"}:
+            if code_clean.upper().startswith("ORPHA:"):
+                ident = f"Orphanet:{code_clean.split(':', 1)[1]}"
+            elif code_clean.upper().startswith("ORPHANET:"):
+                ident = f"Orphanet:{code_clean.split(':', 1)[1]}"
+            else:
+                ident = f"Orphanet:{code_clean}"
+        elif db_lower == "gtr":
+            ident = f"GTR:{code_clean}"
+        else:
+            ident = f"{db_clean}:{code_clean}"
+
+        sources.append(ident)
+
+    return sorted(dict.fromkeys(sources))[:10]
 
 
 def _gene_disease_records(
@@ -1140,13 +1184,7 @@ def _gene_disease_records(
         else:
             association_state = "exact_gene_association"
             rejection_reason = None
-        sources = _source_names(item.get("sources") or item.get("source"))
-        sources.extend(
-            item["database"]
-            for item in concept_metadata
-            if item["database"] is not None
-        )
-        sources = sorted(set(sources))[:10]
+        sources = _deterministic_upstream_sources(concept_metadata)
         if association_state != "exact_gene_association":
             diagnostics.append(
                 {

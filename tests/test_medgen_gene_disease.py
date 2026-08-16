@@ -37,6 +37,7 @@ SAMPLE_CONCEPTMETA_SCN1A = (
     "  <Sources>"
     "    <Source sab='OMIM' code='607208' />"
     "    <Source sab='Orphanet' code='ORPHA:33069' />"
+    "    <Source sab='MONDO' code='MONDO:0011933' />"
     "  </Sources>"
     "</ConceptMeta>"
 )
@@ -66,8 +67,9 @@ def _variant(
     gene: str | None = "SCN1A",
     clingen_status: str = "unavailable",
     curations: list[dict[str, Any]] | None = None,
+    local_support: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    v = {
         "variant": {
             "chrom": "2",
             "pos": 166848650,
@@ -113,6 +115,9 @@ def _variant(
         },
         "mydisease": {"status": "available", "diseases": []},
     }
+    if local_support is not None:
+        v["local_gene_disease_support"] = local_support
+    return v
 
 
 def _mock_response(status_code: int, json_data: dict[str, Any] | None) -> requests.Response:
@@ -152,11 +157,12 @@ def _make_summary_payload(
 
 
 # ---------------------------------------------------------------------------
-# Unit Tests: Primary State & Target-Node Sufficiency
+# Unit Tests: Primary State & Target-Node Sufficiency Semantics
 # ---------------------------------------------------------------------------
 
 class TestClinGenPrimaryStateAndSufficiency:
-    def test_clingen_usable_is_primary_sufficient(self) -> None:
+    def test_clingen_validity_available_without_support_triggers_medgen(self) -> None:
+        """GenCC validity available must NOT by itself satisfy gene_disease_support."""
         clingen = {
             "status": "success",
             "curations": [
@@ -167,10 +173,51 @@ class TestClinGenPrimaryStateAndSufficiency:
                 }
             ],
         }
-        state, triggered, reasons, missing = _clingen_primary_state(clingen)
+        item = {"gene": "SCN1A", "sources": {"clingen": clingen}}
+        state, triggered, reasons, missing = _clingen_primary_state(clingen, item)
+        assert state == "available"
+        # Separate semantic node: gene_disease_support remains insufficient!
+        assert triggered is True
+        assert reasons == ["primary_validity_available", "gene_disease_support_gap"]
+        assert missing == ["gene_disease_support"]
+
+    def test_local_support_sufficient_suppresses_medgen_when_validity_available(self) -> None:
+        """When local semantically valid support is present, MedGen is NOT_NEEDED."""
+        clingen = {
+            "status": "success",
+            "curations": [
+                {"disease": "Dravet syndrome", "classification": "Definitive", "submitter": "ClinGen"}
+            ],
+        }
+        item = {
+            "gene": "SCN1A",
+            "sources": {"clingen": clingen},
+            "local_gene_disease_support": {
+                "status": "available",
+                "records": [{"disease": "Dravet syndrome", "gene": "SCN1A"}],
+            },
+        }
+        state, triggered, reasons, missing = _clingen_primary_state(clingen, item)
         assert state == "available"
         assert triggered is False
-        assert reasons == ["primary_sufficient"]
+        assert reasons == ["primary_validity_available", "local_support_sufficient"]
+        assert missing == []
+
+    def test_local_support_sufficient_suppresses_medgen_when_validity_unavailable(self) -> None:
+        """When local support is present and GenCC is unavailable, MedGen is NOT_NEEDED."""
+        clingen = {"status": "unavailable", "primary_failure": "500 Server Error"}
+        item = {
+            "gene": "SCN1A",
+            "sources": {"clingen": clingen},
+            "local_gene_disease_support": {
+                "status": "available",
+                "records": [{"disease": "Dravet syndrome", "gene": "SCN1A"}],
+            },
+        }
+        state, triggered, reasons, missing = _clingen_primary_state(clingen, item)
+        assert state == "unavailable"
+        assert triggered is False
+        assert reasons == ["primary_operational_failure", "local_support_sufficient"]
         assert missing == []
 
     def test_clingen_operational_failure_triggers_medgen(self) -> None:
@@ -197,25 +244,9 @@ class TestClinGenPrimaryStateAndSufficiency:
         assert reasons == ["primary_partial", "gene_disease_support_gap"]
         assert missing == ["gene_disease_support"]
 
-    def test_target_node_sufficiency_suppresses_medgen_when_local_support_present(self) -> None:
-        clingen = {"status": "unavailable", "primary_failure": "timeout"}
-        item = {
-            "gene": "SCN1A",
-            "sources": {"clingen": clingen},
-            "local_gene_disease_support": {
-                "status": "available",
-                "records": [{"disease": "Epilepsy", "gene": "SCN1A"}],
-            },
-        }
-        state, triggered, reasons, missing = _clingen_primary_state(clingen, item)
-        assert state == "unavailable"
-        assert triggered is False
-        assert reasons == ["primary_operational_failure", "local_support_sufficient"]
-        assert missing == []
-
 
 # ---------------------------------------------------------------------------
-# Unit Tests: enrich_with_medgen_gene_disease
+# Unit Tests: enrich_with_medgen_gene_disease & No-Match vs Rejection Semantics
 # ---------------------------------------------------------------------------
 
 class TestEnrichWithMedGenGeneDisease:
@@ -253,26 +284,42 @@ class TestEnrichWithMedGenGeneDisease:
         assert len(gd["records"]) == 2
         assert gd["records"][0]["title"] == "Dravet syndrome"
         assert gd["records"][0]["gene_association_match_state"] == "exact_gene_association"
-        assert "OMIM" in gd["records"][0]["upstream_sources"]
+        assert "OMIM:607208" in gd["records"][0]["upstream_sources"]
 
     @patch("backend.medgen.requests.Session.get")
-    def test_enrich_gene_disease_exact_gene_filtering_and_diagnostics(self, mock_get: MagicMock) -> None:
-        # 1001 has SCN1A (match), 1002 has SCN1B (mismatch), 1003 has no gene (unverified)
+    def test_true_no_match_when_esearch_empty(self, mock_get: MagicMock) -> None:
+        """Case A: ESearch returns 0 UIDs -> valid no_match with no diagnostics."""
         mock_get.side_effect = [
-            _mock_response(200, _make_search_payload(["1001", "1002", "1003"])),
+            _mock_response(200, _make_search_payload([])),
+        ]
+
+        variants = [_variant(gene="NONEXISTENTGENE", clingen_status="not_found")]
+
+        result = enrich_with_medgen_gene_disease(variants)
+        assert result["status"] == "no_match"
+
+        gd = result["variants"][0]["medgen_gene_disease_context"]
+        assert gd["status"] == "no_match"
+        assert gd["retrieval_state"] == "no_match"
+        assert gd["records"] == []
+        assert gd["candidate_diagnostics"] == []
+
+    @patch("backend.medgen.requests.Session.get")
+    def test_rejected_candidates_when_conceptmeta_fails_exact_gene(self, mock_get: MagicMock) -> None:
+        """Case B: ESearch returns candidates but none pass exact-gene verification."""
+        mock_get.side_effect = [
+            _mock_response(200, _make_search_payload(["1002", "1003"])),
             _mock_response(
                 200,
                 _make_summary_payload(
-                    ["1001", "1002", "1003"],
+                    ["1002", "1003"],
                     titles={
-                        "1001": "Dravet syndrome",
                         "1002": "Brugada syndrome",
                         "1003": "Generic epilepsy",
                     },
                     conceptmetas={
-                        "1001": SAMPLE_CONCEPTMETA_SCN1A,
-                        "1002": SAMPLE_CONCEPTMETA_SCN1B,
-                        "1003": SAMPLE_CONCEPTMETA_NO_GENES,
+                        "1002": SAMPLE_CONCEPTMETA_SCN1B,  # mismatch (SCN1B vs SCN1A)
+                        "1003": SAMPLE_CONCEPTMETA_NO_GENES,  # unverified (no AssociatedGenes)
                     },
                 ),
             ),
@@ -281,12 +328,12 @@ class TestEnrichWithMedGenGeneDisease:
         variants = [_variant(gene="SCN1A", clingen_status="not_found")]
 
         result = enrich_with_medgen_gene_disease(variants)
-        assert result["status"] == "success"
+        assert result["status"] == "no_match"
 
         gd = result["variants"][0]["medgen_gene_disease_context"]
-        assert len(gd["records"]) == 1
-        assert gd["records"][0]["medgen_uid"] == "1001"
-        assert gd["records"][0]["title"] == "Dravet syndrome"
+        assert gd["status"] == "no_match"
+        assert gd["retrieval_state"] == "no_verified_gene_association"
+        assert gd["records"] == []
 
         # Diagnostics contain the rejected concepts
         assert len(gd["candidate_diagnostics"]) == 2
@@ -320,6 +367,7 @@ class TestEnrichWithMedGenGeneDisease:
                         "2001": (
                             "<ConceptMeta>"
                             "  <AssociatedGenes><AssociatedGene symbol='FBN1' /></AssociatedGenes>"
+                            "  <Sources><Source sab='OMIM' code='154700' /></Sources>"
                             "</ConceptMeta>"
                         )
                     },
@@ -350,14 +398,13 @@ class TestEnrichWithMedGenGeneDisease:
         assert result["variants"][1]["medgen_gene_disease_context"]["records"][0]["title"] == "Marfan syndrome"
 
     @patch("backend.medgen.requests.Session.get")
-    def test_primary_sufficient_suppresses_network_calls(self, mock_get: MagicMock) -> None:
+    def test_local_support_sufficient_suppresses_network_calls(self, mock_get: MagicMock) -> None:
         variants = [
             _variant(
                 gene="SCN1A",
                 clingen_status="success",
-                curations=[
-                    {"disease": "Dravet syndrome", "classification": "Definitive", "submitter": "ClinGen"}
-                ],
+                curations=[{"disease": "Dravet syndrome", "classification": "Definitive"}],
+                local_support={"status": "available", "records": [{"disease": "Dravet syndrome"}]},
             )
         ]
 
@@ -367,7 +414,7 @@ class TestEnrichWithMedGenGeneDisease:
         gd = result["variants"][0]["medgen_gene_disease_context"]
         assert gd["retrieval_state"] == "not_needed"
         assert gd["enrichment_decision"]["triggered"] is False
-        assert gd["enrichment_decision"]["reason_codes"] == ["primary_sufficient"]
+        assert gd["enrichment_decision"]["reason_codes"] == ["primary_validity_available", "local_support_sufficient"]
 
     def test_missing_gene_unattempted(self) -> None:
         variants = [_variant(gene=None, clingen_status="unavailable")]
@@ -388,7 +435,7 @@ class TestEnrichWithMedGenGeneDisease:
 
 
 # ---------------------------------------------------------------------------
-# Unit Tests: Semantic Isolation & EvidenceObject Validation
+# Unit Tests: Semantic Isolation, Correlation & EvidenceObject Validation
 # ---------------------------------------------------------------------------
 
 class TestSemanticIsolationAndEvidenceObject:
@@ -448,3 +495,60 @@ class TestSemanticIsolationAndEvidenceObject:
         assert "medgen_gene_disease_context" not in evidence["pathogenicity"]
         # Must pass schema validation
         validate_evidence_object(evidence)
+
+    @patch("backend.medgen.requests.Session.get")
+    def test_exact_upstream_identifier_overlap_creates_shared_correlation(self, mock_get: MagicMock) -> None:
+        """Exact identifier overlap (e.g. OMIM:607208) creates a shared upstream group."""
+        mock_get.side_effect = [
+            _mock_response(200, _make_search_payload(["1001"])),
+            _mock_response(
+                200,
+                _make_summary_payload(
+                    ["1001"],
+                    titles={"1001": "Dravet syndrome"},
+                    conceptmetas={"1001": SAMPLE_CONCEPTMETA_SCN1A},  # contains OMIM:607208
+                ),
+            ),
+        ]
+
+        candidate = _variant(gene="SCN1A", clingen_status="unavailable")
+        # Add another provider with exact same deterministic identifier OMIM:607208
+        candidate["mydisease"]["diseases"] = [{"upstream_sources": ["OMIM:607208"]}]
+
+        enrich_result = enrich_with_medgen_gene_disease([candidate])
+        evidence = build_evidence_object(enrich_result["variants"][0])
+
+        shared_groups = evidence["provenance"]["shared_upstream_groups"]
+        omim_group = next(
+            (g for g in shared_groups if g["upstream_source"] == "OMIM:607208"),
+            None,
+        )
+        assert omim_group is not None
+        assert "pathogenicity.medgen_gene_disease_context" in omim_group["evidence_paths"]
+        assert "phenotype_relationship.mydisease" in omim_group["evidence_paths"]
+
+    @patch("backend.medgen.requests.Session.get")
+    def test_same_database_without_same_identifier_does_not_create_shared_correlation(self, mock_get: MagicMock) -> None:
+        """Same database name without same identifier does NOT claim shared biological upstream evidence."""
+        mock_get.side_effect = [
+            _mock_response(200, _make_search_payload(["1001"])),
+            _mock_response(
+                200,
+                _make_summary_payload(
+                    ["1001"],
+                    titles={"1001": "Dravet syndrome"},
+                    conceptmetas={"1001": SAMPLE_CONCEPTMETA_SCN1A},  # contains OMIM:607208
+                ),
+            ),
+        ]
+
+        candidate = _variant(gene="SCN1A", clingen_status="unavailable")
+        # Add another provider with a DIFFERENT OMIM identifier OMIM:123456
+        candidate["mydisease"]["diseases"] = [{"upstream_sources": ["OMIM:123456"]}]
+
+        enrich_result = enrich_with_medgen_gene_disease([candidate])
+        evidence = build_evidence_object(enrich_result["variants"][0])
+
+        shared_groups = evidence["provenance"]["shared_upstream_groups"]
+        # Neither OMIM:607208 nor OMIM:123456 should have a shared group (no overlap)
+        assert not any("OMIM" in g["upstream_source"] for g in shared_groups)
