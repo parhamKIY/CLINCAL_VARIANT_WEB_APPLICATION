@@ -459,7 +459,7 @@ def test_phen2gene_valid_no_match_triggers_medgen_enrichment() -> None:
     assert decision["primary_retrieval_state"] == "no_match"
     assert "primary_no_match" in decision["reason_codes"]
     assert "phenotype_gene_support_gap" in decision["reason_codes"]
-    assert decision["required_fields_missing"] == ["phen2gene_result"]
+    assert decision["required_fields_missing"] == ["phenotype_gene_support"]
     assert len(context["records"]) == 1
 
 
@@ -617,4 +617,47 @@ def test_same_query_gene_hpo_deduplicated_across_multiple_variants_order_preserv
 
     # FBN1 variant (2) has its own distinct context
     assert ctx3["query_gene"] == "FBN1"
+
+
+def test_multi_root_conceptmeta_and_sdui_attribute_parsing() -> None:
+    """Multi-root ConceptMeta XML and SDUI HPO attribute are parsed deterministically."""
+    # Live MedGen XML snippet for SCN1A UID 400655
+    raw_multi_root_conceptmeta = (
+        '<Names><Name SAB="OMIM" CODE="609634">MIGRAINE, FAMILIAL HEMIPLEGIC, 3</Name></Names>'
+        '<AssociatedGenes><Gene gene_id="6323" chromosome="2">SCN1A</Gene></AssociatedGenes>'
+        '<ClinicalFeatures>'
+        '<ClinicalFeature uid="20693" CUI="C0036572" TUI="T184" SDUI="HP:0001250" />'
+        '</ClinicalFeatures>'
+    )
+    session = _Session([
+        _Response(200, _search(["400655"])),
+        _Response(200, {
+            "result": {
+                "uids": ["400655"],
+                "400655": {
+                    "uid": "400655",
+                    "conceptid": "C1864987",
+                    "title": "Migraine, familial hemiplegic, 3",
+                    "sources": ["OMIM", "GTR"],
+                    "conceptmeta": raw_multi_root_conceptmeta,
+                },
+            }
+        }),
+    ])
+    result = enrich_with_medgen_phenotype_gene(
+        [_variant(gene="SCN1A")],
+        session=session,
+        enabled=True,
+        accepted_hpo_terms=[{"hpo_id": "HP:0001250", "label": "Seizure"}],
+    )
+    ctx = result["variants"][0]["medgen_phenotype_gene_context"][0]
+    assert ctx["status"] == "success"
+    assert ctx["retrieval_state"] == "accepted_records"
+    assert len(ctx["records"]) == 1
+    record = ctx["records"][0]
+    assert record["concept_id"] == "C1864987"
+    assert record["gene_association_match_state"] == "exact_gene_association"
+    assert record["hpo_match_method"] == "exact_hpo_id_conceptmeta"
+    assert record["matched_hpo_terms"] == [{"hpo_id": "HP:0001250", "label": "Seizure"}]
+
 

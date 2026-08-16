@@ -122,7 +122,10 @@ def _conceptmeta(value: object) -> tuple[set[str] | None, list[dict[str, str | N
     try:
         root = ElementTree.fromstring(raw)
     except ElementTree.ParseError:
-        return None, [], {}
+        try:
+            root = ElementTree.fromstring(f"<ConceptMeta>{raw}</ConceptMeta>")
+        except ElementTree.ParseError:
+            return None, [], {}
 
     associated_genes: set[str] = set()
     found_associated_genes = False
@@ -182,6 +185,7 @@ def _conceptmeta(value: object) -> tuple[set[str] | None, list[dict[str, str | N
                 (
                     candidate
                     for candidate in (
+                        attributes.get("sdui"), attributes.get("scui"),
                         attributes.get("hpo_id"), attributes.get("hpoid"),
                         attributes.get("id"), attributes.get("code"), text,
                     )
@@ -650,7 +654,7 @@ def _phen2gene_state(
         return primary_state, False, [gap_reason, "local_support_sufficient"], []
 
     # 3. Support node is insufficient -> trigger MedGen
-    return primary_state, True, [gap_reason, "phenotype_gene_support_gap"], ["phen2gene_result"]
+    return primary_state, True, [gap_reason, "phenotype_gene_support_gap"], ["phenotype_gene_support"]
 
 
 def _phenotype_gene_context(
