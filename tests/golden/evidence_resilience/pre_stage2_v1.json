@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Deterministic pre-Stage-2, pre-LLM regression projection. All cases are synthetic and non-PHI.",
+  "cases": [
+    {"id": "ERC-01", "identity": {"assembly": "GRCh38", "chrom": "2", "pos": 222772851, "ref": "C", "alt": "T"}, "gene": "PAX3", "transcript": "ENST00000303395", "consequence": "missense_variant"},
+    {"id": "ERC-02", "identity": {"assembly": "GRCh38", "chrom": "2", "pos": 222772900, "ref": "C", "alt": "T"}, "gene": "PAX3", "transcript": "ENST00000303395", "consequence": "missense_variant"},
+    {"id": "ERC-03", "identity": {"assembly": "GRCh38", "chrom": "16", "pos": 46636712, "ref": "C", "alt": "T"}, "gene": "TELO2", "transcript": "ENST00000303395", "consequence": "missense_variant"},
+    {"id": "ERC-04", "identity": {"assembly": "GRCh38", "chrom": "2", "pos": 166848839, "ref": "C", "alt": "T"}, "gene": "SCN1A", "transcript": "ENST00000303395", "consequence": "missense_variant", "sparse_valid_overlay": "tests/test_stage105_professor_testcase.py::test_105_2_irrelevant_phenotype_produces_report_with_non_concordance"},
+    {"id": "ERC-05", "identity": {"assembly": "GRCh38", "chrom": "13", "pos": 32890540, "ref": "C", "alt": "T"}, "gene": "BRCA2", "transcript": "ENST00000303395", "consequence": "missense_variant"},
+    {"id": "ERC-06", "identity": {"assembly": "GRCh38", "chrom": "3", "pos": 37067491, "ref": "C", "alt": "T"}, "gene": "MLH1", "transcript": "ENST00000303395", "consequence": "missense_variant"},
+    {"id": "ERC-07", "identity": {"assembly": "GRCh38", "chrom": "7", "pos": 117559592, "ref": "C", "alt": "T"}, "gene": "CFTR", "transcript": "ENST00000303395", "consequence": "missense_variant"}
+  ],
+  "expected_source_statuses": {"vep": "success", "myvariant": "success", "clinvar": "success", "clingen": "success"},
+  "expected_capability_statuses": {"variant_annotation": "success", "variant_context": "success", "clinvar_evidence": "success", "population_frequency": "not_triggered", "phenotype_gene": "unavailable", "disease_context": "unavailable", "literature": "not_triggered", "cspec_context": "unavailable"}
+}

@@ -2,11 +2,15 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active planning document. No stage below is implemented by this document.
+**Status:** Active execution roadmap. Stage 1 is COMPLETE / APPROVED; Stage 2 has not yet been authorized.
 
-Current authorized stage: NONE — Stage 1 is complete and awaiting review
-Current implementation permission: No production integration is authorized
-Next automatic stage: NONE — explicit review approval required
+**Current completed stage:** Stage 1 — Freeze ERepo response and exact-identity contract.
+
+**Current implementation permission:** SAFETY BASELINE / ROADMAP PREPARATION ONLY. No Stage 2 production implementation is authorized by this document update.
+
+**Next eligible stage:** Stage 2 — ERepo integration, only after the pre-Stage-2 rollback/regression safety gate is satisfied and explicit approval is given.
+
+**Next automatic stage:** NONE — every stage requires explicit review approval.
 
 **Authoritative context:**
 
@@ -24,10 +28,11 @@ This document deliberately does not reproduce those documents. It records the ap
 5. [Evidence-node, trigger, and provenance rules](#5-evidence-node-trigger-and-provenance-rules)
 6. [Readiness and final interpretation disposition](#6-readiness-and-final-interpretation-disposition)
 7. [VEP-outage field-composition policy](#7-vep-outage-field-composition-policy)
-8. [Execution stages](#8-execution-stages)
-9. [Cross-stage test and live-validation plan](#9-cross-stage-test-and-live-validation-plan)
-10. [File-level implementation map](#10-file-level-implementation-map)
-11. [Roadmap maintenance policy](#11-roadmap-maintenance-policy)
+8. [Rollback and regression safety policy](#8-rollback-and-regression-safety-policy)
+9. [Execution stages](#9-execution-stages)
+10. [Cross-stage test and live-validation plan](#10-cross-stage-test-and-live-validation-plan)
+11. [File-level implementation map](#11-file-level-implementation-map)
+12. [Roadmap maintenance policy](#12-roadmap-maintenance-policy)
 
 ## 1. Document roles and execution policy
 
@@ -247,7 +252,140 @@ Composition requirements:
 
 VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted without validated consequence semantics. A valid VEP `no_match` remains distinct from operational failure; composition is governed by annotation-node insufficiency rather than an implicit provider fallback claim.
 
-## 8. Execution stages
+## 8. Rollback and regression safety policy
+
+This workstream must be implemented so that failure in a later stage never requires discarding previously approved work or losing the last known-good project state. The default recovery unit is the current stage, not the entire workstream.
+
+### 8.1 Dedicated branch and immutable baseline
+
+Before any Stage 2 production change:
+
+- create or confirm a dedicated evidence-resilience feature branch;
+- capture a clean, named baseline commit representing the last known-good pre-Stage-2 implementation;
+- create a durable tag for that baseline;
+- record the exact commit hash, branch name, tag, database/schema version, EvidenceObject version, pipeline version, and deterministic test baseline in this roadmap's Stage 2 validation notes before implementation begins; and
+- preserve a recoverable backup/snapshot of any mutable local persistence used for compatibility testing.
+
+Recommended naming, subject to repository conventions:
+
+```text
+branch: feature/evidence-resilience
+tag:    evidence-resilience-baseline-2026-08-16
+```
+
+If the repository already has an equivalent protected branch/tag strategy, reuse it rather than creating a competing convention.
+
+### 8.2 One stage = one reviewable change set
+
+- Each implementation stage must be independently reviewable and independently revertible.
+- Do not combine multiple roadmap stages into one implementation commit/change set.
+- A later stage must not rewrite or silently invalidate an earlier APPROVED stage.
+- If a stage fails review, revert or amend that stage only; do not discard earlier approved stages.
+- Do not begin the next stage until the current stage is `COMPLETE / APPROVED`.
+
+### 8.3 Existing behavior is the regression baseline
+
+Before each implementation stage, record the relevant deterministic baseline tests and representative outputs. After the stage:
+
+- all previously required deterministic tests must remain green unless an explicitly approved contract change requires a documented expectation update;
+- new stage-specific tests must pass;
+- historical persisted analyses required by the current compatibility contract must still hydrate/read successfully; and
+- unexpected changes in variant order, cardinality, canonical identity, existing provider evidence, readiness, LLM sanitization, or report projection are regressions until proven otherwise.
+
+A stage cannot be marked `COMPLETE` while an unexplained regression remains.
+
+### 8.4 Golden-case regression set
+
+Before Stage 2 implementation, freeze a small deterministic Golden Case set representing the current pipeline. Prefer 5–7 public/non-PHI variants or already-approved synthetic fixtures that exercise materially different paths. At minimum the set should cover, where existing fixtures allow:
+
+- normal VEP-success annotation;
+- ClinVar-present and ClinVar-no-match behavior;
+- population evidence;
+- phenotype/disease context;
+- same-gene multiple variants and stable original order; and
+- at least one currently limited/degraded evidence path.
+
+For each Golden Case, retain bounded machine-comparable snapshots of the relevant normalized outputs, not raw patient data. Compare pre/post-stage outputs and classify every difference as:
+
+```text
+EXPECTED_IMPROVEMENT
+EXPECTED_CONTRACT_CHANGE
+UNEXPECTED_REGRESSION
+```
+
+Any `UNEXPECTED_REGRESSION` blocks approval until resolved or explicitly accepted by architecture review. Golden snapshots must follow existing privacy and repository fixture rules.
+
+### 8.5 Additive-first integration
+
+Wherever possible, new evidence paths must initially be additive:
+
+- ERepo adds `expert_curated_variant_context`; it does not replace GeneBe, ClinVar, or CSpec.
+- MedGen adds source-separated support/context; it does not overwrite MyDisease, Phen2Gene, or GenCC semantics.
+- Coverage calculation initially observes existing evidence; it must not itself rewrite evidence.
+- Derived final disposition should remain a projection until persistence is separately justified.
+
+Removal/replacement of existing behavior requires an explicit, reviewed contract change.
+
+### 8.6 Shadow/observation mode for high-risk behavior changes
+
+High-risk stages must prove their proposed output before they are allowed to alter gating or canonical behavior.
+
+**Stage 6 — VEP field composition:** first compute composed canonical candidates and provenance in shadow/observation mode for deterministic tests/Golden Cases. Compare them against existing provider evidence. Promotion into canonical fields/readiness must occur only after transcript coherence, exact identity, consequence semantics, and regression comparisons pass.
+
+**Stage 7 — Evidence Coverage Calculator:** initially calculate/report coverage without changing readiness or LLM gating.
+
+**Stage 8 — Capability/final disposition/UI integration:** prefer runtime/projection behavior first. Do not perform a destructive readiness/schema migration unless separately justified and approved.
+
+### 8.7 Persistence and migration safety
+
+- Schema changes must be additive/backward-compatible whenever possible.
+- Every migration that becomes necessary must have a deterministic recovery/compatibility test before approval.
+- Historical readiness states and EvidenceObjects must remain readable under the documented compatibility contract.
+- No destructive migration is allowed solely to simplify new code.
+- If rollback would require data conversion, the rollback/recovery procedure must be documented and tested before the migration is approved.
+
+### 8.8 Provider failure must remain isolated
+
+A newly integrated provider must never become a single point of failure for the existing pipeline. Timeout, `403`, `429`, malformed payload, schema drift, or provider outage must degrade only the evidence node(s) that depend on that provider and must preserve existing valid evidence, ordering, persistence, and reviewer access.
+
+### 8.9 Pre-Stage-2 safety gate
+
+Stage 2 is not authorized until the following are recorded and reviewed:
+
+```text
+[ ] dedicated feature branch confirmed
+[ ] last-known-good baseline commit recorded
+[ ] rollback tag recorded
+[ ] current schema / EvidenceObject / pipeline versions recorded
+[ ] deterministic baseline test result recorded
+[ ] Golden Case set frozen
+[ ] Golden Case baseline snapshots generated
+[ ] mutable persistence backup/snapshot prepared where applicable
+[ ] working tree status reviewed so unrelated pre-existing changes are not overwritten
+```
+
+This safety gate does not create a new numbered implementation stage. It is a mandatory entry condition for Stage 2 and remains the rollback model for all later stages.
+
+### 8.10 Pre-Stage-2 baseline record (2026-08-16)
+
+- **Branch:** `feature/evidence-resilience`.
+- **Baseline checkpoint:** created only after this record and its deterministic artifacts are committed; it includes Stage 1's approved contract and this safety gate, but no Stage 2 production behavior.
+- **Versions:** SQLite schema `4`; EvidenceObject `2.5`; pipeline `3.2`; readiness audit schema `1.0` with persisted states `READY`, `READY_WITH_LIMITATIONS`, `RESCUE_REQUIRED`, and `MINIMUM_IDENTITY_FAILURE`.
+- **Deterministic baseline:** `python tests/run_stage78_resilience_acceptance.py` compiled successfully, passed the secrets audit, and passed its Stage 78 scenario (`1 passed, 1276 deselected in 5.64s`). Its full offline suite established two pre-existing failures: `tests/test_pipeline.py::TestFrontendFoundation::test_manual_table_executes_pipeline` (expected six Streamlit dataframes, observed eight) and `tests/test_stage79_acceptance_assets.py::test_acceptance_registry_freezes_all_stage79_defects` (missing tracked `docs/acceptance_failures_v1.md`). The suite result was `1269 passed, 2 failed, 6 skipped in 144.62s`. The established Testing V3 runner also recorded the first failure as pre-existing: `878 passed, 1 failed, 4 skipped, 395 deselected in 154.12s` at `84.18%` coverage. These failures are baseline observations, not Stage 2 work.
+- **Golden baseline:** `tests/golden/evidence_resilience/pre_stage2_v1.json` freezes seven non-PHI synthetic cases (`ERC-01` through `ERC-07`) generated from the existing Stage 105 fixture. `tests/test_stage105_professor_testcase.py::test_pre_stage2_golden_cases_match_stable_pre_llm_projection` compares only normalized identity, gene, transcript, consequence, source-presence states, and capability states. It intentionally excludes timestamps, raw payloads, provider metadata, ordering outside input order, and LLM prose. `ERC-04` additionally reuses the existing sparse-but-valid phenotype non-concordance overlay. The existing Stage 78 fixture remains the degradation overlay for retained fallback provenance and persistence.
+- **Golden diff policy:** every future difference must be marked `EXPECTED_IMPROVEMENT`, `EXPECTED_CONTRACT_CHANGE`, or `UNEXPECTED_REGRESSION`. The last category blocks Stage review. Loss of existing source evidence, identity/order changes, unapproved readiness restriction, inability to load historical persisted state, or any unclassified difference is an unexpected regression.
+- **Persistence/recovery baseline:** `tests/test_stage99_persistence_recovery_v4.py` verifies schema-4 normalized recovery state, edit/selection/finalization round trips, no interpretation regeneration during recovery, schema-3-to-4 recovery-row backfill, and fail-closed tamper detection. `tests/test_pipeline.py` retains legacy schema compatibility, bounded schema-2 migration, and recovery-request isolation coverage. Historical persisted analyses remain readable unless a separately approved, tested migration changes that contract.
+- **Rollback:** revert only a future stage by reverting its isolated stage commit on this branch, run its pre-stage baseline plus Golden and recovery tests, and retain earlier approved commits. Return the entire workstream to the pre-Stage-2 state by checking out `evidence-resilience-baseline-2026-08-16` in a separate recovery branch/worktree; never reset or overwrite unrelated work. If a later migration has occurred, follow its approved recovery procedure before deploying the baseline.
+
+## 9. Execution stages
+
+### Current stage status summary
+
+| Stage | Status | Review | Authorization |
+|---|---|---|---|
+| 1 — ERepo contract freeze | COMPLETE | APPROVED | CLOSED |
+| 2 — ERepo integration | NOT_STARTED | NOT_REQUIRED | NOT YET AUTHORIZED — Section 8.9 safety gate first |
+| 3–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until prior stage approval |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -266,11 +404,11 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 - **Dependencies:** None.
 - **Definition of Done:** Approved fixture and exact identity contract exist; deterministic cases define success, no-match, malformed payload, and mismatch outcomes.
 - **Status:** COMPLETE
-- **Review:** PENDING
-- **Implementation notes:** The Stage 1 contract now separates bounded discovery identifiers from exact acceptance, defines final `no_match` across all eligible strategies, restores `EXACT_MATCH_EQUIVALENT_REPRESENTATION` only for deterministic normalized-CPRA proof, and freezes detailed-document version verification. No production code, schema, persistence, readiness, or LLM payload changed.
-- **Validation evidence:** On 2026-08-16, bounded live summary queries returned one record for each of exact genomic HGVS `NC_000012.12:g.102894804T>A`, exact transcript HGVS `NM_000277.3:c.283A>T`, and exact ClinVar Variation ID `102645`; all resolved to `CA229507`. An eligible genomic-HGVS query for `NC_000001.11:g.1A>G` returned structured `404 Not Found`. The exact detailed-document endpoint returned `data.uuid=c61fa227-893e-4be0-9e02-2d7c1494af20` and `data.metadata.version=1.0.0`, matching the accepted summary record's `uuid` and `docVersion`. Fixture-contract tests pass.
+- **Review:** APPROVED
+- **Implementation notes:** Contract frozen on 2026-08-16. Discovery identity is explicitly separated from exact acceptance identity. Approved bounded discovery strategies are validated assembly-specific genomic HGVS, validated ClinVar Variation ID, and validated transcript HGVS; CAID remains future-only until stored as a validated allele-scope identifier. Exact acceptance supports `EXACT_MATCH` and deterministically proven `EXACT_MATCH_EQUIVALENT_REPRESENTATION`. Strategy-level no-match is preserved separately; final provider-level `no_match` requires exhaustion of all eligible approved strategies without an accepted exact record. Detailed document UUID and `data.metadata.version` must match the accepted summary UUID/docVersion.
+- **Validation evidence:** Frozen deterministic fixtures cover exact GRCh38 success, detailed-document UUID/version verification and mismatch, per-strategy no-match versus final no-match, CPRA/assembly mismatch, deterministic padded-indel equivalent representation, and malformed/identity-incomplete input. Stage 2 entry criteria additionally require deterministic timeout, `403`, `429`, and UUID/version mismatch coverage before production acceptance. Bounded live verification on 2026-08-16 confirmed: genomic HGVS exact success for `NC_000012.12:g.102894804T>A`, transcript HGVS exact success for `NM_000277.3:c.283A>T`, ClinVar Variation ID exact discovery for `102645`, structured 404 no-match for `NC_000001.11:g.1A>G`, and detail `data.metadata.version=1.0.0` for UUID `c61fa227-893e-4be0-9e02-2d7c1494af20`. Stage 1 changed the contract/fixture specification only and did not authorize Stage 2 production behavior.
 
-**STOP FOR REVIEW.**
+**STAGE CLOSED — APPROVED. Stage 2 remains gated by Section 8.9 and explicit authorization.**
 
 ### Stage 2 — ERepo integration
 
@@ -286,8 +424,8 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 - **Tests:** Exact success/no-match, timeout, `403`, `429`, malformed payload, CPRA mismatch, assembly mismatch, conflict retention, persistence recovery.
 - **Live validation:** Bounded exact record plus bounded no-match after deterministic tests pass.
 - **Risks:** Strict classification audit currently expects three source outcomes; extension must preserve semantic separation and correlation rules.
-- **Dependencies:** Stage 1.
-- **Definition of Done:** Exact ERepo context is source-attributed, serializable, persistent, non-equivalent to GeneBe, and covered by deterministic tests.
+- **Dependencies:** Stage 1 APPROVED plus completion/review of the pre-Stage-2 safety gate in Section 8.9.
+- **Definition of Done:** Exact ERepo context is source-attributed, serializable, persistent, non-equivalent to GeneBe, covered by deterministic tests, and introduces no unexplained regression in the frozen Golden Cases or pre-Stage-2 baseline.
 - **Status:** NOT_STARTED
 - **Review:** NOT_REQUIRED
 - **Implementation notes:** None.
@@ -379,7 +517,7 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 - **Live validation:** Verify provider schema only; do not require inducing a live outage.
 - **Risks:** Mixing HGVS.c/HGVS.p values across transcripts is structurally unsafe.
 - **Dependencies:** Stages 2–5 are independent of composition but precede it by approved order.
-- **Definition of Done:** Any promoted canonical field is exactly validated, transcript-coherent where required, provenance-complete, and not falsely attributed to VEP.
+- **Definition of Done:** Shadow/observation comparisons pass first; any subsequently promoted canonical field is exactly validated, transcript-coherent where required, provenance-complete, not falsely attributed to VEP, and introduces no unexplained Golden Case regression.
 - **Status:** NOT_STARTED
 - **Review:** NOT_REQUIRED
 - **Implementation notes:** None.
@@ -402,7 +540,7 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 - **Live validation:** None beyond completed provider-specific validation.
 - **Risks:** Collapsing non-equivalent semantic nodes in an umbrella summary.
 - **Dependencies:** Stages 2–6.
-- **Definition of Done:** Coverage is deterministic, per-variant, provenance-linked, and keeps raw semantic nodes distinct.
+- **Definition of Done:** Coverage is deterministic, per-variant, provenance-linked, keeps raw semantic nodes distinct, and initially remains observational without changing readiness/LLM gating.
 - **Status:** NOT_STARTED
 - **Review:** NOT_REQUIRED
 - **Implementation notes:** None.
@@ -415,7 +553,7 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 - **Objective:** Integrate coverage into capability presentation, reviewer warning semantics, and derived final interpretation disposition.
 - **Existing code to reuse:** `backend/evidence_readiness.py`, `backend/pipeline.py`, Stage 114 source-status presentation, report projections.
 - **Files/modules likely affected:** `backend/evidence_readiness.py`, `backend/pipeline.py`, `backend/variant_interpretation.py`, `backend/variant_report.py`, frontend review/preview modules, tests.
-- **Required changes:** Derive final disposition from internal readiness after enrichment; render coverage and source-specific limitations.
+- **Required changes:** Derive final disposition from internal readiness after enrichment; render coverage and source-specific limitations. Preserve the existing technical provider diagnostics while explicitly separating (1) provider reachability/operational readiness, (2) per-analysis provider query result, and (3) final per-variant evidence capability coverage. The primary reviewer surface must emphasize evidence capability rather than raw provider availability; a red/unreachable provider must not automatically render the corresponding evidence capability unavailable when equivalent/composed evidence remains. Add ERepo and MedGen to the collapsed technical diagnostics with privacy-safe status, attempts/latency where already supported, query/enrichment use, and failure category semantics.
 - **Contracts that must not change:** Existing persisted internal readiness enum; no provider outage alone blocks interpretation; human review remains mandatory.
 - **Schema impact:** Prefer runtime/projection derivation. Any persisted enum or schema migration requires separate justification, compatibility benefit, tests, and review.
 - **Provenance/lineage impact:** Reviewer notices identify capability, source, retrieval state, composition, and limitations.
@@ -425,7 +563,7 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 - **Live validation:** One bounded end-to-end run after deterministic acceptance passes.
 - **Risks:** Accidentally turning a display concept into a destructive persisted migration.
 - **Dependencies:** Stage 7.
-- **Definition of Done:** Reviewer-facing disposition is accurate, derived without premature migration, and source-specific limitations are retained.
+- **Definition of Done:** Reviewer-facing disposition is accurate, derived without premature migration, source-specific limitations are retained, and provider reachability/query state remains distinct from final evidence capability state.
 - **Status:** NOT_STARTED
 - **Review:** NOT_REQUIRED
 - **Implementation notes:** None.
@@ -502,7 +640,7 @@ VEP success must not be overwritten. GeneBe `effect` alone cannot be promoted wi
 
 **STOP FOR REVIEW.**
 
-## 9. Cross-stage test and live-validation plan
+## 10. Cross-stage test and live-validation plan
 
 Required deterministic coverage across applicable stages:
 
@@ -521,7 +659,7 @@ Required deterministic coverage across applicable stages:
 
 Live validation is never a replacement for deterministic tests. It is opt-in, bounded, checkpointed, provider-by-provider, and recorded as an operational observation with normalized safe summaries only.
 
-## 10. File-level implementation map
+## 11. File-level implementation map
 
 | Area | Current or proposed files | Planned responsibility |
 |---|---|---|
@@ -535,28 +673,32 @@ Live validation is never a replacement for deterministic tests. It is opt-in, bo
 | Reviewer/report surfaces | `backend/variant_report.py`, `backend/report_data_projection.py`, frontend review/preview modules | Source-specific coverage, limitation, and disposition presentation. |
 | Validation | Existing resilience/provider/pipeline tests and live validation runner | Fixtures, failure injection, acceptance, migration, and bounded live checks. |
 
-## 11. Roadmap maintenance policy
+## 12. Roadmap maintenance policy
 
 When executing a future stage:
 
 1. Read this roadmap first.
 2. Read `docs/AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md`.
-3. Perform only the currently approved stage.
-4. Update that stage's **Implementation notes** and **Validation evidence** with observed, verified facts.
-5. Mark the stage:
+3. Confirm the current authorized stage and its safety/dependency gates.
+4. Confirm the working branch, last approved checkpoint, and that unrelated pre-existing working-tree changes will not be overwritten.
+5. Perform only the currently approved stage.
+6. Run the required pre-existing deterministic regression baseline plus stage-specific tests and Golden Case comparisons.
+7. Update that stage's **Implementation notes** and **Validation evidence** with observed, verified facts, including baseline/Golden Case differences and rollback checkpoint where applicable.
+8. Mark the stage:
 
    ```text
    Status: COMPLETE
    Review: PENDING
    ```
 
-6. Stop and wait for architecture review.
-7. Only after explicit approval may that stage become:
+9. Stop and wait for architecture review.
+10. Only after explicit approval may that stage become:
 
    ```text
    Review: APPROVED
    ```
 
-8. Begin the next stage only after the prior stage is approved.
+11. Create/retain an independently revertible approved-stage checkpoint according to repository conventions.
+12. Begin the next stage only after the prior stage is approved.
 
-Never mark a stage `COMPLETE` merely because code was written. Completion requires its Definition of Done and required deterministic tests to pass. Use `CHANGES_REQUESTED` when review identifies unresolved architectural, safety, provenance, compatibility, or validation issues.
+Never mark a stage `COMPLETE` merely because code was written. Completion requires its Definition of Done, required deterministic tests, compatibility checks, and applicable Golden Case comparisons to pass. Use `CHANGES_REQUESTED` when review identifies unresolved architectural, safety, provenance, regression, compatibility, or validation issues. An unexplained regression blocks approval. A later-stage failure must be recovered by reverting/amending that stage rather than discarding earlier approved stages.
