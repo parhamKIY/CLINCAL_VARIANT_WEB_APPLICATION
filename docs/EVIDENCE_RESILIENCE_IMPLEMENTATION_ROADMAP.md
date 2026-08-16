@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stages 1–8 are approved; Stage 9 is COMPLETE / PENDING architecture review.
+**Status:** Active execution roadmap. Stages 1–9 are approved; Stage 10 is COMPLETE / PENDING architecture review.
 
-**Current completed stage:** Stage 9 — deterministic resilience and bounded live validation.
+**Current completed stage:** Stage 10 — failure-driven input-to-LLM audit.
 
-**Current implementation permission:** NONE — Stage 9 architecture review is pending.
+**Current implementation permission:** NONE — Stage 10 architecture review is pending.
 
-**Next eligible stage:** NONE — Stage 10 remains unauthorized pending Stage 9 architecture review and explicit authorization.
+**Next eligible stage:** NONE — Stage 11 remains unauthorized pending Stage 10 architecture review and explicit authorization.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -389,8 +389,9 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 | 4–6 | COMPLETE | APPROVED | CLOSED |
 | 7 — Evidence Coverage Calculator | COMPLETE | APPROVED | CLOSED |
 | 8 — Capability/final disposition | COMPLETE | APPROVED | CLOSED |
-| 9 — Resilience/live validation | COMPLETE | PENDING | CLOSED pending architecture review |
-| 10–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit authorization |
+| 9 — Resilience/live validation | COMPLETE | APPROVED | CLOSED |
+| 10 — Failure-driven trace audit | COMPLETE | PENDING | CLOSED pending architecture review |
+| 11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit authorization |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -618,10 +619,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Making implementation changes while diagnosing.
 - **Dependencies:** Stage 9.
 - **Definition of Done:** Each observed loss/limitation has a classified cause; any defect is reported separately and awaits approval.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Added a bounded test-only Stage 10 trace model (`tests/stage10_trace.py`) and deterministic failure-flow tests. The audit first found a critical LLM-boundary defect: compact non-evidentiary MedGen `candidate_diagnostics` survived EvidenceObject sanitization and reached the prompt. Corrective commit `d9d912e` changes only `shadow_free_evidence_for_llm()` to recursively remove that non-evidentiary field from the canonical LLM projection. It retains all upstream diagnostics, accepted records, persistence, Stage 7 diagnostic paths, reviewer technical traceability, and approved semantic evidence.
+- **Validation evidence:** `docs/stage_10_failure_driven_trace.md` records red/green proof, trace scenarios A–F, manifest, first-loss classification, and frozen boundaries. The original regression test failed red (`1 failed in 0.16s`) then passed green with focused MedGen/Stage 6–8/persistence tests (`150 passed in 6.34s`); the complete Stage 10 focused command passed `180 passed in 27.30s`. `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets, and Stage 78 (`1 passed, 1438 deselected in 3.18s`), then reached `1431 passed, 2 failed, 6 skipped in 147.35s`; the frozen manual-table dataframe and acceptance-registry failures remain the only failures.
 
 **STOP FOR REVIEW.**
 
