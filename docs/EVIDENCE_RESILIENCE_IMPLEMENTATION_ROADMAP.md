@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stages 1–7 are approved; Stage 8 is COMPLETE / PENDING architecture review.
+**Status:** Active execution roadmap. Stages 1–8 are approved; Stage 9 is COMPLETE / PENDING architecture review.
 
-**Current completed stage:** Stage 8 — runtime-only capability and final-disposition integration.
+**Current completed stage:** Stage 9 — deterministic resilience and bounded live validation.
 
-**Current implementation permission:** NONE — Stage 8 architecture review is pending.
+**Current implementation permission:** NONE — Stage 9 architecture review is pending.
 
-**Next eligible stage:** NONE — Stage 9 remains unauthorized pending Stage 8 architecture review.
+**Next eligible stage:** NONE — Stage 10 remains unauthorized pending Stage 9 architecture review and explicit authorization.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -387,8 +387,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 | 2 — ERepo integration | COMPLETE | APPROVED | CLOSED |
 | 3 — Shared MedGen disease/HPO role | COMPLETE | APPROVED | CLOSED |
 | 4–6 | COMPLETE | APPROVED | CLOSED |
-| 7 — Evidence Coverage Calculator | COMPLETE | PENDING | CLOSED pending architecture review |
-| 8–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit authorization |
+| 7 — Evidence Coverage Calculator | COMPLETE | APPROVED | CLOSED |
+| 8 — Capability/final disposition | COMPLETE | APPROVED | CLOSED |
+| 9 — Resilience/live validation | COMPLETE | PENDING | CLOSED pending architecture review |
+| 10–11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit authorization |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -571,7 +573,7 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stage 7.
 - **Definition of Done:** Reviewer-facing disposition is accurate, derived without premature migration, source-specific limitations are retained, and provider reachability/query state remains distinct from final evidence capability state.
 - **Status:** COMPLETE
-- **Review:** PENDING
+- **Review:** APPROVED
 - **Implementation notes:** Added `backend/final_disposition.py`, a strict runtime-only schema `1.0` projection that retains the persisted readiness audit while mapping `READY`, `READY_WITH_LIMITATIONS`, and `MINIMUM_IDENTITY_FAILURE` to `READY`, `READY_WITH_LIMITATIONS`, and `BLOCKED`. A residual pre-enrichment `RESCUE_REQUIRED` is deterministically reassessed from structural safety and semantic coverage and never appears as a final state. `BLOCKED` is limited to the existing minimum-identity failure; safe sparse evidence and provider outages remain `READY_WITH_LIMITATIONS`. The projection preserves Stage 7 semantic states and normalized evidence paths, adds bounded capability-specific notices for valid no-match, operational failure, unverified MedGen candidates, composition, support-only semantics, not-triggered/not-applicable cases, and shared upstream correlation, and does not write a new persisted enum. `frontend/variant_status.py` derives and presents this runtime capability layer ahead of the existing provider-oriented lines; the existing collapsed technical diagnostics remain intact. EvidenceObject `2.5`, SQLite `4`, pipeline `3.2`, internal readiness, canonical annotation, provider invocation, and LLM payload are unchanged.
 - **Validation evidence:** `tests/test_stage8_final_disposition.py` verifies readiness mapping, post-enrichment rescue reassessment, structural blocking, sparse-valid evidence, no-match versus operational failure, GenCC/MedGen and Phen2Gene/support separation, no-HPO applicability, candidate-only MedGen results, composed annotation, correlation notice, ordered runtime projection, and one synthetic non-PHI Stage-6-to-reviewer end-to-end projection. Focused Stage 6A/6B/7/Stage 8/status/diagnostic tests passed `103`; ERC-01..ERC-07 plus persistence/recovery passed `9`. `tests/run_stage78_resilience_acceptance.py` passed compilation, secrets, and the Stage-78 scenario, then reached `1420 passed, 2 failed, 6 skipped in 144.88s`; only the two frozen baseline failures remain (manual-table dataframe count and missing `docs/acceptance_failures_v1.md`).
 
@@ -593,10 +595,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Treating live reachability as deterministic correctness.
 - **Dependencies:** Stages 2–8.
 - **Definition of Done:** Required deterministic gates pass and live results are recorded only as point-in-time operational evidence.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Added `tests/run_stage9_live_validation.py`, a test-only opt-in runner that reuses existing provider clients for exactly one named query class at a time. It has no production import path and adds no provider or persistence schema. It checkpoints a normalized safe result after each completed class, supports `--resume`, retains completed checkpoints when a later class is unavailable, records disabled configuration as `NOT_RUN`, and never writes raw responses or exception text. A localized harness-only manual-row shape defect was corrected before the VEP probe; no production module changed.
+- **Validation evidence:** `docs/stage_9_resilience_validation.md` separates the deterministic correctness gate from point-in-time operational observations. The focused Stage 1–8, Stage 9-runner, persistence, and ERC command passed `264 passed in 26.10s`. The bounded one-class-at-a-time observations recorded ERepo valid `no_match`; MedGen gene-disease, phenotype-gene, and disease/HPO accepted records; VEP accepted annotation; population evidence available; and literature valid `no_match`, all without raw response retention. `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets audit, and Stage 78 (`1 passed, 1432 deselected in 3.27s`), then reached `1425 passed, 2 failed, 6 skipped in 144.35s`; only the two frozen manual-table dataframe and missing acceptance-registry failures remain.
 
 **STOP FOR REVIEW.**
 
