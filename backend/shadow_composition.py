@@ -534,9 +534,21 @@ def build_shadow_composition(candidate: Mapping[str, object]) -> ShadowCompositi
 
 
 def shadow_free_evidence_for_llm(evidence: Mapping[str, object]) -> dict[str, object]:
-    """Return canonical active evidence without composition-only metadata."""
+    """Return active semantic evidence without non-evidentiary diagnostics."""
 
-    result = deepcopy(dict(evidence))
+    def project(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {
+                key: project(item)
+                for key, item in value.items()
+                if key != "candidate_diagnostics"
+            }
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        return deepcopy(value)
+
+    result = project(evidence)
+    assert isinstance(result, dict)
     result.pop("shadow_composition", None)
     result.pop("annotation_promotion", None)
     return result
