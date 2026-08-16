@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
+import pyarrow.ipc as pyarrow_ipc
 from openpyxl import Workbook, load_workbook
 from streamlit.testing.v1 import AppTest
 
@@ -24123,7 +24124,92 @@ class TestFrontendFoundation:
             "ClinVar": "Evidence available",
             "ClinGen/GenCC": "Evidence available",
         }
-        assert len(app.dataframe) == 6
+        dataframe_columns = [
+            tuple(
+                pyarrow_ipc.open_stream(
+                    BytesIO(dataframe.proto.arrow_data.data)
+                ).read_all().column_names
+            )
+            for dataframe in app.dataframe
+        ]
+        assert dataframe_columns == [
+            (
+                "Provider",
+                "Use",
+                "Fallback role",
+                "Status",
+                "Check",
+                "Latency",
+                "Details",
+            ),
+            ("Use", "Recommended source", "Status", "Latency", "Basis"),
+            (
+                "Variant",
+                "Chromosome",
+                "Position",
+                "Reference",
+                "Alternate",
+                "Quality",
+                "Filter",
+            ),
+            (
+                "Variant",
+                "Gene",
+                "Consequence",
+                "Impact",
+                "Protein change",
+                "GeneBe status",
+                "GeneBe automated classification",
+                "Population frequency",
+                "ClinVar accession",
+                "ClinVar significance",
+                "CSpec applicability",
+                "CSpec specifications",
+                "Warnings",
+            ),
+            (
+                "Variant",
+                "Gene",
+                "Phenotype score",
+                "Matched terms",
+                "Matched HPO",
+                "Submitted HPO",
+                "Phenotype-gene provider",
+                "Phenotype-gene availability",
+                "Phenotype-gene score",
+                "Phenotype-gene rank",
+                "Phenotype-gene method",
+                "Phenotype-gene status",
+                "Fallback used",
+                "Primary provider failure",
+                "MyDisease result",
+                "MyDisease HTTP status",
+                "MyDisease provider total",
+                "MyDisease provider returned",
+                "MyDisease diseases",
+                "MyDisease matched HPO",
+                "MyDisease inferred context",
+            ),
+            (
+                "Variant",
+                "Gene",
+                "Consequence",
+                "ClinVar significance",
+                "Phenotype score",
+                "Successful sources",
+                "Fallback capabilities",
+                "Warnings",
+            ),
+            (
+                "Disease",
+                "Disease ID",
+                "Classification",
+                "Inheritance",
+                "PMIDs",
+                "Report",
+            ),
+            ("Reference", "Source", "Identifier", "Link status", "URL"),
+        ]
         assert any(
             subheader.value
             == "Draft Variant Review — Evidence and interpretation"
