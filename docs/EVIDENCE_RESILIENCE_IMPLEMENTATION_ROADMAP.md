@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stages 1–9 are approved; Stage 10 is COMPLETE / PENDING architecture review.
+**Status:** Evidence-resilience workstream closed. Stages 1–10 are approved; Stage 11 is COMPLETE / PENDING closeout review.
 
-**Current completed stage:** Stage 10 — failure-driven input-to-LLM audit.
+**Current completed stage:** Stage 11 — documentation and evidence-resilience closeout.
 
-**Current implementation permission:** NONE — Stage 10 architecture review is pending.
+**Current implementation permission:** NONE — closeout review is pending.
 
-**Next eligible stage:** NONE — Stage 11 remains unauthorized pending Stage 10 architecture review and explicit authorization.
+**Next eligible stage:** NONE — this workstream has no automatic successor.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -390,8 +390,8 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 | 7 — Evidence Coverage Calculator | COMPLETE | APPROVED | CLOSED |
 | 8 — Capability/final disposition | COMPLETE | APPROVED | CLOSED |
 | 9 — Resilience/live validation | COMPLETE | APPROVED | CLOSED |
-| 10 — Failure-driven trace audit | COMPLETE | PENDING | CLOSED pending architecture review |
-| 11 | NOT_STARTED | NOT_REQUIRED | LOCKED until explicit authorization |
+| 10 — Failure-driven trace audit | COMPLETE | APPROVED | CLOSED |
+| 11 — Documentation closeout | COMPLETE | PENDING | CLOSED pending closeout review |
 
 ### Stage 1 — Freeze ERepo response and exact-identity contract
 
@@ -642,10 +642,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Copying stale handoff claims without reconciliation.
 - **Dependencies:** Stages 1–10.
 - **Definition of Done:** Documentation accurately reflects code, tests, validation, open issues, and the final provider decision record.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Reconciled current scope, provider roles, Stage 6 composition, Stage 7 coverage, Stage 8 disposition, Stage 10 LLM boundary, schemas, validation, live-observation limits, and frozen issues against approved implementation artifacts.
+- **Validation evidence:** Stage 10 focused gate `180 passed in 27.30s`; full resilience gate `1431 passed, 2 failed, 6 skipped in 147.35s`, with only the two frozen historical failures.
 
 **STOP FOR REVIEW.**
 
