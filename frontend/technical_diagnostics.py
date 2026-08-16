@@ -10,8 +10,10 @@ class ProviderDiagnostic(TypedDict):
     """One bounded developer diagnostic row for a specific variant."""
 
     provider: str
+    capability: str
     variant_identity: str
     status: str
+    retrieval_state: str | None
     attempt_count: int | None
     latency_ms: float | None
     fallback_used: bool
@@ -35,6 +37,7 @@ _OPERATIONAL_FAILURES = frozenset(
         "server_error",
         "invalid_response",
         "configuration_error",
+        "operational_failure",
     }
 )
 _MAX_DEPTH = 6
@@ -193,6 +196,10 @@ def _failure_category(source: Mapping[str, object], status: str) -> str:
     return status if status in _OPERATIONAL_FAILURES else "none"
 
 
+def _retrieval_state(source: Mapping[str, object]) -> str | None:
+    return _text(source.get("retrieval_state"))
+
+
 def _provider_note(
     provider: str,
     status: str,
@@ -215,6 +222,102 @@ def _provider_note(
     if status in {"not_assessed", "not_triggered", "not_applicable"}:
         return f"{provider} was not assessed for this capability."
     return f"{provider} evidence was retained for this capability."
+
+
+def _context_diagnostic(
+    *,
+    evidence: object,
+    identity: str,
+    context: Mapping[str, object],
+    provider: str,
+    capability: str,
+) -> ProviderDiagnostic:
+    """Project a retained semantic context without exposing its raw query."""
+
+    status = _status(context.get("status") or context.get("availability"))
+    attempts, latency = _telemetry(
+        evidence,
+        provider=provider,
+        capability=capability,
+    )
+    fallback_used = context.get("provider_role") == "fallback"
+    failure_category = _failure_category(context, status)
+    retrieval_state = _retrieval_state(context)
+    display_status = (
+        retrieval_state
+        if retrieval_state == "no_verified_gene_association"
+        else status
+    )
+    if retrieval_state == "no_verified_gene_association":
+        note = (
+            "MedGen query completed, but no candidate passed exact gene "
+            "association verification."
+        )
+    else:
+        note = _provider_note(
+            provider,
+            status,
+            fallback_used=fallback_used,
+            failure_category=failure_category,
+        )
+    return {
+        "provider": provider,
+        "capability": capability,
+        "variant_identity": identity,
+        "status": display_status,
+        "retrieval_state": retrieval_state,
+        "attempt_count": attempts,
+        "latency_ms": latency,
+        "fallback_used": fallback_used,
+        "failure_category": failure_category,
+        "provider_note": note,
+    }
+
+
+def _semantic_context_diagnostics(
+    evidence: object,
+    *,
+    identity: str,
+    existing: set[tuple[str, str]],
+) -> list[ProviderDiagnostic]:
+    """Retain ERepo and every populated MedGen role in technical diagnostics."""
+
+    item = _mapping(evidence)
+    pathogenicity = _mapping(item.get("pathogenicity")) or {}
+    phenotype = _mapping(item.get("phenotype_relationship")) or {}
+    contexts: list[tuple[Mapping[str, object], str, str]] = []
+    erepo = _mapping(pathogenicity.get("expert_curated_variant_context"))
+    if erepo:
+        contexts.append((erepo, "ClinGen ERepo", "expert_curated_variant_context"))
+    medgen_gene = _mapping(pathogenicity.get("medgen_gene_disease_context"))
+    if medgen_gene:
+        contexts.append((medgen_gene, "NCBI MedGen", "gene_disease_support"))
+    medgen_disease = _mapping(phenotype.get("medgen_disease_hpo_context"))
+    if medgen_disease:
+        contexts.append((medgen_disease, "NCBI MedGen", "disease_hpo_context"))
+    medgen_phenotype = phenotype.get("medgen_phenotype_gene_context")
+    for context in _sequence(medgen_phenotype):
+        mapped = _mapping(context)
+        if mapped:
+            contexts.append((mapped, "NCBI MedGen", "phenotype_gene_support"))
+
+    rows: list[ProviderDiagnostic] = []
+    for context, default_provider, capability in contexts:
+        provider = _text(context.get("provider")) or default_provider
+        key = (_normalized(provider), capability)
+        if key in existing:
+            continue
+        existing.add(key)
+        rows.append(
+            _context_diagnostic(
+                evidence=evidence,
+                identity=identity,
+                context=context,
+                provider=provider,
+                capability=capability,
+            )
+        )
+    return rows
 
 
 def build_provider_diagnostics(
@@ -265,8 +368,10 @@ def build_provider_diagnostics(
             rows.append(
                 {
                     "provider": provider,
+                    "capability": capability,
                     "variant_identity": identity,
                     "status": status,
+                    "retrieval_state": _retrieval_state(source),
                     "attempt_count": attempts,
                     "latency_ms": latency,
                     "fallback_used": fallback_used,
@@ -279,6 +384,17 @@ def build_provider_diagnostics(
                     ),
                 }
             )
+        existing = {
+            (_normalized(row["provider"]), row["capability"])
+            for row in rows
+        }
+        rows.extend(
+            _semantic_context_diagnostics(
+                evidence,
+                identity=identity,
+                existing=existing,
+            )
+        )
         diagnostics[variant_index] = rows
     return diagnostics
 

@@ -147,8 +147,10 @@ def _render_technical_diagnostics(
             display_rows,
             column_order=(
                 "provider",
+                "capability",
                 "variant_identity",
                 "status",
+                "retrieval_state",
                 "attempt_count",
                 "latency_ms",
                 "fallback_used",
@@ -157,8 +159,10 @@ def _render_technical_diagnostics(
             ),
             column_config={
                 "provider": "Provider",
+                "capability": "Analysis capability",
                 "variant_identity": "Variant identity",
                 "status": "Status",
+                "retrieval_state": "Retrieval result",
                 "attempt_count": "Attempt count",
                 "latency_ms": "Latency (ms)",
                 "fallback_used": "Fallback used",

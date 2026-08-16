@@ -236,6 +236,7 @@ def test_composed_annotation_is_active_coverage_but_missing_consequence_is_visib
     assert annotation["composition_state"] == "mixed"
     assert disposition["state"] == "READY_WITH_LIMITATIONS"
     assert _notice(disposition, "COMPOSED_ANNOTATION")["severity"] == "INFO"
+    assert "GeneBe" in _notice(disposition, "COMPOSED_ANNOTATION")["message"]
 
 
 def test_runtime_projection_preserves_input_order_and_cards_prioritize_capability() -> None:
@@ -296,5 +297,6 @@ def test_bounded_non_phi_end_to_end_stage6_to_reviewer_projection() -> None:
     assert cards[0]["final_disposition"] == "READY_WITH_LIMITATIONS"
     assert any(
         notice["message"].startswith("Annotation uses safely promoted")
+        and "VariantValidator" in notice["message"]
         for notice in cards[0]["capability_notices"]
     )

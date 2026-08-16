@@ -236,6 +236,12 @@ def _record_notices(
 
     composition = record.get("composition_state")
     if target == "annotation" and composition in {"composed", "mixed"}:
+        sources = _unique_text(record.get("sources", []))
+        source_context = (
+            f" Source-attributed to {', '.join(sources)}."
+            if sources
+            else ""
+        )
         notices.append(
             _notice(
                 severity="INFO",
@@ -244,7 +250,7 @@ def _record_notices(
                 message=(
                     "Annotation uses safely promoted active fields from validated "
                     "fallback evidence; provider reachability remains a separate "
-                    "technical detail."
+                    f"technical detail.{source_context}"
                 ),
                 record=record,
             )
