@@ -25,6 +25,107 @@ SEMANTIC_TARGETS = (
     "population_evidence",
     "literature_evidence",
 )
+SEMANTIC_REQUIREMENT_PROFILES: dict[str, dict[str, tuple[str, ...] | str]] = {
+    "annotation": {
+        "critical_fields": (
+            "gene",
+            "transcript",
+            "variant_context.hgvs_c",
+            "variant_context.hgvs_p",
+            "consequence",
+        ),
+        "important_fields": (),
+        "optional_fields": ("gene_id", "impact", "protein_change"),
+        "critical_field_rule": "all",
+    },
+    "automated_acmg_context": {
+        "critical_fields": (
+            "pathogenicity.automated_acmg_classification",
+            "pathogenicity.acmg_criteria",
+        ),
+        "important_fields": (),
+        "optional_fields": (),
+        "critical_field_rule": "any",
+    },
+    "expert_curated_variant_context": {
+        "critical_fields": ("pathogenicity.expert_curated_variant_context.records",),
+        "important_fields": (),
+        "optional_fields": (),
+        "critical_field_rule": "all",
+    },
+    "clinvar_clinical_evidence": {
+        "critical_fields": (
+            "pathogenicity.clinvar_classification",
+            "clinvar_accession",
+        ),
+        "important_fields": (
+            "pathogenicity.clinvar_review_status",
+            "pathogenicity.clinvar_conditions",
+        ),
+        "optional_fields": ("pathogenicity.clinvar_conflicting_submissions",),
+        "critical_field_rule": "any",
+    },
+    "cspec_context": {
+        "critical_fields": ("pathogenicity.cspec_context",),
+        "important_fields": (),
+        "optional_fields": (),
+        "critical_field_rule": "all",
+    },
+    "gene_disease_validity": {
+        "critical_fields": ("pathogenicity.clingen_context",),
+        "important_fields": (),
+        "optional_fields": (),
+        "critical_field_rule": "all",
+    },
+    "gene_disease_support": {
+        "critical_fields": ("pathogenicity.medgen_gene_disease_context.records",),
+        "important_fields": (),
+        "optional_fields": (
+            "pathogenicity.medgen_gene_disease_context.candidate_diagnostics",
+        ),
+        "critical_field_rule": "all",
+    },
+    "phenotype_gene_ranking": {
+        "critical_fields": ("phenotype_relationship.phen2gene",),
+        "important_fields": ("phenotype_relationship.patient_hpo_terms",),
+        "optional_fields": (),
+        "critical_field_rule": "all",
+    },
+    "phenotype_gene_support": {
+        "critical_fields": (
+            "phenotype_relationship.matched_patient_hpo_terms",
+            "phenotype_relationship.local_phenotype_score",
+            "phenotype_relationship.medgen_phenotype_gene_context.records",
+        ),
+        "important_fields": ("phenotype_relationship.patient_hpo_terms",),
+        "optional_fields": (),
+        "critical_field_rule": "any",
+    },
+    "disease_hpo_context": {
+        "critical_fields": (
+            "phenotype_relationship.mydisease.diseases",
+            "phenotype_relationship.medgen_disease_hpo_context.records",
+        ),
+        "important_fields": (),
+        "optional_fields": (),
+        "critical_field_rule": "any",
+    },
+    "population_evidence": {
+        "critical_fields": (
+            "population_frequency",
+            "conditional_enrichment.population_frequency.population_frequency",
+        ),
+        "important_fields": ("conditional_enrichment.population_frequency.populations",),
+        "optional_fields": (),
+        "critical_field_rule": "any",
+    },
+    "literature_evidence": {
+        "critical_fields": ("conditional_enrichment.literature.articles",),
+        "important_fields": ("conditional_enrichment.literature.query_basis",),
+        "optional_fields": (),
+        "critical_field_rule": "all",
+    },
+}
 
 
 class EvidenceCoverageError(ValueError):
@@ -81,6 +182,49 @@ def _state(*, evidence_present: bool, retrieval_states: Iterable[str]) -> str:
     return "UNAVAILABLE"
 
 
+def _profile(target: str) -> Mapping[str, tuple[str, ...] | str]:
+    return SEMANTIC_REQUIREMENT_PROFILES[target]
+
+
+def _profile_missing_fields(
+    target: str,
+    satisfied_fields: Iterable[str],
+) -> list[str]:
+    profile = _profile(target)
+    critical = tuple(profile["critical_fields"])
+    satisfied = set(satisfied_fields)
+    if profile["critical_field_rule"] == "any" and any(
+        field in satisfied for field in critical
+    ):
+        return []
+    return [field for field in critical if field not in satisfied]
+
+
+def _profile_state(
+    *,
+    target: str,
+    satisfied_fields: Iterable[str],
+    retrieval_states: Iterable[str],
+    semantically_partial: bool = False,
+    not_applicable: bool = False,
+) -> str:
+    if not_applicable:
+        return "NOT_APPLICABLE"
+    satisfied = _unique(satisfied_fields)
+    if not satisfied:
+        return _state(
+            evidence_present=False,
+            retrieval_states=retrieval_states,
+        )
+    if semantically_partial or _profile_missing_fields(target, satisfied):
+        return "DEGRADED"
+    return "FULL"
+
+
+def _is_partial(payload: Mapping[str, object]) -> bool:
+    return _text(payload.get("status")) == "partial"
+
+
 def _record(
     *,
     semantic_target: str,
@@ -91,12 +235,22 @@ def _record(
     sources: Iterable[str] = (),
     limitations: Iterable[str] = (),
     missing_semantic_targets: Iterable[str] = (),
+    satisfied_fields: Iterable[str] = (),
+    annotation_fields: Iterable[Mapping[str, object]] = (),
+    diagnostic_paths: Iterable[str] = (),
 ) -> dict[str, Any]:
     if state not in COVERAGE_STATES:
         raise EvidenceCoverageError("Coverage state is invalid.")
+    profile = _profile(semantic_target)
+    satisfied = _unique(satisfied_fields)
     return {
         "semantic_target": semantic_target,
         "state": state,
+        "critical_fields": list(profile["critical_fields"]),
+        "important_fields": list(profile["important_fields"]),
+        "optional_fields": list(profile["optional_fields"]),
+        "satisfied_fields": satisfied,
+        "missing_fields": _profile_missing_fields(semantic_target, satisfied),
         "evidence_paths": _unique(evidence_paths),
         "retrieval_states": _unique(retrieval_states),
         "composition_state": composition_state,
@@ -104,6 +258,8 @@ def _record(
         "correlation_groups": [],
         "limitations": _unique(limitations),
         "missing_semantic_targets": _unique(missing_semantic_targets),
+        "annotation_fields": [dict(field) for field in annotation_fields],
+        "diagnostic_paths": _unique(diagnostic_paths),
     }
 
 
@@ -120,44 +276,86 @@ def _annotation(evidence: Mapping[str, object]) -> dict[str, Any]:
     promotion_fields = _mapping(promotion.get("fields"))
     annotations = _mapping(evidence.get("annotations"))
     vep = _mapping(annotations.get("vep"))
-    promoted_sources = [
-        _mapping(value).get("source")
-        for value in promotion_fields.values()
-    ]
+    field_paths = {
+        "gene": "gene",
+        "transcript": "transcript",
+        "hgvs_c": "variant_context.hgvs_c",
+        "hgvs_p": "variant_context.hgvs_p",
+        "consequence": "consequence",
+    }
+    direct_source = _source(vep, "Ensembl VEP")
+    fields: list[dict[str, Any]] = []
+    for field_name, path in field_paths.items():
+        promotion_field = _mapping(promotion_fields.get(field_name))
+        promoted = bool(promotion_field)
+        active = present[field_name]
+        fields.append(
+            {
+                "field": field_name,
+                "state": "FULL" if active else "UNAVAILABLE",
+                "evidence_path": path,
+                "composition_state": (
+                    _text(promotion_field.get("composition_state"))
+                    if promoted
+                    else "direct" if active else "none"
+                ),
+                "promotion_state": (
+                    _text(promotion_field.get("promotion_state"))
+                    if promoted
+                    else "NOT_PROMOTED"
+                ),
+                "source": (
+                    _text(promotion_field.get("source"))
+                    if promoted
+                    else direct_source if active else None
+                ),
+                "limitations": (
+                    _unique(promotion_field.get("limitations", []))
+                    if promoted
+                    else [] if active else ["missing_active_canonical_field"]
+                ),
+            }
+        )
     active_count = sum(present.values())
-    composition_state = "composed" if promotion_fields else "direct" if active_count else "none"
+    field_compositions = {field["composition_state"] for field in fields if field["state"] == "FULL"}
+    composition_state = (
+        "mixed" if len(field_compositions) > 1
+        else "composed" if promotion_fields
+        else "direct" if active_count
+        else "none"
+    )
     retrieval_states = [_retrieval_state(vep)]
     if promotion_fields:
         retrieval_states.append(_text(promotion.get("vep_state")) or "composed")
-    if active_count == len(present):
-        state = "FULL"
-    elif active_count:
-        state = "DEGRADED"
-    else:
-        state = _state(evidence_present=False, retrieval_states=retrieval_states)
+    satisfied_fields = [
+        field_paths[name] for name, is_present in present.items() if is_present
+    ]
+    state = _profile_state(
+        target="annotation",
+        satisfied_fields=satisfied_fields,
+        retrieval_states=retrieval_states,
+    )
     missing = [name for name, is_present in present.items() if not is_present]
-    sources = promoted_sources if promotion_fields else [_source(vep, "Ensembl VEP")]
+    sources = [field["source"] for field in fields if field["state"] == "FULL"]
     return _record(
         semantic_target="annotation",
         state=state,
-        evidence_paths=[
-            path
-            for name, path in (
-                ("gene", "gene"),
-                ("transcript", "transcript"),
-                ("hgvs_c", "variant_context.hgvs_c"),
-                ("hgvs_p", "variant_context.hgvs_p"),
-                ("consequence", "consequence"),
-            )
-            if present[name]
-        ],
+        evidence_paths=satisfied_fields,
         retrieval_states=retrieval_states,
         composition_state=composition_state,
         sources=sources,
         limitations=(
-            ["active_annotation_fields_missing"] if missing else []
+            (["active_annotation_fields_missing"] if missing else [])
+            + [
+                limitation
+                for field in fields
+                for limitation in field["limitations"]
+                if limitation != "missing_active_canonical_field"
+            ]
         ),
         missing_semantic_targets=missing,
+        satisfied_fields=satisfied_fields,
+        annotation_fields=fields,
     )
 
 
@@ -165,24 +363,37 @@ def _context_record(
     *,
     semantic_target: str,
     payload: Mapping[str, object],
-    evidence_path: str,
+    satisfied_fields: Iterable[str],
     fallback_source: str,
     present: bool,
     not_applicable: bool = False,
+    diagnostic_paths: Iterable[str] = (),
 ) -> dict[str, Any]:
     retrieval = _retrieval_state(payload)
-    state = "NOT_APPLICABLE" if not_applicable else _state(
-        evidence_present=present,
+    satisfied = _unique(satisfied_fields) if present else []
+    state = _profile_state(
+        target=semantic_target,
+        satisfied_fields=satisfied,
         retrieval_states=[retrieval],
+        semantically_partial=_is_partial(payload),
+        not_applicable=not_applicable,
     )
     return _record(
         semantic_target=semantic_target,
         state=state,
-        evidence_paths=[evidence_path] if present else [],
+        evidence_paths=satisfied,
         retrieval_states=[retrieval],
         sources=[_source(payload, fallback_source)],
-        limitations=[] if present or state == "NOT_APPLICABLE" else ["semantic_evidence_unavailable"],
-        missing_semantic_targets=[] if present or state == "NOT_APPLICABLE" else [semantic_target],
+        limitations=(
+            ["semantic_evidence_partial"] if state == "DEGRADED" else []
+        ) + (
+            [] if present or state == "NOT_APPLICABLE" else ["semantic_evidence_unavailable"]
+        ),
+        missing_semantic_targets=(
+            [] if state in {"FULL", "NOT_APPLICABLE"} else [semantic_target]
+        ),
+        satisfied_fields=satisfied,
+        diagnostic_paths=diagnostic_paths,
     )
 
 
@@ -253,8 +464,8 @@ def _contexts(evidence: Mapping[str, object]) -> list[dict[str, Any]]:
         isinstance(evidence.get("population_frequency"), (int, float))
         and not isinstance(evidence.get("population_frequency"), bool)
     ) or (
-        isinstance(population.get("selected_frequency"), (int, float))
-        and not isinstance(population.get("selected_frequency"), bool)
+        isinstance(population.get("population_frequency"), (int, float))
+        and not isinstance(population.get("population_frequency"), bool)
     )
     literature_present = isinstance(literature.get("articles"), list) and bool(literature.get("articles"))
 
@@ -262,62 +473,101 @@ def _contexts(evidence: Mapping[str, object]) -> list[dict[str, Any]]:
         _context_record(
             semantic_target="automated_acmg_context",
             payload=genebe,
-            evidence_path="pathogenicity.automated_acmg_context",
+            satisfied_fields=(
+                (["pathogenicity.automated_acmg_classification"]
+                 if _text(pathogenicity.get("automated_acmg_classification")) is not None else [])
+                + (["pathogenicity.acmg_criteria"] if pathogenicity.get("acmg_criteria") else [])
+            ),
             fallback_source="GeneBe",
             present=automated_present,
         ),
         _context_record(
             semantic_target="expert_curated_variant_context",
             payload=erepo,
-            evidence_path="pathogenicity.expert_curated_variant_context",
+            satisfied_fields=["pathogenicity.expert_curated_variant_context.records"],
             fallback_source="ClinGen ERepo",
             present=_records_present(erepo),
         ),
         _context_record(
             semantic_target="clinvar_clinical_evidence",
             payload={"status": source_statuses.get("clinvar")},
-            evidence_path="pathogenicity.clinvar",
+            satisfied_fields=(
+                (["pathogenicity.clinvar_classification"]
+                 if _text(pathogenicity.get("clinvar_classification")) is not None else [])
+                + (["clinvar_accession"] if _text(evidence.get("clinvar_accession")) is not None else [])
+                + (["pathogenicity.clinvar_review_status"]
+                   if _text(pathogenicity.get("clinvar_review_status")) is not None else [])
+                + (["pathogenicity.clinvar_conditions"]
+                   if pathogenicity.get("clinvar_conditions") else [])
+            ),
             fallback_source="NCBI ClinVar",
             present=clinvar_present,
         ),
         _context_record(
             semantic_target="cspec_context",
             payload={"status": source_statuses.get("cspec")},
-            evidence_path="pathogenicity.cspec_context",
+            satisfied_fields=["pathogenicity.cspec_context"],
             fallback_source="ClinGen CSpec Registry",
             present=cspec_present,
         ),
         _context_record(
             semantic_target="gene_disease_validity",
             payload={"status": source_statuses.get("clingen")},
-            evidence_path="pathogenicity.clingen_context",
+            satisfied_fields=["pathogenicity.clingen_context"],
             fallback_source="ClinGen/GenCC",
             present=validity_present,
         ),
         _context_record(
             semantic_target="gene_disease_support",
             payload=medgen_gene,
-            evidence_path="pathogenicity.medgen_gene_disease_context",
+            satisfied_fields=["pathogenicity.medgen_gene_disease_context.records"],
             fallback_source="NCBI MedGen",
             present=_records_present(medgen_gene),
+            diagnostic_paths=(
+                ["pathogenicity.medgen_gene_disease_context.candidate_diagnostics"]
+                if _text(medgen_gene.get("retrieval_state"))
+                == "no_verified_gene_association"
+                and isinstance(medgen_gene.get("candidate_diagnostics"), list)
+                and bool(medgen_gene.get("candidate_diagnostics"))
+                else []
+            ),
         ),
         _context_record(
             semantic_target="phenotype_gene_ranking",
             payload=phen2gene,
-            evidence_path="phenotype_relationship.phen2gene",
+            satisfied_fields=["phenotype_relationship.phen2gene"],
             fallback_source="Phen2Gene",
             present=ranking_present,
             not_applicable=not has_hpo,
         ),
         _record(
             semantic_target="phenotype_gene_support",
-            state=("NOT_APPLICABLE" if not has_hpo else "FULL" if support_present else "UNAVAILABLE"),
+            state=_profile_state(
+                target="phenotype_gene_support",
+                satisfied_fields=(
+                    (["phenotype_relationship.matched_patient_hpo_terms"]
+                     if bool(phenotype.get("matched_patient_hpo_terms")) else [])
+                    + (["phenotype_relationship.local_phenotype_score"]
+                       if phenotype.get("local_phenotype_score") is not None else [])
+                    + (["phenotype_relationship.medgen_phenotype_gene_context.records"]
+                       if any(_records_present(item) for item in medgen_phenotype_items) else [])
+                ),
+                retrieval_states=(
+                    [_retrieval_state(item) for item in medgen_phenotype_items]
+                    or ["local_support" if support_present else "unavailable"]
+                ),
+                not_applicable=not has_hpo,
+            ),
             evidence_paths=(
                 ["phenotype_relationship.matched_patient_hpo_terms"]
                 if bool(phenotype.get("matched_patient_hpo_terms"))
                 else []
             ) + (
-                ["phenotype_relationship.medgen_phenotype_gene_context"]
+                ["phenotype_relationship.local_phenotype_score"]
+                if phenotype.get("local_phenotype_score") is not None
+                else []
+            ) + (
+                ["phenotype_relationship.medgen_phenotype_gene_context.records"]
                 if any(_records_present(item) for item in medgen_phenotype_items)
                 else []
             ),
@@ -333,14 +583,30 @@ def _contexts(evidence: Mapping[str, object]) -> list[dict[str, Any]]:
             ],
             limitations=[] if support_present or not has_hpo else ["semantic_evidence_unavailable"],
             missing_semantic_targets=[] if support_present or not has_hpo else ["phenotype_gene_support"],
+            satisfied_fields=(
+                (["phenotype_relationship.matched_patient_hpo_terms"]
+                 if bool(phenotype.get("matched_patient_hpo_terms")) else [])
+                + (["phenotype_relationship.local_phenotype_score"]
+                   if phenotype.get("local_phenotype_score") is not None else [])
+                + (["phenotype_relationship.medgen_phenotype_gene_context.records"]
+                   if any(_records_present(item) for item in medgen_phenotype_items) else [])
+            ),
         ),
         _record(
             semantic_target="disease_hpo_context",
-            state=("FULL" if mydisease_present or medgen_disease_present else _state(evidence_present=False, retrieval_states=[_retrieval_state(mydisease), _retrieval_state(medgen_disease)])),
+            state=_profile_state(
+                target="disease_hpo_context",
+                satisfied_fields=(
+                    (["phenotype_relationship.mydisease.diseases"] if mydisease_present else [])
+                    + (["phenotype_relationship.medgen_disease_hpo_context.records"]
+                       if medgen_disease_present else [])
+                ),
+                retrieval_states=[_retrieval_state(mydisease), _retrieval_state(medgen_disease)],
+            ),
             evidence_paths=(
-                ["phenotype_relationship.mydisease"] if mydisease_present else []
+                ["phenotype_relationship.mydisease.diseases"] if mydisease_present else []
             ) + (
-                ["phenotype_relationship.medgen_disease_hpo_context"] if medgen_disease_present else []
+                ["phenotype_relationship.medgen_disease_hpo_context.records"] if medgen_disease_present else []
             ),
             retrieval_states=[_retrieval_state(mydisease), _retrieval_state(medgen_disease)],
             sources=(
@@ -350,18 +616,36 @@ def _contexts(evidence: Mapping[str, object]) -> list[dict[str, Any]]:
             ),
             limitations=[] if mydisease_present or medgen_disease_present else ["semantic_evidence_unavailable"],
             missing_semantic_targets=[] if mydisease_present or medgen_disease_present else ["disease_hpo_context"],
+            satisfied_fields=(
+                (["phenotype_relationship.mydisease.diseases"] if mydisease_present else [])
+                + (["phenotype_relationship.medgen_disease_hpo_context.records"]
+                   if medgen_disease_present else [])
+            ),
         ),
         _context_record(
             semantic_target="population_evidence",
             payload=population,
-            evidence_path="conditional_enrichment.population_frequency",
+            satisfied_fields=(
+                (["population_frequency"]
+                 if isinstance(evidence.get("population_frequency"), (int, float))
+                 and not isinstance(evidence.get("population_frequency"), bool) else [])
+                + (["conditional_enrichment.population_frequency.population_frequency"]
+                   if isinstance(population.get("population_frequency"), (int, float))
+                   and not isinstance(population.get("population_frequency"), bool) else [])
+                + (["conditional_enrichment.population_frequency.populations"]
+                   if population.get("populations") else [])
+            ),
             fallback_source="population evidence",
             present=population_present,
         ),
         _context_record(
             semantic_target="literature_evidence",
             payload=literature,
-            evidence_path="conditional_enrichment.literature",
+            satisfied_fields=(
+                (["conditional_enrichment.literature.articles"] if literature_present else [])
+                + (["conditional_enrichment.literature.query_basis"]
+                   if literature.get("query_basis") else [])
+            ),
             fallback_source="literature evidence",
             present=literature_present,
         ),
@@ -389,7 +673,9 @@ def _attach_correlation(
             if upstream is None or not isinstance(group_paths, list):
                 continue
             if any(
-                path == group_path or path.startswith(f"{group_path}.") or group_path.startswith(f"{path}.")
+                path == group_path
+                or path.startswith(group_path)
+                or group_path.startswith(f"{path}.")
                 for path in paths
                 for group_path in group_paths
                 if isinstance(group_path, str)
@@ -468,15 +754,62 @@ def validate_evidence_coverage(value: object) -> dict[str, Any]:
     seen: set[str] = set()
     for record in records:
         data = _mapping(record)
-        expected = {"semantic_target", "state", "evidence_paths", "retrieval_states", "composition_state", "sources", "correlation_groups", "limitations", "missing_semantic_targets"}
+        expected = {
+            "semantic_target",
+            "state",
+            "critical_fields",
+            "important_fields",
+            "optional_fields",
+            "satisfied_fields",
+            "missing_fields",
+            "evidence_paths",
+            "retrieval_states",
+            "composition_state",
+            "sources",
+            "correlation_groups",
+            "limitations",
+            "missing_semantic_targets",
+            "annotation_fields",
+            "diagnostic_paths",
+        }
         if set(data) != expected:
             raise EvidenceCoverageError("Coverage capability fields are invalid.")
         target = _text(data.get("semantic_target"))
         if target not in SEMANTIC_TARGETS or target in seen or data.get("state") not in COVERAGE_STATES:
             raise EvidenceCoverageError("Coverage semantic target is invalid.")
-        lists = ("evidence_paths", "retrieval_states", "sources", "correlation_groups", "limitations", "missing_semantic_targets")
-        if data.get("composition_state") not in {"none", "direct", "composed"} or any(not isinstance(data.get(name), list) for name in lists):
+        lists = (
+            "critical_fields",
+            "important_fields",
+            "optional_fields",
+            "satisfied_fields",
+            "missing_fields",
+            "evidence_paths",
+            "retrieval_states",
+            "sources",
+            "correlation_groups",
+            "limitations",
+            "missing_semantic_targets",
+            "annotation_fields",
+            "diagnostic_paths",
+        )
+        profile = _profile(target)
+        if (
+            data.get("composition_state") not in {"none", "direct", "composed", "mixed"}
+            or any(not isinstance(data.get(name), list) for name in lists)
+            or data.get("critical_fields") != list(profile["critical_fields"])
+            or data.get("important_fields") != list(profile["important_fields"])
+            or data.get("optional_fields") != list(profile["optional_fields"])
+        ):
             raise EvidenceCoverageError("Coverage semantic record state is invalid.")
+        for field in data["annotation_fields"]:
+            field_data = _mapping(field)
+            if set(field_data) != {
+                "field", "state", "evidence_path", "composition_state",
+                "promotion_state", "source", "limitations",
+            } or field_data.get("state") not in {"FULL", "UNAVAILABLE"}:
+                raise EvidenceCoverageError("Coverage annotation field is invalid.")
+        if target != "annotation" and data["annotation_fields"]:
+            raise EvidenceCoverageError("Only annotation may contain field coverage.")
         clean_records.append({name: (list(data[name]) if name in lists else data[name]) for name in expected})
         seen.add(target)
     if seen != set(SEMANTIC_TARGETS):
@@ -498,6 +831,7 @@ __all__ = [
     "COVERAGE_SCHEMA_VERSION",
     "COVERAGE_STATES",
     "SEMANTIC_TARGETS",
+    "SEMANTIC_REQUIREMENT_PROFILES",
     "EvidenceCoverageError",
     "build_evidence_coverage",
     "build_evidence_coverages",

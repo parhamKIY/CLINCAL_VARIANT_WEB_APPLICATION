@@ -8,6 +8,7 @@ import pytest
 
 from backend.evidence_coverage import (
     COVERAGE_SCHEMA_VERSION,
+    SEMANTIC_REQUIREMENT_PROFILES,
     build_evidence_coverage,
     build_evidence_coverages,
 )
@@ -32,6 +33,47 @@ def _capability(coverage: dict[str, object], name: str) -> dict[str, object]:
     )
 
 
+def _annotation_field(record: dict[str, object], field: str) -> dict[str, object]:
+    fields = record["annotation_fields"]
+    assert isinstance(fields, list)
+    return next(
+        item
+        for item in fields
+        if isinstance(item, dict) and item["field"] == field
+    )
+
+
+def test_semantic_requirement_profiles_are_explicit_and_provider_neutral() -> None:
+    assert set(SEMANTIC_REQUIREMENT_PROFILES) == {
+        "annotation",
+        "automated_acmg_context",
+        "expert_curated_variant_context",
+        "clinvar_clinical_evidence",
+        "cspec_context",
+        "gene_disease_validity",
+        "gene_disease_support",
+        "phenotype_gene_ranking",
+        "phenotype_gene_support",
+        "disease_hpo_context",
+        "population_evidence",
+        "literature_evidence",
+    }
+    assert SEMANTIC_REQUIREMENT_PROFILES["annotation"]["critical_fields"] == (
+        "gene",
+        "transcript",
+        "variant_context.hgvs_c",
+        "variant_context.hgvs_p",
+        "consequence",
+    )
+    assert all(
+        "provider" not in field.lower()
+        for profile in SEMANTIC_REQUIREMENT_PROFILES.values()
+        for fields in profile.values()
+        if isinstance(fields, tuple)
+        for field in fields
+    )
+
+
 def test_direct_vep_annotation_is_full_without_provider_counting() -> None:
     evidence = _evidence()
     context = evidence["variant_context"]
@@ -44,6 +86,19 @@ def test_direct_vep_annotation_is_full_without_provider_counting() -> None:
     assert annotation["state"] == "FULL"
     assert annotation["composition_state"] == "direct"
     assert annotation["missing_semantic_targets"] == []
+    assert annotation["critical_fields"] == list(
+        SEMANTIC_REQUIREMENT_PROFILES["annotation"]["critical_fields"]
+    )
+    assert annotation["satisfied_fields"] == annotation["critical_fields"]
+    assert _annotation_field(annotation, "gene") == {
+        "field": "gene",
+        "state": "FULL",
+        "evidence_path": "gene",
+        "composition_state": "direct",
+        "promotion_state": "NOT_PROMOTED",
+        "source": "Ensembl VEP",
+        "limitations": [],
+    }
 
 
 def test_safe_stage6_composition_is_degraded_when_consequence_remains_missing() -> None:
@@ -93,6 +148,9 @@ def test_safe_stage6_composition_is_degraded_when_consequence_remains_missing() 
     assert annotation["composition_state"] == "composed"
     assert annotation["sources"] == ["GeneBe"]
     assert annotation["missing_semantic_targets"] == ["consequence"]
+    assert _annotation_field(annotation, "gene")["promotion_state"] == "PROMOTED"
+    assert _annotation_field(annotation, "gene")["source"] == "GeneBe"
+    assert _annotation_field(annotation, "consequence")["state"] == "UNAVAILABLE"
 
 
 def test_partial_direct_annotation_is_degraded_without_relabeling_vep_failure() -> None:
@@ -107,6 +165,44 @@ def test_partial_direct_annotation_is_degraded_without_relabeling_vep_failure() 
     assert annotation["state"] == "DEGRADED"
     assert annotation["composition_state"] == "direct"
     assert annotation["missing_semantic_targets"] == ["hgvs_c", "hgvs_p"]
+
+
+def test_only_one_active_annotation_field_is_degraded_not_full() -> None:
+    evidence = _evidence()
+    evidence.update({"transcript": None, "consequence": None})
+    context = evidence["variant_context"]
+    assert isinstance(context, dict)
+    context.update({"hgvs_c": None, "hgvs_p": None})
+
+    annotation = _capability(build_evidence_coverage(evidence), "annotation")
+
+    assert annotation["state"] == "DEGRADED"
+    assert annotation["satisfied_fields"] == ["gene"]
+
+
+def test_mixed_direct_and_promoted_annotation_is_field_level() -> None:
+    evidence = _evidence()
+    context = evidence["variant_context"]
+    assert isinstance(context, dict)
+    context["hgvs_c"] = "NM_000001.5:c.100A>G"
+    evidence["annotation_promotion"] = {
+        "vep_state": "operational_failure",
+        "fields": {
+            "hgvs_c": {
+                "source": "GeneBe",
+                "composition_state": "COMPOSABLE",
+                "promotion_state": "PROMOTED",
+                "limitations": ["vep_field_insufficient"],
+            }
+        },
+    }
+
+    annotation = _capability(build_evidence_coverage(evidence), "annotation")
+
+    assert annotation["state"] == "FULL"
+    assert annotation["composition_state"] == "mixed"
+    assert _annotation_field(annotation, "hgvs_c")["source"] == "GeneBe"
+    assert _annotation_field(annotation, "gene")["source"] == "Ensembl VEP"
 
 
 def test_shadow_only_or_valid_no_match_never_counts_as_active_annotation() -> None:
@@ -170,6 +266,12 @@ def test_medgen_retrieval_states_preserve_true_no_match_and_unverified_candidate
 
         assert support["state"] == "UNAVAILABLE"
         assert support["retrieval_states"] == [retrieval_state]
+        if retrieval_state == "no_verified_gene_association":
+            assert support["diagnostic_paths"] == [
+                "pathogenicity.medgen_gene_disease_context.candidate_diagnostics"
+            ]
+        else:
+            assert support["diagnostic_paths"] == []
 
 
 def test_gencc_validity_and_medgen_support_remain_non_equivalent() -> None:
@@ -234,8 +336,8 @@ def test_disease_hpo_context_keeps_mydisease_and_medgen_paths_separate() -> None
 
     assert disease["state"] == "FULL"
     assert disease["evidence_paths"] == [
-        "phenotype_relationship.mydisease",
-        "phenotype_relationship.medgen_disease_hpo_context",
+        "phenotype_relationship.mydisease.diseases",
+        "phenotype_relationship.medgen_disease_hpo_context.records",
     ]
 
 
@@ -263,7 +365,7 @@ def test_population_literature_and_correlation_are_semantic_not_provider_counts(
     evidence = _evidence()
     enrichment = evidence["conditional_enrichment"]
     assert isinstance(enrichment, dict)
-    enrichment["population_frequency"] = {"status": "success", "provider": "UCSC gnomAD", "selected_frequency": 0.0}
+    enrichment["population_frequency"] = {"status": "success", "provider": "UCSC gnomAD", "population_frequency": 0.0}
     enrichment["literature"] = {
         "status": "success",
         "provider": "Europe PMC",
@@ -292,7 +394,7 @@ def test_population_literature_and_correlation_are_semantic_not_provider_counts(
     ("population_frequency", "payload", "expected_state", "expected_retrieval"),
     [
         (0.0, {"status": "not_triggered"}, "FULL", "not_triggered"),
-        (None, {"status": "success", "selected_frequency": 0.01}, "FULL", "success"),
+        (None, {"status": "success", "population_frequency": 0.01}, "FULL", "success"),
         (None, {"status": "no_match"}, "UNAVAILABLE", "no_match"),
         (None, {"status": "timeout"}, "UNAVAILABLE", "operational_failure"),
     ],
@@ -313,6 +415,24 @@ def test_population_coverage_distinguishes_direct_fallback_no_match_and_failure(
 
     assert population["state"] == expected_state
     assert population["retrieval_states"] == [expected_retrieval]
+
+
+def test_partial_population_evidence_is_degraded_against_its_profile() -> None:
+    evidence = _evidence()
+    evidence["population_frequency"] = None
+    enrichment = evidence["conditional_enrichment"]
+    assert isinstance(enrichment, dict)
+    enrichment["population_frequency"] = {
+        "status": "partial",
+        "population_frequency": 0.01,
+    }
+
+    population = _capability(build_evidence_coverage(evidence), "population_evidence")
+
+    assert population["state"] == "DEGRADED"
+    assert population["satisfied_fields"] == [
+        "conditional_enrichment.population_frequency.population_frequency"
+    ]
 
 
 @pytest.mark.parametrize(
