@@ -71,6 +71,7 @@ from backend.mydisease import MyDiseaseError, enrich_with_mydisease
 from backend.medgen import (
     MedGenError,
     enrich_with_medgen,
+    enrich_with_medgen_gene_disease,
     enrich_with_medgen_phenotype_gene,
 )
 from backend.phenotype import (
@@ -2299,6 +2300,32 @@ def _annotate_and_match(
                 message=(
                     "MedGen phenotype-gene supporting context could not be produced; "
                     "Phen2Gene and existing phenotype evidence were retained."
+                ),
+                recoverable=True,
+            )
+
+        try:
+            medgen_gd_result = enrich_with_medgen_gene_disease(
+                result["phenotype_results"],
+                session=mydisease_session,
+                enabled=True,
+            )
+            public_medgen_gd_results = [
+                dict(variant) for variant in medgen_gd_result["variants"]
+            ]
+            validate_no_prohibited_fields(
+                public_medgen_gd_results,
+                context="MedGen gene-disease output",
+            )
+            result["phenotype_results"] = public_medgen_gd_results
+        except (MedGenError, ClinicalDataPrivacyError):
+            _record_issue(
+                result,
+                stage="phenotype",
+                code="medgen_gene_disease_unavailable",
+                message=(
+                    "MedGen gene-disease supporting context could not be produced; "
+                    "ClinGen and existing evidence were retained."
                 ),
                 recoverable=True,
             )

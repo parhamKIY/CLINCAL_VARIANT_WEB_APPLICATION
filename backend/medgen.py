@@ -57,6 +57,16 @@ class MedGenPhenotypeGeneResult(TypedDict):
     queried_tuple_count: int
 
 
+class MedGenGeneDiseaseResult(TypedDict):
+    """Analysis-level result for Stage 5 gene-disease MedGen enrichment."""
+
+    variants: list[dict[str, Any]]
+    status: MedGenStatus
+    message: str
+    request_attempts: int
+    queried_gene_count: int
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1013,13 +1023,444 @@ def enrich_with_medgen_phenotype_gene(
     }
 
 
+# ===========================================================================
+# Stage 5: MedGen Gene-Disease Supporting Evidence
+# ===========================================================================
+
+MEDGEN_GENE_DISEASE_SCHEMA_VERSION = "1.0"
+
+
+def _is_local_gene_disease_support_sufficient(
+    item: Mapping[str, object],
+    clingen: Mapping[str, object],
+) -> bool:
+    """Check if semantically valid local gene-disease support is already sufficient.
+
+    Preserves the distinction:
+    - gene_disease_validity is ClinGen/GenCC only (never fabricated by MedGen or local support)
+    - gene_disease_support is populated by local support and/or MedGen
+
+    Returns True when:
+    1. clingen curations list is non-empty with valid claims.
+    2. Explicit local_gene_disease_support / gene_disease_support on the variant indicates a match.
+    """
+    curations = clingen.get("curations")
+    if isinstance(curations, (list, tuple)) and len(curations) > 0:
+        return True
+
+    for key in ("local_gene_disease_support", "gene_disease_support", "local_disease_context"):
+        val = item.get(key)
+        if isinstance(val, Mapping):
+            if val.get("status") in {"success", "matched", "available"} or bool(val.get("records")):
+                return True
+        elif isinstance(val, bool) and val is True:
+            return True
+
+    return False
+
+
+def _clingen_primary_state(
+    clingen_value: object,
+    item_value: object = None,
+) -> tuple[str, bool, list[str], list[str]]:
+    """Return (primary_state, triggered, reason_codes, missing) for gene_disease_support node.
+
+    Explicitly distinguishes:
+    - ClinGen usable / primary_sufficient (status == 'success' and curations is non-empty)
+    - ClinGen operational failure (status in {'error', 'unavailable', 'timeout', 'rate_limited'} or primary_failure is not None)
+    - ClinGen valid no_match (status in {'not_found', 'no_match'} or (status == 'success' and not curations))
+    - ClinGen partial / insufficient (status == 'partial')
+
+    Target-node sufficiency:
+    Before triggering MedGen, evaluates whether existing semantically valid local
+    gene-disease support already sufficiently populates the gene_disease_support node.
+    If local support is already sufficient -> NOT_NEEDED.
+    """
+    primary = clingen_value if isinstance(clingen_value, Mapping) else {}
+    item = item_value if isinstance(item_value, Mapping) else {}
+
+    status_raw = _text(primary.get("status")) or "not_applicable"
+    curations = primary.get("curations")
+    has_curations = isinstance(curations, (list, tuple)) and len(curations) > 0
+
+    if status_raw == "success" and has_curations:
+        primary_state = "available"
+        return primary_state, False, ["primary_sufficient"], []
+
+    if status_raw in {"not_found", "no_match"} or (status_raw == "success" and not has_curations):
+        primary_state = "no_match"
+        gap_reason = "primary_no_match"
+    elif status_raw in {"error", "unavailable", "timeout", "rate_limited", "server_error"} or primary.get("primary_failure") is not None:
+        primary_state = "unavailable"
+        gap_reason = "primary_operational_failure"
+    elif status_raw == "partial":
+        primary_state = "partial"
+        gap_reason = "primary_partial"
+    else:
+        primary_state = "not_applicable"
+        gap_reason = "primary_non_applicable"
+
+    # 2. Target-node sufficiency: check if local gene-disease support is already sufficient
+    if _is_local_gene_disease_support_sufficient(item, primary):
+        return primary_state, False, [gap_reason, "local_support_sufficient"], []
+
+    # 3. Support node is insufficient -> trigger MedGen
+    return primary_state, True, [gap_reason, "gene_disease_support_gap"], ["gene_disease_support"]
+
+
+def _gene_disease_records(
+    payload: Mapping[str, object],
+    identifiers: list[str],
+    *,
+    query_gene: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        return None
+    records: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for identifier in identifiers:
+        item = result.get(identifier)
+        if not isinstance(item, Mapping):
+            return None
+        uid = _text(item.get("uid"), limit=64) or identifier
+        title = _text(item.get("title"))
+        concept_id = _text(item.get("conceptid"), limit=128)
+        if title is None:
+            continue
+        associated_genes, concept_metadata, concept_hpo = _conceptmeta(
+            item.get("conceptmeta")
+        )
+        if associated_genes is None:
+            association_state = "gene_association_unverified"
+            rejection_reason = "conceptmeta_associated_genes_unavailable"
+        elif query_gene not in associated_genes:
+            association_state = "gene_mismatch"
+            rejection_reason = "conceptmeta_associated_genes_no_exact_match"
+        else:
+            association_state = "exact_gene_association"
+            rejection_reason = None
+        sources = _source_names(item.get("sources") or item.get("source"))
+        sources.extend(
+            item["database"]
+            for item in concept_metadata
+            if item["database"] is not None
+        )
+        sources = sorted(set(sources))[:10]
+        if association_state != "exact_gene_association":
+            diagnostics.append(
+                {
+                    "medgen_uid": uid,
+                    "concept_id": concept_id,
+                    "title": title,
+                    "gene_association_match_state": association_state,
+                    "rejection_reason": rejection_reason,
+                }
+            )
+            continue
+        records.append(
+            {
+                "medgen_uid": uid,
+                "concept_id": concept_id,
+                "title": title,
+                "semantic_type": _summary_text(
+                    item.get("semantic_type") or item.get("semantictype"),
+                    limit=200,
+                ),
+                "definition": _summary_text(item.get("definition"), limit=500),
+                "gene_association_match_state": association_state,
+                "gene_association_basis": "conceptmeta_associated_genes_exact_symbol",
+                "hpo_terms": [
+                    {"hpo_id": hpo_id, "label": label}
+                    for hpo_id, label in sorted(concept_hpo.items())[:10]
+                ],
+                "source_metadata": concept_metadata,
+                "upstream_sources": sources,
+            }
+        )
+    return records, diagnostics
+
+
+def _gene_disease_context(
+    *,
+    gene: str | None,
+    status: MedGenStatus,
+    retrieval_state: str,
+    triggered: bool,
+    reason_codes: list[str],
+    primary_state: str,
+    missing: list[str],
+    attempts: int = 0,
+    http_status: int | None = None,
+    records: list[dict[str, Any]] | None = None,
+    candidate_diagnostics: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    returned = records or []
+    query_key = f"gene:{gene}" if gene else None
+    return {
+        "schema_version": MEDGEN_GENE_DISEASE_SCHEMA_VERSION,
+        "provider": MEDGEN_PROVIDER_NAME,
+        "provider_id": MEDGEN_PROVIDER,
+        "provider_role": "supporting",
+        "primary_provider": "clingen",
+        "primary_retrieval_state": primary_state,
+        "status": status,
+        "retrieval_state": retrieval_state,
+        "retrieved_at": _timestamp(),
+        "query_gene": gene,
+        "query_key": query_key,
+        "attempts": attempts,
+        "http_status": http_status,
+        "records": returned,
+        "candidate_diagnostics": candidate_diagnostics or [],
+        "upstream_sources": sorted({
+            source
+            for record in returned
+            for source in record["upstream_sources"]
+        }),
+        "enrichment_decision": {
+            "triggered": triggered,
+            "reason_codes": reason_codes,
+            "target_semantic_node": "gene_disease_context",
+            "primary_retrieval_state": primary_state,
+            "required_fields_missing": missing,
+            "query_key": query_key,
+        },
+    }
+
+
+def enrich_with_medgen_gene_disease(
+    annotations: Sequence[dict[str, Any]],
+    *,
+    enabled: bool = True,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+    session: requests.Session | None = None,
+) -> MedGenGeneDiseaseResult:
+    """Attach source-separated MedGen gene-disease supporting context.
+
+    Queries NCBI MedGen with ``GENE[All Fields]`` deduplicated by unique gene
+    symbol.  Records are condition concepts confirmed via ConceptMeta exact
+    gene association.  Never modifies ClinGen validity fields or claims.
+    """
+    if not isinstance(annotations, Sequence) or isinstance(annotations, (str, bytes)):
+        raise MedGenError("MedGen annotations must be a sequence.")
+    items = [dict(item) for item in annotations]
+    if not isinstance(enabled, bool):
+        raise MedGenError("enabled must be a boolean.")
+
+    contexts: list[dict[str, Any] | None] = []
+    queries: dict[str, tuple[str, str, list[str], list[str]]] = {}
+    variant_gene_keys: list[str | None] = []
+
+    for item in items:
+        sources_dict = item.get("sources")
+        clingen_source = (
+            sources_dict.get("clingen")
+            if isinstance(sources_dict, Mapping)
+            else item.get("clingen")
+        )
+        gene = _normalized_gene(item.get("gene"))
+        primary_state, triggered, reasons, missing = _clingen_primary_state(
+            clingen_source,
+            item,
+        )
+
+        if gene is None:
+            contexts.append(_gene_disease_context(
+                gene=None,
+                status="not_applicable", retrieval_state="unattempted",
+                triggered=False, reason_codes=["missing_gene"],
+                primary_state=primary_state, missing=["gene"],
+            ))
+            variant_gene_keys.append(None)
+            continue
+
+        if not enabled:
+            contexts.append(_gene_disease_context(
+                gene=gene,
+                status="not_applicable", retrieval_state="unattempted",
+                triggered=False, reason_codes=["provider_disabled"],
+                primary_state=primary_state, missing=missing,
+            ))
+            variant_gene_keys.append(None)
+            continue
+
+        if not triggered:
+            contexts.append(_gene_disease_context(
+                gene=gene,
+                status="not_applicable", retrieval_state="not_needed",
+                triggered=False, reason_codes=reasons,
+                primary_state=primary_state, missing=missing,
+            ))
+            variant_gene_keys.append(None)
+            continue
+
+        gene_key = gene.casefold()
+        queries.setdefault(gene_key, (gene, primary_state, reasons, missing))
+        variant_gene_keys.append(gene_key)
+        contexts.append(None)
+
+    owns_session = session is None
+    client = session or requests.Session()
+    attempts = 0
+    context_by_gene: dict[str, dict[str, Any]] = {}
+
+    try:
+        circuit = ProviderCircuitState()
+        for gene_key, (gene, primary_state, reasons, missing) in queries.items():
+            search_term = f"{gene}[All Fields]"
+            status, search, used, http_status = _request_json(
+                client, "esearch.fcgi", params={
+                    "db": "medgen",
+                    "term": search_term,
+                    "retmode": "json",
+                    "retmax": MEDGEN_MAX_RECORDS,
+                },
+                circuit=circuit,
+            )
+            attempts += used
+            if status != "success" or search is None:
+                context_by_gene[gene_key] = _gene_disease_context(
+                    gene=gene,
+                    status=status, retrieval_state="operational_failure",
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used, http_status=http_status,
+                )
+                continue
+
+            esearch_result = search.get("esearchresult")
+            ids = (
+                esearch_result.get("idlist")
+                if isinstance(esearch_result, Mapping)
+                else None
+            )
+            if not isinstance(ids, list) or any(
+                not isinstance(v, str) for v in ids
+            ):
+                context_by_gene[gene_key] = _gene_disease_context(
+                    gene=gene,
+                    status="invalid_response",
+                    retrieval_state="invalid_response",
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used, http_status=http_status,
+                )
+                continue
+
+            identifiers = list(dict.fromkeys(ids))[:MEDGEN_MAX_RECORDS]
+            if not identifiers:
+                context_by_gene[gene_key] = _gene_disease_context(
+                    gene=gene,
+                    status="no_match", retrieval_state="no_match",
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used, http_status=http_status,
+                )
+                continue
+
+            summary_status, summary, summary_used, summary_http = _request_json(
+                client, "esummary.fcgi", params={
+                    "db": "medgen",
+                    "id": ",".join(identifiers),
+                    "retmode": "json",
+                },
+                circuit=circuit,
+            )
+            attempts += summary_used
+            normalized = (
+                _gene_disease_records(
+                    summary,
+                    identifiers,
+                    query_gene=gene,
+                )
+                if summary is not None
+                else None
+            )
+            if summary_status != "success" or normalized is None:
+                context_by_gene[gene_key] = _gene_disease_context(
+                    gene=gene,
+                    status=(
+                        summary_status
+                        if summary_status != "success"
+                        else "invalid_response"
+                    ),
+                    retrieval_state=(
+                        "operational_failure"
+                        if summary_status != "success"
+                        else "invalid_response"
+                    ),
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used + summary_used, http_status=summary_http,
+                )
+                continue
+
+            accepted_records, diagnostics = normalized
+            context_by_gene[gene_key] = _gene_disease_context(
+                gene=gene,
+                status="success" if accepted_records else "no_match",
+                retrieval_state=(
+                    "accepted_records" if accepted_records
+                    else "no_verified_gene_association"
+                ),
+                triggered=True, reason_codes=reasons,
+                primary_state=primary_state, missing=missing,
+                attempts=used + summary_used, http_status=summary_http,
+                records=accepted_records,
+                candidate_diagnostics=diagnostics,
+            )
+    finally:
+        if owns_session:
+            client.close()
+
+    enriched: list[dict[str, Any]] = []
+    for item, context, gene_key in zip(items, contexts, variant_gene_keys):
+        if context is not None:
+            enriched.append({
+                **deepcopy(item),
+                "medgen_gene_disease_context": deepcopy(context),
+            })
+        else:
+            enriched.append({
+                **deepcopy(item),
+                "medgen_gene_disease_context": deepcopy(context_by_gene[gene_key]),
+            })
+
+    statuses = [
+        item["medgen_gene_disease_context"]["status"]
+        for item in enriched
+    ]
+    overall: MedGenStatus = "success" if "success" in statuses else (
+        "no_match"
+        if statuses and all(
+            s in {"no_match", "not_applicable"} for s in statuses
+        )
+        else "not_applicable"
+    )
+    return {
+        "variants": enriched,
+        "status": overall,
+        "message": (
+            f"MedGen gene-disease context queried for "
+            f"{len(queries)} unique genes."
+        ),
+        "request_attempts": attempts,
+        "queried_gene_count": len(queries),
+    }
+
+
 __all__ = [
     "MEDGEN_CONTEXT_SCHEMA_VERSION",
+    "MEDGEN_GENE_DISEASE_SCHEMA_VERSION",
     "MEDGEN_PHENOTYPE_GENE_SCHEMA_VERSION",
     "MEDGEN_PROVIDER",
     "MedGenEnrichmentResult",
     "MedGenError",
+    "MedGenGeneDiseaseResult",
     "MedGenPhenotypeGeneResult",
     "enrich_with_medgen",
+    "enrich_with_medgen_gene_disease",
     "enrich_with_medgen_phenotype_gene",
 ]

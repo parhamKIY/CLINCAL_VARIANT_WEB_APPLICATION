@@ -496,10 +496,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Gene-associated condition context must not imply gene-disease validity.
 - **Dependencies:** Stage 3.
 - **Definition of Done:** MedGen support is available only as its own node and cannot alter GenCC validity semantics.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Added source-separated Stage 5 NCBI MedGen gene-disease supporting evidence (`medgen_gene_disease_context`, schema version 1.0) with deduplication per unique normalized gene symbol, exact gene association verification in ConceptMeta (`AssociatedGenes`), target-node sufficiency check suppressing network calls when local support is sufficient, non-blocking pipeline integration, strict semantic boundaries (GenCC alone populates `gene_disease_validity`; MedGen never emits validity classes or causal claims), EvidenceObject schema validation & compaction, and provenance lineage tracking.
+- **Validation evidence:** 53 unit tests passing (`tests/test_medgen_gene_disease.py`, `tests/test_medgen_phenotype_gene.py`, `tests/test_medgen.py`), 12/12 passing for Stage 105 Golden Cases (ERC-01..ERC-07) and Stage 99 persistence recovery, 1344/1346 passing in full resilience runner (0 regressions against baseline), and bounded live validation on SCN1A, FBN1, CFTR.
 
 **STOP FOR REVIEW.**
 
