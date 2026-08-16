@@ -104,6 +104,59 @@ guide, and limitations are maintained in
 The authoritative redesign contract and implemented-versus-planned boundary are also
 recorded in the unified project declaration.
 
+## Evidence-resilience closeout (Stages 1–11)
+
+Stages 1–10 of the evidence-resilience workstream are implemented and approved;
+Stage 11 is documentation closeout pending review. This is a separate workstream
+from the historical Stage 83/115 DOCX visual-signoff track and has no automatic
+Stage 12.
+
+The active Evidence Graph is provider-neutral. VEP is the preferred annotation
+source; VariantValidator is the exact-identity Stage-6 fallback/composition source;
+GeneBe provides automated/supporting context; and MyVariant provides approved
+identifier/aggregate roles. Stage 6 may actively promote only `gene`, `transcript`,
+`HGVS.c`, and `HGVS.p` after exact CPRA/build and versioned same-transcript proof.
+It never promotes consequence, impact, MANE, or canonical status, never attributes a
+non-VEP value to VEP, and leaves usable VEP unchanged. Shadow composition is
+observational; the legacy direct VariantValidator projection is superseded by the
+gated field-level promotion path.
+
+Semantic evidence nodes remain distinct: `annotation`,
+`automated_acmg_context` (GeneBe only), `expert_curated_variant_context` (ERepo),
+`clinvar_clinical_evidence` (direct NCBI with correlated MyVariant-derived rescue
+where applicable), `cspec_context` (registry/context only), `gene_disease_validity`
+(GenCC only), `gene_disease_support` (MedGen only), `phenotype_gene_ranking`
+(Phen2Gene only), `phenotype_gene_support` (MedGen/local only),
+`disease_hpo_context` (source-separated MyDisease and MedGen),
+`population_evidence`, and `literature_evidence` (LitVar2 → Europe PMC → PubMed).
+Population retains its direct and configured-mirror routes with shared-upstream
+provenance; overlapping routes are not independent biological confirmation.
+
+Stage 7 coverage is runtime-only, per-variant, provider-neutral schema `1.0`; it is
+not persisted and is not an evidence score. It classifies normalized evidence paths
+as `critical_fields`, `important_fields`, or `optional_fields`, keeps
+`retrieval_states` separate, and emits `FULL`, `DEGRADED`, `UNAVAILABLE`,
+`NOT_TRIGGERED`, or `NOT_APPLICABLE`. A valid `no_match`, an operational failure, a
+MedGen `no_verified_gene_association`, `NOT_TRIGGERED`, and `NOT_APPLICABLE` are
+separate facts. `FULL` requires applicable critical fields.
+
+Stage 8 preserves internal readiness (`READY`, `READY_WITH_LIMITATIONS`,
+`RESCUE_REQUIRED`, `MINIMUM_IDENTITY_FAILURE`) and derives runtime final disposition
+schema `1.0`: `READY`, `READY_WITH_LIMITATIONS`, or `BLOCKED`. `RESCUE_REQUIRED` is
+reassessed after enrichment and never survives as a final state. Unsafe structural
+identity maps to `BLOCKED`; safe sparse evidence and a provider outage alone do not.
+Reviewer interpretation keeps provider operational status, query retrieval result,
+and per-variant semantic capability as three separate axes. For example, unavailable
+GenCC plus accepted MedGen support means `gene_disease_validity=UNAVAILABLE` and
+`gene_disease_support=FULL`, not converted validity.
+
+LLM input is sanitized normalized semantic evidence only. It excludes raw API/VCF
+data, genotypes, sample identifiers, PHI, shadow composition, wholesale coverage,
+Stage-8 technical diagnostics, and rejected `candidate_diagnostics`. The Stage-10
+audit found that the latter diagnostics could reach the prompt; the focused fix made
+`shadow_free_evidence_for_llm()` recursively remove them while retaining upstream
+reviewer/provenance traceability.
+
 ## Accepted target architecture
 
 The Stage 45 contract replaces the Stage 44 interaction model for all new work.

@@ -2,7 +2,8 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Evidence-resilience workstream closed. Stages 1–10 are approved; Stage 11 is COMPLETE / PENDING closeout review.
+**Status:** Evidence-resilience workstream closed. Stages 1–10 are COMPLETE /
+APPROVED; Stage 11 is COMPLETE / REVIEW PENDING.
 
 **Current completed stage:** Stage 11 — documentation and evidence-resilience closeout.
 
@@ -18,6 +19,20 @@
 - `docs/PROJECT_DECLARATION.md` — project boundaries, historical contracts, current schema versions, and prior stage record.
 
 This document deliberately does not reproduce those documents. It records the approved execution order, implementation reality, required safeguards, validation, and review checkpoints for the selected evidence-resilience work.
+
+## Closeout record (current authoritative summary)
+
+Stages 1–10 are COMPLETE / APPROVED. Stage 11 reconciles this roadmap, the master
+handoff, project declaration, README, and `.env.example`; no production behavior is
+changed. EvidenceObject remains `2.5`, SQLite remains `4`, and pipeline remains
+`3.2`. Stage-6 shadow and promotion schemas are `1.0`; Stage-7 coverage and Stage-8
+disposition are runtime-only schema `1.0`; Stage-10 trace is audit-only schema `1.0`.
+There is no automatic Stage 12. Subsequent stabilization or report visual sign-off is
+a separate workstream and requires separate approval.
+
+The implementation record below contains historical planning text where explicitly
+labelled. Those snapshots do not override the completed-stage implementation notes
+or this closeout record.
 
 ## Table of contents
 
@@ -85,7 +100,7 @@ Execution is sequential and review-gated. A future coding agent must read this r
 
 These are point-in-time observations from the tested network, not claims that services are globally unavailable. Reopen the decision only after a concrete unresolved critical evidence gap is demonstrated after the approved work.
 
-## 4. Current implementation reality and discrepancies
+## 4. Historical pre-implementation reality and planning discrepancies
 
 ### Existing code to reuse
 
@@ -502,7 +517,7 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stage 3.
 - **Definition of Done:** MedGen support is available only as its own node and cannot alter GenCC validity semantics.
 - **Status:** COMPLETE
-- **Review:** PENDING
+- **Review:** APPROVED
 - **Implementation notes:** Added source-separated Stage 5 NCBI MedGen gene-disease supporting evidence (`medgen_gene_disease_context`, schema version 1.0) with deduplication per unique normalized gene symbol, exact gene association verification in ConceptMeta (`AssociatedGenes`), target-node sufficiency check suppressing network calls when local support is sufficient, non-blocking pipeline integration, strict semantic boundaries (GenCC alone populates `gene_disease_validity`; MedGen never emits validity classes or causal claims), EvidenceObject schema validation & compaction, and provenance lineage tracking.
 - **Validation evidence:** 53 unit tests passing (`tests/test_medgen_gene_disease.py`, `tests/test_medgen_phenotype_gene.py`, `tests/test_medgen.py`), 12/12 passing for Stage 105 Golden Cases (ERC-01..ERC-07) and Stage 99 persistence recovery, 1344/1346 passing in full resilience runner (0 regressions against baseline), and bounded live validation on SCN1A, FBN1, CFTR.
 
@@ -597,7 +612,7 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stages 2–8.
 - **Definition of Done:** Required deterministic gates pass and live results are recorded only as point-in-time operational evidence.
 - **Status:** COMPLETE
-- **Review:** PENDING
+- **Review:** APPROVED
 - **Implementation notes:** Added `tests/run_stage9_live_validation.py`, a test-only opt-in runner that reuses existing provider clients for exactly one named query class at a time. It has no production import path and adds no provider or persistence schema. It checkpoints a normalized safe result after each completed class, supports `--resume`, retains completed checkpoints when a later class is unavailable, records disabled configuration as `NOT_RUN`, and never writes raw responses or exception text. A localized harness-only manual-row shape defect was corrected before the VEP probe; no production module changed.
 - **Validation evidence:** `docs/stage_9_resilience_validation.md` separates the deterministic correctness gate from point-in-time operational observations. The focused Stage 1–8, Stage 9-runner, persistence, and ERC command passed `264 passed in 26.10s`. The bounded one-class-at-a-time observations recorded ERepo valid `no_match`; MedGen gene-disease, phenotype-gene, and disease/HPO accepted records; VEP accepted annotation; population evidence available; and literature valid `no_match`, all without raw response retention. `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets audit, and Stage 78 (`1 passed, 1432 deselected in 3.27s`), then reached `1425 passed, 2 failed, 6 skipped in 144.35s`; only the two frozen manual-table dataframe and missing acceptance-registry failures remain.
 
@@ -620,7 +635,7 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Dependencies:** Stage 9.
 - **Definition of Done:** Each observed loss/limitation has a classified cause; any defect is reported separately and awaits approval.
 - **Status:** COMPLETE
-- **Review:** PENDING
+- **Review:** APPROVED
 - **Implementation notes:** Added a bounded test-only Stage 10 trace model (`tests/stage10_trace.py`) and deterministic failure-flow tests. The audit first found a critical LLM-boundary defect: compact non-evidentiary MedGen `candidate_diagnostics` survived EvidenceObject sanitization and reached the prompt. Corrective commit `d9d912e` changes only `shadow_free_evidence_for_llm()` to recursively remove that non-evidentiary field from the canonical LLM projection. It retains all upstream diagnostics, accepted records, persistence, Stage 7 diagnostic paths, reviewer technical traceability, and approved semantic evidence.
 - **Validation evidence:** `docs/stage_10_failure_driven_trace.md` records red/green proof, trace scenarios A–F, manifest, first-loss classification, and frozen boundaries. The original regression test failed red (`1 failed in 0.16s`) then passed green with focused MedGen/Stage 6–8/persistence tests (`150 passed in 6.34s`); the complete Stage 10 focused command passed `180 passed in 27.30s`. `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets, and Stage 78 (`1 passed, 1438 deselected in 3.18s`), then reached `1431 passed, 2 failed, 6 skipped in 147.35s`; the frozen manual-table dataframe and acceptance-registry failures remain the only failures.
 
@@ -644,8 +659,8 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Definition of Done:** Documentation accurately reflects code, tests, validation, open issues, and the final provider decision record.
 - **Status:** COMPLETE
 - **Review:** PENDING
-- **Implementation notes:** Reconciled current scope, provider roles, Stage 6 composition, Stage 7 coverage, Stage 8 disposition, Stage 10 LLM boundary, schemas, validation, live-observation limits, and frozen issues against approved implementation artifacts.
-- **Validation evidence:** Stage 10 focused gate `180 passed in 27.30s`; full resilience gate `1431 passed, 2 failed, 6 skipped in 147.35s`, with only the two frozen historical failures.
+- **Implementation notes:** Reconciled current scope, provider roles, semantic Evidence Graph map, Stage 6 composition/promotion, Stage 7 coverage, Stage 8 disposition, Stage 10 LLM boundary, schemas, persistence limits, configuration controls, bounded-live observation limits, and frozen issues in the declaration, handoff, README, and environment template. Added a focused documentation-consistency test. Historical planning snapshots are explicitly labelled and do not override current closeout facts.
+- **Validation evidence:** The Stage-11 documentation consistency test passed (`3 passed in 0.11s`). The required Stage 6–10, Golden/ERC-01..ERC-07, and schema-4 persistence/recovery command passed (`174 passed in 25.94s`). `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets audit, and Stage 78 (`1 passed, 1441 deselected in 3.24s`); its complete offline regression reached `1434 passed, 2 failed, 6 skipped in 150.54s`. The only failures are the frozen manual-table dataframe mismatch (expected 6, observed 8) and missing `docs/acceptance_failures_v1.md` historical registry.
 
 **STOP FOR REVIEW.**
 
@@ -668,7 +683,7 @@ Required deterministic coverage across applicable stages:
 
 Live validation is never a replacement for deterministic tests. It is opt-in, bounded, checkpointed, provider-by-provider, and recorded as an operational observation with normalized safe summaries only.
 
-## 11. File-level implementation map
+## 11. Historical file-level implementation plan
 
 | Area | Current or proposed files | Planned responsibility |
 |---|---|---|
