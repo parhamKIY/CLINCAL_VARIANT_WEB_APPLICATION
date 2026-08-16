@@ -1,4 +1,4 @@
-"""Bounded, source-separated NCBI MedGen disease/HPO context retrieval."""
+"""Bounded, source-separated NCBI MedGen disease/HPO and phenotype-gene context retrieval."""
 
 from __future__ import annotations
 
@@ -45,6 +45,16 @@ class MedGenEnrichmentResult(TypedDict):
     message: str
     request_attempts: int
     queried_gene_count: int
+
+
+class MedGenPhenotypeGeneResult(TypedDict):
+    """Analysis-level result for Stage 4 phenotype-gene MedGen enrichment."""
+
+    variants: list[dict[str, Any]]
+    status: MedGenStatus
+    message: str
+    request_attempts: int
+    queried_tuple_count: int
 
 
 def _timestamp() -> str:
@@ -539,4 +549,404 @@ def enrich_with_medgen(
     }
 
 
-__all__ = ["MEDGEN_CONTEXT_SCHEMA_VERSION", "MEDGEN_PROVIDER", "MedGenEnrichmentResult", "MedGenError", "enrich_with_medgen"]
+# ---------------------------------------------------------------------------
+# Stage 4 — MedGen phenotype-gene supporting evidence
+# ---------------------------------------------------------------------------
+
+MEDGEN_PHENOTYPE_GENE_SCHEMA_VERSION = "1.0"
+
+
+def _phen2gene_state(
+    value: object,
+) -> tuple[str, bool, list[str], list[str]]:
+    """Return (primary_state, triggered, reason_codes, missing) for phen2gene node.
+
+    The phen2gene evidence is insufficient when:
+    - The node is absent entirely
+    - availability is 'unavailable' (provider operational failure)
+    - availability is 'partial' (provider returned no match for this gene)
+    A sufficient 'available' result suppresses Stage 4 enrichment.
+    """
+    primary = value if isinstance(value, Mapping) else {}
+    availability = _text(primary.get("availability")) or "not_applicable"
+    if availability == "available":
+        return availability, False, ["primary_sufficient"], []
+    reasons: list[str] = []
+    missing: list[str] = []
+    if availability == "unavailable":
+        reasons.append("primary_operational_failure")
+        missing.append("phen2gene_result")
+    elif availability == "partial":
+        reasons.append("primary_partial")
+        missing.append("phen2gene_result")
+    else:
+        reasons.append("primary_non_applicable")
+        missing.append("phen2gene_result")
+    return availability, True, reasons, missing
+
+
+def _phenotype_gene_context(
+    *,
+    gene: str | None,
+    hpo_id: str,
+    hpo_label: str | None,
+    status: MedGenStatus,
+    retrieval_state: str,
+    triggered: bool,
+    reason_codes: list[str],
+    primary_state: str,
+    missing: list[str],
+    attempts: int = 0,
+    http_status: int | None = None,
+    records: list[dict[str, Any]] | None = None,
+    candidate_diagnostics: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build one source-separated Stage 4 phenotype-gene MedGen context.
+
+    ``target_semantic_node`` is ``phenotype_gene_context`` to distinguish it
+    from the Stage 3 ``disease_hpo_context`` node.  Records are disease
+    conditions confirmed as associated with both the query gene and the query
+    HPO term — they are supporting context, not a causal claim, and must never
+    populate Phen2Gene rank/score/weight fields.
+    """
+    returned = records or []
+    normalized_hpo_id = hpo_id if hpo_id and MEDGEN_HPO_PATTERN.fullmatch(hpo_id) else None
+    query_key = f"gene:{gene}|hpo:{normalized_hpo_id}" if gene and normalized_hpo_id else (f"gene:{gene}" if gene else None)
+    return {
+        "schema_version": MEDGEN_PHENOTYPE_GENE_SCHEMA_VERSION,
+        "provider": MEDGEN_PROVIDER_NAME,
+        "provider_id": MEDGEN_PROVIDER,
+        "provider_role": "supporting",
+        "primary_provider": "phen2gene",
+        "primary_retrieval_state": primary_state,
+        "status": status,
+        "retrieval_state": retrieval_state,
+        "retrieved_at": _timestamp(),
+        "query_gene": gene,
+        "query_hpo_id": normalized_hpo_id,
+        "query_hpo_label": hpo_label,
+        "query_key": query_key,
+        "attempts": attempts,
+        "http_status": http_status,
+        "records": returned,
+        "candidate_diagnostics": candidate_diagnostics or [],
+        "queried_hpo_terms": (
+            [{"hpo_id": normalized_hpo_id, "label": hpo_label}]
+            if normalized_hpo_id
+            else []
+        ),
+        "upstream_sources": sorted({
+            source
+            for record in returned
+            for source in record["upstream_sources"]
+        }),
+        "enrichment_decision": {
+            "triggered": triggered,
+            "reason_codes": reason_codes,
+            "target_semantic_node": "phenotype_gene_context",
+            "primary_retrieval_state": primary_state,
+            "required_fields_missing": missing,
+            "query_key": query_key,
+        },
+    }
+
+
+def enrich_with_medgen_phenotype_gene(
+    variants: Sequence[Mapping[str, object]],
+    *,
+    session: requests.Session | None = None,
+    enabled: bool = True,
+    accepted_hpo_terms: Sequence[object] = (),
+) -> MedGenPhenotypeGeneResult:
+    """Attach MedGen phenotype-gene supporting context per (gene, HPO) tuple.
+
+    Queries MedGen with ``GENE[All Fields] AND "HPO label"[Clinical Features]``
+    for each unique (normalized-gene, hpo_id) pair when the Phen2Gene
+    phenotype-gene node is insufficient.  Results are source-separated as
+    ``medgen_phenotype_gene_context`` and must never populate Phen2Gene
+    rank, score, or weight fields.
+
+    Parameters
+    ----------
+    variants:
+        Per-variant dicts that already carry a ``phen2gene`` key with
+        the primary phenotype-gene evidence.
+    session:
+        Optional shared ``requests.Session``; a new one is created when
+        ``None`` and closed on exit.
+    enabled:
+        Master kill-switch; when ``False`` every variant gets
+        ``not_applicable`` context without any HTTP calls.
+    accepted_hpo_terms:
+        Canonical HPO terms (``{"hpo_id": "HP:...", "label": ...}``)
+        already accepted for this analysis.  At least one term with a
+        non-empty label is required to build a valid search query.
+    """
+    if not isinstance(variants, Sequence) or isinstance(variants, (str, bytes)):
+        raise MedGenError("MedGen variants must be a sequence.")
+    items = [dict(item) for item in variants]
+    queried_hpo_terms = _normalized_hpo_terms(accepted_hpo_terms)
+    # Only HPO terms that have a label can be used in an ESearch phrase query.
+    hpo_terms_with_labels = [
+        term for term in queried_hpo_terms if term["label"]
+    ]
+
+    # -----------------------------------------------------------------------
+    # Decide, per variant, whether enrichment should be triggered.
+    # Collect unique (gene_key, hpo_id) query tuples for deduplication.
+    # -----------------------------------------------------------------------
+    # contexts[i] is None when the variant must be looked up by query tuple.
+    contexts: list[dict[str, Any] | None] = []
+    # Map (gene_key, hpo_id) -> (gene, hpo_id, hpo_label, primary_state, reasons, missing)
+    queries: dict[
+        tuple[str, str],
+        tuple[str, str, str | None, str, list[str], list[str]],
+    ] = {}
+    # Map variant index -> list of (gene_key, hpo_id) tuples it requires
+    variant_query_tuples: list[list[tuple[str, str]]] = []
+
+    for item in items:
+        gene = _normalized_gene(item.get("gene"))
+        primary_state, triggered, reasons, missing = _phen2gene_state(
+            item.get("phen2gene")
+        )
+
+        if gene is None:
+            contexts.append(_phenotype_gene_context(
+                gene=None, hpo_id="", hpo_label=None,
+                status="not_applicable", retrieval_state="unattempted",
+                triggered=False, reason_codes=["missing_gene"],
+                primary_state=primary_state, missing=["gene"],
+            ))
+            variant_query_tuples.append([])
+            continue
+
+        if not enabled:
+            contexts.append(_phenotype_gene_context(
+                gene=gene, hpo_id="", hpo_label=None,
+                status="not_applicable", retrieval_state="unattempted",
+                triggered=False, reason_codes=["provider_disabled"],
+                primary_state=primary_state, missing=missing,
+            ))
+            variant_query_tuples.append([])
+            continue
+
+        if not triggered:
+            contexts.append(_phenotype_gene_context(
+                gene=gene, hpo_id="", hpo_label=None,
+                status="not_applicable", retrieval_state="not_needed",
+                triggered=False, reason_codes=reasons,
+                primary_state=primary_state, missing=missing,
+            ))
+            variant_query_tuples.append([])
+            continue
+
+        if not hpo_terms_with_labels:
+            # Cannot build a valid phenotype ESearch term without a label.
+            contexts.append(_phenotype_gene_context(
+                gene=gene, hpo_id="", hpo_label=None,
+                status="not_applicable", retrieval_state="prerequisite_not_met",
+                triggered=False, reason_codes=["no_accepted_hpo_with_label"],
+                primary_state=primary_state, missing=missing,
+            ))
+            variant_query_tuples.append([])
+            continue
+
+        gene_key = gene.casefold()
+        tuples_for_variant: list[tuple[str, str]] = []
+        for term in hpo_terms_with_labels:
+            hpo_id = str(term["hpo_id"])
+            hpo_label = term["label"]
+            tuple_key = (gene_key, hpo_id)
+            queries.setdefault(
+                tuple_key,
+                (gene, hpo_id, hpo_label, primary_state, reasons, missing),
+            )
+            tuples_for_variant.append(tuple_key)
+
+        contexts.append(None)  # will be filled from context_by_tuple
+        variant_query_tuples.append(tuples_for_variant)
+
+    # -----------------------------------------------------------------------
+    # Execute deduplicated (gene, HPO) queries.
+    # -----------------------------------------------------------------------
+    context_by_tuple: dict[tuple[str, str], dict[str, Any]] = {}
+    attempts = 0
+    client = session or requests.Session()
+    owns_session = session is None
+    try:
+        circuit = ProviderCircuitState()
+        for tuple_key, (
+            gene, hpo_id, hpo_label, primary_state, reasons, missing
+        ) in queries.items():
+            search_term = f'{gene}[All Fields] AND "{hpo_label}"[Clinical Features]'
+            status, search, used, http_status = _request_json(
+                client, "esearch.fcgi", params={
+                    "db": "medgen",
+                    "term": search_term,
+                    "retmode": "json",
+                    "retmax": MEDGEN_MAX_RECORDS,
+                },
+                circuit=circuit,
+            )
+            attempts += used
+            if status != "success" or search is None:
+                context_by_tuple[tuple_key] = _phenotype_gene_context(
+                    gene=gene, hpo_id=hpo_id, hpo_label=hpo_label,
+                    status=status, retrieval_state="operational_failure",
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used, http_status=http_status,
+                )
+                continue
+
+            esearch_result = search.get("esearchresult")
+            ids = (
+                esearch_result.get("idlist")
+                if isinstance(esearch_result, Mapping)
+                else None
+            )
+            if not isinstance(ids, list) or any(
+                not isinstance(v, str) for v in ids
+            ):
+                context_by_tuple[tuple_key] = _phenotype_gene_context(
+                    gene=gene, hpo_id=hpo_id, hpo_label=hpo_label,
+                    status="invalid_response",
+                    retrieval_state="invalid_response",
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used, http_status=http_status,
+                )
+                continue
+
+            identifiers = list(dict.fromkeys(ids))[:MEDGEN_MAX_RECORDS]
+            if not identifiers:
+                context_by_tuple[tuple_key] = _phenotype_gene_context(
+                    gene=gene, hpo_id=hpo_id, hpo_label=hpo_label,
+                    status="no_match", retrieval_state="no_match",
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used, http_status=http_status,
+                )
+                continue
+
+            # Single-HPO term list for _records() HPO matching.
+            hpo_term_list = [{"hpo_id": hpo_id, "label": hpo_label}]
+            summary_status, summary, summary_used, summary_http = _request_json(
+                client, "esummary.fcgi", params={
+                    "db": "medgen",
+                    "id": ",".join(identifiers),
+                    "retmode": "json",
+                },
+                circuit=circuit,
+            )
+            attempts += summary_used
+            normalized = (
+                _records(
+                    summary,
+                    identifiers,
+                    query_gene=gene,
+                    queried_hpo_terms=hpo_term_list,
+                )
+                if summary is not None
+                else None
+            )
+            if summary_status != "success" or normalized is None:
+                context_by_tuple[tuple_key] = _phenotype_gene_context(
+                    gene=gene, hpo_id=hpo_id, hpo_label=hpo_label,
+                    status=(
+                        summary_status
+                        if summary_status != "success"
+                        else "invalid_response"
+                    ),
+                    retrieval_state=(
+                        "operational_failure"
+                        if summary_status != "success"
+                        else "invalid_response"
+                    ),
+                    triggered=True, reason_codes=reasons,
+                    primary_state=primary_state, missing=missing,
+                    attempts=used + summary_used, http_status=summary_http,
+                )
+                continue
+
+            accepted_records, diagnostics = normalized
+            context_by_tuple[tuple_key] = _phenotype_gene_context(
+                gene=gene, hpo_id=hpo_id, hpo_label=hpo_label,
+                status="success" if accepted_records else "no_match",
+                retrieval_state=(
+                    "accepted_records" if accepted_records
+                    else "no_verified_gene_association"
+                ),
+                triggered=True, reason_codes=reasons,
+                primary_state=primary_state, missing=missing,
+                attempts=used + summary_used, http_status=summary_http,
+                records=accepted_records,
+                candidate_diagnostics=diagnostics,
+            )
+    finally:
+        if owns_session:
+            client.close()
+
+    # -----------------------------------------------------------------------
+    # Fan immutable results back to input-ordered variants.
+    # Each variant gets a list of per-HPO context records.
+    # When a variant has multiple HPO tuples, all are attached.
+    # When a variant was skipped (no tuples), it keeps its single context in a list.
+    # -----------------------------------------------------------------------
+    enriched: list[dict[str, Any]] = []
+    for item, context, tuples in zip(items, contexts, variant_query_tuples):
+        if context is not None:
+            # Variant was resolved to a single non-null context (skipped case).
+            enriched.append({
+                **deepcopy(item),
+                "medgen_phenotype_gene_context": [deepcopy(context)],
+            })
+        else:
+            # Variant needs per-HPO-tuple contexts.
+            per_hpo_contexts = [
+                deepcopy(context_by_tuple[t]) for t in tuples
+            ]
+            enriched.append({
+                **deepcopy(item),
+                "medgen_phenotype_gene_context": per_hpo_contexts,
+            })
+
+    statuses = [
+        next(
+            (c["status"] for c in ctx if c.get("status") == "success"),
+            ctx[0]["status"] if ctx else "not_applicable",
+        )
+        for ctx in [
+            item["medgen_phenotype_gene_context"] for item in enriched
+        ]
+    ]
+    overall: MedGenStatus = "success" if "success" in statuses else (
+        "no_match"
+        if statuses and all(
+            s in {"no_match", "not_applicable"} for s in statuses
+        )
+        else "not_applicable"
+    )
+    return {
+        "variants": enriched,
+        "status": overall,
+        "message": (
+            f"MedGen phenotype-gene context queried for "
+            f"{len(queries)} unique (gene, HPO) tuples."
+        ),
+        "request_attempts": attempts,
+        "queried_tuple_count": len(queries),
+    }
+
+
+__all__ = [
+    "MEDGEN_CONTEXT_SCHEMA_VERSION",
+    "MEDGEN_PHENOTYPE_GENE_SCHEMA_VERSION",
+    "MEDGEN_PROVIDER",
+    "MedGenEnrichmentResult",
+    "MedGenError",
+    "MedGenPhenotypeGeneResult",
+    "enrich_with_medgen",
+    "enrich_with_medgen_phenotype_gene",
+]
