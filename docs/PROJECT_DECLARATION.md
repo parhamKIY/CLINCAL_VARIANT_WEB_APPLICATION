@@ -8,6 +8,18 @@
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
+> **Evidence-resilience closeout (2026-08-17):** Stages 1–10 are COMPLETE /
+> APPROVED and Stage 11 is COMPLETE / REVIEW PENDING. This workstream preserves the
+> existing product boundary: 1–10 already-selected variants, evidence aggregation
+> and normalization, one selected interpretation LLM, and mandatory human review;
+> it does not add raw-VCF filtering, prioritization/ranking/Top-N selection,
+> autonomous diagnosis/ACMG classification, treatment recommendations, or automatic
+> CSpec-rule execution. Current evidence contracts and validation are maintained in
+> `AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md`,
+> `EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md`,
+> `stage_6a_counterfactual_audit.md`, `stage_9_resilience_validation.md`, and
+> `stage_10_failure_driven_trace.md`.
+
 ## 1. Executive declaration
 
 This repository implements an evidence-centered clinical variant interpretation

@@ -80,8 +80,10 @@ def test_diagnostics_include_every_required_field_and_safe_telemetry() -> None:
 
     assert row == {
         "provider": "gnomAD",
+        "capability": "population_frequency",
         "variant_identity": "GRCh38 2:100001 C>T",
         "status": "success",
+        "retrieval_state": None,
         "attempt_count": 2,
         "latency_ms": 125.25,
         "fallback_used": False,
@@ -179,6 +181,93 @@ def test_missing_attempt_and_latency_telemetry_are_explicitly_empty() -> None:
     assert row["latency_ms"] is None
 
 
+def test_erepo_and_medgen_semantic_query_contexts_remain_in_technical_drawer() -> None:
+    result = _result(
+        [_source("ClinGen / GenCC", "gene_disease_validity", "unavailable")],
+        {
+            "pathogenicity": {
+                "expert_curated_variant_context": {
+                    "provider": "ClinGen ERepo",
+                    "status": "no_match",
+                    "retrieval_state": "no_match",
+                    "attempts": 1,
+                },
+                "medgen_gene_disease_context": {
+                    "provider": "NCBI MedGen",
+                    "status": "success",
+                    "retrieval_state": "accepted_records",
+                    "attempts": 2,
+                },
+            }
+        },
+    )
+
+    rows = build_provider_diagnostics(result)[0]
+    by_capability = {row["capability"]: row for row in rows}
+
+    assert by_capability["gene_disease_validity"]["status"] == "unavailable"
+    assert by_capability["gene_disease_validity"]["failure_category"] == "unavailable"
+    assert by_capability["expert_curated_variant_context"] == {
+        "provider": "ClinGen ERepo",
+        "capability": "expert_curated_variant_context",
+        "variant_identity": "GRCh38 2:100001 C>T",
+        "status": "no_match",
+        "retrieval_state": "no_match",
+        "attempt_count": 1,
+        "latency_ms": None,
+        "fallback_used": False,
+        "failure_category": "none",
+        "provider_note": "ClinGen ERepo returned a valid no-match result.",
+    }
+    assert by_capability["gene_disease_support"] == {
+        "provider": "NCBI MedGen",
+        "capability": "gene_disease_support",
+        "variant_identity": "GRCh38 2:100001 C>T",
+        "status": "success",
+        "retrieval_state": "accepted_records",
+        "attempt_count": 2,
+        "latency_ms": None,
+        "fallback_used": False,
+        "failure_category": "none",
+        "provider_note": "NCBI MedGen evidence was retained for this capability.",
+    }
+
+
+def test_medgen_unverified_candidates_are_a_query_result_not_provider_failure() -> None:
+    rows = build_provider_diagnostics(
+        _result(
+            [],
+            {
+                "pathogenicity": {
+                    "medgen_gene_disease_context": {
+                        "provider": "NCBI MedGen",
+                        "status": "no_match",
+                        "retrieval_state": "no_verified_gene_association",
+                    }
+                }
+            },
+        )
+    )[0]
+
+    assert rows == [
+        {
+            "provider": "NCBI MedGen",
+            "capability": "gene_disease_support",
+            "variant_identity": "GRCh38 2:100001 C>T",
+            "status": "no_verified_gene_association",
+            "retrieval_state": "no_verified_gene_association",
+            "attempt_count": None,
+            "latency_ms": None,
+            "fallback_used": False,
+            "failure_category": "none",
+            "provider_note": (
+                "MedGen query completed, but no candidate passed exact gene "
+                "association verification."
+            ),
+        }
+    ]
+
+
 def test_invalid_telemetry_is_not_displayed() -> None:
     row = build_provider_diagnostics(
         _result(
@@ -203,8 +292,10 @@ def test_drawer_is_collapsed_and_uses_all_required_columns(
     rows: list[ProviderDiagnostic] = [
         {
             "provider": "ClinVar",
+            "capability": "clinvar_evidence",
             "variant_identity": "GRCh38 2:100001 C>T",
             "status": "success",
+            "retrieval_state": None,
             "attempt_count": 1,
             "latency_ms": 10.0,
             "fallback_used": False,
@@ -234,8 +325,10 @@ def test_drawer_is_collapsed_and_uses_all_required_columns(
     assert rendered_rows == rows
     assert options["column_order"] == (
         "provider",
+        "capability",
         "variant_identity",
         "status",
+        "retrieval_state",
         "attempt_count",
         "latency_ms",
         "fallback_used",
@@ -254,8 +347,10 @@ def test_drawer_marks_unavailable_telemetry_as_not_recorded(
     rows: list[ProviderDiagnostic] = [
         {
             "provider": "ClinVar",
+            "capability": "clinvar_evidence",
             "variant_identity": "GRCh38 2:100001 C>T",
             "status": "no_match",
+            "retrieval_state": None,
             "attempt_count": None,
             "latency_ms": None,
             "fallback_used": False,

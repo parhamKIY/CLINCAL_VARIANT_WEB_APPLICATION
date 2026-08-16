@@ -24,6 +24,7 @@ from backend.evidence_rescue import (
     EvidenceRescueIdentifier,
     build_evidence_rescue_trace,
 )
+from backend.erepo import retrieve_expert_curated_context
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
     ProviderCircuitState,
@@ -42,6 +43,11 @@ from backend.retrieval_intelligence import (
     VariantIdentifierBundle,
     build_retrieval_assessment,
     build_variant_identifier_bundle,
+)
+from backend.variant_identity import (
+    format_genomic_hgvs as _shared_format_genomic_hgvs,
+    normalize_chromosome as _shared_normalize_chromosome,
+    normalize_variant_edit as _shared_normalize_variant_edit,
 )
 from backend.vcf_processing import VariantData
 from config import settings
@@ -206,6 +212,7 @@ ANNOTATION_SERVICE_LOG_NAMES = {
     "clinvar": "ncbi_clinvar",
     "clingen": "ucsc_gencc",
     "cspec": "clingen_cspec",
+    "erepo": "clingen_erepo",
 }
 ANNOTATION_SOURCE_LABELS = {
     "vep": "Ensembl VEP",
@@ -214,6 +221,7 @@ ANNOTATION_SOURCE_LABELS = {
     "clinvar": "NCBI ClinVar",
     "clingen": "ClinGen/GenCC",
     "cspec": "ClinGen CSpec Registry",
+    "erepo": "ClinGen ERepo",
 }
 _CLINVAR_RATE_LOCK = Lock()
 _LAST_CLINVAR_REQUEST_AT = 0.0
@@ -781,55 +789,15 @@ def _post_genebe_batch(
 # ---------------------------------------------------------------------------
 
 def _normalize_chromosome(chromosome: Any) -> str | None:
-    """Convert a VCF chromosome to a standard human chromosome name."""
-    normalized = str(chromosome).strip()
-    if normalized.lower().startswith("chr"):
-        normalized = normalized[3:]
-
-    normalized = normalized.upper()
-    if normalized == "M":
-        normalized = "MT"
-
-    if normalized in {"X", "Y", "MT"}:
-        return normalized
-
-    if normalized.isdigit() and 1 <= int(normalized) <= 22:
-        return str(int(normalized))
-
-    return None
+    """Compatibility wrapper for the shared deterministic normalizer."""
+    return _shared_normalize_chromosome(chromosome)
 
 
 def _normalize_variant_edit(
     variant: VariantData,
 ) -> tuple[str, int, str, str] | None:
-    """Remove shared VCF padding from one exact small-variant edit."""
-    chromosome = _normalize_chromosome(variant["chrom"])
-    reference = str(variant["ref"]).strip().upper()
-    alternate = str(variant["alt"]).strip().upper()
-
-    if (
-        chromosome is None
-        or not reference
-        or not alternate
-        or not set(reference).issubset({"A", "C", "G", "T"})
-        or not set(alternate).issubset({"A", "C", "G", "T"})
-        or reference == alternate
-    ):
-        return None
-
-    start = int(variant["pos"])
-
-    # Remove shared VCF padding so indels use HGVS coordinates and alleles.
-    while reference and alternate and reference[0] == alternate[0]:
-        reference = reference[1:]
-        alternate = alternate[1:]
-        start += 1
-
-    while reference and alternate and reference[-1] == alternate[-1]:
-        reference = reference[:-1]
-        alternate = alternate[:-1]
-
-    return chromosome, start, reference, alternate
+    """Compatibility wrapper for the shared deterministic normalizer."""
+    return _shared_normalize_variant_edit(variant)
 
 
 def _format_genomic_hgvs(
@@ -838,23 +806,8 @@ def _format_genomic_hgvs(
     reference: str,
     alternate: str,
 ) -> str:
-    """Format one normalized small-variant edit as genomic HGVS."""
-    prefix = f"{sequence}:g."
-
-    if not reference and alternate:
-        return f"{prefix}{start - 1}_{start}ins{alternate}"
-
-    if reference and not alternate:
-        end = start + len(reference) - 1
-        location = str(start) if start == end else f"{start}_{end}"
-        return f"{prefix}{location}del"
-
-    if len(reference) == 1 and len(alternate) == 1:
-        return f"{prefix}{start}{reference}>{alternate}"
-
-    end = start + len(reference) - 1
-    location = str(start) if start == end else f"{start}_{end}"
-    return f"{prefix}{location}delins{alternate}"
+    """Compatibility wrapper for shared deterministic HGVS formatting."""
+    return _shared_format_genomic_hgvs(sequence, start, reference, alternate)
 
 
 def _to_myvariant_hgvs(variant: VariantData) -> str | None:
@@ -2431,6 +2384,12 @@ def _base_annotation(
                 "context_type": "gene_disease_acmg_specification",
                 "classification_effect": "context_only",
                 "rule_logic_applied": False,
+            },
+            "erepo": {
+                "status": "pending",
+                "provider": "ClinGen ERepo",
+                "provider_id": "clingen_erepo",
+                "retrieved_at": None,
             },
         },
         "references": [
@@ -5416,6 +5375,9 @@ def _apply_vep_fallback(
             "provider_version": match["provider_version"],
             "retrieved_at": _retrieval_timestamp(),
             "validated_genomic_hgvs": match["genomic_hgvs"],
+            "validated_gene": match["gene"],
+            "validated_gene_id": match["gene_id"],
+            "validated_transcript": match["transcript"],
             "validated_transcript_hgvs": match["transcript_hgvs"],
             "validated_protein_hgvs": match["protein_hgvs"],
             "selected_record": match["selected_record"],
@@ -5738,7 +5700,9 @@ def _annotation_cache_put(
     """Cache only complete non-failure provider results in bounded memory."""
 
     if any(
-        source.get("status") not in {"success", "not_found"}
+        source.get("status") not in {
+            "success", "not_found", "not_applicable",
+        }
         for annotation in annotations
         for source in annotation.get("sources", {}).values()
         if isinstance(source, dict)
@@ -6098,8 +6062,6 @@ def annotate_variants(
             if _source_failed(annotation, "cspec"):
                 _apply_cspec_lkg_fallback(annotation)
         _refresh_identifier_bundles(annotations)
-        for annotation in annotations:
-            _record_retrieval_assessments(annotation)
         cspec_status, cspec_message = _source_progress_summary(
             annotations,
             "cspec",
@@ -6111,6 +6073,33 @@ def annotate_variants(
             cspec_status,
             cspec_message,
         )
+
+        _notify_annotation_progress(
+            progress_callback,
+            "erepo",
+            "running",
+            "Querying ClinGen ERepo exact variant context.",
+        )
+        erepo_circuit = ProviderCircuitState()
+        for annotation in annotations:
+            annotation["sources"]["erepo"] = retrieve_expert_curated_context(
+                annotation["identifier_bundle"],
+                session=active_session,
+                circuit_state=erepo_circuit,
+                enabled=settings.ENABLE_EREPO,
+            )
+        erepo_status, erepo_message = _source_progress_summary(
+            annotations,
+            "erepo",
+        )
+        _notify_annotation_progress(
+            progress_callback,
+            "erepo",
+            erepo_status,
+            erepo_message,
+        )
+        for annotation in annotations:
+            _record_retrieval_assessments(annotation)
     finally:
         if owns_session:
             active_session.close()

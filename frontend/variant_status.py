@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal, TypedDict
 
+from backend.final_disposition import (
+    FinalDisposition,
+    FinalDispositionError,
+    build_final_dispositions,
+)
 from frontend.warning_semantics import WarningNotice, build_warning_notices
 
 
@@ -37,6 +42,9 @@ class VariantStatusCard(TypedDict):
     phenotype: str
     interpretation: str
     notices: list[WarningNotice]
+    final_disposition: str | None
+    capability_summary: str | None
+    capability_notices: list[WarningNotice]
     technical_details: list[TechnicalProviderDetail]
 
 
@@ -130,6 +138,7 @@ def build_variant_status_card(
     *,
     variant_index: int,
     total: int,
+    final_disposition: FinalDisposition | None = None,
 ) -> VariantStatusCard:
     """Build one card without exposing internal exception names as its status."""
 
@@ -204,16 +213,35 @@ def build_variant_status_card(
         )
         for status in _source_statuses(sources, capability)
     )
-    if input_requires_attention:
+    disposition_state = (
+        final_disposition["state"] if final_disposition is not None else None
+    )
+    if input_requires_attention or disposition_state == "BLOCKED":
         status: VariantCardStatus = "Input requires attention"
     elif interpretation_failed:
         status = "Interpretation requires attention"
-    elif source_partial or any(
+    elif disposition_state == "READY_WITH_LIMITATIONS" or source_partial or any(
         (annotation_partial, population_partial, clinvar_partial, phenotype_partial)
     ):
         status = "Report ready with partial evidence"
     else:
         status = "Report ready"
+
+    capability_notices = (
+        [
+            {"severity": notice["severity"], "message": notice["message"]}
+            for notice in final_disposition["reviewer_notices"]
+        ]
+        if final_disposition is not None
+        else []
+    )
+    capability_summary = (
+        "Evidence capability: "
+        f"{final_disposition['state'].replace('_', ' ')} "
+        f"(coverage: {final_disposition['coverage_overall_state']})"
+        if final_disposition is not None
+        else None
+    )
 
     return {
         "variant_index": variant_index,
@@ -225,6 +253,9 @@ def build_variant_status_card(
         "phenotype": phenotype,
         "interpretation": interpretation,
         "notices": notices,
+        "final_disposition": disposition_state,
+        "capability_summary": capability_summary,
+        "capability_notices": capability_notices,
         "technical_details": _technical_details(sources),
     }
 
@@ -247,11 +278,27 @@ def build_variant_status_cards(result: Mapping[str, object]) -> list[VariantStat
         and declared_total > 0
         else max((int(index) for index in reports), default=-1) + 1
     )
+    dispositions: dict[int, FinalDisposition] = {}
+    evidence_objects = _sequence(result.get("evidence_objects"))
+    readiness_audits = _sequence(result.get("evidence_readiness"))
+    if len(evidence_objects) == len(readiness_audits) and evidence_objects:
+        try:
+            dispositions = {
+                item["variant_index"]: item
+                for item in build_final_dispositions(
+                    [item for item in evidence_objects if isinstance(item, Mapping)],
+                    [item for item in readiness_audits if isinstance(item, Mapping)],
+                )
+            }
+        except FinalDispositionError:
+            # Historical/partial runtime results retain the established card projection.
+            dispositions = {}
     return [
         build_variant_status_card(
             reports.get(index),
             variant_index=index,
             total=total,
+            final_disposition=dispositions.get(index),
         )
         for index in range(total)
     ]

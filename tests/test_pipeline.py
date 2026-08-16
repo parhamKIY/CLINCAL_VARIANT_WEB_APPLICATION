@@ -4549,6 +4549,8 @@ class TestAnnotation:
             ("clingen", "success"),
             ("cspec", "running"),
             ("cspec", "success"),
+            ("erepo", "running"),
+            ("erepo", "success"),
         ]
 
     def test_provider_specific_timeouts_are_applied(
@@ -7489,6 +7491,7 @@ class TestAnnotation:
             "clinvar": "success",
             "clingen": "success",
             "cspec": "not_found",
+            "erepo": "not_applicable",
         }
         assert annotation["gene"] == "GENE1"
         assert annotation["consequence"] == "missense_variant"

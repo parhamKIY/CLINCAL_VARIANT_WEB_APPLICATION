@@ -277,6 +277,16 @@ class Settings:
         "https://cspec.clinicalgenome.org/cspec",
     ).strip().rstrip("/")
 
+    EREPO_BASE_URL: str = os.getenv(
+        "EREPO_BASE_URL",
+        "https://erepo.genome.network",
+    ).strip().rstrip("/")
+
+    MEDGEN_BASE_URL: str = os.getenv(
+        "MEDGEN_BASE_URL",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+    ).strip().rstrip("/")
+
     PHEN2GENE_BASE_URL: str = os.getenv(
         "PHEN2GENE_BASE_URL",
         "https://phen2gene.wglab.org/api",
@@ -320,6 +330,26 @@ class Settings:
     CSPEC_TIMEOUT: int = _get_positive_int(
         "CSPEC_TIMEOUT",
         REQUEST_TIMEOUT,
+    )
+
+    EREPO_TIMEOUT: int = _get_positive_int(
+        "EREPO_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    EREPO_MAX_RETRIES: int = _get_non_negative_int(
+        "EREPO_MAX_RETRIES",
+        1,
+    )
+
+    MEDGEN_TIMEOUT: int = _get_positive_int(
+        "MEDGEN_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    MEDGEN_MAX_RETRIES: int = _get_non_negative_int(
+        "MEDGEN_MAX_RETRIES",
+        1,
     )
 
     PHEN2GENE_TIMEOUT: int = _get_positive_int(
@@ -449,6 +479,16 @@ class Settings:
 
     ENABLE_LITERATURE_ENRICHMENT: bool = _get_bool(
         "ENABLE_LITERATURE_ENRICHMENT",
+        True,
+    )
+
+    ENABLE_EREPO: bool = _get_bool(
+        "ENABLE_EREPO",
+        True,
+    )
+
+    ENABLE_MEDGEN: bool = _get_bool(
+        "ENABLE_MEDGEN",
         True,
     )
 
@@ -619,6 +659,8 @@ class Settings:
             "CLINGEN_BASE_URL": cls.CLINGEN_BASE_URL,
             "UCSC_GNOMAD_BASE_URL": cls.UCSC_GNOMAD_BASE_URL,
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
+            "EREPO_BASE_URL": cls.EREPO_BASE_URL,
+            "MEDGEN_BASE_URL": cls.MEDGEN_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "MONARCH_BASE_URL": cls.MONARCH_BASE_URL,
             "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
@@ -707,12 +749,17 @@ class Settings:
                 "VARIANT_INTERPRETATION_MAX_TOKENS cannot exceed 8000."
             )
 
-        if not isinstance(cls.ENABLE_GNOMAD_DEEP_LOOKUP, bool) or not isinstance(
-            cls.ENABLE_LITERATURE_ENRICHMENT,
-            bool,
+        if not all(
+            isinstance(value, bool)
+            for value in (
+                cls.ENABLE_GNOMAD_DEEP_LOOKUP,
+                cls.ENABLE_LITERATURE_ENRICHMENT,
+                cls.ENABLE_EREPO,
+                cls.ENABLE_MEDGEN,
+            )
         ):
             raise RuntimeError(
-                "Conditional-enrichment feature flags must be booleans."
+                "Provider feature flags must be booleans."
             )
 
         if cls.GENOME_ASSEMBLY not in {"GRCh37", "GRCh38"}:
@@ -744,6 +791,8 @@ class Settings:
             "CLINGEN_TIMEOUT": cls.CLINGEN_TIMEOUT,
             "UCSC_GNOMAD_TIMEOUT": cls.UCSC_GNOMAD_TIMEOUT,
             "CSPEC_TIMEOUT": cls.CSPEC_TIMEOUT,
+            "EREPO_TIMEOUT": cls.EREPO_TIMEOUT,
+            "MEDGEN_TIMEOUT": cls.MEDGEN_TIMEOUT,
             "PHEN2GENE_TIMEOUT": cls.PHEN2GENE_TIMEOUT,
             "GNOMAD_TIMEOUT": cls.GNOMAD_TIMEOUT,
             "ENSEMBL_VARIATION_TIMEOUT": cls.ENSEMBL_VARIATION_TIMEOUT,
@@ -781,6 +830,12 @@ class Settings:
             raise RuntimeError(
                 "MYDISEASE_MAX_RETRIES cannot exceed 1."
             )
+
+        if cls.EREPO_MAX_RETRIES > 2:
+            raise RuntimeError("EREPO_MAX_RETRIES cannot exceed 2.")
+
+        if cls.MEDGEN_MAX_RETRIES > 2:
+            raise RuntimeError("MEDGEN_MAX_RETRIES cannot exceed 2.")
 
         if cls.MYDISEASE_CACHE_SIZE > 1000:
             raise RuntimeError(

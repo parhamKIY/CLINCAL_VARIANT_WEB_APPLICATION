@@ -169,6 +169,35 @@ def _classification_records(
                 "review_status": _text(review_status),
             }
         )
+    erepo_context = _mapping(
+        pathogenicity.get("expert_curated_variant_context")
+    )
+    erepo_records = erepo_context.get("records")
+    if isinstance(erepo_records, list):
+        for index, record in enumerate(erepo_records):
+            if not isinstance(record, Mapping):
+                continue
+            original_label = _text(record.get("classification"))
+            normalized = normalize_classification_label(original_label)
+            if original_label is None or normalized is None:
+                continue
+            evidence_path = (
+                "pathogenicity.expert_curated_variant_context."
+                f"records[{index}].classification"
+            )
+            records.append(
+                {
+                    "evidence_path": evidence_path,
+                    "source": _source_name(
+                        evidence,
+                        evidence_path.rsplit(".classification", 1)[0],
+                        "ClinGen ERepo",
+                    ),
+                    "original_label": original_label,
+                    "normalized_label": normalized,
+                    "review_status": _text(record.get("assertion_method")),
+                }
+            )
     return records
 
 

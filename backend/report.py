@@ -11,12 +11,18 @@ from collections.abc import Iterable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, NotRequired, TypedDict, cast
 from urllib.parse import urlsplit
 
 from backend.conflict_auditor import (
     ConflictAuditResult,
     audit_evidence_conflicts,
+)
+from backend.active_annotation_promotion import (
+    ActiveAnnotationPromotionError,
+    controlled_active_annotation_candidate,
+    promote_active_annotation_fields,
+    validate_active_annotation_promotion,
 )
 from backend.evidence_rescue import (
     EvidenceRescueContractError,
@@ -43,6 +49,11 @@ from backend.retrieval_intelligence import (
     RetrievalIntelligenceError,
     build_retrieval_assessment,
     validate_retrieval_assessment,
+)
+from backend.shadow_composition import (
+    ShadowCompositionError,
+    build_shadow_composition,
+    validate_shadow_composition,
 )
 from config import (
     PRIVATE_DIRECTORY_MODE,
@@ -348,6 +359,8 @@ class EvidenceObject(TypedDict):
     conflict_audit: EvidenceConflictAudit
     conditional_enrichment: EvidenceConditionalEnrichment
     capability_results: dict[str, CapabilityResult]
+    shadow_composition: NotRequired[dict[str, Any]]
+    annotation_promotion: NotRequired[dict[str, Any]]
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -411,7 +424,11 @@ class ValidatedClinicalInterpretation(TypedDict):
     sections: ClinicalInterpretationSections
 
 
-EVIDENCE_OBJECT_FIELDS = frozenset(EvidenceObject.__required_keys__)
+EVIDENCE_OBJECT_FIELDS = frozenset(
+    field
+    for field in EvidenceObject.__required_keys__
+    if field not in {"shadow_composition", "annotation_promotion"}
+)
 EVIDENCE_VARIANT_FIELDS = frozenset(EvidenceVariant.__required_keys__)
 EVIDENCE_REFERENCE_FIELDS = frozenset(EvidenceReference.__required_keys__)
 EVIDENCE_CLINGEN_FIELDS = frozenset(
@@ -439,6 +456,12 @@ EVIDENCE_ANNOTATION_FIELDS = frozenset(
 )
 EVIDENCE_PATHOGENICITY_FIELDS = frozenset(
     EvidencePathogenicity.__required_keys__
+)
+EVIDENCE_OPTIONAL_PATHOGENICITY_FIELDS = frozenset(
+    {"expert_curated_variant_context", "medgen_gene_disease_context"}
+)
+EVIDENCE_OPTIONAL_PHENOTYPE_RELATIONSHIP_FIELDS = frozenset(
+    {"medgen_disease_hpo_context", "medgen_phenotype_gene_context"}
 )
 EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS = frozenset(
     EvidencePhenotypeRelationship.__required_keys__
@@ -962,6 +985,553 @@ def _validate_evidence_lineage(provenance: dict[str, Any]) -> None:
         )
 
 
+def _validate_erepo_context(value: object) -> None:
+    """Validate the optional, versioned ERepo context without raw payloads."""
+
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity.expert_curated_variant_context must be a dictionary."
+        )
+    expected = {
+        "schema_version",
+        "provider",
+        "status",
+        "retrieval_state",
+        "context_available",
+        "records",
+        "strategy_results",
+        "capability_result",
+    }
+    if set(value) != expected:
+        raise EvidenceObjectError(
+            "evidence.pathogenicity.expert_curated_variant_context fields are invalid."
+        )
+    if value["schema_version"] != "1.0" or value["provider"] != "clingen_erepo":
+        raise EvidenceObjectError("ERepo context schema or provider is invalid.")
+    if not isinstance(value["status"], str) or not isinstance(
+        value["retrieval_state"], str
+    ) or not isinstance(value["context_available"], bool):
+        raise EvidenceObjectError("ERepo context state is invalid.")
+    records = value["records"]
+    strategies = value["strategy_results"]
+    if not isinstance(records, list) or len(records) > 10:
+        raise EvidenceObjectError("ERepo records must be a bounded list.")
+    if not isinstance(strategies, list) or len(strategies) > 7:
+        raise EvidenceObjectError("ERepo strategies must be a bounded list.")
+    if value["context_available"] != bool(records):
+        raise EvidenceObjectError("ERepo context availability is inconsistent.")
+    try:
+        capability = validate_capability_result(value["capability_result"])
+    except ProviderContractError as exc:
+        raise EvidenceObjectError("ERepo capability result is invalid.") from exc
+    if (
+        capability["capability"] != "expert_curated_variant_context"
+        or capability["provider"] != "clingen_erepo"
+    ):
+        raise EvidenceObjectError("ERepo capability attribution is invalid.")
+    for index, record in enumerate(records):
+        path = f"evidence.pathogenicity.expert_curated_variant_context.records[{index}]"
+        if not isinstance(record, dict):
+            raise EvidenceObjectError(f"{path} must be a dictionary.")
+        required = {"uuid", "ca_id", "doc_version", "acceptance_state", "query_strategy", "query_identifier"}
+        if not required <= set(record) or set(record) - {
+            *required,
+            "classification", "condition", "mondo_id", "mode_of_inheritance",
+            "expert_panel", "approved_date", "published_date", "met_codes",
+            "unmet_codes", "clinvar_variation_id", "preferred_variant_title",
+            "summary_description", "statement_outcome", "assertion_method",
+            "detail_attempts", "detail_http_status", "normalized_identity",
+        }:
+            raise EvidenceObjectError(f"{path} contains unsupported fields.")
+        for field in required:
+            _validate_required_string(record[field], f"{path}.{field}")
+        if record["acceptance_state"] not in {
+            "EXACT_MATCH", "EXACT_MATCH_EQUIVALENT_REPRESENTATION",
+        }:
+            raise EvidenceObjectError(f"{path}.acceptance_state is invalid.")
+        normalized_identity = record.get("normalized_identity")
+        if record["acceptance_state"] == "EXACT_MATCH_EQUIVALENT_REPRESENTATION":
+            if not isinstance(normalized_identity, dict) or set(normalized_identity) != {
+                "schema_version", "assembly", "chromosome", "position", "reference",
+                "alternate", "normalizer", "normalization_provenance",
+                "representation_basis",
+            }:
+                raise EvidenceObjectError(f"{path}.normalized_identity is invalid.")
+            if normalized_identity["schema_version"] != "1.0":
+                raise EvidenceObjectError(f"{path}.normalized_identity schema is invalid.")
+            for field in (
+                "assembly", "chromosome", "normalizer",
+                "normalization_provenance", "representation_basis",
+            ):
+                _validate_required_string(normalized_identity[field], f"{path}.normalized_identity.{field}")
+            if (not isinstance(normalized_identity["reference"], str)
+                    or not isinstance(normalized_identity["alternate"], str)
+                    or not normalized_identity["reference"] and not normalized_identity["alternate"]):
+                raise EvidenceObjectError(f"{path}.normalized_identity alleles are invalid.")
+            if (not isinstance(normalized_identity["position"], int)
+                    or isinstance(normalized_identity["position"], bool)
+                    or normalized_identity["position"] < 1):
+                raise EvidenceObjectError(f"{path}.normalized_identity.position is invalid.")
+        elif normalized_identity is not None:
+            raise EvidenceObjectError(f"{path}.normalized_identity requires equivalent acceptance.")
+        for field in (
+            "classification", "condition", "mondo_id", "mode_of_inheritance",
+            "expert_panel", "approved_date", "published_date",
+            "clinvar_variation_id", "preferred_variant_title",
+            "summary_description", "statement_outcome", "assertion_method",
+        ):
+            if field in record:
+                _validate_optional_string(record[field], f"{path}.{field}")
+        for field in ("met_codes", "unmet_codes"):
+            if field in record:
+                _validate_unique_strings(record[field], f"{path}.{field}")
+        for field in ("detail_attempts", "detail_http_status"):
+            if field in record and (
+                not isinstance(record[field], int)
+                or isinstance(record[field], bool)
+                or record[field] < 0
+            ):
+                raise EvidenceObjectError(f"{path}.{field} is invalid.")
+    for index, strategy in enumerate(strategies):
+        path = f"evidence.pathogenicity.expert_curated_variant_context.strategy_results[{index}]"
+        if not isinstance(strategy, dict):
+            raise EvidenceObjectError(f"{path} must be a dictionary.")
+        required = {
+            "strategy_id", "query_column", "query_identifier", "identifier_provenance",
+            "endpoint", "retrieved_at", "candidate_count", "candidate_rejections",
+            "accepted_uuids", "status", "attempts", "http_status",
+        }
+        if set(strategy) != required:
+            raise EvidenceObjectError(f"{path} fields are invalid.")
+        for field in ("strategy_id", "query_column", "query_identifier", "endpoint", "retrieved_at", "status"):
+            _validate_required_string(strategy[field], f"{path}.{field}")
+        if not isinstance(strategy["identifier_provenance"], list) or not isinstance(
+            strategy["candidate_rejections"], list
+        ) or not isinstance(strategy["accepted_uuids"], list):
+            raise EvidenceObjectError(f"{path} lists are invalid.")
+        if not isinstance(strategy["candidate_count"], int) or isinstance(strategy["candidate_count"], bool) or strategy["candidate_count"] < 0:
+            raise EvidenceObjectError(f"{path}.candidate_count is invalid.")
+        for field in ("candidate_rejections", "accepted_uuids"):
+            _validate_unique_strings(strategy[field], f"{path}.{field}")
+        for provenance_index, provenance in enumerate(
+            strategy["identifier_provenance"]
+        ):
+            provenance_path = f"{path}.identifier_provenance[{provenance_index}]"
+            if not isinstance(provenance, dict) or set(provenance) != {
+                "source", "scope", "validation"
+            }:
+                raise EvidenceObjectError(f"{provenance_path} is invalid.")
+            for field in ("source", "scope", "validation"):
+                _validate_required_string(
+                    provenance[field], f"{provenance_path}.{field}"
+                )
+        for field in ("attempts",):
+            if not isinstance(strategy[field], int) or isinstance(strategy[field], bool) or strategy[field] < 0:
+                raise EvidenceObjectError(f"{path}.{field} is invalid.")
+        if strategy["http_status"] is not None and (
+            not isinstance(strategy["http_status"], int)
+            or isinstance(strategy["http_status"], bool)
+            or strategy["http_status"] < 100
+            or strategy["http_status"] > 599
+        ):
+            raise EvidenceObjectError(f"{path}.http_status is invalid.")
+
+
+def _validate_medgen_hpo_terms(value: object, path: str) -> None:
+    """Validate bounded canonical HPO terms retained by MedGen provenance."""
+    if not isinstance(value, list) or len(value) > 10:
+        raise EvidenceObjectError(f"{path} must be a bounded list.")
+    seen: set[str] = set()
+    for index, term in enumerate(value):
+        term_path = f"{path}[{index}]"
+        if not isinstance(term, dict) or set(term) != {"hpo_id", "label"}:
+            raise EvidenceObjectError(f"{term_path} fields are invalid.")
+        _validate_required_string(term["hpo_id"], f"{term_path}.hpo_id")
+        if HPO_ID_PATTERN.fullmatch(term["hpo_id"]) is None or term["hpo_id"] in seen:
+            raise EvidenceObjectError(f"{term_path}.hpo_id is invalid.")
+        _validate_optional_string(term["label"], f"{term_path}.label")
+        seen.add(term["hpo_id"])
+
+
+def _validate_medgen_disease_hpo_context(value: object) -> None:
+    """Validate compact, source-separated MedGen context without raw payloads."""
+    if not isinstance(value, dict):
+        raise EvidenceObjectError("MedGen disease/HPO context must be a dictionary.")
+    legacy_expected = {
+        "schema_version", "provider", "provider_id", "provider_role", "fallback_used",
+        "primary_provider", "primary_retrieval_state", "status", "retrieval_state",
+        "retrieved_at", "query_gene", "query_key", "attempts", "http_status", "records",
+        "upstream_sources", "enrichment_decision",
+    }
+    current_expected = legacy_expected | {"candidate_diagnostics", "queried_hpo_terms"}
+    schema_version = value.get("schema_version")
+    if (
+        (schema_version == "1.0" and set(value) != legacy_expected)
+        or (schema_version == "1.1" and set(value) != current_expected)
+        or schema_version not in {"1.0", "1.1"}
+        or value.get("provider_id") != "ncbi_medgen"
+    ):
+        raise EvidenceObjectError("MedGen disease/HPO context fields are invalid.")
+    for field in ("provider", "provider_role", "primary_provider", "primary_retrieval_state", "status", "retrieval_state", "retrieved_at"):
+        _validate_required_string(value[field], f"medgen.{field}")
+    for field in ("query_gene", "query_key"):
+        _validate_optional_string(value[field], f"medgen.{field}")
+    if not isinstance(value["fallback_used"], bool) or not isinstance(value["attempts"], int) or isinstance(value["attempts"], bool) or value["attempts"] < 0:
+        raise EvidenceObjectError("MedGen disease/HPO state is invalid.")
+    if value["http_status"] is not None and (not isinstance(value["http_status"], int) or isinstance(value["http_status"], bool) or not 100 <= value["http_status"] <= 599):
+        raise EvidenceObjectError("MedGen disease/HPO HTTP status is invalid.")
+    _validate_unique_strings(value["upstream_sources"], "medgen.upstream_sources")
+    if not isinstance(value["records"], list) or len(value["records"]) > 10:
+        raise EvidenceObjectError("MedGen disease/HPO records are invalid.")
+    for index, record in enumerate(value["records"]):
+        legacy_record_fields = {"medgen_uid", "concept_id", "title", "semantic_type", "definition", "source_metadata", "upstream_sources"}
+        current_record_fields = legacy_record_fields | {
+            "gene_association_match_state", "gene_association_basis",
+            "matched_hpo_terms", "hpo_match_method",
+        }
+        if (
+            not isinstance(record, dict)
+            or (schema_version == "1.0" and set(record) != legacy_record_fields)
+            or (schema_version == "1.1" and set(record) != current_record_fields)
+        ):
+            raise EvidenceObjectError(f"medgen.records[{index}] fields are invalid.")
+        _validate_required_string(record["medgen_uid"], f"medgen.records[{index}].medgen_uid")
+        for field in ("concept_id", "semantic_type", "definition"):
+            _validate_optional_string(record[field], f"medgen.records[{index}].{field}")
+        _validate_required_string(record["title"], f"medgen.records[{index}].title")
+        _validate_unique_strings(record["upstream_sources"], f"medgen.records[{index}].upstream_sources")
+        if schema_version == "1.0":
+            _validate_unique_strings(record["source_metadata"], f"medgen.records[{index}].source_metadata")
+            continue
+        if record["gene_association_match_state"] != "exact_gene_association":
+            raise EvidenceObjectError("Accepted MedGen records require exact gene association.")
+        _validate_required_string(record["gene_association_basis"], f"medgen.records[{index}].gene_association_basis")
+        if record["hpo_match_method"] not in {"exact_hpo_id_conceptmeta", "not_available"}:
+            raise EvidenceObjectError("MedGen HPO match method is invalid.")
+        if not isinstance(record["source_metadata"], list) or len(record["source_metadata"]) > 10:
+            raise EvidenceObjectError("MedGen structured source metadata is invalid.")
+        for metadata_index, metadata in enumerate(record["source_metadata"]):
+            metadata_path = f"medgen.records[{index}].source_metadata[{metadata_index}]"
+            if not isinstance(metadata, dict) or set(metadata) != {"database", "code", "scui", "term_type"}:
+                raise EvidenceObjectError(f"{metadata_path} fields are invalid.")
+            _validate_required_string(metadata["database"], f"{metadata_path}.database")
+            for field in ("code", "scui", "term_type"):
+                _validate_optional_string(metadata[field], f"{metadata_path}.{field}")
+        _validate_medgen_hpo_terms(record["matched_hpo_terms"], f"medgen.records[{index}].matched_hpo_terms")
+        if record["hpo_match_method"] == "exact_hpo_id_conceptmeta" and not record["matched_hpo_terms"]:
+            raise EvidenceObjectError("MedGen exact HPO matching requires matched terms.")
+    if schema_version == "1.1":
+        _validate_medgen_hpo_terms(value["queried_hpo_terms"], "medgen.queried_hpo_terms")
+        diagnostics = value["candidate_diagnostics"]
+        if not isinstance(diagnostics, list) or len(diagnostics) > 10:
+            raise EvidenceObjectError("MedGen candidate diagnostics are invalid.")
+        for index, diagnostic in enumerate(diagnostics):
+            path = f"medgen.candidate_diagnostics[{index}]"
+            if not isinstance(diagnostic, dict) or set(diagnostic) != {
+                "medgen_uid", "concept_id", "title", "gene_association_match_state", "rejection_reason",
+            }:
+                raise EvidenceObjectError(f"{path} fields are invalid.")
+            _validate_required_string(diagnostic["medgen_uid"], f"{path}.medgen_uid")
+            _validate_required_string(diagnostic["title"], f"{path}.title")
+            _validate_optional_string(diagnostic["concept_id"], f"{path}.concept_id")
+            if diagnostic["gene_association_match_state"] not in {"gene_association_unverified", "gene_mismatch"}:
+                raise EvidenceObjectError(f"{path}.gene_association_match_state is invalid.")
+            _validate_required_string(diagnostic["rejection_reason"], f"{path}.rejection_reason")
+    decision = value["enrichment_decision"]
+    if not isinstance(decision, dict) or set(decision) != {"triggered", "reason_codes", "target_semantic_node", "primary_retrieval_state", "required_fields_missing", "query_key"}:
+        raise EvidenceObjectError("MedGen enrichment decision is invalid.")
+    if not isinstance(decision["triggered"], bool) or decision["target_semantic_node"] != "disease_hpo_context":
+        raise EvidenceObjectError("MedGen enrichment decision state is invalid.")
+    for field in ("reason_codes", "required_fields_missing"):
+        _validate_unique_strings(decision[field], f"medgen.enrichment_decision.{field}")
+    _validate_required_string(decision["primary_retrieval_state"], "medgen.enrichment_decision.primary_retrieval_state")
+    _validate_optional_string(decision["query_key"], "medgen.enrichment_decision.query_key")
+
+
+def _validate_medgen_phenotype_gene_context(value: object) -> None:
+    """Validate Stage 4 MedGen phenotype-gene context (list of per-HPO-tuple dicts)."""
+    if not isinstance(value, list):
+        raise EvidenceObjectError(
+            "MedGen phenotype-gene context must be a list of per-HPO-tuple dicts."
+        )
+    if len(value) > 50:
+        raise EvidenceObjectError(
+            "MedGen phenotype-gene context list is too large."
+        )
+    _pg_expected = {
+        "schema_version", "provider", "provider_id", "provider_role",
+        "primary_provider", "primary_retrieval_state", "status",
+        "retrieval_state", "retrieved_at", "query_gene", "query_hpo_id",
+        "query_hpo_label", "query_key", "attempts", "http_status",
+        "records", "candidate_diagnostics", "queried_hpo_terms",
+        "upstream_sources", "enrichment_decision",
+    }
+    for index, ctx in enumerate(value):
+        path = f"medgen_phenotype_gene_context[{index}]"
+        if not isinstance(ctx, dict) or set(ctx) != _pg_expected:
+            raise EvidenceObjectError(f"{path} fields are invalid.")
+        if (
+            ctx.get("schema_version") != "1.0"
+            or ctx.get("provider_id") != "ncbi_medgen"
+            or ctx.get("primary_provider") != "phen2gene"
+        ):
+            raise EvidenceObjectError(f"{path} identity fields are invalid.")
+        for field in (
+            "provider", "provider_role", "primary_provider",
+            "primary_retrieval_state", "status", "retrieval_state", "retrieved_at",
+        ):
+            _validate_required_string(ctx[field], f"{path}.{field}")
+        for field in ("query_gene", "query_hpo_id", "query_hpo_label", "query_key"):
+            _validate_optional_string(ctx[field], f"{path}.{field}")
+        if (
+            not isinstance(ctx["attempts"], int)
+            or isinstance(ctx["attempts"], bool)
+            or ctx["attempts"] < 0
+        ):
+            raise EvidenceObjectError(f"{path}.attempts is invalid.")
+        if ctx["http_status"] is not None and (
+            not isinstance(ctx["http_status"], int)
+            or isinstance(ctx["http_status"], bool)
+            or not 100 <= ctx["http_status"] <= 599
+        ):
+            raise EvidenceObjectError(f"{path}.http_status is invalid.")
+        _validate_unique_strings(ctx["upstream_sources"], f"{path}.upstream_sources")
+        if not isinstance(ctx["records"], list) or len(ctx["records"]) > 10:
+            raise EvidenceObjectError(f"{path}.records is invalid.")
+        for rec_index, record in enumerate(ctx["records"]):
+            rec_path = f"{path}.records[{rec_index}]"
+            expected_record = {
+                "medgen_uid", "concept_id", "title", "semantic_type",
+                "definition", "gene_association_match_state",
+                "gene_association_basis", "matched_hpo_terms",
+                "hpo_match_method", "source_metadata", "upstream_sources",
+            }
+            if not isinstance(record, dict) or set(record) != expected_record:
+                raise EvidenceObjectError(f"{rec_path} fields are invalid.")
+            _validate_required_string(record["medgen_uid"], f"{rec_path}.medgen_uid")
+            for field in ("concept_id", "semantic_type", "definition"):
+                _validate_optional_string(record[field], f"{rec_path}.{field}")
+            _validate_required_string(record["title"], f"{rec_path}.title")
+            _validate_unique_strings(
+                record["upstream_sources"], f"{rec_path}.upstream_sources"
+            )
+            if record["gene_association_match_state"] != "exact_gene_association":
+                raise EvidenceObjectError(
+                    "Accepted phenotype-gene MedGen records require exact gene association."
+                )
+            _validate_required_string(
+                record["gene_association_basis"], f"{rec_path}.gene_association_basis"
+            )
+            if record["hpo_match_method"] not in {
+                "exact_hpo_id_conceptmeta", "not_available"
+            }:
+                raise EvidenceObjectError(f"{rec_path}.hpo_match_method is invalid.")
+            if not isinstance(record["source_metadata"], list) or len(
+                record["source_metadata"]
+            ) > 10:
+                raise EvidenceObjectError(f"{rec_path}.source_metadata is invalid.")
+            for meta_index, metadata in enumerate(record["source_metadata"]):
+                meta_path = f"{rec_path}.source_metadata[{meta_index}]"
+                if not isinstance(metadata, dict) or set(metadata) != {
+                    "database", "code", "scui", "term_type"
+                }:
+                    raise EvidenceObjectError(f"{meta_path} fields are invalid.")
+                _validate_required_string(metadata["database"], f"{meta_path}.database")
+                for field in ("code", "scui", "term_type"):
+                    _validate_optional_string(metadata[field], f"{meta_path}.{field}")
+            _validate_medgen_hpo_terms(
+                record["matched_hpo_terms"], f"{rec_path}.matched_hpo_terms"
+            )
+        _validate_medgen_hpo_terms(ctx["queried_hpo_terms"], f"{path}.queried_hpo_terms")
+        if not isinstance(ctx["candidate_diagnostics"], list) or len(
+            ctx["candidate_diagnostics"]
+        ) > 10:
+            raise EvidenceObjectError(f"{path}.candidate_diagnostics is invalid.")
+        for diag_index, diagnostic in enumerate(ctx["candidate_diagnostics"]):
+            diag_path = f"{path}.candidate_diagnostics[{diag_index}]"
+            if not isinstance(diagnostic, dict) or set(diagnostic) != {
+                "medgen_uid", "concept_id", "title",
+                "gene_association_match_state", "rejection_reason",
+            }:
+                raise EvidenceObjectError(f"{diag_path} fields are invalid.")
+            _validate_required_string(diagnostic["medgen_uid"], f"{diag_path}.medgen_uid")
+            _validate_required_string(diagnostic["title"], f"{diag_path}.title")
+            _validate_optional_string(diagnostic["concept_id"], f"{diag_path}.concept_id")
+            if diagnostic["gene_association_match_state"] not in {
+                "gene_association_unverified", "gene_mismatch"
+            }:
+                raise EvidenceObjectError(
+                    f"{diag_path}.gene_association_match_state is invalid."
+                )
+            _validate_required_string(
+                diagnostic["rejection_reason"], f"{diag_path}.rejection_reason"
+            )
+        decision = ctx["enrichment_decision"]
+        if not isinstance(decision, dict) or set(decision) != {
+            "triggered", "reason_codes", "target_semantic_node",
+            "primary_retrieval_state", "required_fields_missing", "query_key",
+        }:
+            raise EvidenceObjectError(f"{path}.enrichment_decision fields are invalid.")
+        if (
+            not isinstance(decision["triggered"], bool)
+            or decision["target_semantic_node"] != "phenotype_gene_context"
+        ):
+            raise EvidenceObjectError(f"{path}.enrichment_decision state is invalid.")
+        for field in ("reason_codes", "required_fields_missing"):
+            _validate_unique_strings(
+                decision[field], f"{path}.enrichment_decision.{field}"
+            )
+        _validate_required_string(
+            decision["primary_retrieval_state"],
+            f"{path}.enrichment_decision.primary_retrieval_state",
+        )
+        _validate_optional_string(
+            decision["query_key"], f"{path}.enrichment_decision.query_key"
+        )
+
+
+def _validate_medgen_gene_disease_context(value: object) -> None:
+    """Validate Stage 5 MedGen gene-disease supporting context."""
+    if not isinstance(value, dict):
+        raise EvidenceObjectError(
+            "MedGen gene-disease context must be a dictionary."
+        )
+    _gd_expected = {
+        "schema_version", "provider", "provider_id", "provider_role",
+        "primary_provider", "primary_retrieval_state", "status",
+        "retrieval_state", "retrieved_at", "query_gene", "query_key",
+        "attempts", "http_status", "records", "candidate_diagnostics",
+        "upstream_sources", "enrichment_decision",
+    }
+    if set(value) != _gd_expected:
+        raise EvidenceObjectError("medgen_gene_disease_context fields are invalid.")
+    if (
+        value.get("schema_version") != "1.0"
+        or value.get("provider_id") != "ncbi_medgen"
+        or value.get("primary_provider") != "clingen"
+    ):
+        raise EvidenceObjectError(
+            "medgen_gene_disease_context identity fields are invalid."
+        )
+    for field in (
+        "provider", "provider_role", "primary_provider",
+        "primary_retrieval_state", "status", "retrieval_state", "retrieved_at",
+    ):
+        _validate_required_string(value[field], f"medgen_gene_disease_context.{field}")
+    for field in ("query_gene", "query_key"):
+        _validate_optional_string(value[field], f"medgen_gene_disease_context.{field}")
+    if (
+        not isinstance(value["attempts"], int)
+        or isinstance(value["attempts"], bool)
+        or value["attempts"] < 0
+    ):
+        raise EvidenceObjectError("medgen_gene_disease_context.attempts is invalid.")
+    if value["http_status"] is not None and (
+        not isinstance(value["http_status"], int)
+        or isinstance(value["http_status"], bool)
+        or not 100 <= value["http_status"] <= 599
+    ):
+        raise EvidenceObjectError("medgen_gene_disease_context.http_status is invalid.")
+    _validate_unique_strings(
+        value["upstream_sources"], "medgen_gene_disease_context.upstream_sources"
+    )
+    if not isinstance(value["records"], list) or len(value["records"]) > 10:
+        raise EvidenceObjectError("medgen_gene_disease_context.records is invalid.")
+    for rec_index, record in enumerate(value["records"]):
+        rec_path = f"medgen_gene_disease_context.records[{rec_index}]"
+        expected_record = {
+            "medgen_uid", "concept_id", "title", "semantic_type",
+            "definition", "gene_association_match_state",
+            "gene_association_basis", "hpo_terms", "source_metadata",
+            "upstream_sources",
+        }
+        if not isinstance(record, dict) or set(record) != expected_record:
+            raise EvidenceObjectError(f"{rec_path} fields are invalid.")
+        _validate_required_string(record["medgen_uid"], f"{rec_path}.medgen_uid")
+        for field in ("concept_id", "semantic_type", "definition"):
+            _validate_optional_string(record[field], f"{rec_path}.{field}")
+        _validate_required_string(record["title"], f"{rec_path}.title")
+        _validate_unique_strings(
+            record["upstream_sources"], f"{rec_path}.upstream_sources"
+        )
+        if record["gene_association_match_state"] != "exact_gene_association":
+            raise EvidenceObjectError(
+                "Accepted gene-disease MedGen records require exact gene association."
+            )
+        _validate_required_string(
+            record["gene_association_basis"], f"{rec_path}.gene_association_basis"
+        )
+        if not isinstance(record["source_metadata"], list) or len(
+            record["source_metadata"]
+        ) > 10:
+            raise EvidenceObjectError(f"{rec_path}.source_metadata is invalid.")
+        for meta_index, metadata in enumerate(record["source_metadata"]):
+            meta_path = f"{rec_path}.source_metadata[{meta_index}]"
+            if not isinstance(metadata, dict) or set(metadata) != {
+                "database", "code", "scui", "term_type"
+            }:
+                raise EvidenceObjectError(f"{meta_path} fields are invalid.")
+            _validate_required_string(metadata["database"], f"{meta_path}.database")
+            for field in ("code", "scui", "term_type"):
+                _validate_optional_string(metadata[field], f"{meta_path}.{field}")
+        _validate_medgen_hpo_terms(
+            record["hpo_terms"], f"{rec_path}.hpo_terms"
+        )
+    if not isinstance(value["candidate_diagnostics"], list) or len(
+        value["candidate_diagnostics"]
+    ) > 10:
+        raise EvidenceObjectError(
+            "medgen_gene_disease_context.candidate_diagnostics is invalid."
+        )
+    for diag_index, diagnostic in enumerate(value["candidate_diagnostics"]):
+        diag_path = f"medgen_gene_disease_context.candidate_diagnostics[{diag_index}]"
+        if not isinstance(diagnostic, dict) or set(diagnostic) != {
+            "medgen_uid", "concept_id", "title",
+            "gene_association_match_state", "rejection_reason",
+        }:
+            raise EvidenceObjectError(f"{diag_path} fields are invalid.")
+        _validate_required_string(diagnostic["medgen_uid"], f"{diag_path}.medgen_uid")
+        _validate_required_string(diagnostic["title"], f"{diag_path}.title")
+        _validate_optional_string(diagnostic["concept_id"], f"{diag_path}.concept_id")
+        if diagnostic["gene_association_match_state"] not in {
+            "gene_association_unverified", "gene_mismatch"
+        }:
+            raise EvidenceObjectError(
+                f"{diag_path}.gene_association_match_state is invalid."
+            )
+        _validate_required_string(
+            diagnostic["rejection_reason"], f"{diag_path}.rejection_reason"
+        )
+    decision = value["enrichment_decision"]
+    if not isinstance(decision, dict) or set(decision) != {
+        "triggered", "reason_codes", "target_semantic_node",
+        "primary_retrieval_state", "required_fields_missing", "query_key",
+    }:
+        raise EvidenceObjectError(
+            "medgen_gene_disease_context.enrichment_decision fields are invalid."
+        )
+    if (
+        not isinstance(decision["triggered"], bool)
+        or decision["target_semantic_node"] != "gene_disease_context"
+    ):
+        raise EvidenceObjectError(
+            "medgen_gene_disease_context.enrichment_decision state is invalid."
+        )
+    for field in ("reason_codes", "required_fields_missing"):
+        _validate_unique_strings(
+            decision[field], f"medgen_gene_disease_context.enrichment_decision.{field}"
+        )
+    _validate_required_string(
+        decision["primary_retrieval_state"],
+        "medgen_gene_disease_context.enrichment_decision.primary_retrieval_state",
+    )
+    _validate_optional_string(
+        decision["query_key"], "medgen_gene_disease_context.enrichment_decision.query_key"
+    )
+
+
 def _validate_v2_sections(value: dict[str, Any]) -> None:
     """Validate the additive Evidence Object V2 sections."""
 
@@ -1038,11 +1608,16 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         raise EvidenceObjectError(
             "evidence.pathogenicity must be a dictionary."
         )
-    _validate_exact_fields(
-        pathogenicity,
-        EVIDENCE_PATHOGENICITY_FIELDS,
-        "evidence.pathogenicity",
-    )
+    pathogenicity_fields = set(pathogenicity)
+    if not (
+        EVIDENCE_PATHOGENICITY_FIELDS <= pathogenicity_fields
+        and pathogenicity_fields
+        <= EVIDENCE_PATHOGENICITY_FIELDS
+        | EVIDENCE_OPTIONAL_PATHOGENICITY_FIELDS
+    ):
+        raise EvidenceObjectError(
+            "evidence.pathogenicity fields do not match the contract."
+        )
     _validate_optional_string(
         pathogenicity["automated_acmg_classification"],
         "evidence.pathogenicity.automated_acmg_classification",
@@ -1076,6 +1651,13 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         raise EvidenceObjectError(
             "evidence.pathogenicity.cspec_context must be a list."
         )
+    _validate_erepo_context(
+        pathogenicity.get("expert_curated_variant_context")
+    )
+    if "medgen_gene_disease_context" in pathogenicity:
+        _validate_medgen_gene_disease_context(
+            pathogenicity["medgen_gene_disease_context"]
+        )
     _validate_unique_strings(
         pathogenicity["warnings"],
         "evidence.pathogenicity.warnings",
@@ -1086,11 +1668,17 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         raise EvidenceObjectError(
             "evidence.phenotype_relationship must be a dictionary."
         )
-    _validate_exact_fields(
-        phenotype,
-        EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS,
-        "evidence.phenotype_relationship",
-    )
+    phenotype_fields = set(phenotype)
+    if not (
+        EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS <= phenotype_fields
+        and phenotype_fields <= (
+            EVIDENCE_PHENOTYPE_RELATIONSHIP_FIELDS
+            | EVIDENCE_OPTIONAL_PHENOTYPE_RELATIONSHIP_FIELDS
+        )
+    ):
+        raise EvidenceObjectError(
+            "evidence.phenotype_relationship fields do not match the contract."
+        )
     patient_hpo = _validate_unique_strings(
         phenotype["patient_hpo_terms"],
         "evidence.phenotype_relationship.patient_hpo_terms",
@@ -1125,6 +1713,14 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
                 "evidence.phenotype_relationship."
                 f"{field} must be a dictionary."
             )
+    if "medgen_disease_hpo_context" in phenotype:
+        _validate_medgen_disease_hpo_context(
+            phenotype["medgen_disease_hpo_context"]
+        )
+    if "medgen_phenotype_gene_context" in phenotype:
+        _validate_medgen_phenotype_gene_context(
+            phenotype["medgen_phenotype_gene_context"]
+        )
 
     provenance = value["provenance"]
     if not isinstance(provenance, dict):
@@ -1274,6 +1870,20 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
         "conditional_enrichment",
     ):
         _validate_context_tree(value[field], f"evidence.{field}")
+    if "shadow_composition" in value:
+        try:
+            validate_shadow_composition(value["shadow_composition"])
+        except ShadowCompositionError as exc:
+            raise EvidenceObjectError(
+                "evidence.shadow_composition is invalid."
+            ) from exc
+    if "annotation_promotion" in value:
+        try:
+            validate_active_annotation_promotion(value["annotation_promotion"])
+        except ActiveAnnotationPromotionError as exc:
+            raise EvidenceObjectError(
+                "evidence.annotation_promotion is invalid."
+            ) from exc
 
 
 def validate_evidence_object(value: object) -> EvidenceObject:
@@ -1288,7 +1898,12 @@ def validate_evidence_object(value: object) -> EvidenceObject:
         raise EvidenceObjectError(
             "Evidence object must be a dictionary."
         )
-    _validate_exact_fields(value, EVIDENCE_OBJECT_FIELDS, "evidence")
+    expected_fields = EVIDENCE_OBJECT_FIELDS | (
+        {"shadow_composition"}
+        if "shadow_composition" in value
+        else set()
+    ) | ({"annotation_promotion"} if "annotation_promotion" in value else set())
+    _validate_exact_fields(value, expected_fields, "evidence")
     if value["schema_version"] != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceObjectError(
             "evidence.schema_version must be "
@@ -1845,6 +2460,11 @@ def _sanitize_context_tree(value: Any, path: str) -> Any:
     """Sanitize strings inside an already validated context tree."""
 
     if isinstance(value, str):
+        if (value == "" and path.endswith((
+            ".normalized_identity.reference",
+            ".normalized_identity.alternate",
+        ))):
+            return value
         return _sanitize_text(
             value,
             max_length=(
@@ -2137,6 +2757,20 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
             for capability, result in evidence["capability_results"].items()
         },
     }
+    if "shadow_composition" in evidence:
+        clean_evidence["shadow_composition"] = validate_shadow_composition(
+            _sanitize_context_tree(
+                evidence["shadow_composition"],
+                "evidence.shadow_composition",
+            )
+        )
+    if "annotation_promotion" in evidence:
+        clean_evidence["annotation_promotion"] = validate_active_annotation_promotion(
+            _sanitize_context_tree(
+                evidence["annotation_promotion"],
+                "evidence.annotation_promotion",
+            )
+        )
     clean_evidence = validate_evidence_object(clean_evidence)
     serialized_size = len(
         json.dumps(
@@ -2326,25 +2960,47 @@ def _build_clinical_evidence(evidence: EvidenceObject) -> str:
     ]
     if not evidence["clingen_curations"]:
         lines.append("- Not available in the supplied evidence.")
-        return "\n".join(lines)
-
-    for curation in evidence["clingen_curations"]:
-        curation_parts = [
-            f"Disease: {_markdown_value(curation['disease'])}",
-            (
-                "Disease ID: "
-                f"{_markdown_value(curation['disease_id'])}"
-            ),
-            (
-                "Classification: "
-                f"{_markdown_value(curation['classification'])}"
-            ),
-            (
-                "Mode of inheritance: "
-                f"{_markdown_value(curation['mode_of_inheritance'])}"
-            ),
-        ]
-        lines.append(f"- {'; '.join(curation_parts)}")
+    else:
+        for curation in evidence["clingen_curations"]:
+            curation_parts = [
+                f"Disease: {_markdown_value(curation['disease'])}",
+                (
+                    "Disease ID: "
+                    f"{_markdown_value(curation['disease_id'])}"
+                ),
+                (
+                    "Classification: "
+                    f"{_markdown_value(curation['classification'])}"
+                ),
+                (
+                    "Mode of inheritance: "
+                    f"{_markdown_value(curation['mode_of_inheritance'])}"
+                ),
+            ]
+            lines.append(f"- {'; '.join(curation_parts)}")
+    erepo_context = evidence["pathogenicity"].get(
+        "expert_curated_variant_context",
+        {},
+    )
+    if isinstance(erepo_context, dict):
+        lines.extend(("", "### ClinGen ERepo expert-curated context"))
+        erepo_records = erepo_context.get("records")
+        if not isinstance(erepo_records, list) or not erepo_records:
+            lines.append(
+                "- No accepted exact ERepo record is available for this variant."
+            )
+        else:
+            for record in erepo_records:
+                if not isinstance(record, dict):
+                    continue
+                lines.append(
+                    "- Classification: "
+                    f"{_markdown_value(record.get('classification'))}; "
+                    "condition: "
+                    f"{_markdown_value(record.get('condition'))}; "
+                    "record: "
+                    f"{_markdown_value(record.get('ca_id'))}."
+                )
     return "\n".join(lines)
 
 
@@ -3167,6 +3823,110 @@ def _compact_mydisease_context(value: object) -> dict[str, Any]:
     return context
 
 
+def _compact_medgen_disease_hpo_context(value: object) -> dict[str, Any]:
+    """Retain compact Stage 3 MedGen context with no provider raw payload."""
+    source = _candidate_mapping(value)
+    if not source:
+        return {}
+    records = source.get("records")
+    return {
+        **_selected_context(
+            source,
+            (
+                "schema_version", "provider", "provider_id", "provider_role",
+                "fallback_used", "primary_provider", "primary_retrieval_state",
+                "status", "retrieval_state", "retrieved_at", "query_gene",
+                "query_key", "attempts", "http_status", "upstream_sources",
+                "enrichment_decision", "candidate_diagnostics", "queried_hpo_terms",
+            ),
+        ),
+        "records": [
+            _selected_context(
+                record,
+                (
+                    "medgen_uid", "concept_id", "title", "semantic_type",
+                    "definition", "gene_association_match_state",
+                    "gene_association_basis", "matched_hpo_terms",
+                    "hpo_match_method", "source_metadata", "upstream_sources",
+                ),
+            )
+            for record in records[:10]
+            if isinstance(record, dict)
+        ] if isinstance(records, list) else [],
+    }
+
+
+def _compact_medgen_phenotype_gene_context(value: object) -> list[dict[str, Any]]:
+    """Compact Stage 4 MedGen phenotype-gene contexts (list of per-HPO-tuple dicts)."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for ctx in value:
+        if not isinstance(ctx, dict):
+            continue
+        records = ctx.get("records")
+        result.append({
+            **_selected_context(
+                ctx,
+                (
+                    "schema_version", "provider", "provider_id", "provider_role",
+                    "primary_provider", "primary_retrieval_state",
+                    "status", "retrieval_state", "retrieved_at",
+                    "query_gene", "query_hpo_id", "query_hpo_label", "query_key",
+                    "attempts", "http_status", "upstream_sources",
+                    "enrichment_decision", "candidate_diagnostics", "queried_hpo_terms",
+                ),
+            ),
+            "records": [
+                _selected_context(
+                    record,
+                    (
+                        "medgen_uid", "concept_id", "title", "semantic_type",
+                        "definition", "gene_association_match_state",
+                        "gene_association_basis", "matched_hpo_terms",
+                        "hpo_match_method", "source_metadata", "upstream_sources",
+                    ),
+                )
+                for record in records[:10]
+                if isinstance(record, dict)
+            ] if isinstance(records, list) else [],
+        })
+    return result
+
+
+def _compact_medgen_gene_disease_context(value: object) -> dict[str, Any]:
+    """Retain compact Stage 5 MedGen gene-disease context with no provider raw payload."""
+    source = _candidate_mapping(value)
+    if not source:
+        return {}
+    records = source.get("records")
+    return {
+        **_selected_context(
+            source,
+            (
+                "schema_version", "provider", "provider_id", "provider_role",
+                "primary_provider", "primary_retrieval_state",
+                "status", "retrieval_state", "retrieved_at", "query_gene",
+                "query_key", "attempts", "http_status", "upstream_sources",
+                "enrichment_decision", "candidate_diagnostics",
+            ),
+        ),
+        "records": [
+            _selected_context(
+                record,
+                (
+                    "medgen_uid", "concept_id", "title", "semantic_type",
+                    "definition", "gene_association_match_state",
+                    "gene_association_basis", "hpo_terms",
+                    "source_metadata", "upstream_sources",
+                ),
+            )
+            for record in records[:10]
+            if isinstance(record, dict)
+        ] if isinstance(records, list) else [],
+    }
+
+
 def _compact_cspec_context(value: object) -> list[dict[str, Any]]:
     """Retain released CSpec metadata as context only."""
 
@@ -3588,8 +4348,12 @@ def _build_evidence_lineage(
     clinvar: dict[str, Any],
     clingen: dict[str, Any],
     cspec: dict[str, Any],
+    erepo: dict[str, Any],
     phen2gene: dict[str, Any],
     mydisease: dict[str, Any],
+    medgen: dict[str, Any],
+    medgen_pg: list[dict[str, Any]] | None = None,
+    medgen_gd: dict[str, Any] | None = None,
     conditional_enrichment: dict[str, Any],
 ) -> tuple[
     list[EvidenceLineageRecord],
@@ -3896,6 +4660,113 @@ def _build_evidence_lineage(
                 ),
             )
         )
+
+    if medgen:
+        medgen_sources = [
+            source
+            for record in medgen.get("records", [])
+            if isinstance(record, dict)
+            for source in record.get("upstream_sources", [])
+            if isinstance(source, str)
+        ] if isinstance(medgen.get("records"), list) else []
+        records.append(
+            _lineage_record(
+                "phenotype_relationship.medgen_disease_hpo_context",
+                {
+                    **medgen,
+                    "upstream_sources": medgen_sources or medgen.get("upstream_sources", []),
+                },
+                default_provider="NCBI MedGen",
+                default_upstream_sources=(medgen_sources or ("NCBI MedGen",)),
+                derivation="aggregated",
+                evidence_present=(
+                    _lineage_status(medgen) == "success"
+                    and bool(medgen.get("records"))
+                ),
+            )
+        )
+    if medgen_pg:
+        for idx, pg_ctx in enumerate(medgen_pg):
+            pg_sources = [
+                source
+                for record in pg_ctx.get("records", [])
+                if isinstance(record, dict)
+                for source in record.get("upstream_sources", [])
+                if isinstance(source, str)
+            ] if isinstance(pg_ctx.get("records"), list) else []
+            lineage_path = (
+                f"phenotype_relationship.medgen_phenotype_gene_context[{idx}]"
+                if len(medgen_pg) > 1
+                else "phenotype_relationship.medgen_phenotype_gene_context"
+            )
+            records.append(
+                _lineage_record(
+                    lineage_path,
+                    {
+                        **pg_ctx,
+                        "upstream_sources": pg_sources or pg_ctx.get("upstream_sources", []),
+                    },
+                    default_provider="NCBI MedGen",
+                    default_upstream_sources=(pg_sources or ("NCBI MedGen",)),
+                    derivation="aggregated",
+                    evidence_present=(
+                        _lineage_status(pg_ctx) == "success"
+                        and bool(pg_ctx.get("records"))
+                    ),
+                )
+            )
+    if medgen_gd:
+        gd_sources = [
+            source
+            for record in medgen_gd.get("records", [])
+            if isinstance(record, dict)
+            for source in record.get("upstream_sources", [])
+            if isinstance(source, str)
+        ] if isinstance(medgen_gd.get("records"), list) else []
+        records.append(
+            _lineage_record(
+                "pathogenicity.medgen_gene_disease_context",
+                {
+                    **medgen_gd,
+                    "upstream_sources": gd_sources or medgen_gd.get("upstream_sources", []),
+                },
+                default_provider="NCBI MedGen",
+                default_upstream_sources=(gd_sources or ("NCBI MedGen",)),
+                derivation="aggregated",
+                evidence_present=(
+                    _lineage_status(medgen_gd) == "success"
+                    and bool(medgen_gd.get("records"))
+                ),
+            )
+        )
+    if erepo:
+        context = _candidate_mapping(
+            erepo.get("expert_curated_variant_context")
+        )
+        erepo_records = context.get("records")
+        if isinstance(erepo_records, list):
+            for index, record in enumerate(erepo_records):
+                if not isinstance(record, dict):
+                    continue
+                records.append(
+                    _lineage_record(
+                        (
+                            "pathogenicity.expert_curated_variant_context."
+                            f"records[{index}]"
+                        ),
+                        {
+                            "provider": _lineage_text(erepo.get("provider"))
+                            or "ClinGen ERepo",
+                            "provider_version": record.get("doc_version"),
+                            "retrieved_at": erepo.get("retrieved_at"),
+                            "status": context.get("status"),
+                        },
+                        default_provider="ClinGen ERepo",
+                        default_upstream_sources=("ClinGen ERepo",),
+                        derivation="direct",
+                        evidence_present=True,
+                    )
+                )
     literature = _candidate_mapping(
         conditional_enrichment.get("literature")
     )
@@ -4188,6 +5059,12 @@ def _build_capability_results(
         break
     phen2gene = _candidate_mapping(candidate.get("phen2gene"))
     mydisease = _candidate_mapping(candidate.get("mydisease"))
+    medgen = _candidate_mapping(candidate.get("medgen_disease_hpo_context"))
+    disease_context = (
+        medgen
+        if medgen.get("status") == "success" and medgen.get("records")
+        else mydisease
+    )
     definitions = (
         (
             "variant_annotation", _candidate_mapping(sources.get("vep")),
@@ -4215,9 +5092,9 @@ def _build_capability_results(
             "direct_hpo_gene_overlap", "phenotype_relationship.phen2gene",
         ),
         (
-            "disease_context", mydisease, "mydisease",
-            "local_hpo_disease_fallback", "gene_disease_query",
-            "accepted_hpo_local_disease_context",
+            "disease_context", disease_context, "mydisease",
+            "ncbi_medgen", "gene_disease_query",
+            "medgen_disease_hpo_context",
             "phenotype_relationship.mydisease",
         ),
         (
@@ -4279,9 +5156,22 @@ def _build_v2_sections(
     clinvar = _candidate_mapping(sources.get("clinvar"))
     clingen = _candidate_mapping(sources.get("clingen"))
     cspec = _candidate_mapping(sources.get("cspec"))
+    erepo = _candidate_mapping(sources.get("erepo"))
+    erepo_context = _candidate_mapping(
+        erepo.get("expert_curated_variant_context")
+    )
     phen2gene = _candidate_mapping(candidate.get("phen2gene"))
     mydisease = _compact_mydisease_context(
         candidate.get("mydisease")
+    )
+    medgen = _compact_medgen_disease_hpo_context(
+        candidate.get("medgen_disease_hpo_context")
+    )
+    medgen_pg = _compact_medgen_phenotype_gene_context(
+        candidate.get("medgen_phenotype_gene_context")
+    )
+    medgen_gd = _compact_medgen_gene_disease_context(
+        candidate.get("medgen_gene_disease_context")
     )
     conditional_enrichment = _compact_conditional_enrichment(
         candidate.get("conditional_enrichment")
@@ -4321,6 +5211,8 @@ def _build_v2_sections(
         "clinvar": "NCBI ClinVar",
         "clingen": "ClinGen/GenCC",
         "cspec": "ClinGen CSpec Registry",
+        "erepo": "ClinGen ERepo",
+        "medgen": "NCBI MedGen",
     }
     for source_name, payload in (
         ("vep", vep),
@@ -4329,6 +5221,7 @@ def _build_v2_sections(
         ("clinvar", clinvar),
         ("clingen", clingen),
         ("cspec", cspec),
+        ("erepo", erepo),
         ("phen2gene", phen2gene),
         (
             "mydisease",
@@ -4336,6 +5229,8 @@ def _build_v2_sections(
             if isinstance(candidate.get("mydisease"), dict)
             else {},
         ),
+        ("medgen", medgen),
+        ("medgen_pg", medgen_pg[0] if medgen_pg else {}),
     ):
         if not payload:
             continue
@@ -4389,12 +5284,16 @@ def _build_v2_sections(
         clinvar=clinvar,
         clingen=clingen,
         cspec=cspec,
+        erepo=erepo,
         phen2gene=phen2gene,
         mydisease=(
             mydisease
             if isinstance(candidate.get("mydisease"), dict)
             else {}
         ),
+        medgen=medgen,
+        medgen_pg=medgen_pg,
+        medgen_gd=medgen_gd,
         conditional_enrichment=conditional_enrichment,
     )
     upstream_sources = sorted(
@@ -4441,8 +5340,12 @@ def _build_v2_sections(
                         "assembly",
                         "normalized_variant",
                         "validated_genomic_hgvs",
+                        "validated_gene",
+                        "validated_gene_id",
+                        "validated_transcript",
                         "validated_transcript_hgvs",
                         "validated_protein_hgvs",
+                        "selected_record",
                         "consequence_available",
                         "validation_warnings",
                         "most_severe_consequence",
@@ -4576,6 +5479,24 @@ def _build_v2_sections(
             ),
             "clingen_context": deepcopy(clingen_curations),
             "cspec_context": _compact_cspec_context(cspec),
+            **(
+                {
+                    "expert_curated_variant_context": deepcopy(
+                        erepo_context
+                    )
+                }
+                if erepo_context
+                else {}
+            ),
+            **(
+                {
+                    "medgen_gene_disease_context": deepcopy(
+                        medgen_gd
+                    )
+                }
+                if medgen_gd
+                else {}
+            ),
             "warnings": deepcopy(warnings[:MAX_EVIDENCE_WARNINGS]),
         },
         "phenotype_relationship": {
@@ -4605,6 +5526,16 @@ def _build_v2_sections(
                 ),
             ),
             "mydisease": mydisease,
+            **(
+                {"medgen_disease_hpo_context": medgen}
+                if medgen
+                else {}
+            ),
+            **(
+                {"medgen_phenotype_gene_context": medgen_pg}
+                if medgen_pg
+                else {}
+            ),
         },
         "provenance": {
             "providers": providers,
@@ -4629,6 +5560,7 @@ def _build_v2_sections(
 def build_evidence_object(candidate: object) -> EvidenceObject:
     """Convert one Stage 5/6 candidate to the Stage 7 schema."""
     candidate_data = _require_candidate_mapping(candidate, "candidate")
+    active_candidate_data = controlled_active_annotation_candidate(candidate_data)
     variant = _require_candidate_mapping(
         candidate_data.get("variant"),
         "candidate.variant",
@@ -4661,7 +5593,7 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
         "candidate.warnings",
     )
     v2_sections = _build_v2_sections(
-        candidate_data,
+        active_candidate_data,
         variant=variant,
         sources=sources,
         clinvar_conditions=clinvar_conditions,
@@ -4680,12 +5612,12 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             "alt": variant.get("alt"),
         },
         "assembly": candidate_data.get("assembly"),
-        "gene": candidate_data.get("gene"),
-        "gene_id": candidate_data.get("gene_id"),
-        "transcript": candidate_data.get("transcript"),
-        "consequence": candidate_data.get("consequence"),
-        "impact": candidate_data.get("impact"),
-        "protein_change": candidate_data.get("protein_change"),
+        "gene": active_candidate_data.get("gene"),
+        "gene_id": active_candidate_data.get("gene_id"),
+        "transcript": active_candidate_data.get("transcript"),
+        "consequence": active_candidate_data.get("consequence"),
+        "impact": active_candidate_data.get("impact"),
+        "protein_change": active_candidate_data.get("protein_change"),
         "population_frequency": candidate_data.get(
             "population_frequency"
         ),
@@ -4725,6 +5657,16 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
             sources,
         ),
     }
+    shadow = build_shadow_composition(candidate_data)
+    if shadow is not None:
+        evidence["shadow_composition"] = shadow
+        promotion = promote_active_annotation_fields(
+            evidence,
+            candidate=candidate_data,
+            shadow=shadow,
+        )
+        if promotion is not None:
+            evidence["annotation_promotion"] = promotion
     evidence["conflict_audit"]["pre_review"] = audit_evidence_conflicts(
         evidence,
         phase="pre_review",

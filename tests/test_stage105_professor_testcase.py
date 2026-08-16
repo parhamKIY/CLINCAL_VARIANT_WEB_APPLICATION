@@ -15,6 +15,7 @@ testcase structure:
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,10 @@ from tests.test_pipeline import (
 
 
 pytestmark = pytest.mark.stage105_professor_testcase
+
+_GOLDEN_BASELINE = (
+    Path(__file__).parent / "golden" / "evidence_resilience" / "pre_stage2_v1.json"
+)
 
 # ---------------------------------------------------------------------------
 # Synthetic 7-variant professor testcase fixture
@@ -94,6 +99,43 @@ def _make_fake_annotate(same_gene_for_indexes: dict[int, str] | None = None):
         return annotations
 
     return _annotate
+
+
+def _pre_llm_golden_projection(analysis: dict[str, object]) -> list[dict[str, object]]:
+    """Return only stable, source-attributed artifacts for Stage 2 regression."""
+    annotations = analysis["annotations"]
+    evidence_objects = analysis["evidence_objects"]
+    assert isinstance(annotations, list)
+    assert isinstance(evidence_objects, list)
+    projection: list[dict[str, object]] = []
+    for annotation, evidence in zip(annotations, evidence_objects, strict=True):
+        assert isinstance(annotation, dict)
+        assert isinstance(evidence, dict)
+        variant = annotation["variant"]
+        capabilities = evidence["capability_results"]
+        assert isinstance(variant, dict)
+        assert isinstance(capabilities, dict)
+        projection.append(
+            {
+                "identity": {
+                    "assembly": annotation["assembly"],
+                    "chrom": variant["chrom"],
+                    "pos": variant["pos"],
+                    "ref": variant["ref"],
+                    "alt": variant["alt"],
+                },
+                "gene": annotation["gene"],
+                "transcript": annotation["transcript"],
+                "consequence": annotation["consequence"],
+                "source_statuses": evidence["source_statuses"],
+                "capability_statuses": {
+                    name: result["status"]
+                    for name, result in capabilities.items()
+                    if isinstance(result, dict)
+                },
+            }
+        )
+    return projection
 
 
 def _monkeypatch_pipeline_dependencies(
@@ -243,6 +285,42 @@ def test_105_1_seven_variant_cardinality_order_and_same_gene_separation(
         assert len(docx_bytes) > 0, (
             f"DOCX render failed for variant_index={record['variant_index']}"
         )
+
+
+def test_pre_stage2_golden_cases_match_stable_pre_llm_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Freeze identity, evidence presence, and capability state without LLM prose."""
+    baseline = json.loads(_GOLDEN_BASELINE.read_text(encoding="utf-8"))
+    _monkeypatch_pipeline_dependencies(monkeypatch)
+    analysis = run_analysis(
+        vcf_path=None,
+        manual_variants=_professor_manual_variants(),
+        phenotypes=[],
+        llm_client=LLMClient(FakeLLMAdapter(_variant_interpretation_response())),
+        database_path=tmp_path / "pre_stage2_golden.sqlite3",
+    )
+
+    cases = baseline["cases"]
+    assert isinstance(cases, list)
+    projection = _pre_llm_golden_projection(analysis)
+    assert [item["identity"] for item in projection] == [
+        case["identity"] for case in cases
+    ]
+    assert [item["gene"] for item in projection] == [case["gene"] for case in cases]
+    assert [item["transcript"] for item in projection] == [
+        case["transcript"] for case in cases
+    ]
+    assert [item["consequence"] for item in projection] == [
+        case["consequence"] for case in cases
+    ]
+    assert all(
+        item["source_statuses"] == baseline["expected_source_statuses"]
+        and item["capability_statuses"]
+        == baseline["expected_capability_statuses"]
+        for item in projection
+    )
 
 
 # ---------------------------------------------------------------------------

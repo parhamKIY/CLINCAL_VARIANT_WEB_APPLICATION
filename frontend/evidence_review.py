@@ -147,8 +147,10 @@ def _render_technical_diagnostics(
             display_rows,
             column_order=(
                 "provider",
+                "capability",
                 "variant_identity",
                 "status",
+                "retrieval_state",
                 "attempt_count",
                 "latency_ms",
                 "fallback_used",
@@ -157,8 +159,10 @@ def _render_technical_diagnostics(
             ),
             column_config={
                 "provider": "Provider",
+                "capability": "Analysis capability",
                 "variant_identity": "Variant identity",
                 "status": "Status",
+                "retrieval_state": "Retrieval result",
                 "attempt_count": "Attempt count",
                 "latency_ms": "Latency (ms)",
                 "fallback_used": "Fallback used",
@@ -180,6 +184,8 @@ def _render_variant_status_cards(result: PipelineResult) -> None:
         with st.container(border=True):
             st.markdown(f"**{card['heading']}**")
             st.write(f"Status: **{card['status']}**")
+            if card["capability_summary"] is not None:
+                st.write(card["capability_summary"])
             for line in (
                 card["annotation"],
                 card["population"],
@@ -189,6 +195,8 @@ def _render_variant_status_cards(result: PipelineResult) -> None:
             ):
                 st.write(line)
             for notice in card["notices"]:
+                _render_variant_notice(card["variant_index"], notice)
+            for notice in card["capability_notices"]:
                 _render_variant_notice(card["variant_index"], notice)
             _render_technical_diagnostics(
                 card["variant_index"],

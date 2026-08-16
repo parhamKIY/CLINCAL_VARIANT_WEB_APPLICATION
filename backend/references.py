@@ -351,6 +351,24 @@ def build_canonical_references(
             for field in ("concept_doi", "document_doi"):
                 if item.get(field):
                     add("DOI", item.get(field), item.get("title"))
+    erepo_context = (
+        pathogenicity.get("expert_curated_variant_context")
+        if isinstance(pathogenicity, Mapping)
+        else None
+    )
+    erepo_records = (
+        erepo_context.get("records")
+        if isinstance(erepo_context, Mapping)
+        else None
+    )
+    if isinstance(erepo_records, list):
+        for item in erepo_records:
+            if isinstance(item, Mapping):
+                add(
+                    "ClinGen ERepo",
+                    item.get("ca_id"),
+                    item.get("preferred_variant_title"),
+                )
     enrichment = evidence.get("conditional_enrichment")
     literature = (
         enrichment.get("literature")
