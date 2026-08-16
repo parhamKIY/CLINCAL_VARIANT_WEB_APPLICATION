@@ -20,6 +20,7 @@ def block_live_http_requests(
         return
 
     monkeypatch.setattr(settings, "ENABLE_EREPO", False)
+    monkeypatch.setattr(settings, "ENABLE_MEDGEN", False)
 
     def blocked_request(
         _session: requests.Session,

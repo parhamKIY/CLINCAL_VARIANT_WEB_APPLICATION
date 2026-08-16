@@ -282,6 +282,11 @@ class Settings:
         "https://erepo.genome.network",
     ).strip().rstrip("/")
 
+    MEDGEN_BASE_URL: str = os.getenv(
+        "MEDGEN_BASE_URL",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+    ).strip().rstrip("/")
+
     PHEN2GENE_BASE_URL: str = os.getenv(
         "PHEN2GENE_BASE_URL",
         "https://phen2gene.wglab.org/api",
@@ -334,6 +339,16 @@ class Settings:
 
     EREPO_MAX_RETRIES: int = _get_non_negative_int(
         "EREPO_MAX_RETRIES",
+        1,
+    )
+
+    MEDGEN_TIMEOUT: int = _get_positive_int(
+        "MEDGEN_TIMEOUT",
+        REQUEST_TIMEOUT,
+    )
+
+    MEDGEN_MAX_RETRIES: int = _get_non_negative_int(
+        "MEDGEN_MAX_RETRIES",
         1,
     )
 
@@ -469,6 +484,11 @@ class Settings:
 
     ENABLE_EREPO: bool = _get_bool(
         "ENABLE_EREPO",
+        True,
+    )
+
+    ENABLE_MEDGEN: bool = _get_bool(
+        "ENABLE_MEDGEN",
         True,
     )
 
@@ -640,6 +660,7 @@ class Settings:
             "UCSC_GNOMAD_BASE_URL": cls.UCSC_GNOMAD_BASE_URL,
             "CSPEC_BASE_URL": cls.CSPEC_BASE_URL,
             "EREPO_BASE_URL": cls.EREPO_BASE_URL,
+            "MEDGEN_BASE_URL": cls.MEDGEN_BASE_URL,
             "PHEN2GENE_BASE_URL": cls.PHEN2GENE_BASE_URL,
             "MONARCH_BASE_URL": cls.MONARCH_BASE_URL,
             "MYDISEASE_BASE_URL": cls.MYDISEASE_BASE_URL,
@@ -734,6 +755,7 @@ class Settings:
                 cls.ENABLE_GNOMAD_DEEP_LOOKUP,
                 cls.ENABLE_LITERATURE_ENRICHMENT,
                 cls.ENABLE_EREPO,
+                cls.ENABLE_MEDGEN,
             )
         ):
             raise RuntimeError(
@@ -770,6 +792,7 @@ class Settings:
             "UCSC_GNOMAD_TIMEOUT": cls.UCSC_GNOMAD_TIMEOUT,
             "CSPEC_TIMEOUT": cls.CSPEC_TIMEOUT,
             "EREPO_TIMEOUT": cls.EREPO_TIMEOUT,
+            "MEDGEN_TIMEOUT": cls.MEDGEN_TIMEOUT,
             "PHEN2GENE_TIMEOUT": cls.PHEN2GENE_TIMEOUT,
             "GNOMAD_TIMEOUT": cls.GNOMAD_TIMEOUT,
             "ENSEMBL_VARIATION_TIMEOUT": cls.ENSEMBL_VARIATION_TIMEOUT,
@@ -810,6 +833,9 @@ class Settings:
 
         if cls.EREPO_MAX_RETRIES > 2:
             raise RuntimeError("EREPO_MAX_RETRIES cannot exceed 2.")
+
+        if cls.MEDGEN_MAX_RETRIES > 2:
+            raise RuntimeError("MEDGEN_MAX_RETRIES cannot exceed 2.")
 
         if cls.MYDISEASE_CACHE_SIZE > 1000:
             raise RuntimeError(

@@ -68,6 +68,7 @@ from backend.logging_config import (
     reset_analysis_run_id,
 )
 from backend.mydisease import MyDiseaseError, enrich_with_mydisease
+from backend.medgen import MedGenError, enrich_with_medgen
 from backend.phenotype import (
     HPODataError,
     Phen2GeneError,
@@ -2242,6 +2243,33 @@ def _annotate_and_match(
             mydisease_api_status,
             progress_callback,
         )
+
+    if settings.ENABLE_MEDGEN:
+        try:
+            medgen_result = enrich_with_medgen(
+                result["phenotype_results"],
+                session=mydisease_session,
+                enabled=True,
+            )
+            public_medgen_results = [
+                dict(variant) for variant in medgen_result["variants"]
+            ]
+            validate_no_prohibited_fields(
+                public_medgen_results,
+                context="MedGen disease/HPO output",
+            )
+            result["phenotype_results"] = public_medgen_results
+        except (MedGenError, ClinicalDataPrivacyError):
+            _record_issue(
+                result,
+                stage="phenotype",
+                code="medgen_unavailable",
+                message=(
+                    "MedGen disease/HPO context could not be produced; "
+                    "MyDisease and existing phenotype evidence were retained."
+                ),
+                recoverable=True,
+            )
 
     result["current_stage"] = "evidence"
     result["progress_percent"] = 60

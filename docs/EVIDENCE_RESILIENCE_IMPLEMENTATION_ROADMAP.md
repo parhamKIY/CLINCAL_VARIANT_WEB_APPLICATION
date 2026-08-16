@@ -2,13 +2,13 @@
 
 **Document role:** Executable, review-gated plan for the current evidence-resilience workstream.
 
-**Status:** Active execution roadmap. Stage 1 is COMPLETE / APPROVED; Stage 2 is COMPLETE / PENDING review.
+**Status:** Active execution roadmap. Stages 1–2 are COMPLETE / APPROVED; Stage 3 is COMPLETE / PENDING review.
 
-**Current completed stage:** Stage 2 — ERepo integration.
+**Current completed stage:** Stage 3 — Shared MedGen client plus disease/HPO role.
 
-**Current implementation permission:** NONE — Stage 2 is complete and awaiting architecture review.
+**Current implementation permission:** NONE — Stage 3 is complete and awaiting architecture review.
 
-**Next eligible stage:** Stage 3 — Shared MedGen client plus disease/HPO role, only after Stage 2 review approval and explicit authorization.
+**Next eligible stage:** Stage 4 — MedGen phenotype-gene supporting evidence, only after Stage 3 review approval and explicit authorization.
 
 **Next automatic stage:** NONE — every stage requires explicit review approval.
 
@@ -449,10 +449,10 @@ This safety gate does not create a new numbered implementation stage. It is a ma
 - **Risks:** Existing ClinVar and PubMed E-utilities helpers are provider-specific; do not duplicate or broadly refactor them without need.
 - **Dependencies:** Stage 1 is not technically required; Stage 2 is independent but remains earlier in the approved sequence.
 - **Definition of Done:** MedGen disease/HPO context is evidence-gap-driven, bounded, source-separated, provenance-complete, and cannot overwrite MyDisease.
-- **Status:** NOT_STARTED
-- **Review:** NOT_REQUIRED
-- **Implementation notes:** None.
-- **Validation evidence:** None.
+- **Status:** COMPLETE
+- **Review:** PENDING
+- **Implementation notes:** Added the bounded shared `backend/medgen.py` NCBI E-utilities client behind `MEDGEN_BASE_URL`, `MEDGEN_TIMEOUT`, `MEDGEN_MAX_RETRIES`, and `ENABLE_MEDGEN`. It performs one normalized, exact-gene query per eligible same-gene group only after the source-labelled MyDisease disease/HPO node is insufficient; it preserves the mandatory enrichment-decision record, compact MedGen UID/ConceptID/title/source metadata, exact query gene/key, retrieval state, attempts, timestamp, and deterministically exposed upstream sources. It fans the immutable result back to distinct input-ordered variants as an additive optional `medgen_disease_hpo_context`; historical EvidenceObject `2.5` records remain readable without it. MedGen cannot overwrite MyDisease, populate Phen2Gene rank/score, populate GenCC validity, or make a causal/pathogenicity claim. No SQLite or pipeline schema migration was made.
+- **Validation evidence:** `tests/test_medgen.py` passed (`8 passed in 0.10s`) for primary sufficiency/non-triggering, partial/operational/no-match gap triggers, exact same-gene deduplication and fan-out, timeout/`403`/`429`, malformed ESearch/ESummary, EvidenceObject serialization, semantic isolation, and deterministic shared-upstream retention. The focused Stage 2/3, persistence, and ERC suite passed (`41 passed in 25.01s`); compilation passed. `python tests/run_stage78_resilience_acceptance.py` passed compilation, secrets, and the Stage-78 scenario, then ran `1299 passed, 2 failed, 6 skipped in 138.72s`; the two recorded pre-existing failures remain the manual-table Streamlit dataframe count and missing `docs/acceptance_failures_v1.md`. Bounded public live validation on 2026-08-16 used only `SCN1A` and `FBN1`: both returned structured MedGen `success` with 10 bounded records; one transient ESummary `429` retried successfully under the configured bounded policy. No raw provider response or private data was retained.
 
 **STOP FOR REVIEW.**
 
