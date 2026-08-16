@@ -1,0 +1,250 @@
+{
+  "schema_version": "1.1",
+  "approved_discovery_strategies": [
+    {
+      "id": "exact_genomic_hgvs",
+      "priority": 1,
+      "enabled": true,
+      "identifier_field": "genomic_hgvs",
+      "query_column": "hgvs",
+      "match_type": "exact",
+      "max_values_per_variant": 1,
+      "required_provenance": ["deterministic_normalization", "provider_exact_allele"]
+    },
+    {
+      "id": "exact_clinvar_variation_id",
+      "priority": 2,
+      "enabled": true,
+      "identifier_field": "clinvar_variation_ids",
+      "query_column": "cvId",
+      "match_type": "exact",
+      "max_values_per_variant": 3,
+      "required_provenance": ["provider_exact_allele"]
+    },
+    {
+      "id": "exact_transcript_hgvs",
+      "priority": 3,
+      "enabled": true,
+      "identifier_field": "transcript_hgvs",
+      "query_column": "hgvs",
+      "match_type": "exact",
+      "max_values_per_variant": 3,
+      "required_provenance": ["provider_transcript_annotation"]
+    },
+    {
+      "id": "future_validated_caid",
+      "priority": 4,
+      "enabled": false,
+      "identifier_field": "caid",
+      "query_column": "caId",
+      "match_type": "exact",
+      "max_values_per_variant": 1,
+      "activation_requirement": "versioned allele-scope provider_exact_allele CAID field"
+    }
+  ],
+  "cases": [
+    {
+      "id": "accept_grch38_exact_hgvs",
+      "request": {
+        "strategy_id": "exact_genomic_hgvs",
+        "columns": "hgvs",
+        "values": "NC_000012.12:g.102894804T>A",
+        "matchTypes": "exact",
+        "matchMode": "and",
+        "pg": 1,
+        "pgSize": 10
+      },
+      "input": {
+        "genome_build": "GRCh38",
+        "chromosome": "12",
+        "position": 102894804,
+        "reference": "T",
+        "alternate": "A",
+        "minimal_representation_status": "not_needed",
+        "left_normalization_status": "not_required"
+      },
+      "response_fixture": "summary_classification_exact_success_ca229507.json",
+      "expected": {
+        "acceptance_state": "EXACT_MATCH",
+        "accepted_uuids": ["c61fa227-893e-4be0-9e02-2d7c1494af20"],
+        "candidate_rejection_reasons": []
+      }
+    },
+    {
+      "id": "continue_after_one_strategy_no_match",
+      "eligible_strategy_ids": [
+        "exact_genomic_hgvs",
+        "exact_clinvar_variation_id",
+        "exact_transcript_hgvs"
+      ],
+      "strategy_results": [
+        {
+          "strategy_id": "exact_genomic_hgvs",
+          "response_fixture": "summary_classification_exact_no_match.json",
+          "outcome": "no_match"
+        },
+        {
+          "strategy_id": "exact_clinvar_variation_id",
+          "outcome": "pending"
+        },
+        {
+          "strategy_id": "exact_transcript_hgvs",
+          "outcome": "pending"
+        }
+      ],
+      "expected": {
+        "provider_final_state": "continue_discovery",
+        "final_no_match": false
+      }
+    },
+    {
+      "id": "final_no_match_after_all_eligible_strategies",
+      "eligible_strategy_ids": [
+        "exact_genomic_hgvs",
+        "exact_clinvar_variation_id",
+        "exact_transcript_hgvs"
+      ],
+      "strategy_results": [
+        {
+          "strategy_id": "exact_genomic_hgvs",
+          "response_fixture": "summary_classification_exact_no_match.json",
+          "outcome": "no_match"
+        },
+        {
+          "strategy_id": "exact_clinvar_variation_id",
+          "response_fixture": "summary_classification_exact_no_match.json",
+          "outcome": "no_match"
+        },
+        {
+          "strategy_id": "exact_transcript_hgvs",
+          "response_fixture": "summary_classification_exact_no_match.json",
+          "outcome": "no_match"
+        }
+      ],
+      "expected": {
+        "provider_final_state": "no_match",
+        "final_no_match": true,
+        "operational_failure": false
+      }
+    },
+    {
+      "id": "reject_malformed_success_envelope",
+      "response": {
+        "metadata": {},
+        "status": {"code": 200, "name": "OK"}
+      },
+      "expected": {
+        "provider_final_state": "response_error",
+        "final_no_match": false
+      }
+    },
+    {
+      "id": "reject_candidate_with_grch37_hgvs_for_grch38_input",
+      "input": {
+        "genome_build": "GRCh38",
+        "chromosome": "12",
+        "position": 102894804,
+        "reference": "T",
+        "alternate": "A",
+        "selected_genomic_hgvs": "NC_000012.12:g.102894804T>A"
+      },
+      "response": {
+        "data": [
+          {
+            "uuid": "c61fa227-893e-4be0-9e02-2d7c1494af20",
+            "caId": "CA229507",
+            "docVersion": "1.0.0",
+            "retracted": false,
+            "hgvs": ["NC_000012.11:g.103288582T>A"],
+            "classification": "Likely Pathogenic"
+          }
+        ],
+        "metadata": {},
+        "status": {"code": 200, "name": "OK"}
+      },
+      "expected": {
+        "acceptance_state": "REJECTED",
+        "accepted_uuids": [],
+        "candidate_rejection_reasons": ["assembly_mismatch"]
+      }
+    },
+    {
+      "id": "accept_deterministic_padded_indel_equivalent_representation",
+      "input": {
+        "genome_build": "GRCh38",
+        "chromosome": "1",
+        "position": 100,
+        "reference": "AT",
+        "alternate": "A",
+        "minimal_representation_status": "applied",
+        "left_normalization_status": "unverified_without_reference"
+      },
+      "deterministic_equivalence_proof": {
+        "normalizer": "backend.annotation._normalize_variant_edit",
+        "normalized_cpra": {
+          "genome_build": "GRCh38",
+          "chromosome": "1",
+          "position": 101,
+          "reference": "T",
+          "alternate": ""
+        },
+        "formatted_genomic_hgvs": "NC_000001.11:g.101del"
+      },
+      "response": {
+        "data": [
+          {
+            "uuid": "deterministic-indel-fixture-uuid",
+            "caId": "CA000000001",
+            "docVersion": "1.0.0",
+            "retracted": false,
+            "hgvs": ["NC_000001.11:g.101del"]
+          }
+        ],
+        "metadata": {},
+        "status": {"code": 200, "name": "OK"}
+      },
+      "expected": {
+        "acceptance_state": "EXACT_MATCH_EQUIVALENT_REPRESENTATION",
+        "candidate_rejection_reasons": [],
+        "left_shift_inferred": false
+      }
+    },
+    {
+      "id": "reject_detailed_document_version_mismatch",
+      "summary": {
+        "uuid": "c61fa227-893e-4be0-9e02-2d7c1494af20",
+        "docVersion": "1.0.0"
+      },
+      "detail_response": {
+        "data": {
+          "@id": "https://cgerepoapi/evrepo/api/summary/classification/c61fa227-893e-4be0-9e02-2d7c1494af20/doc/sepio/version/1.0.1",
+          "uuid": "c61fa227-893e-4be0-9e02-2d7c1494af20",
+          "metadata": {"version": "1.0.1"}
+        },
+        "metadata": {},
+        "status": {"code": 200, "name": "OK"}
+      },
+      "expected": {
+        "acceptance_state": "REJECTED",
+        "candidate_rejection_reasons": ["detail_version_mismatch"]
+      }
+    },
+    {
+      "id": "skip_identity_incomplete_input",
+      "input": {
+        "genome_build": "GRCh38",
+        "chromosome": "12",
+        "position": 102894804,
+        "reference": "TA",
+        "alternate": "T",
+        "left_normalization_status": "unverified_without_reference"
+      },
+      "expected": {
+        "provider_final_state": "unattempted",
+        "reason": "identity_unverifiable",
+        "provider_call_expected": false
+      }
+    }
+  ]
+}
+

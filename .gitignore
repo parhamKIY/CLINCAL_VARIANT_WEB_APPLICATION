@@ -18,6 +18,8 @@ storage/database/*
 storage/logs/*
 data/cache/*
 /docs/*
+!/docs/EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md
+!/docs/EREPO_EXACT_IDENTITY_CONTRACT.md
 !/docs/PROJECT_DECLARATION.md
 !/docs/STAGE45_ARCHITECTURE_CONTRACT.md
 !/docs/STAGE62_DEMO_AND_REVIEW.md

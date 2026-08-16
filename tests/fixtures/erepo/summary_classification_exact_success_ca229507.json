@@ -1,0 +1,49 @@
+{
+  "data": [
+    {
+      "PCERDocID": "PCER000007891",
+      "_id": "AlleleRecords/1849976205",
+      "_key": "1849976205",
+      "_rev": "_lZDYIaa--A",
+      "affiliationId": "50015",
+      "approvedDate": "2024-09-06",
+      "caId": "CA229507",
+      "classification": "Likely Pathogenic",
+      "condition": "phenylketonuria",
+      "cvId": "102645",
+      "docVersion": "1.0.0",
+      "ep": "Phenylketonuria VCEP",
+      "gene": "PAH",
+      "geneNcbiId": "5053",
+      "hgvs": [
+        "NM_000277.3:c.283A>T",
+        "NC_000012.12:g.102894804T>A",
+        "NC_000012.11:g.103288582T>A",
+        "NM_000277.3(PAH):c.283A>T (p.Ile95Phe)"
+      ],
+      "hgvsSearch": "nm_000277.3:c.283a>t nc_000012.12:g.102894804t>a nc_000012.11:g.103288582t>a",
+      "metCodes": ["PM3_Strong", "PP3", "PP4"],
+      "metCodesSearch": "pm3_strong pp3 pp4",
+      "moi": "Autosomal recessive inheritance",
+      "mondoId": "MONDO:0009861",
+      "preferredVarTitle": "NM_000277.3(PAH):c.283A>T (p.Ile95Phe)",
+      "publishedDate": "2024-09-06",
+      "retracted": false,
+      "summaryDesc": "The c.283A>T (p.Ile95Phe) variant in PAH has been reported in multiple patients with mild and moderate phenylketonuria.",
+      "unMetCodes": ["PM2", "PM1", "PM5"],
+      "unMetCodesSearch": "pm2 pm1 pm5",
+      "uuid": "c61fa227-893e-4be0-9e02-2d7c1494af20",
+      "versionsList": ["1.0.0"]
+    }
+  ],
+  "metadata": {
+    "rendered": {
+      "by": "https://erepo.genome.network/evrepo/api/summary/srvc",
+      "when": "2026-08-16T07:04:29.103Z"
+    }
+  },
+  "status": {
+    "code": 200,
+    "name": "OK"
+  }
+}

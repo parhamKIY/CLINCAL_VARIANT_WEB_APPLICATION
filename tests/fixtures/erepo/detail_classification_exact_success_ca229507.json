@@ -1,0 +1,60 @@
+{
+  "data": {
+    "@context": "https://erepo.genome.network/evrepo/api/context",
+    "@id": "https://cgerepoapi/evrepo/api/summary/classification/c61fa227-893e-4be0-9e02-2d7c1494af20/doc/sepio/version/1.0.0",
+    "assertionMethod": {
+      "@id": "https://cspec.genome.network/cspec/SequenceVariantInterpretation/id/135637578",
+      "label": "ClinGen Phenylketonuria Expert Panel Specifications to the ACMG/AMP Variant Interpretation Guidelines for PAH Version 2.0.0",
+      "type": "VariantPathogenicityInterpretationGuideline",
+      "version": "2.0.0"
+    },
+    "condition": {
+      "@id": "https://api.monarchinitiative.org/api/bioentity/phenotype/MONDO:0009861",
+      "id": "MONDO:0009861",
+      "label": "phenylketonuria",
+      "type": "GeneticCondition"
+    },
+    "evidenceLine": [],
+    "id": "CG-PCER-VARINT:CA229507/MONDO:0009861/006",
+    "metadata": {
+      "created": "2024-09-28T05:40:24.177Z",
+      "note": "The SEPIO schema returned by ERepo is labelled Beta-1 (Unofficial); preserve it as provider metadata rather than treating it as a stable application schema.",
+      "producedAtUTC": "Sat, 28 Sep 2024 05:40:24 -0000",
+      "schemaLabel": "Evidence Repository.Beta-1 (Unofficial)",
+      "version": "1.0.0"
+    },
+    "statementOutcome": {
+      "@id": "https://loinc.org/LA26332-9",
+      "id": "LN:LA26332-9",
+      "label": "Likely Pathogenic"
+    },
+    "type": "VariantPathogenicityInterpretation",
+    "uuid": "c61fa227-893e-4be0-9e02-2d7c1494af20",
+    "variant": {
+      "@id": "https://reg.genome.network/allele/CA229507",
+      "id": "CAR:CA229507",
+      "relatedContextualAllele": [
+        {
+          "alleleName": [
+            {"name": "NM_000277.3:c.283A>T"}
+          ],
+          "preferred": true
+        }
+      ],
+      "relatedIdentifier": [
+        {"label": "NM_000277.3(PAH):c.283A>T (p.Ile95Phe)"}
+      ],
+      "type": "CAR"
+    }
+  },
+  "metadata": {
+    "rendered": {
+      "by": "https://erepo.genome.network/evrepo/api/summary/srvc",
+      "when": "2026-08-16T07:11:03.078Z"
+    }
+  },
+  "status": {
+    "code": 200,
+    "name": "OK"
+  }
+}
