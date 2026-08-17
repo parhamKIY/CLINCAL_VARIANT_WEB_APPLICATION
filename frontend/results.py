@@ -8,6 +8,7 @@ from backend.fallback_transparency import build_fallback_notices
 from backend.pipeline import PipelineResult
 from backend.references import build_canonical_references
 from frontend.source_status import build_reviewer_source_status
+from frontend.xlsx_selection import build_preprocessing_summary
 
 
 SOURCE_LABELS = {
@@ -836,6 +837,55 @@ def _render_evidence_view(result: PipelineResult) -> None:
     _render_evidence_details(evidence_objects[selected_index])
 
 
+def _render_input_preprocessing(result: PipelineResult) -> None:
+    """Show selected-input identity outcomes without exposing provider payloads."""
+
+    records = result.get("input_preprocessing_results", [])
+    if not isinstance(records, list) or not records:
+        return
+    summary = build_preprocessing_summary(
+        [item for item in records if isinstance(item, dict)]
+    )
+    if summary["selected_count"] == 0:
+        return
+    st.subheader("Selected-input preprocessing")
+    with st.container(horizontal=True):
+        st.metric("Selected source rows", summary["selected_count"], border=True)
+        st.metric("Canonical variants", summary["canonical_count"], border=True)
+        st.metric("Identity unresolved", summary["unresolved_count"], border=True)
+    with st.expander("Per-row preprocessing status", expanded=False):
+        rows: list[dict[str, object]] = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            provenance = _dictionary(item.get("source_provenance"))
+            canonical = _dictionary(item.get("canonical_variant"))
+            status = item.get("status")
+            rows.append(
+                {
+                    "Source row": provenance.get("source_row"),
+                    "Worksheet": provenance.get("source_worksheet"),
+                    "Source FILTER": provenance.get("source_filter"),
+                    "Input status": {
+                        "ACCEPTED_DIRECT": "Accepted directly",
+                        "NORMALIZED_AND_ACCEPTED": "Normalized safely",
+                        "IDENTITY_UNRESOLVED": "Requires attention",
+                    }.get(status, status),
+                    "Source representation": provenance.get("source_representation"),
+                    "Reference verification": provenance.get("reference_verification"),
+                    "Canonical identity": item.get("canonical_variant_identity"),
+                    "Canonical variant": (
+                        f"{canonical.get('chrom')}:{canonical.get('pos')} "
+                        f"{canonical.get('ref')}>{canonical.get('alt')}"
+                        if canonical
+                        else None
+                    ),
+                    "Reason": item.get("failure_reason"),
+                }
+            )
+        st.dataframe(rows, hide_index=True)
+
+
 def render_analysis_results(result: PipelineResult) -> None:
     """Render retained Stage 10 collections without raw provider payloads."""
 
@@ -868,6 +918,7 @@ def render_analysis_results(result: PipelineResult) -> None:
         )
     )
     with variants_tab:
+        _render_input_preprocessing(result)
         _render_variant_table(result)
     with annotations_tab:
         _render_annotation_table(result)

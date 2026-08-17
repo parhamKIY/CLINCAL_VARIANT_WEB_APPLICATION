@@ -1,6 +1,7 @@
 """Presentation-only Streamlit interface for the analysis pipeline."""
 
 from copy import deepcopy
+from hashlib import sha256
 from math import isfinite
 from numbers import Integral, Real
 from pathlib import Path
@@ -10,6 +11,11 @@ import pandas as pd
 import streamlit as st
 
 from backend.database import DatabaseError, load_pipeline_state
+from backend.excel_processing import (
+    ExcelProcessingError,
+    discover_excel_worksheets,
+    parse_excel_input_records,
+)
 from backend.error_handling import safe_ui_error_message
 from backend.llm import LLMError, get_available_llm_models
 from backend.phenotype_llm import (
@@ -68,6 +74,11 @@ from frontend.provider_readiness import (
     render_provider_readiness,
 )
 from frontend.results import render_analysis_results
+from frontend.xlsx_selection import (
+    XLSXSelectionError,
+    select_excel_input_records,
+    source_row_display_rows,
+)
 
 
 PAGE_TITLE = "Clinical Variant Interpretation"
@@ -154,6 +165,7 @@ class AnalysisSubmission(TypedDict):
 
     uploaded_vcf: UploadedVCF | None
     manual_variants: list[dict[str, object]] | None
+    excel_input_records: list[dict[str, object]] | None
     phenotypes: list[str]
     input_type: str
     phenotype_extraction_model: str
@@ -1236,6 +1248,7 @@ def _prepare_input(
     manual_table: object,
     phenotype_model: str,
     llm_model: str,
+    excel_input_records: list[dict[str, object]] | None = None,
 ) -> AnalysisSubmission | None:
     """Validate frontend presence rules and build one submission."""
 
@@ -1255,8 +1268,11 @@ def _prepare_input(
             )
             return None
         return {
-            "uploaded_vcf": cast(UploadedVCF, uploaded_vcf),
+            "uploaded_vcf": (
+                None if excel_input_records is not None else cast(UploadedVCF, uploaded_vcf)
+            ),
             "manual_variants": None,
+            "excel_input_records": excel_input_records,
             "phenotypes": phenotype_ids,
             "input_type": (
                 "excel"
@@ -1283,6 +1299,7 @@ def _prepare_input(
     return {
         "uploaded_vcf": None,
         "manual_variants": normalized_variants,
+        "excel_input_records": None,
         "phenotypes": phenotype_ids,
         "input_type": "manual",
         "phenotype_extraction_model": phenotype_model,
@@ -1291,6 +1308,96 @@ def _prepare_input(
         ),
         "llm_model": llm_model,
     }
+
+
+def _xlsx_upload_payload(uploaded_vcf: object) -> bytes:
+    """Read one Streamlit upload only for local workbook inspection."""
+
+    payload = getattr(uploaded_vcf, "getvalue", lambda: None)()
+    if not isinstance(payload, bytes):
+        raise ExcelProcessingError("The Excel upload is empty or invalid.")
+    return payload
+
+
+def _xlsx_worksheet_changed() -> None:
+    """Prevent a row selection from one worksheet applying to another."""
+
+    st.session_state.pop("xlsx_selected_source_rows", None)
+    _clear_analysis_result()
+
+
+def _render_xlsx_row_selection(
+    uploaded_vcf: object,
+) -> list[dict[str, object]] | None:
+    """Require an explicit worksheet and 1–10 source rows before analysis."""
+
+    try:
+        payload = _xlsx_upload_payload(uploaded_vcf)
+        upload_identity = sha256(payload).hexdigest()
+        if st.session_state.get("xlsx_upload_identity") != upload_identity:
+            st.session_state["xlsx_upload_identity"] = upload_identity
+            st.session_state.pop("xlsx_selected_worksheet", None)
+            st.session_state.pop("xlsx_selected_source_rows", None)
+        worksheets = discover_excel_worksheets(payload)
+    except ExcelProcessingError as exc:
+        st.error(str(exc))
+        return None
+
+    st.caption(
+        "Review the uploaded source rows before analysis. Source FILTER and "
+        "quality values are retained as provenance; they do not select, rank, "
+        "or exclude candidates."
+    )
+    worksheet_names = [str(item["name"]) for item in worksheets]
+    selected_worksheet = st.selectbox(
+        "Excel worksheet",
+        worksheet_names,
+        index=None,
+        placeholder="Select a worksheet",
+        key="xlsx_selected_worksheet",
+        on_change=_xlsx_worksheet_changed,
+    )
+    if selected_worksheet is None:
+        st.info("Select a worksheet to review its source rows.")
+        return None
+    try:
+        records = parse_excel_input_records(
+            payload,
+            worksheet_name=selected_worksheet,
+        )
+    except ExcelProcessingError as exc:
+        st.error(str(exc))
+        return None
+
+    worksheet_count = next(
+        int(item["candidate_count"])
+        for item in worksheets
+        if item["name"] == selected_worksheet
+    )
+    st.caption(f"{worksheet_count} source candidate rows in {selected_worksheet}.")
+    st.dataframe(source_row_display_rows(records), hide_index=True)
+    selected_rows = st.multiselect(
+        "Selected source rows",
+        [record["row"] for record in records],
+        format_func=lambda row: f"Worksheet {selected_worksheet}, row {row}",
+        placeholder="Select 1–10 source rows",
+        key="xlsx_selected_source_rows",
+        on_change=_clear_analysis_result,
+    )
+    try:
+        selected_records = select_excel_input_records(records, selected_rows)
+    except XLSXSelectionError as exc:
+        if selected_rows:
+            st.error(str(exc))
+        else:
+            st.info("Select 1–10 source rows before analysis.")
+        return None
+    st.success(
+        f"{len(selected_records)} selected source rows are ready for identity preprocessing."
+    )
+    with st.expander("Selected source rows", expanded=False):
+        st.dataframe(source_row_display_rows(selected_records), hide_index=True)
+    return selected_records
 
 
 def _render_variant_input(
@@ -1329,15 +1436,16 @@ def _render_variant_input(
                 _render_manual_variant_table()
             )
 
-        with st.form("analysis_input_form", border=False):
-            if input_mode == VCF_INPUT_MODE:
-                uploaded_vcf = st.file_uploader(
+        excel_input_records: list[dict[str, object]] | None = None
+        if input_mode == VCF_INPUT_MODE:
+            uploaded_vcf = st.file_uploader(
                     "Variant file",
                     type=("vcf", "gz", "xlsx"),
                     key="vcf_upload",
                     help=(
                         "Accepted formats: .vcf, .vcf.gz, and .xlsx. "
-                        "For Excel, only worksheet 1 is read; required "
+                        "For Excel, select a worksheet and source rows before "
+                        "analysis; required "
                         "columns are CHROM, POS, REF, and ALT, while QUAL "
                         "and FILTER are optional. "
                         f"The filtered input must produce 1 to "
@@ -1346,7 +1454,12 @@ def _render_variant_input(
                         f"Maximum size: "
                         f"{settings.MAX_UPLOAD_BYTES // 1_000_000} MB."
                     ),
-                )
+            )
+            filename = str(getattr(uploaded_vcf, "name", ""))
+            if filename.casefold().endswith(".xlsx"):
+                excel_input_records = _render_xlsx_row_selection(uploaded_vcf)
+
+        with st.form("analysis_input_form", border=False):
 
             with st.container(
                 horizontal=True,
@@ -1358,7 +1471,16 @@ def _render_variant_input(
                     type="primary",
                     icon=":material/biotech:",
                     width="stretch",
-                    disabled=job_present or bool(position_errors),
+                    disabled=(
+                        job_present
+                        or bool(position_errors)
+                        or (
+                            input_mode == VCF_INPUT_MODE
+                            and uploaded_vcf is not None
+                            and str(getattr(uploaded_vcf, "name", "")).casefold().endswith(".xlsx")
+                            and excel_input_records is None
+                        )
+                    ),
                 )
                 st.form_submit_button(
                     "Cancelling..." if cancellation_pending else "Cancel",
@@ -1384,6 +1506,7 @@ def _render_variant_input(
                 manual_table,
                 phenotype_model,
                 llm_model,
+                excel_input_records,
             )
     return None
 
@@ -1547,20 +1670,19 @@ def _start_submission(
     def runner(
         progress_callback: PipelineProgressCallback,
     ) -> PipelineResult:
-        return execute_analysis(
-            uploaded_vcf=submission["uploaded_vcf"],
-            manual_variants=submission["manual_variants"],
-            phenotypes=submission["phenotypes"],
-            input_type=submission["input_type"],
-            phenotype_extraction_model=submission[
-                "phenotype_extraction_model"
-            ],
-            phenotype_extraction_provenance=submission[
-                "phenotype_extraction_provenance"
-            ],
-            llm_model=submission["llm_model"],
-            progress_callback=progress_callback,
-        )
+        kwargs: dict[str, object] = {
+            "uploaded_vcf": submission["uploaded_vcf"],
+            "manual_variants": submission["manual_variants"],
+            "phenotypes": submission["phenotypes"],
+            "input_type": submission["input_type"],
+            "phenotype_extraction_model": submission["phenotype_extraction_model"],
+            "phenotype_extraction_provenance": submission["phenotype_extraction_provenance"],
+            "llm_model": submission["llm_model"],
+            "progress_callback": progress_callback,
+        }
+        if submission["excel_input_records"] is not None:
+            kwargs["excel_input_records"] = submission["excel_input_records"]
+        return execute_analysis(**kwargs)
 
     _discard_analysis_result()
     st.session_state[ANALYSIS_NOTICE_KEY] = None
@@ -1578,6 +1700,7 @@ def _start_submission(
                 "phenotype_extraction_provenance"
             ],
             llm_model=submission["llm_model"],
+            excel_input_records=submission["excel_input_records"],
         )
         token = register_analysis_job(
             job,

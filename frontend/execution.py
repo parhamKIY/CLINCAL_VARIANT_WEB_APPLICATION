@@ -1075,14 +1075,37 @@ def prepare_analysis_recovery_request(
     input_type: str | None = None,
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
+    excel_input_records: Sequence[Mapping[str, object]] | None = None,
 ) -> AnalysisRecoveryRequest:
     """Normalize input into a restart-safe analysis-phase checkpoint."""
 
-    if uploaded_vcf is not None and manual_variants is not None:
+    if uploaded_vcf is not None and (
+        manual_variants is not None or excel_input_records is not None
+    ):
         raise FrontendExecutionError(
             "Choose either a variant-file upload or manual table rows."
         )
     try:
+        if excel_input_records is not None:
+            request = AnalysisRecoveryRequest(
+                schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
+                manual_variants=[],
+                phenotypes=list(phenotypes),
+                llm_model=llm_model,
+                input_type=input_type or "excel",
+                phenotype_extraction_model=phenotype_extraction_model,
+                phenotype_extraction_provenance=(
+                    dict(phenotype_extraction_provenance)
+                    if phenotype_extraction_provenance is not None
+                    else None
+                ),
+                analysis_id=None,
+                created_at=time(),
+            )
+            request["excel_input_records"] = [
+                dict(record) for record in excel_input_records
+            ]
+            return request
         if uploaded_vcf is None:
             variants = list(
                 process_vcf(manual_variants=manual_variants)

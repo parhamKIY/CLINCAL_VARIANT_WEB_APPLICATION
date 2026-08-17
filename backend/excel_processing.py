@@ -1,4 +1,4 @@
-"""First-worksheet-only Excel input for filtered variant tables."""
+"""Safe Excel source-table parsing for explicitly selected variant rows."""
 
 from __future__ import annotations
 
@@ -311,8 +311,36 @@ def parse_excel_variants(payload: bytes) -> list[VariantData]:
             workbook.close()
 
 
-def parse_excel_input_records(payload: bytes) -> list[dict[str, object]]:
-    """Read sheet 1 source records without converting ANNOVAR-like alleles."""
+def _worksheet_for_name(
+    workbook: object,
+    worksheet_name: str | None,
+) -> tuple[object, str]:
+    """Return one named worksheet, retaining legacy sheet-1 parsing only."""
+
+    sheetnames = getattr(workbook, "sheetnames", ())
+    if not sheetnames:
+        raise ExcelProcessingError("The Excel workbook does not contain a worksheet.")
+    if worksheet_name is None:
+        name = sheetnames[0]
+        return workbook[name], "Excel worksheet 1"
+    if not isinstance(worksheet_name, str) or worksheet_name not in sheetnames:
+        raise ExcelProcessingError(
+            "The Excel workbook does not contain worksheet "
+            f"{worksheet_name!r}."
+        )
+    return workbook[worksheet_name], f"Excel worksheet {worksheet_name!r}"
+
+
+def parse_excel_input_records(
+    payload: bytes,
+    *,
+    worksheet_name: str | None = None,
+) -> list[dict[str, object]]:
+    """Read one source worksheet without converting ANNOVAR-like alleles.
+
+    ``worksheet_name`` is required by the Stage-3 UI.  Omitting it retains the
+    established sheet-1 API for durable pre-Stage-3 callers only.
+    """
 
     if not isinstance(payload, bytes) or not payload:
         raise ExcelProcessingError("The Excel upload is empty or invalid.")
@@ -324,21 +352,29 @@ def parse_excel_input_records(payload: bytes) -> list[dict[str, object]]:
             data_only=True,
             keep_links=False,
         )
-        if not workbook.sheetnames:
-            raise ExcelProcessingError("The Excel workbook does not contain a worksheet.")
-        worksheet = workbook[workbook.sheetnames[0]]
+        worksheet, worksheet_label = _worksheet_for_name(
+            workbook,
+            worksheet_name,
+        )
         rows = worksheet.iter_rows(values_only=True)
         try:
             header = tuple(next(rows))
         except StopIteration as exc:
-            raise ExcelProcessingError("Excel worksheet 1 is empty.") from exc
-        indexes = _column_indexes(header)
+            raise ExcelProcessingError(f"{worksheet_label} is empty.") from exc
+        try:
+            indexes = _column_indexes(header)
+        except ExcelProcessingError as exc:
+            raise ExcelProcessingError(
+                str(exc).replace("Excel worksheet 1", worksheet_label)
+            ) from exc
         recognized_indexes = tuple(indexes.values())
         records: list[dict[str, object]] = []
         for scanned_count, raw_values in enumerate(rows, start=1):
             row_number = scanned_count + 1
             if scanned_count > MAX_EXCEL_ROWS_SCANNED:
-                raise ExcelProcessingError("Excel worksheet 1 exceeds the safe row-scan limit.")
+                raise ExcelProcessingError(
+                    f"{worksheet_label} exceeds the safe row-scan limit."
+                )
             values = tuple(raw_values)
             if all(_is_blank(values[index] if index < len(values) else None) for index in recognized_indexes):
                 continue
@@ -368,12 +404,10 @@ def parse_excel_input_records(payload: bytes) -> list[dict[str, object]]:
                     "gq": value_for("gq"),
                 }
             )
-            if len(records) > MAX_VARIANTS_PER_ANALYSIS:
-                raise ExcelProcessingError(
-                    f"Excel worksheet 1 cannot contain more than {MAX_VARIANTS_PER_ANALYSIS} variant rows."
-                )
         if not records:
-            raise ExcelProcessingError("Excel worksheet 1 must contain at least one variant row.")
+            raise ExcelProcessingError(
+                f"{worksheet_label} must contain at least one variant row."
+            )
         return records
     except ExcelProcessingError:
         raise
@@ -384,12 +418,41 @@ def parse_excel_input_records(payload: bytes) -> list[dict[str, object]]:
             workbook.close()
 
 
+def discover_excel_worksheets(payload: bytes) -> list[dict[str, object]]:
+    """Return actual selectable worksheets and their unranked source-row counts."""
+
+    if not isinstance(payload, bytes) or not payload:
+        raise ExcelProcessingError("The Excel upload is empty or invalid.")
+    workbook = None
+    try:
+        sanitized = _sanitize_dot_numeric_cells(payload)
+        workbook = load_workbook(
+            BytesIO(sanitized),
+            read_only=True,
+            data_only=True,
+            keep_links=False,
+        )
+        names = tuple(workbook.sheetnames)
+    except (BadZipFile, InvalidFileException, KeyError, OSError, ParseError, ValueError) as exc:
+        raise ExcelProcessingError("The .xlsx upload is damaged or invalid.") from exc
+    finally:
+        if workbook is not None:
+            workbook.close()
+
+    discovered: list[dict[str, object]] = []
+    for name in names:
+        records = parse_excel_input_records(payload, worksheet_name=name)
+        discovered.append({"name": name, "candidate_count": len(records)})
+    return discovered
+
+
 __all__ = [
     "EXCEL_COLUMN_ALIASES",
     "ExcelProcessingError",
     "OPTIONAL_EXCEL_COLUMNS",
     "REQUIRED_EXCEL_COLUMNS",
     "SUPPORTED_EXCEL_SUFFIXES",
+    "discover_excel_worksheets",
     "parse_excel_input_records",
     "parse_excel_variants",
 ]

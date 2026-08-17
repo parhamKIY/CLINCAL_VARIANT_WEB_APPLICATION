@@ -110,6 +110,12 @@ biological evidence. The fallback controls are `UCSC_SEQUENCE_BASE_URL`,
 `ENABLE_UCSC_SEQUENCE_FALLBACK`.
 Reference-route semantics and coordinate translation are recorded in
 [`docs/input_preprocessing_stage2c.md`](docs/input_preprocessing_stage2c.md).
+For `.xlsx` uploads, the user explicitly selects a worksheet and one to ten
+source rows before preprocessing. The application performs no workbook candidate
+ranking, Top-N selection, or automatic quality/FILTER selection; caller quality
+metadata is retained as source provenance. Inputs requiring identity attention
+remain visible but do not enter annotations, Evidence Objects, or LLM payloads.
+See [`docs/input_preprocessing_stage3.md`](docs/input_preprocessing_stage3.md).
 
 The complete stage register, API catalog, safety declaration, demonstration
 guide, and limitations are maintained in
@@ -583,9 +589,12 @@ configured assembly.
 
 ### Excel upload
 
-Excel `.xlsx` input reads worksheet index 0 only. Later worksheets are never
-iterated or included in normalized input, recovery checkpoints, persistence, logs,
-provider calls, LLM payloads, or exports.
+Excel `.xlsx` input exposes actual worksheet names. The user explicitly chooses one
+worksheet and one to ten source rows; no sheet or rows are inferred from order,
+FILTER, quality, phenotype score, pathogenicity, or any Top-N rule. Only selected
+source rows are retained in the private recovery checkpoint and pass to identity
+preprocessing. Unresolved source rows remain accounted for but never enter provider,
+Evidence Object, interpretation, or LLM payloads.
 
 Required columns are `CHROM`, `POS`, `REF`, and `ALT`. Optional columns are `QUAL`
 and `FILTER`. Headers are matched case-insensitively using these deterministic
@@ -600,9 +609,10 @@ aliases:
 | `QUAL` | `QUAL`, `Quality` |
 | `FILTER` | `FILTER`, `Filter status` |
 
-Unknown columns are ignored. Excel rows pass through the same assembly, coordinate,
-allele, multiallelic-splitting, ordering, and ten-variant validation contract used
-by the existing input paths.
+Unknown columns are ignored. Source `FILTER`, QUAL, depth, AD, and GQ are displayed
+as caller metadata and never decide selection eligibility. Excel rows pass through
+the same assembly, coordinate, allele, ordering, and selected-input identity
+preprocessing contract used by the existing input paths.
 
 ### Phenotype input
 
@@ -789,8 +799,9 @@ and redacted structured logging is initialized.
 
 ## Using the application
 
-1. Choose filtered VCF/VCF.GZ/XLSX upload or manual-table input.
-2. Supply one to ten valid variants.
+1. Choose filtered VCF/VCF.GZ/XLSX upload or manual-table input. For XLSX, select
+   one worksheet and one to ten candidate rows explicitly.
+2. Supply one to ten valid variants; XLSX source quality flags are informational.
 3. Select/search HPO terms manually, or extract candidates from a de-identified
    Persian description, edit them, and explicitly accept the locally validated set.
 4. Choose one Phenotype Extraction Model and one Variant Interpretation Model.

@@ -24,8 +24,8 @@
 
 This repository implements an evidence-centered clinical variant interpretation
 workflow for one to ten already-filtered germline Mendelian variants. It accepts a
-filtered VCF/VCF.GZ file, the first worksheet of an Excel `.xlsx` workbook, or a
-manual VCF-style table, validates and standardizes each allele, collects independent
+filtered VCF/VCF.GZ file, user-selected rows from a user-selected worksheet of an
+Excel `.xlsx` workbook, or a manual VCF-style table, validates and standardizes each allele, collects independent
 annotation and phenotype evidence, interprets every variant with one selected model,
 then presents ordered evidence and interpretation state for human review and final
 confirmation. Per-variant model failures remain explicit without removing collected
@@ -1753,8 +1753,9 @@ job; when the job has completed and the result was persisted, the UI reloads it 
 SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
 A private one-hour checkpoint stores normalized variants, HPO terms, task model
 choices, and bounded extraction provenance, never raw VCF content. For an XLSX
-zero-allele source form it also stores only the bounded first-sheet source records
-needed to repeat GRCh38 identity verification; it never stores later worksheets.
+zero-allele source form it also stores only the bounded user-selected source records
+needed to repeat GRCh38 identity verification; unselected worksheets and rows never
+enter the checkpoint.
 After a
 process/server restart, a checkpoint linked to a durably persisted draft reloads that
 state without another interpretation call. Only interrupted, unpersisted work reruns
@@ -1780,8 +1781,8 @@ resume error.
   same redaction/rejection boundary.
 - Exact task-specific payload validation prevents phenotype clinical text and
   interpretation evidence from being mixed across model entry points.
-- Ignored Excel worksheets are eliminated before provider/model, logging, database,
-  report, and export boundaries.
+- Unselected Excel worksheets and rows are eliminated before provider/model,
+  logging, database, report, and export boundaries.
 - Evidence confirmation requires an explicit no-PHI attestation in the Streamlit UI;
   saving or resetting a Draft clears the attestation and invalidates confirmation.
 - Human-review state and audit history are bounded and validated before persistence.
