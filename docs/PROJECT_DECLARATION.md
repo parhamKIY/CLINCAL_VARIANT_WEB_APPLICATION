@@ -8,8 +8,8 @@
 **Primary interface:** Streamlit  
 **Primary language:** Python
 
-> **Evidence-resilience closeout (2026-08-17):** Stages 1–10 are COMPLETE /
-> APPROVED and Stage 11 is COMPLETE / REVIEW PENDING. This workstream preserves the
+> **Evidence-resilience closeout (2026-08-17):** Stages 1–11 are COMPLETE /
+> APPROVED. This workstream preserves the
 > existing product boundary: 1–10 already-selected variants, evidence aggregation
 > and normalization, one selected interpretation LLM, and mandatory human review;
 > it does not add raw-VCF filtering, prioritization/ranking/Top-N selection,
@@ -1363,10 +1363,12 @@ Variant Report, and Stage 86 review-record identity.
 
 The gate uses an assembly-qualified digest of chromosome, position, reference, and
 alternate allele. Gene is deliberately excluded, so multiple alleles in one gene
-remain separate. Pipeline schema `3.2` validates non-empty stage cardinalities against
-the accepted input, rejects reordering or identity drift, and persists the ledger.
-Schemas `2.8`, `2.9`, and `3.0` receive a bounded order-preserving migration without
-provider or model reruns.
+remain separate. Pipeline schema `3.3` retains a separate ordered
+`input_preprocessing_results` ledger for every selected input, while its accepted
+canonical variants retain the existing downstream cardinality and identity gates.
+An `IDENTITY_UNRESOLVED` input has no canonical link and never becomes an annotation,
+Evidence Object, or LLM input. Schemas `2.8` through `3.2` receive bounded,
+order-preserving migrations without provider or model reruns.
 
 `tests/test_stage87_variant_integrity.py` supplies seven variants, including repeated
 `SCN1A` annotations, and proves parser, normalized, pipeline, evidence, draft, and
@@ -1721,7 +1723,7 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.2`.
+- Active pipeline schema: `3.3`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
@@ -1731,6 +1733,12 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 - Variant Integrity Record schema: `1.0`.
 - Final Clinical Report schema: `2.0`.
 - Recovery request schema: `3`.
+
+Pipeline schema `3.3` persists an input-preprocessing result for each selected input:
+source provenance, deterministic status, warnings/failure reason, and an explicit
+canonical-variant/integrity link when identity is established. The selected-input
+count is independent of analyzable downstream cardinality; unresolved inputs are
+retained only at this input boundary.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
 interprets each variant, and persists the ordered review state. Review may edit and

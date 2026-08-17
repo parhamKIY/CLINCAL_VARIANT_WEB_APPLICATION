@@ -430,7 +430,7 @@ def test_shadow_is_sanitized_persistable_and_historical_evidence_stays_readable(
     assert validate_evidence_object(historical) == historical
     assert EVIDENCE_SCHEMA_VERSION == "2.5"
     assert DATABASE_SCHEMA_VERSION == 4
-    assert PIPELINE_SCHEMA_VERSION == "3.2"
+    assert PIPELINE_SCHEMA_VERSION == "3.3"
 
 
 def test_counterfactual_comparison_freezes_shadow_before_vep_comparator() -> None:

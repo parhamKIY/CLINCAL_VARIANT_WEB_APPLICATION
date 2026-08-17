@@ -27,11 +27,17 @@ This document deliberately does not reproduce those documents. It records the ap
 
 Stages 1–10 are COMPLETE / APPROVED. Stage 11 reconciles this roadmap, the master
 handoff, project declaration, README, and `.env.example`; no production behavior is
-changed. EvidenceObject remains `2.5`, SQLite remains `4`, and pipeline remains
-`3.2`. Stage-6 shadow and promotion schemas are `1.0`; Stage-7 coverage and Stage-8
+changed. EvidenceObject remains `2.5`, SQLite remains `4`, and pipeline was
+`3.2` at closeout. Stage-6 shadow and promotion schemas are `1.0`; Stage-7 coverage and Stage-8
 disposition are runtime-only schema `1.0`; Stage-10 trace is audit-only schema `1.0`.
 There is no automatic Stage 12. Subsequent stabilization or report visual sign-off is
 a separate workstream and requires separate approval.
+
+Post-closeout input stabilization is separate from this closed workstream. Its Stage
+2A advances only the pipeline result contract to `3.3`: every selected input has an
+input-preprocessing result, while `IDENTITY_UNRESOLVED` inputs never become Evidence
+Objects or LLM input. SQLite remains `4`; no Evidence-Resilience semantic contract
+is changed.
 
 The implementation record below contains historical planning text where explicitly
 labelled. Those snapshots do not override the completed-stage implementation notes

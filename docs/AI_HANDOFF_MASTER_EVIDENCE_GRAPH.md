@@ -4,7 +4,7 @@
 **Project:** Clinical Variant Interpretation  
 **Primary implementation:** Python + Streamlit  
 **Current input scope:** 1–10 already-filtered germline Mendelian variants  
-**Current implementation baseline:** Stages 0–114 implemented; evidence-resilience Stages 1–10 COMPLETE / APPROVED; Stage 11 COMPLETE / REVIEW PENDING; Stage 115 final visual sign-off remains separate  
+**Current implementation baseline:** Stages 0–114 implemented; evidence-resilience Stages 1–11 COMPLETE / APPROVED; Stage 115 final visual sign-off remains separate
 **Handoff status:** Evidence-resilience implementation and documentation closeout completed; no automatic successor  
 **Last architecture update:** 2026-08-17 (+03:30)  
 **Primary source documents:** `PROJECT_DECLARATION(1).md`, `Evidence Graph Architecture Audit` (2026-08-16), and user-run API probe logs V1–V4
@@ -38,6 +38,11 @@ human review / edits / include-exclude decision
         ↓
 final report
 ```
+
+Selected-input stabilization is a pre-evidence boundary: `input_preprocessing_results`
+accounts for every selected input separately from canonical variants. An
+`IDENTITY_UNRESOLVED` input has no canonical variant and never enters the Evidence
+Graph, Evidence Object, or LLM payload.
 
 The project is **evidence-centered**. APIs are not the product. Each API is only a provider for one or more evidence nodes.
 

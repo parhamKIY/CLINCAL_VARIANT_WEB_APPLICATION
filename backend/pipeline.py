@@ -55,6 +55,11 @@ from backend.final_clinical_report import (
     compose_final_clinical_report,
     validate_final_clinical_report,
 )
+from backend.input_preprocessing import (
+    InputPreprocessingError,
+    build_accepted_input_result,
+    validate_input_preprocessing_results,
+)
 from backend.llm import LLMClient
 from backend.llm_routing import (
     RoutingProgressCallback,
@@ -120,7 +125,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.2"
+PIPELINE_SCHEMA_VERSION = "3.3"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -280,6 +285,7 @@ class PipelineResult(TypedDict):
     variant_count: int
     variants: list[dict[str, object]]
     variant_integrity_records: list[dict[str, object]]
+    input_preprocessing_results: list[dict[str, object]]
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
@@ -522,6 +528,7 @@ def create_pipeline_result() -> PipelineResult:
         "variant_count": 0,
         "variants": [],
         "variant_integrity_records": [],
+        "input_preprocessing_results": [],
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
@@ -540,6 +547,124 @@ def create_pipeline_result() -> PipelineResult:
         "errors": [],
     }
     return validate_pipeline_result(result)
+
+
+def attach_input_preprocessing_results(
+    result: Mapping[str, object],
+    input_preprocessing_results: Sequence[Mapping[str, object]],
+) -> PipelineResult:
+    """Attach selected-input outcomes without altering downstream evidence."""
+
+    candidate = deepcopy(dict(result))
+    candidate["input_preprocessing_results"] = [
+        dict(item) for item in input_preprocessing_results
+    ]
+    return validate_pipeline_result(candidate)
+
+
+def migrate_pipeline_schema32_to33(raw: object) -> PipelineResult | None:
+    """Add deterministic selected-input links to a validated 3.2 snapshot."""
+
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != "3.2":
+        return None
+    candidate = deepcopy(dict(raw))
+    variants = candidate.get("variants")
+    integrity_records = candidate.get("variant_integrity_records")
+    analysis_context = candidate.get("analysis_context")
+    if (
+        not isinstance(variants, list)
+        or not all(isinstance(item, Mapping) for item in variants)
+        or not isinstance(integrity_records, list)
+        or not all(isinstance(item, Mapping) for item in integrity_records)
+    ):
+        return None
+    if not integrity_records and variants:
+        evidence_objects = candidate.get("evidence_objects")
+        draft_reports = candidate.get("draft_variant_reports")
+        review_records = candidate.get("variant_report_records")
+        try:
+            indexed_variants = index_input_variants(variants)
+            candidate["variants"] = indexed_variants
+            candidate["variant_integrity_records"] = [
+                dict(record)
+                for record in build_variant_integrity_records(
+                    indexed_variants,
+                    indexed_variants,
+                    assembly=(
+                        evidence_objects[0]["assembly"]
+                        if isinstance(evidence_objects, list)
+                        and evidence_objects
+                        and isinstance(evidence_objects[0], Mapping)
+                        else settings.GENOME_ASSEMBLY
+                    ),
+                    evidence_objects=(
+                        evidence_objects
+                        if isinstance(evidence_objects, list)
+                        else []
+                    ),
+                    draft_reports=(
+                        draft_reports if isinstance(draft_reports, list) else []
+                    ),
+                    review_records=(
+                        review_records
+                        if isinstance(review_records, list)
+                        else []
+                    ),
+                )
+            ]
+            variants = candidate["variants"]
+            integrity_records = candidate["variant_integrity_records"]
+        except (VariantIntegrityError, TypeError, ValueError, KeyError):
+            return None
+    if len(variants) != len(integrity_records):
+        return None
+    source_type = (
+        analysis_context.get("input_type")
+        if isinstance(analysis_context, Mapping)
+        else None
+    )
+    if source_type not in {"vcf", "vcf_gz", "excel", "manual"}:
+        source_type = "manual"
+    try:
+        candidate["input_preprocessing_results"] = [
+            dict(
+                build_accepted_input_result(
+                    source_index=index,
+                    source_type=source_type,
+                    source_provenance=None,
+                    canonical_variant={
+                        field: variant[field]
+                        for field in ("chrom", "pos", "ref", "alt")
+                    },
+                    canonical_variant_index=index,
+                    canonical_variant_identity=integrity["parser_allele_identity"],
+                )
+            )
+            for index, (variant, integrity) in enumerate(
+                zip(variants, integrity_records, strict=True)
+            )
+        ]
+    except (InputPreprocessingError, KeyError, TypeError, ValueError):
+        return None
+    candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
+    final_clinical_report = candidate.get("final_clinical_report")
+    if isinstance(final_clinical_report, Mapping):
+        generated_at = final_clinical_report.get("generated_at")
+        if not isinstance(generated_at, str):
+            return None
+        try:
+            candidate["final_clinical_report"] = dict(
+                compose_final_clinical_report(
+                    candidate,
+                    timestamp=generated_at,
+                )
+            )
+        except FinalClinicalReportError:
+            return None
+    try:
+        return validate_pipeline_result(candidate)
+    except (PipelineResultError, TypeError, ValueError):
+        return None
 
 
 def validate_analysis_context(value: object) -> AnalysisContext:
@@ -841,6 +966,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
     for field in (
         "variants",
         "variant_integrity_records",
+        "input_preprocessing_results",
         "annotations",
         "phenotype_results",
         "evidence_objects",
@@ -866,6 +992,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 for field in (
                     "variants",
                     "variant_integrity_records",
+                    "input_preprocessing_results",
                     "analysis_context",
                     "annotations",
                     "phenotype_results",
@@ -892,6 +1019,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             "pipeline.variant_count must match the complete variant list."
         )
     integrity_records = value["variant_integrity_records"]
+    validated_integrity_records: list[dict[str, object]] = []
     if integrity_records:
         for field in (
             "annotations",
@@ -924,6 +1052,48 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             raise PipelineResultError(
                 "pipeline.variant_integrity_records must preserve input order."
             )
+    if (
+        not value["input_preprocessing_results"]
+        and value["variants"]
+        and validated_integrity_records
+    ):
+        source_type = analysis_context["input_type"] or "manual"
+        value["input_preprocessing_results"] = [
+            dict(
+                build_accepted_input_result(
+                    source_index=index,
+                    source_type=source_type,
+                    source_provenance={
+                        "normalization_provenance": "legacy_result_backfill"
+                    },
+                    canonical_variant=variant,
+                    canonical_variant_index=index,
+                    canonical_variant_identity=integrity["parser_allele_identity"],
+                )
+            )
+            for index, (variant, integrity) in enumerate(
+                zip(
+                    value["variants"],
+                    validated_integrity_records,
+                    strict=True,
+                )
+            )
+        ]
+    if integrity_records or not value["variants"]:
+        try:
+            validate_input_preprocessing_results(
+                value["input_preprocessing_results"],
+                variants=value["variants"],
+                variant_integrity_records=validated_integrity_records,
+            )
+        except InputPreprocessingError as exc:
+            raise PipelineResultError(
+                "pipeline.input_preprocessing_results is invalid."
+            ) from exc
+    elif value["input_preprocessing_results"]:
+        raise PipelineResultError(
+            "pipeline.input_preprocessing_results requires integrity records."
+        )
     if analysis_context["accepted_hpo_terms"] and value[
         "phenotype_results"
     ]:
@@ -1768,6 +1938,21 @@ def _process_filtered_variants(
         raise PipelineError(
             "Parser and normalized variant identity did not match."
         ) from exc
+    result["input_preprocessing_results"] = [
+        dict(
+            build_accepted_input_result(
+                source_index=index,
+                source_type=request["input_mode"],
+                source_provenance=None,
+                canonical_variant=indexed_variants[index],
+                canonical_variant_index=index,
+                canonical_variant_identity=result["variant_integrity_records"][index][
+                    "parser_allele_identity"
+                ],
+            )
+        )
+        for index in range(result["variant_count"])
+    ]
     LOGGER.info(
         "event=filtered_variants_loaded variant_count=%d",
         result["variant_count"],

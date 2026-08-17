@@ -87,7 +87,7 @@ its original input order.
   reviewer-facing fallback transparency, and deterministic failure injection are
   implemented, documented, and offline-verified; the multi-variant resilience gate
   and manual reachability utility are available.
-- Pipeline schema: `3.2`.
+- Pipeline schema: `3.3`.
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.2`.
@@ -96,6 +96,10 @@ its original input order.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
 - Current verified suite: **1225 passed, 6 skipped**.
 - External-provider availability is not implied by the offline test result.
+
+Post-closeout selected-input stabilization separates every retained user-selected
+input from analyzable canonical variants. `IDENTITY_UNRESOLVED` inputs remain
+input-level records and never become annotations, Evidence Objects, or LLM input.
 
 The complete stage register, API catalog, safety declaration, demonstration
 guide, and limitations are maintained in
