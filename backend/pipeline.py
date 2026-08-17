@@ -57,7 +57,10 @@ from backend.final_clinical_report import (
 )
 from backend.input_preprocessing import (
     InputPreprocessingError,
+    InputPreprocessingStatus,
+    adapt_annovar_like_record,
     build_accepted_input_result,
+    build_unresolved_input_result,
     validate_input_preprocessing_results,
 )
 from backend.llm import LLMClient
@@ -1877,6 +1880,8 @@ def _process_filtered_variants(
     request: AnalysisInput,
     result: PipelineResult,
     *,
+    adapted_input_records: Sequence[Mapping[str, object]] | None = None,
+    source_type: str | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Load every variant from the pre-filtered input table."""
@@ -1900,7 +1905,17 @@ def _process_filtered_variants(
     )
     _notify_progress(result, progress_callback)
 
-    if request["input_mode"] == "vcf":
+    if adapted_input_records is not None:
+        raw_variants = [
+            dict(candidate["canonical_variant"])
+            for candidate in adapted_input_records
+            if candidate.get("status") in {
+                "ACCEPTED_DIRECT",
+                "NORMALIZED_AND_ACCEPTED",
+            }
+            and isinstance(candidate.get("canonical_variant"), Mapping)
+        ]
+    elif request["input_mode"] == "vcf":
         raw_variants = list(
             process_vcf(vcf_path=request["vcf_path"])
         )
@@ -1938,21 +1953,58 @@ def _process_filtered_variants(
         raise PipelineError(
             "Parser and normalized variant identity did not match."
         ) from exc
-    result["input_preprocessing_results"] = [
-        dict(
-            build_accepted_input_result(
-                source_index=index,
-                source_type=request["input_mode"],
-                source_provenance=None,
-                canonical_variant=indexed_variants[index],
-                canonical_variant_index=index,
-                canonical_variant_identity=result["variant_integrity_records"][index][
-                    "parser_allele_identity"
-                ],
+    if adapted_input_records is None:
+        result["input_preprocessing_results"] = [
+            dict(
+                build_accepted_input_result(
+                    source_index=index,
+                    source_type=request["input_mode"],
+                    source_provenance=None,
+                    canonical_variant=indexed_variants[index],
+                    canonical_variant_index=index,
+                    canonical_variant_identity=result["variant_integrity_records"][index][
+                        "parser_allele_identity"
+                    ],
+                )
             )
-        )
-        for index in range(result["variant_count"])
-    ]
+            for index in range(result["variant_count"])
+        ]
+    else:
+        input_results: list[dict[str, object]] = []
+        canonical_index = 0
+        for source_index, candidate in enumerate(adapted_input_records):
+            provenance = candidate.get("source_provenance")
+            if not isinstance(provenance, Mapping):
+                raise PipelineError("Input preprocessing provenance is invalid.")
+            if candidate.get("status") == "IDENTITY_UNRESOLVED":
+                reason = candidate.get("failure_reason")
+                if not isinstance(reason, str):
+                    raise PipelineError("Input preprocessing failure reason is invalid.")
+                input_results.append(
+                    dict(build_unresolved_input_result(
+                        source_index=source_index,
+                        source_type=source_type or request["input_mode"],
+                        source_provenance=provenance,
+                        failure_reason=reason,
+                    ))
+                )
+                continue
+            input_results.append(
+                dict(build_accepted_input_result(
+                    source_index=source_index,
+                    source_type=source_type or request["input_mode"],
+                    source_provenance=provenance,
+                    canonical_variant=indexed_variants[canonical_index],
+                    canonical_variant_index=canonical_index,
+                    canonical_variant_identity=result["variant_integrity_records"][canonical_index]["parser_allele_identity"],
+                    status=cast(
+                        InputPreprocessingStatus,
+                        candidate["status"],
+                    ),
+                ))
+            )
+            canonical_index += 1
+        result["input_preprocessing_results"] = input_results
     LOGGER.info(
         "event=filtered_variants_loaded variant_count=%d",
         result["variant_count"],
@@ -2812,6 +2864,72 @@ def run_variant_processing(
     _process_filtered_variants(
         request,
         result,
+    )
+    return validate_pipeline_result(result)
+
+
+def run_annovar_like_input_processing(
+    input_records: Sequence[Mapping[str, object]],
+    phenotypes: list[str] | tuple[str, ...],
+    *,
+    reference_fetcher: Callable[..., Mapping[str, object]] | None = None,
+) -> PipelineResult:
+    """Process source records through the canonical input boundary only."""
+
+    if not input_records:
+        raise PipelineInputError("At least one selected input is required.")
+    adapted = [
+        adapt_annovar_like_record(
+            record,
+            **(
+                {"reference_fetcher": reference_fetcher}
+                if reference_fetcher is not None
+                else {}
+            ),
+        )
+        for record in input_records
+    ]
+    canonical_variants = [
+        cast(Mapping[str, object], item["canonical_variant"])
+        for item in adapted
+        if isinstance(item.get("canonical_variant"), Mapping)
+    ]
+    if not canonical_variants:
+        result = create_pipeline_result()
+        result["analysis_context"] = validate_analysis_context(
+            {
+                "input_type": "excel",
+                "accepted_hpo_terms": list(phenotypes),
+                "phenotype_extraction_model": None,
+                "variant_interpretation_model": None,
+                "phenotype_extraction_provenance": None,
+            }
+        )
+        result["input_preprocessing_results"] = [
+            dict(
+                build_unresolved_input_result(
+                    source_index=source_index,
+                    source_type="excel",
+                    source_provenance=cast(
+                        Mapping[str, object], candidate["source_provenance"]
+                    ),
+                    failure_reason=cast(str, candidate["failure_reason"]),
+                )
+            )
+            for source_index, candidate in enumerate(adapted)
+        ]
+        return validate_pipeline_result(result)
+    request = validate_analysis_input(
+        vcf_path=None,
+        manual_variants=canonical_variants,
+        phenotypes=phenotypes,
+    )
+    result = create_pipeline_result()
+    _process_filtered_variants(
+        request,
+        result,
+        adapted_input_records=adapted,
+        source_type="excel",
     )
     return validate_pipeline_result(result)
 
@@ -4011,6 +4129,7 @@ __all__ = [
     "retry_failed_variant_interpretation",
     "create_pipeline_result",
     "run_analysis",
+    "run_annovar_like_input_processing",
     "update_draft_variant_report",
     "run_annotation_and_phenotype",
     "run_variant_processing",

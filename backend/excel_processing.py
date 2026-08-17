@@ -34,6 +34,7 @@ EXCEL_COLUMN_ALIASES: Final = {
     "pos": "pos",
     "position": "pos",
     "start": "pos",
+    "end": "end",
     "ref": "ref",
     "reference": "ref",
     "alt": "alt",
@@ -43,6 +44,11 @@ EXCEL_COLUMN_ALIASES: Final = {
     "quality": "qual",
     "filter": "filter",
     "filter_status": "filter",
+    "depth": "depth",
+    "dp": "depth",
+    "ad": "ad",
+    "gt_quality": "gq",
+    "gq": "gq",
 }
 
 
@@ -115,16 +121,8 @@ def _excel_position(value: object, row_number: int) -> object:
 
 
 def _excel_alternate(value: object) -> object:
-    """Map an exported table's zero deletion marker to canonical ALT."""
+    """Retain source ALT; ANNOVAR-like zero is not a canonical allele."""
 
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == 0
-    ) or (
-        isinstance(value, str) and value.strip() == "0"
-    ):
-        return "<DEL>"
     return value
 
 
@@ -313,11 +311,85 @@ def parse_excel_variants(payload: bytes) -> list[VariantData]:
             workbook.close()
 
 
+def parse_excel_input_records(payload: bytes) -> list[dict[str, object]]:
+    """Read sheet 1 source records without converting ANNOVAR-like alleles."""
+
+    if not isinstance(payload, bytes) or not payload:
+        raise ExcelProcessingError("The Excel upload is empty or invalid.")
+    workbook = None
+    try:
+        workbook = load_workbook(
+            BytesIO(_sanitize_dot_numeric_cells(payload)),
+            read_only=True,
+            data_only=True,
+            keep_links=False,
+        )
+        if not workbook.sheetnames:
+            raise ExcelProcessingError("The Excel workbook does not contain a worksheet.")
+        worksheet = workbook[workbook.sheetnames[0]]
+        rows = worksheet.iter_rows(values_only=True)
+        try:
+            header = tuple(next(rows))
+        except StopIteration as exc:
+            raise ExcelProcessingError("Excel worksheet 1 is empty.") from exc
+        indexes = _column_indexes(header)
+        recognized_indexes = tuple(indexes.values())
+        records: list[dict[str, object]] = []
+        for scanned_count, raw_values in enumerate(rows, start=1):
+            row_number = scanned_count + 1
+            if scanned_count > MAX_EXCEL_ROWS_SCANNED:
+                raise ExcelProcessingError("Excel worksheet 1 exceeds the safe row-scan limit.")
+            values = tuple(raw_values)
+            if all(_is_blank(values[index] if index < len(values) else None) for index in recognized_indexes):
+                continue
+            def value_for(column: str) -> object:
+                index = indexes.get(column)
+                return None if index is None or index >= len(values) else values[index]
+            chromosome = value_for("chrom")
+            if isinstance(chromosome, (int, float)) and not isinstance(chromosome, bool):
+                chromosome = str(chromosome).removesuffix(".0")
+            records.append(
+                {
+                    "worksheet": worksheet.title,
+                    "row": row_number,
+                    "chrom": chromosome,
+                    "start": _excel_position(value_for("pos"), row_number),
+                    "end": (
+                        _excel_position(value_for("end"), row_number)
+                        if value_for("end") is not None
+                        else None
+                    ),
+                    "ref": value_for("ref"),
+                    "alt": value_for("alt"),
+                    "qual": value_for("qual"),
+                    "filter": value_for("filter"),
+                    "depth": value_for("depth"),
+                    "ad": value_for("ad"),
+                    "gq": value_for("gq"),
+                }
+            )
+            if len(records) > MAX_VARIANTS_PER_ANALYSIS:
+                raise ExcelProcessingError(
+                    f"Excel worksheet 1 cannot contain more than {MAX_VARIANTS_PER_ANALYSIS} variant rows."
+                )
+        if not records:
+            raise ExcelProcessingError("Excel worksheet 1 must contain at least one variant row.")
+        return records
+    except ExcelProcessingError:
+        raise
+    except (BadZipFile, InvalidFileException, KeyError, OSError, ParseError, ValueError) as exc:
+        raise ExcelProcessingError("The .xlsx upload is damaged or invalid.") from exc
+    finally:
+        if workbook is not None:
+            workbook.close()
+
+
 __all__ = [
     "EXCEL_COLUMN_ALIASES",
     "ExcelProcessingError",
     "OPTIONAL_EXCEL_COLUMNS",
     "REQUIRED_EXCEL_COLUMNS",
     "SUPPORTED_EXCEL_SUFFIXES",
+    "parse_excel_input_records",
     "parse_excel_variants",
 ]

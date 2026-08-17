@@ -23,20 +23,31 @@ from typing import (
     Protocol,
     Sequence,
     TypedDict,
+    NotRequired,
     cast,
 )
 from uuid import uuid4
 
-from backend.database import DatabaseError, load_pipeline_state
+from backend.database import (
+    DatabaseError,
+    load_pipeline_state,
+    save_pipeline_state,
+)
 from backend.pipeline import (
     ANALYSIS_ID_PATTERN,
     PipelineProgressCallback,
     PipelineResult,
     PipelineResultError,
+    attach_input_preprocessing_results,
+    run_annovar_like_input_processing,
     run_analysis,
     validate_analysis_context,
 )
-from backend.excel_processing import parse_excel_variants
+from backend.excel_processing import (
+    parse_excel_input_records,
+    parse_excel_variants,
+)
+from backend.input_preprocessing import classify_source_representation
 from backend.vcf_processing import (
     VCFProcessingError,
     process_vcf,
@@ -95,6 +106,7 @@ class AnalysisRecoveryRequest(TypedDict):
 
     schema_version: int
     manual_variants: list[dict[str, object]]
+    excel_input_records: NotRequired[list[dict[str, object]]]
     phenotypes: list[str]
     llm_model: str | None
     input_type: str
@@ -102,6 +114,53 @@ class AnalysisRecoveryRequest(TypedDict):
     phenotype_extraction_provenance: dict[str, object] | None
     analysis_id: str | None
     created_at: float
+
+
+EXCEL_RECOVERY_RECORD_FIELDS = frozenset(
+    {
+        "worksheet",
+        "row",
+        "chrom",
+        "start",
+        "end",
+        "ref",
+        "alt",
+        "qual",
+        "filter",
+        "depth",
+        "ad",
+        "gq",
+    }
+)
+
+
+def _validate_excel_recovery_records(
+    value: object,
+) -> list[dict[str, object]] | None:
+    """Accept only the bounded first-sheet source records used by Stage 2B."""
+
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or not value
+        or len(value) > MAX_VARIANTS_PER_ANALYSIS
+        or any(not isinstance(item, dict) for item in value)
+    ):
+        return None
+    records: list[dict[str, object]] = []
+    for item in value:
+        if set(item) != EXCEL_RECOVERY_RECORD_FIELDS:
+            return None
+        if any(
+            field_value is not None
+            and not isinstance(field_value, (str, int, float))
+            or isinstance(field_value, bool)
+            for field_value in item.values()
+        ):
+            return None
+        records.append(dict(item))
+    return records
 
 
 def _last_session_path() -> Path | None:
@@ -457,6 +516,11 @@ def _persist_recovery_request(
         analysis_id=request["analysis_id"],
         created_at=request["created_at"],
     )
+    excel_input_records = _validate_excel_recovery_records(
+        request.get("excel_input_records")
+    )
+    if excel_input_records is not None:
+        normalized_request["excel_input_records"] = excel_input_records
     payload = json.dumps(
         normalized_request,
         ensure_ascii=True,
@@ -516,6 +580,9 @@ def _load_recovery_request(
         return None
     created_at = value.get("created_at")
     variants = value.get("manual_variants")
+    excel_input_records = _validate_excel_recovery_records(
+        value.get("excel_input_records")
+    )
     phenotypes = value.get("phenotypes")
     llm_model = value.get("llm_model")
     input_type = value.get("input_type")
@@ -528,7 +595,7 @@ def _load_recovery_request(
         not isinstance(created_at, (int, float))
         or time() - float(created_at) > RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS
         or not isinstance(variants, list)
-        or not variants
+        or (not variants and excel_input_records is None)
         or len(variants) > MAX_VARIANTS_PER_ANALYSIS
         or any(not isinstance(item, dict) for item in variants)
         or not isinstance(phenotypes, list)
@@ -553,6 +620,9 @@ def _load_recovery_request(
     ):
         _delete_recovery_request(token)
         return None
+    if value.get("excel_input_records") is not None and excel_input_records is None:
+        _delete_recovery_request(token)
+        return None
     try:
         context = validate_analysis_context(
             {
@@ -566,7 +636,7 @@ def _load_recovery_request(
     except PipelineResultError:
         _delete_recovery_request(token)
         return None
-    return AnalysisRecoveryRequest(
+    request = AnalysisRecoveryRequest(
         schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
         manual_variants=variants,
         phenotypes=context["accepted_hpo_terms"],
@@ -581,6 +651,9 @@ def _load_recovery_request(
         analysis_id=analysis_id,
         created_at=float(created_at),
     )
+    if excel_input_records is not None:
+        request["excel_input_records"] = excel_input_records
+    return request
 
 
 def _mark_recovery_request_persisted(
@@ -1018,8 +1091,17 @@ def prepare_analysis_recovery_request(
             suffix = _validate_upload_filename(uploaded_vcf.name)
             payload = _read_upload(uploaded_vcf)
             if suffix == ".xlsx":
-                variants = parse_excel_variants(payload)
-                return AnalysisRecoveryRequest(
+                input_records = parse_excel_input_records(payload)
+                if all(
+                    classify_source_representation(
+                        record["ref"], record["alt"]
+                    ) == "STANDARD_ALLELE"
+                    for record in input_records
+                ):
+                    variants = parse_excel_variants(payload)
+                else:
+                    variants = []
+                request = AnalysisRecoveryRequest(
                     schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
                     manual_variants=[dict(variant) for variant in variants],
                     phenotypes=list(phenotypes),
@@ -1034,6 +1116,8 @@ def prepare_analysis_recovery_request(
                     analysis_id=None,
                     created_at=time(),
                 )
+                request["excel_input_records"] = input_records
+                return request
             _validate_upload_content(payload, suffix)
             upload_directory = _prepare_upload_directory()
             with TemporaryDirectory(
@@ -1082,14 +1166,59 @@ def execute_analysis(
     input_type: str | None = None,
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
+    excel_input_records: Sequence[Mapping[str, object]] | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
 
-    if uploaded_vcf is not None and manual_variants is not None:
+    if uploaded_vcf is not None and (
+        manual_variants is not None or excel_input_records is not None
+    ):
         raise FrontendExecutionError(
             "Choose either a variant-file upload or manual table rows."
         )
+
+    if excel_input_records is not None:
+        if manual_variants is not None:
+            raise FrontendExecutionError(
+                "Excel source records cannot be combined with manual rows."
+            )
+        prepared = run_annovar_like_input_processing(
+            excel_input_records,
+            phenotypes=phenotypes,
+        )
+        if not prepared["variants"]:
+            return prepared
+        canonical_variants = [
+            {
+                key: value
+                for key, value in variant.items()
+                if key != "input_index"
+            }
+            for variant in prepared["variants"]
+        ]
+        result = run_analysis(
+            vcf_path=None,
+            manual_variants=canonical_variants,
+            phenotypes=phenotypes,
+            llm_model=llm_model,
+            input_type=input_type or "excel",
+            phenotype_extraction_model=phenotype_extraction_model,
+            phenotype_extraction_provenance=phenotype_extraction_provenance,
+            progress_callback=progress_callback,
+        )
+        if (
+            len(result["variants"]) != len(prepared["variants"])
+            or not result["variant_integrity_records"]
+        ):
+            return result
+        attached = attach_input_preprocessing_results(
+            result,
+            prepared["input_preprocessing_results"],
+        )
+        if attached["analysis_id"] is not None:
+            save_pipeline_state(attached)
+        return attached
 
     if uploaded_vcf is None:
         return run_analysis(
@@ -1111,19 +1240,18 @@ def execute_analysis(
     payload = _read_upload(uploaded_vcf)
     if suffix == ".xlsx":
         try:
-            variants = parse_excel_variants(payload)
+            input_records = parse_excel_input_records(payload)
         except VCFProcessingError as exc:
             raise FrontendExecutionError(str(exc)) from exc
-        return run_analysis(
-            vcf_path=None,
-            manual_variants=variants,
+        return execute_analysis(
+            uploaded_vcf=None,
+            manual_variants=None,
             phenotypes=phenotypes,
             llm_model=llm_model,
             input_type=input_type or "excel",
             phenotype_extraction_model=phenotype_extraction_model,
-            phenotype_extraction_provenance=(
-                phenotype_extraction_provenance
-            ),
+            phenotype_extraction_provenance=phenotype_extraction_provenance,
+            excel_input_records=input_records,
             progress_callback=progress_callback,
         )
     _validate_upload_content(payload, suffix)
@@ -1215,7 +1343,11 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
     ) -> PipelineResult:
         return execute_analysis(
             uploaded_vcf=None,
-            manual_variants=request["manual_variants"],
+            manual_variants=(
+                None
+                if "excel_input_records" in request
+                else request["manual_variants"]
+            ),
             phenotypes=request["phenotypes"],
             llm_model=request["llm_model"],
             input_type=request["input_type"],
@@ -1225,6 +1357,7 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
             phenotype_extraction_provenance=request[
                 "phenotype_extraction_provenance"
             ],
+            excel_input_records=request.get("excel_input_records"),
             progress_callback=progress_callback,
         )
 

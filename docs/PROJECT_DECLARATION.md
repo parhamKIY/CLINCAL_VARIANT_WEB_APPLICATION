@@ -1752,7 +1752,10 @@ opaque, unguessable recovery token. A page refresh reconnects to an active in-pr
 job; when the job has completed and the result was persisted, the UI reloads it from
 SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
 A private one-hour checkpoint stores normalized variants, HPO terms, task model
-choices, and bounded extraction provenance, never raw VCF content. After a
+choices, and bounded extraction provenance, never raw VCF content. For an XLSX
+zero-allele source form it also stores only the bounded first-sheet source records
+needed to repeat GRCh38 identity verification; it never stores later worksheets.
+After a
 process/server restart, a checkpoint linked to a durably persisted draft reloads that
 state without another interpretation call. Only interrupted, unpersisted work reruns
 from sanitized input. Older Output A/B payloads return an explicit unsupported-legacy

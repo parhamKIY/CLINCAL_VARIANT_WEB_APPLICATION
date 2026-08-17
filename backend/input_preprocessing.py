@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from math import isfinite
 from typing import Literal, TypedDict, cast
+
+from backend.reference_sequence import (
+    fetch_grch38_reference_sequence,
+    reference_sequence_is_success,
+)
+from backend.variant_identity import normalize_chromosome, normalize_variant_edit
+from backend.vcf_processing import get_primary_chromosome_length
+from config import settings
 
 
 INPUT_PREPROCESSING_SCHEMA_VERSION = "1.0"
@@ -37,6 +45,13 @@ CANONICAL_VARIANT_FIELDS = frozenset({"chrom", "pos", "ref", "alt"})
 InputPreprocessingStatus = Literal[
     "ACCEPTED_DIRECT", "NORMALIZED_AND_ACCEPTED", "IDENTITY_UNRESOLVED"
 ]
+SourceRepresentation = Literal[
+    "STANDARD_ALLELE",
+    "ANNOVAR_DELETION",
+    "ANNOVAR_INSERTION",
+    "UNSUPPORTED_OR_AMBIGUOUS",
+]
+ReferenceFetcher = Callable[..., Mapping[str, object]]
 
 
 class SourceVariantProvenance(TypedDict):
@@ -78,6 +93,208 @@ INPUT_PREPROCESSING_RESULT_FIELDS = frozenset(
 
 class InputPreprocessingError(ValueError):
     """Raised when a selected-input result violates the bounded contract."""
+
+
+def _zero_token(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == 0
+    ) or (isinstance(value, str) and value.strip() == "0")
+
+
+def _allele(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    return normalized if normalized and set(normalized) <= {"A", "C", "G", "T"} else None
+
+
+def classify_source_representation(
+    reference: object,
+    alternate: object,
+) -> SourceRepresentation:
+    """Classify source notation without altering it."""
+
+    if _allele(reference) is not None and _allele(alternate) is not None:
+        return "STANDARD_ALLELE"
+    if _allele(reference) is not None and _zero_token(alternate):
+        return "ANNOVAR_DELETION"
+    if _zero_token(reference) and _allele(alternate) is not None:
+        return "ANNOVAR_INSERTION"
+    return "UNSUPPORTED_OR_AMBIGUOUS"
+
+
+def _source_provenance_from_record(
+    record: Mapping[str, object],
+    representation: SourceRepresentation,
+    *,
+    normalization_provenance: str,
+    reference_verification: str,
+) -> dict[str, object]:
+    return {
+        "source_worksheet": record.get("worksheet"),
+        "source_row": record.get("row"),
+        "source_chrom": str(record.get("chrom")).strip() if record.get("chrom") is not None else None,
+        "source_start": record.get("start"),
+        "source_end": record.get("end"),
+        "source_ref": str(record.get("ref")).strip() if record.get("ref") is not None else None,
+        "source_alt": str(record.get("alt")).strip() if record.get("alt") is not None else None,
+        "source_filter": record.get("filter"),
+        "source_qual": record.get("qual"),
+        "source_depth": record.get("depth"),
+        "source_ad": record.get("ad"),
+        "source_gq": record.get("gq"),
+        "source_representation": representation,
+        "normalization_provenance": normalization_provenance,
+        "reference_verification": reference_verification,
+    }
+
+
+def _unresolved_adapter_record(
+    record: Mapping[str, object],
+    representation: SourceRepresentation,
+    reason: str,
+    reference_verification: str,
+) -> dict[str, object]:
+    return {
+        "status": "IDENTITY_UNRESOLVED",
+        "canonical_variant": None,
+        "failure_reason": reason,
+        "source_provenance": _source_provenance_from_record(
+            record,
+            representation,
+            normalization_provenance="not_normalized",
+            reference_verification=reference_verification,
+        ),
+    }
+
+
+def adapt_annovar_like_record(
+    record: Mapping[str, object],
+    *,
+    reference_fetcher: ReferenceFetcher = fetch_grch38_reference_sequence,
+    assembly: str = "GRCh38",
+) -> dict[str, object]:
+    """Adapt one ANNOVAR-like source record into safe canonical CPRA or hold it."""
+
+    representation = classify_source_representation(record.get("ref"), record.get("alt"))
+    chromosome = normalize_chromosome(record.get("chrom"))
+    start = record.get("start")
+    end = record.get("end")
+    if end is None and representation == "STANDARD_ALLELE":
+        end = start
+    if (
+        assembly != "GRCh38"
+        or chromosome is None
+        or isinstance(start, bool)
+        or not isinstance(start, int)
+        or isinstance(end, bool)
+        or not isinstance(end, int)
+        or start < 1
+        or end < start
+    ):
+        return _unresolved_adapter_record(
+            record, representation, "INVALID_INTERVAL", "not_attempted"
+        )
+    try:
+        if end > get_primary_chromosome_length(chromosome, assembly):
+            raise ValueError
+    except (ValueError, KeyError):
+        return _unresolved_adapter_record(
+            record, representation, "INVALID_INTERVAL", "not_attempted"
+        )
+    if representation == "UNSUPPORTED_OR_AMBIGUOUS":
+        return _unresolved_adapter_record(
+            record, representation, "UNSUPPORTED_REPRESENTATION", "not_attempted"
+        )
+    if representation == "STANDARD_ALLELE":
+        canonical = {
+            "chrom": chromosome,
+            "pos": start,
+            "ref": _allele(record.get("ref")),
+            "alt": _allele(record.get("alt")),
+            "qual": record.get("qual"),
+            "filter": record.get("filter"),
+        }
+        if normalize_variant_edit(canonical) is None:
+            return _unresolved_adapter_record(
+                record, representation, "IDENTITY_NOT_PROVEN", "not_required"
+            )
+        return {
+            "status": "ACCEPTED_DIRECT",
+            "canonical_variant": canonical,
+            "failure_reason": None,
+            "source_provenance": _source_provenance_from_record(
+                record,
+                representation,
+                normalization_provenance="direct_vcf_compatible_allele",
+                reference_verification="not_required",
+            ),
+        }
+    if representation == "ANNOVAR_DELETION":
+        deleted = _allele(record.get("ref"))
+        assert deleted is not None
+        if end - start + 1 != len(deleted) or start == 1:
+            return _unresolved_adapter_record(
+                record, representation, "INVALID_INTERVAL", "not_attempted"
+            )
+        interval = reference_fetcher(
+            assembly=assembly, chrom=chromosome, start=start, end=end
+        )
+        observed = reference_sequence_is_success(
+            interval, assembly=assembly, chrom=chromosome, start=start, end=end
+        )
+        if observed is None:
+            return _unresolved_adapter_record(
+                record, representation, "REFERENCE_LOOKUP_UNAVAILABLE", "unavailable"
+            )
+        if observed != deleted:
+            return _unresolved_adapter_record(
+                record, representation, "REFERENCE_MISMATCH", "mismatch"
+            )
+        anchor_result = reference_fetcher(
+            assembly=assembly, chrom=chromosome, start=start - 1, end=start - 1
+        )
+        anchor = reference_sequence_is_success(
+            anchor_result,
+            assembly=assembly,
+            chrom=chromosome,
+            start=start - 1,
+            end=start - 1,
+        )
+        if anchor is None:
+            return _unresolved_adapter_record(
+                record, representation, "REFERENCE_LOOKUP_UNAVAILABLE", "deleted_interval_verified_anchor_unavailable"
+            )
+        canonical = {"chrom": chromosome, "pos": start - 1, "ref": anchor + deleted, "alt": anchor, "qual": record.get("qual"), "filter": record.get("filter")}
+        if normalize_variant_edit(canonical) is None:
+            return _unresolved_adapter_record(
+                record, representation, "NORMALIZATION_FAILED", "verified"
+            )
+        return {"status": "NORMALIZED_AND_ACCEPTED", "canonical_variant": canonical, "failure_reason": None, "source_provenance": _source_provenance_from_record(record, representation, normalization_provenance="annovar_deletion_to_vcf_left_anchor", reference_verification="verified_source_ref_and_left_anchor_grch38")}
+    if end != start:
+        return _unresolved_adapter_record(
+            record, representation, "INVALID_INTERVAL", "not_attempted"
+        )
+    inserted = _allele(record.get("alt"))
+    assert inserted is not None
+    anchor_result = reference_fetcher(
+        assembly=assembly, chrom=chromosome, start=start, end=start
+    )
+    anchor = reference_sequence_is_success(
+        anchor_result, assembly=assembly, chrom=chromosome, start=start, end=start
+    )
+    if anchor is None:
+        return _unresolved_adapter_record(
+            record, representation, "REFERENCE_LOOKUP_UNAVAILABLE", "unavailable"
+        )
+    canonical = {"chrom": chromosome, "pos": start, "ref": anchor, "alt": anchor + inserted, "qual": record.get("qual"), "filter": record.get("filter")}
+    if normalize_variant_edit(canonical) is None:
+        return _unresolved_adapter_record(
+            record, representation, "NORMALIZATION_FAILED", "verified"
+        )
+    return {"status": "NORMALIZED_AND_ACCEPTED", "canonical_variant": canonical, "failure_reason": None, "source_provenance": _source_provenance_from_record(record, representation, normalization_provenance="annovar_insertion_to_vcf_anchor_at_start", reference_verification="verified_anchor_grch38")}
 
 
 def _text(value: object, path: str, *, optional: bool = False) -> str | None:
@@ -359,11 +576,16 @@ def validate_input_preprocessing_results(
 __all__ = [
     "CANONICAL_VARIANT_FIELDS",
     "INPUT_PREPROCESSING_SCHEMA_VERSION",
+    "InputPreprocessingStatus",
     "InputPreprocessingError",
     "InputPreprocessingResult",
+    "ReferenceFetcher",
+    "SourceRepresentation",
     "SourceVariantProvenance",
+    "adapt_annovar_like_record",
     "build_accepted_input_result",
     "build_unresolved_input_result",
+    "classify_source_representation",
     "validate_input_preprocessing_result",
     "validate_input_preprocessing_results",
 ]

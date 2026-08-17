@@ -100,6 +100,9 @@ its original input order.
 Post-closeout selected-input stabilization separates every retained user-selected
 input from analyzable canonical variants. `IDENTITY_UNRESOLVED` inputs remain
 input-level records and never become annotations, Evidence Objects, or LLM input.
+Stage 2B additionally adapts verified ANNOVAR-like `REF=0`/`ALT=0` indels to
+non-empty GRCh38 canonical alleles before API handoff; source zero tokens remain
+provenance only. See [`docs/input_preprocessing_stage2b.md`](docs/input_preprocessing_stage2b.md).
 
 The complete stage register, API catalog, safety declaration, demonstration
 guide, and limitations are maintained in

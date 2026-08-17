@@ -21473,8 +21473,9 @@ class TestFrontendExecution:
         )
 
         variants = request["manual_variants"]
-        assert len(variants) == 7
-        assert [variant["pos"] for variant in variants] == [
+        assert variants == []
+        input_records = request["excel_input_records"]
+        assert [record["start"] for record in input_records] == [
             101,
             202,
             303,
@@ -21483,10 +21484,8 @@ class TestFrontendExecution:
             606,
             707,
         ]
-        assert [variant["alt"] for variant in variants][2:4] == [
-            "<DEL>",
-            "<DEL>",
-        ]
+        assert [record["alt"] for record in input_records][2:4] == [0, 0]
+        assert "<DEL>" not in json.dumps(input_records)
         assert request["input_type"] == "excel"
         assert secret not in json.dumps(request)
 
@@ -21514,7 +21513,8 @@ class TestFrontendExecution:
         recovered.join(2)
         assert recovered.view().state == "completed"
         assert observed["uploaded_vcf"] is None
-        assert observed["manual_variants"] == variants
+        assert observed["manual_variants"] is None
+        assert observed["excel_input_records"] == input_records
         assert observed["input_type"] == "excel"
         release_registered_analysis_job(token)
 
