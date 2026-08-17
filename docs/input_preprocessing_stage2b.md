@@ -23,6 +23,12 @@ and then uses the existing deterministic identity normalizer.
 infrastructure, not an evidence provider. It requests an exact GRCh38 Ensembl
 sequence interval with normalized chromosome naming, a five-second per-attempt
 timeout, at most two attempts, explicit source provenance, and fail-closed output.
+Ensembl is primary. Only operational or malformed-response failure activates the
+bounded UCSC hg38 sequence fallback; a valid Ensembl sequence that contradicts the
+workbook REF remains `REFERENCE_MISMATCH` and never triggers a second source to seek
+agreement. UCSC translates the internal 1-based inclusive interval to its documented
+zero-relative start and one-relative end. This is redundancy for one reference
+identity concept, not a second evidence source, semantic capability, or score.
 
 For a deletion-style row, the adapter requires inclusive `Start`/`End` length to
 match the supplied deleted sequence, verifies that exact interval against GRCh38,

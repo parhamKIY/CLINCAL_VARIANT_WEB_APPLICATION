@@ -63,6 +63,10 @@ from backend.input_preprocessing import (
     build_unresolved_input_result,
     validate_input_preprocessing_results,
 )
+from backend.reference_sequence import (
+    fetch_grch38_reference_sequence,
+    fetch_reference_sequence_cached,
+)
 from backend.llm import LLMClient
 from backend.llm_routing import (
     RoutingProgressCallback,
@@ -2878,14 +2882,23 @@ def run_annovar_like_input_processing(
 
     if not input_records:
         raise PipelineInputError("At least one selected input is required.")
+    active_fetcher = reference_fetcher or fetch_grch38_reference_sequence
+    reference_cache: dict[tuple[str, str, int, int], Mapping[str, object]] = {}
+
+    def cached_reference_fetcher(**kwargs: object) -> Mapping[str, object]:
+        return fetch_reference_sequence_cached(
+            assembly=cast(str, kwargs["assembly"]),
+            chrom=cast(str, kwargs["chrom"]),
+            start=cast(int, kwargs["start"]),
+            end=cast(int, kwargs["end"]),
+            cache=reference_cache,
+            fetcher=cast(Callable[..., Mapping[str, object]], active_fetcher),
+        )
+
     adapted = [
         adapt_annovar_like_record(
             record,
-            **(
-                {"reference_fetcher": reference_fetcher}
-                if reference_fetcher is not None
-                else {}
-            ),
+            reference_fetcher=cached_reference_fetcher,
         )
         for record in input_records
     ]

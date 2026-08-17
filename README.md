@@ -103,6 +103,13 @@ input-level records and never become annotations, Evidence Objects, or LLM input
 Stage 2B additionally adapts verified ANNOVAR-like `REF=0`/`ALT=0` indels to
 non-empty GRCh38 canonical alleles before API handoff; source zero tokens remain
 provenance only. See [`docs/input_preprocessing_stage2b.md`](docs/input_preprocessing_stage2b.md).
+Ensembl is the primary identity-sequence route and UCSC hg38 is an operational-only
+fallback after Ensembl cannot return a usable exact sequence; neither route is
+biological evidence. The fallback controls are `UCSC_SEQUENCE_BASE_URL`,
+`UCSC_SEQUENCE_TIMEOUT`, `UCSC_SEQUENCE_MAX_RETRIES`, and
+`ENABLE_UCSC_SEQUENCE_FALLBACK`.
+Reference-route semantics and coordinate translation are recorded in
+[`docs/input_preprocessing_stage2c.md`](docs/input_preprocessing_stage2c.md).
 
 The complete stage register, API catalog, safety declaration, demonstration
 guide, and limitations are maintained in

@@ -234,6 +234,11 @@ class Settings:
         "https://rest.ensembl.org",
     ).strip().rstrip("/")
 
+    UCSC_SEQUENCE_BASE_URL: str = os.getenv(
+        "UCSC_SEQUENCE_BASE_URL",
+        "https://api.genome.ucsc.edu",
+    ).strip().rstrip("/")
+
     VARIANTVALIDATOR_BASE_URL: str = os.getenv(
         "VARIANTVALIDATOR_BASE_URL",
         "https://rest.variantvalidator.org",
@@ -295,6 +300,16 @@ class Settings:
     VEP_TIMEOUT: int = _get_positive_int(
         "VEP_TIMEOUT",
         REQUEST_TIMEOUT,
+    )
+
+    UCSC_SEQUENCE_TIMEOUT: int = _get_positive_int(
+        "UCSC_SEQUENCE_TIMEOUT",
+        5,
+    )
+
+    UCSC_SEQUENCE_MAX_RETRIES: int = _get_non_negative_int(
+        "UCSC_SEQUENCE_MAX_RETRIES",
+        1,
     )
 
     VARIANTVALIDATOR_TIMEOUT: int = _get_positive_int(
@@ -492,6 +507,11 @@ class Settings:
         True,
     )
 
+    ENABLE_UCSC_SEQUENCE_FALLBACK: bool = _get_bool(
+        "ENABLE_UCSC_SEQUENCE_FALLBACK",
+        True,
+    )
+
     HPO_ONTOLOGY_URL: str = os.getenv(
         "HPO_ONTOLOGY_URL",
         "https://purl.obolibrary.org/obo/hp.obo",
@@ -650,6 +670,7 @@ class Settings:
         url_settings = {
             "LLM_BASE_URL": cls.LLM_BASE_URL,
             "VEP_BASE_URL": cls.VEP_BASE_URL,
+            "UCSC_SEQUENCE_BASE_URL": cls.UCSC_SEQUENCE_BASE_URL,
             "VARIANTVALIDATOR_BASE_URL": (
                 cls.VARIANTVALIDATOR_BASE_URL
             ),
@@ -756,6 +777,7 @@ class Settings:
                 cls.ENABLE_LITERATURE_ENRICHMENT,
                 cls.ENABLE_EREPO,
                 cls.ENABLE_MEDGEN,
+                cls.ENABLE_UCSC_SEQUENCE_FALLBACK,
             )
         ):
             raise RuntimeError(
@@ -782,6 +804,7 @@ class Settings:
 
         provider_timeouts = {
             "VEP_TIMEOUT": cls.VEP_TIMEOUT,
+            "UCSC_SEQUENCE_TIMEOUT": cls.UCSC_SEQUENCE_TIMEOUT,
             "VARIANTVALIDATOR_TIMEOUT": (
                 cls.VARIANTVALIDATOR_TIMEOUT
             ),
@@ -836,6 +859,11 @@ class Settings:
 
         if cls.MEDGEN_MAX_RETRIES > 2:
             raise RuntimeError("MEDGEN_MAX_RETRIES cannot exceed 2.")
+
+        if cls.UCSC_SEQUENCE_MAX_RETRIES > 1:
+            raise RuntimeError(
+                "UCSC_SEQUENCE_MAX_RETRIES cannot exceed 1."
+            )
 
         if cls.MYDISEASE_CACHE_SIZE > 1000:
             raise RuntimeError(

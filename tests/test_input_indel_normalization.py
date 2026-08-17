@@ -383,6 +383,7 @@ def test_reference_accessor_returns_explicit_bounded_operational_unavailability(
     )
 
     assert result["status"] == "unavailable"
-    assert result["source"] == "ensembl_grch38_sequence"
-    assert len(session.calls) == 2
+    assert result["source"] == "reference_sequence_unavailable"
+    assert result["failure_reason"] == "REFERENCE_LOOKUP_UNAVAILABLE"
+    assert len(session.calls) == 4
     assert all(call["timeout"] == 5 for call in session.calls)

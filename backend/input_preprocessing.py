@@ -9,7 +9,9 @@ from typing import Literal, TypedDict, cast
 
 from backend.reference_sequence import (
     fetch_grch38_reference_sequence,
+    reference_failure_reason,
     reference_sequence_is_success,
+    reference_verification_provenance,
 )
 from backend.variant_identity import normalize_chromosome, normalize_variant_edit
 from backend.vcf_processing import get_primary_chromosome_length
@@ -170,6 +172,15 @@ def _unresolved_adapter_record(
     }
 
 
+def _reference_failure(
+    result: Mapping[str, object],
+) -> tuple[str, str]:
+    return (
+        reference_failure_reason(result),
+        reference_verification_provenance(result, outcome="unavailable"),
+    )
+
+
 def adapt_annovar_like_record(
     record: Mapping[str, object],
     *,
@@ -246,12 +257,16 @@ def adapt_annovar_like_record(
             interval, assembly=assembly, chrom=chromosome, start=start, end=end
         )
         if observed is None:
+            reason, verification = _reference_failure(interval)
             return _unresolved_adapter_record(
-                record, representation, "REFERENCE_LOOKUP_UNAVAILABLE", "unavailable"
+                record, representation, reason, verification
             )
         if observed != deleted:
             return _unresolved_adapter_record(
-                record, representation, "REFERENCE_MISMATCH", "mismatch"
+                record,
+                representation,
+                "REFERENCE_MISMATCH",
+                reference_verification_provenance(interval, outcome="mismatch"),
             )
         anchor_result = reference_fetcher(
             assembly=assembly, chrom=chromosome, start=start - 1, end=start - 1
@@ -264,15 +279,32 @@ def adapt_annovar_like_record(
             end=start - 1,
         )
         if anchor is None:
+            reason, verification = _reference_failure(anchor_result)
             return _unresolved_adapter_record(
-                record, representation, "REFERENCE_LOOKUP_UNAVAILABLE", "deleted_interval_verified_anchor_unavailable"
+                record,
+                representation,
+                reason,
+                f"deleted_interval_verified_{verification}",
             )
         canonical = {"chrom": chromosome, "pos": start - 1, "ref": anchor + deleted, "alt": anchor, "qual": record.get("qual"), "filter": record.get("filter")}
         if normalize_variant_edit(canonical) is None:
             return _unresolved_adapter_record(
                 record, representation, "NORMALIZATION_FAILED", "verified"
             )
-        return {"status": "NORMALIZED_AND_ACCEPTED", "canonical_variant": canonical, "failure_reason": None, "source_provenance": _source_provenance_from_record(record, representation, normalization_provenance="annovar_deletion_to_vcf_left_anchor", reference_verification="verified_source_ref_and_left_anchor_grch38")}
+        return {
+            "status": "NORMALIZED_AND_ACCEPTED",
+            "canonical_variant": canonical,
+            "failure_reason": None,
+            "source_provenance": _source_provenance_from_record(
+                record,
+                representation,
+                normalization_provenance="annovar_deletion_to_vcf_left_anchor",
+                reference_verification=reference_verification_provenance(
+                    anchor_result,
+                    outcome="verified_source_ref_and_left_anchor",
+                ),
+            ),
+        }
     if end != start:
         return _unresolved_adapter_record(
             record, representation, "INVALID_INTERVAL", "not_attempted"
@@ -286,15 +318,29 @@ def adapt_annovar_like_record(
         anchor_result, assembly=assembly, chrom=chromosome, start=start, end=start
     )
     if anchor is None:
+        reason, verification = _reference_failure(anchor_result)
         return _unresolved_adapter_record(
-            record, representation, "REFERENCE_LOOKUP_UNAVAILABLE", "unavailable"
+            record, representation, reason, verification
         )
     canonical = {"chrom": chromosome, "pos": start, "ref": anchor, "alt": anchor + inserted, "qual": record.get("qual"), "filter": record.get("filter")}
     if normalize_variant_edit(canonical) is None:
         return _unresolved_adapter_record(
             record, representation, "NORMALIZATION_FAILED", "verified"
         )
-    return {"status": "NORMALIZED_AND_ACCEPTED", "canonical_variant": canonical, "failure_reason": None, "source_provenance": _source_provenance_from_record(record, representation, normalization_provenance="annovar_insertion_to_vcf_anchor_at_start", reference_verification="verified_anchor_grch38")}
+    return {
+        "status": "NORMALIZED_AND_ACCEPTED",
+        "canonical_variant": canonical,
+        "failure_reason": None,
+        "source_provenance": _source_provenance_from_record(
+            record,
+            representation,
+            normalization_provenance="annovar_insertion_to_vcf_anchor_at_start",
+            reference_verification=reference_verification_provenance(
+                anchor_result,
+                outcome="verified_anchor",
+            ),
+        ),
+    }
 
 
 def _text(value: object, path: str, *, optional: bool = False) -> str | None:
