@@ -62,6 +62,7 @@ from frontend.evidence_review import (
     clear_evidence_review_state,
     render_evidence_review,
 )
+from frontend.evidence_graph import render_evidence_graph
 from frontend.provider_readiness import (
     initialize_provider_readiness_state,
     render_provider_readiness,
@@ -1730,6 +1731,14 @@ def render_app() -> None:
         _render_hpo_update_control()
         st.divider()
         render_provider_readiness(job_active=_analysis_job() is not None)
+        st.divider()
+        if st.button(
+            "Evidence Graph",
+            key="open_evidence_graph",
+            icon=":material/account_tree:",
+            width="stretch",
+        ):
+            render_evidence_graph()
 
     st.subheader("Analysis workflow")
     _render_workflow_overview()

@@ -23596,9 +23596,30 @@ class TestFrontendFoundation:
             in warning.value.casefold()
             for warning in app.warning
         )
-        assert [control.value for control in app.segmented_control] == [
-            "File upload"
-        ]
+        assert next(
+            control
+            for control in app.segmented_control
+            if control.label == "Input source"
+        ).value == "File upload"
+        evidence_graph_button = next(
+            button
+            for button in app.sidebar.button
+            if button.label == "Evidence Graph"
+        )
+        assert app.session_state["pipeline_result"] is None
+        evidence_graph_button.click().run(timeout=10)
+        assert not app.exception
+        assert next(
+            control
+            for control in app.segmented_control
+            if control.label == "Graph view"
+        ).value == "Simple view"
+        assert next(
+            field
+            for field in app.selectbox
+            if field.label == "Explore a semantic node"
+        ).value == "Annotation"
+        assert app.session_state["pipeline_result"] is None
         assert [uploader.label for uploader in app.file_uploader] == [
             "Variant file"
         ]
