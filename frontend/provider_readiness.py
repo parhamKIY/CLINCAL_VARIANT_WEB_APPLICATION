@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Callable, Mapping, Sequence
-
-import pandas as pd
 import streamlit as st
 
 from backend.provider_readiness import (
@@ -184,20 +182,20 @@ def build_provider_recommendation_rows(
     return rows
 
 
-def _status_style(value: object) -> str:
-    if value == "Reachable":
-        return "color: #1b7f3a; font-weight: 600"
-    if value == "Unreachable":
-        return "color: #b42318; font-weight: 600"
-    return "color: #667085"
+def build_provider_readiness_summary(
+    rows: Sequence[Mapping[str, str]],
+) -> str:
+    """Summarize only the operational readiness states already recorded."""
 
-
-def _recommendation_status_style(value: object) -> str:
-    if value == "Preferred":
-        return "color: #1b7f3a; font-weight: 600"
-    if value == "Unavailable":
-        return "color: #b42318; font-weight: 600"
-    return "color: #667085"
+    counts = {
+        status: sum(row["Status"] == status for row in rows)
+        for status in ("Reachable", "Unreachable", "Not checked")
+    }
+    return " · ".join(
+        f"{count} {status.lower()}"
+        for status, count in counts.items()
+        if count
+    )
 
 
 def _replace_provider_result(
@@ -235,16 +233,21 @@ def render_provider_readiness(
         [ProviderReadinessTarget], ProviderReadinessResult
     ] = _check_one_provider,
 ) -> None:
-    """Render the user-triggered pre-upload connectivity table."""
+    """Render compact, user-triggered operational status in the sidebar."""
 
-    with st.container(border=True):
-        st.subheader("Provider readiness")
+    results = tuple(st.session_state[PROVIDER_READINESS_RESULTS_KEY])
+    rows = build_provider_readiness_rows(results)
+    with st.expander(
+        "API / Data Source Status",
+        expanded=False,
+        icon=":material/language:",
+    ):
         st.caption(
-            "Check current endpoint access before uploading variants. "
-            "This does not submit variant data or clinical text."
+            "Operational endpoint reachability only; this does not report "
+            "query results or clinical-evidence capability."
         )
         if st.button(
-            "Check provider readiness",
+            "Refresh API Status",
             key="check_provider_readiness",
             icon=":material/network_check:",
             disabled=job_active,
@@ -256,10 +259,12 @@ def render_provider_readiness(
             )
 
         results = tuple(st.session_state[PROVIDER_READINESS_RESULTS_KEY])
+        rows = build_provider_readiness_rows(results)
+        st.caption(build_provider_readiness_summary(rows))
         targets = configured_provider_readiness_targets()
         target_by_provider = {target.provider: target for target in targets}
         selected_provider = st.selectbox(
-            "Manual provider recheck",
+            "Recheck one source",
             tuple(target_by_provider),
             format_func=lambda provider: target_by_provider[provider].label,
             key="manual_provider_recheck",
@@ -285,51 +290,27 @@ def render_provider_readiness(
 
         checked_at = st.session_state[PROVIDER_READINESS_CHECKED_AT_KEY]
         if checked_at is None:
-            st.info("Provider readiness has not been checked in this session.")
+            st.info("API status has not been checked in this session.")
         else:
             st.caption(f"Last checked: {checked_at}")
 
-        rows = build_provider_readiness_rows(results)
-        table = pd.DataFrame(rows)
-        st.dataframe(
-            table.style.map(_status_style, subset=["Status"]),
-            hide_index=True,
-            column_order=(
-                "Provider",
-                "Use",
-                "Fallback role",
-                "Status",
-                "Check",
-                "Latency",
-                "Details",
-            ),
-            key="provider_readiness_table",
-        )
+        for row in rows:
+            st.markdown(f"**{row['Provider']} — {row['Status']}**")
+            st.caption(
+                f"{row['Details']} {row['Check']}: {row['Latency']}."
+            )
+            st.caption(f"{row['Use']}. {row['Fallback role']}.")
+
         st.caption(
             "Automatic preference uses source quality first and latency only "
             "between equal-quality reachable sources. It is a readiness "
             "recommendation; normal pipeline fallback provenance is unchanged."
         )
-        st.caption(
-            "Normal population frequency is supplied through MyVariant.info. "
-            "Population-frequency verification checks the direct gnomAD, "
-            "UCSC gnomAD, and Ensembl fallback chain separately."
-        )
-        recommendation_table = pd.DataFrame(
-            build_provider_recommendation_rows(results)
-        )
-        st.dataframe(
-            recommendation_table.style.map(
-                _recommendation_status_style,
-                subset=["Status"],
-            ),
-            hide_index=True,
-            column_order=(
-                "Use",
-                "Recommended source",
-                "Status",
-                "Latency",
-                "Basis",
-            ),
-            key="provider_readiness_recommendations",
-        )
+        st.caption("Current selection guidance")
+        for recommendation in build_provider_recommendation_rows(results):
+            st.caption(
+                f"{recommendation['Use']}: "
+                f"{recommendation['Recommended source']} "
+                f"({recommendation['Status']}). "
+                f"{recommendation['Basis']}"
+            )

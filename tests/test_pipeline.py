@@ -24132,7 +24132,7 @@ class TestFrontendFoundation:
             )
             for dataframe in app.dataframe
         ]
-        assert dataframe_columns == [
+        readiness_tables = {
             (
                 "Provider",
                 "Use",
@@ -24143,6 +24143,9 @@ class TestFrontendFoundation:
                 "Details",
             ),
             ("Use", "Recommended source", "Status", "Latency", "Basis"),
+        }
+        assert not readiness_tables.intersection(dataframe_columns)
+        expected_result_tables = {
             (
                 "Variant",
                 "Chromosome",
@@ -24209,7 +24212,8 @@ class TestFrontendFoundation:
                 "Report",
             ),
             ("Reference", "Source", "Identifier", "Link status", "URL"),
-        ]
+        }
+        assert expected_result_tables.issubset(dataframe_columns)
         assert any(
             subheader.value
             == "Draft Variant Review — Evidence and interpretation"

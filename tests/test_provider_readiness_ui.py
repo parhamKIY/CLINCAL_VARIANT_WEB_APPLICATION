@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 import requests
+from streamlit.testing.v1 import AppTest
 
 import frontend.provider_readiness as provider_readiness_ui
 from backend.provider_readiness import (
@@ -241,24 +243,47 @@ def test_renderer_runs_checks_only_after_explicit_user_action(
     state: dict[str, object] = {}
 
     @contextmanager
-    def fake_container(**_kwargs: object):
+    def fake_expander(*args: object, **_kwargs: object):
+        observed["expander"] = args
         yield
 
     @contextmanager
     def fake_spinner(*_args: object, **_kwargs: object):
         yield
 
-    def fake_dataframe(data: object, **kwargs: object) -> None:
-        observed["dataframe"] = (data, kwargs)
-
     monkeypatch.setattr(provider_readiness_ui.st, "session_state", state)
-    monkeypatch.setattr(provider_readiness_ui.st, "container", fake_container)
+    monkeypatch.setattr(provider_readiness_ui.st, "expander", fake_expander)
     monkeypatch.setattr(provider_readiness_ui.st, "spinner", fake_spinner)
-    monkeypatch.setattr(provider_readiness_ui.st, "subheader", lambda *_args: None)
-    monkeypatch.setattr(provider_readiness_ui.st, "caption", lambda *_args: None)
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "caption",
+        lambda message, *_args, **_kwargs: observed.setdefault(
+            "captions", []
+        ).append(message),
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "markdown",
+        lambda message, *_args, **_kwargs: observed.setdefault(
+            "providers", []
+        ).append(message),
+    )
     monkeypatch.setattr(provider_readiness_ui.st, "info", lambda *_args: None)
-    monkeypatch.setattr(provider_readiness_ui.st, "dataframe", fake_dataframe)
-    monkeypatch.setattr(provider_readiness_ui.st, "button", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "dataframe",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sidebar status must not render a table"
+        ),
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "button",
+        lambda label, *_args, **_kwargs: observed.setdefault(
+            "buttons", []
+        ).append(label)
+        or True,
+    )
     monkeypatch.setattr(
         provider_readiness_ui.st,
         "selectbox",
@@ -277,4 +302,143 @@ def test_renderer_runs_checks_only_after_explicit_user_action(
         _result("variantvalidator"),
     )
     assert state[provider_readiness_ui.PROVIDER_READINESS_CHECKED_AT_KEY]
-    assert observed["dataframe"]
+    assert observed["expander"] == ("API / Data Source Status",)
+    assert "Refresh API Status" in observed["buttons"]
+    assert any(
+        "Ensembl VEP" in provider and "Reachable" in provider
+        for provider in observed["providers"]
+    )
+
+
+def test_renderer_reuses_cached_results_without_an_automatic_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state: dict[str, object] = {
+        provider_readiness_ui.PROVIDER_READINESS_RESULTS_KEY: (_result("vep"),),
+        provider_readiness_ui.PROVIDER_READINESS_CHECKED_AT_KEY: (
+            "2026-08-17T00:00:00Z"
+        ),
+    }
+    calls = 0
+
+    @contextmanager
+    def fake_expander(*_args: object, **_kwargs: object):
+        yield
+
+    def unexpected_check() -> tuple[ProviderReadinessResult, ...]:
+        nonlocal calls
+        calls += 1
+        return ()
+
+    monkeypatch.setattr(provider_readiness_ui.st, "session_state", state)
+    monkeypatch.setattr(provider_readiness_ui.st, "expander", fake_expander)
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "caption",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "markdown",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "info",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "button",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "selectbox",
+        lambda *_args, **_kwargs: "vep",
+    )
+
+    provider_readiness_ui.render_provider_readiness(
+        job_active=False,
+        checker=unexpected_check,
+    )
+
+    assert calls == 0
+
+
+def test_renderer_keeps_an_operational_outage_safe_and_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state: dict[str, object] = {
+        provider_readiness_ui.PROVIDER_READINESS_RESULTS_KEY: (
+            _result("vep", state="unreachable", failure_category="timeout"),
+        ),
+        provider_readiness_ui.PROVIDER_READINESS_CHECKED_AT_KEY: (
+            "2026-08-17T00:00:00Z"
+        ),
+    }
+    captions: list[str] = []
+
+    @contextmanager
+    def fake_expander(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr(provider_readiness_ui.st, "session_state", state)
+    monkeypatch.setattr(provider_readiness_ui.st, "expander", fake_expander)
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "caption",
+        lambda message, *_args, **_kwargs: captions.append(message),
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "markdown",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "info",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "button",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        provider_readiness_ui.st,
+        "selectbox",
+        lambda *_args, **_kwargs: "vep",
+    )
+
+    provider_readiness_ui.render_provider_readiness(job_active=False)
+
+    assert any("1 unreachable" in caption for caption in captions)
+    assert any(
+        "did not respond before the deadline" in caption
+        for caption in captions
+    )
+    assert any(
+        "does not report query results or clinical-evidence capability" in caption
+        for caption in captions
+    )
+
+
+def test_readiness_status_is_sidebar_only_with_manual_refresh() -> None:
+    app = AppTest.from_file(
+        str(Path(__file__).resolve().parents[1] / "app.py")
+    ).run(timeout=15)
+
+    assert not app.exception
+    assert any(
+        panel.label == "API / Data Source Status"
+        for panel in app.sidebar.status
+    )
+    assert any(
+        button.label == "Refresh API Status" for button in app.sidebar.button
+    )
+    assert all(
+        dataframe.key
+        not in {"provider_readiness_table", "provider_readiness_recommendations"}
+        for dataframe in app.dataframe
+    )

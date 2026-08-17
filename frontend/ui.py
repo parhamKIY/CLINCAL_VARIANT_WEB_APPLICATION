@@ -1728,13 +1728,14 @@ def render_app() -> None:
         _render_appearance_status()
         st.divider()
         _render_hpo_update_control()
+        st.divider()
+        render_provider_readiness(job_active=_analysis_job() is not None)
 
     st.subheader("Analysis workflow")
     _render_workflow_overview()
     st.divider()
     phenotype_model, variant_model = _render_task_model_selectors()
     _render_hpo_picker(phenotype_model)
-    render_provider_readiness(job_active=_analysis_job() is not None)
     submission = _render_variant_input(phenotype_model, variant_model)
     st.divider()
 
