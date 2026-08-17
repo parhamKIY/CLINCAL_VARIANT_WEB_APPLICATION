@@ -2,7 +2,8 @@
 
 **Project:** Clinical Variant Interpretation  
 **Implementation status:** Stages 0-114 implemented as recorded below
-**Current release gate:** Stage 60 V3, Stage 61 live, and Stage 78 resilience gates passed
+**Current release gate:** Stage 60 V3, Stage 61 live, Stage 78 resilience, and the
+final selected-variant input smoke gates passed.
 **Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 115 final visual sign-off
 **Document date:** 2026-08-13
 **Primary interface:** Streamlit  
@@ -25,7 +26,8 @@
 This repository implements an evidence-centered clinical variant interpretation
 workflow for one to ten already-filtered germline Mendelian variants. It accepts a
 filtered VCF/VCF.GZ file, user-selected rows from a user-selected worksheet of an
-Excel `.xlsx` workbook, or a manual VCF-style table, validates and standardizes each allele, collects independent
+Excel `.xlsx` workbook, or a manual VCF-style table, validates and standardizes each
+allele, collects independent
 annotation and phenotype evidence, interprets every variant with one selected model,
 then presents ordered evidence and interpretation state for human review and final
 confirmation. Per-variant model failures remain explicit without removing collected
@@ -159,8 +161,8 @@ frozen contract for Stages 46-78.
 
 ### In scope
 
-- One to ten professor-filtered variants in VCF, VCF.GZ, first-worksheet-only
-  Excel `.xlsx`, or manual-table form.
+- One to ten professor-filtered variants in VCF, VCF.GZ, a user-selected Excel
+  `.xlsx` worksheet/source-row set, or manual-table form.
 - Explicit GRCh37 or GRCh38 assembly handling.
 - Germline Mendelian evidence collection and interpretation support.
 - SNV/indel allele validation, multiallelic splitting, and input-order preservation.
@@ -189,18 +191,34 @@ VCF, manual, Excel, frontend, and recovery validation. The limit applies after
 multiallelic splitting, so no supported input route can produce more than ten
 normalized variants.
 
-Excel `.xlsx` input reads worksheet index 0 only. Later worksheets are not iterated
-and cannot enter normalized input, recovery checkpoints, persistence, logs,
-provider calls, LLM payloads, or exports. Required headers are `CHROM`, `POS`,
-`REF`, and `ALT`; `QUAL` and `FILTER` are optional. Matching is case-insensitive
-with deterministic aliases: `#CHROM`/`Chromosome`, `Position`, `Reference`,
-`Alternate`/`Alternative`, `Quality`, and `Filter status`. Unknown columns are
-discarded before pipeline entry.
+The historical Stage 46 Excel adapter read worksheet index 0 only. It is superseded
+for new XLSX analyses by the selected-input stabilization contract below. Required
+headers are `CHROM`, `POS`, `REF`, and `ALT`; `QUAL` and `FILTER` are optional.
+Matching is case-insensitive with deterministic aliases: `#CHROM`/`Chromosome`,
+`Position`, `Reference`, `Alternate`/`Alternative`, `Quality`, and `Filter status`.
+Unknown columns are discarded before pipeline entry.
 
 Excel rows are projected onto the established manual-table structure and pass
 through the same assembly, coordinate, allele, ordering, and multiallelic
 validation. Excel therefore adds an input adapter, not a separate interpretation
 pipeline.
+
+### Selected-variant XLSX stabilization (Stages 1–3)
+
+For current XLSX analyses, the UI exposes actual worksheet names and requires the
+user to choose one worksheet and one to ten source rows. No worksheet or rows are
+selected from order, FILTER, quality, phenotype score, pathogenicity, or a Top-N
+rule. Changing worksheets clears row selection. Source FILTER, QUAL, DP, AD, and GQ
+remain provenance only.
+
+Only after explicit submission do selected source rows enter the existing Stage-2
+adapter. It emits `ACCEPTED_DIRECT`, `NORMALIZED_AND_ACCEPTED`, or
+`IDENTITY_UNRESOLVED`; no frontend normalization or reference API call occurs while
+browsing. Selected, canonical/analyzable, and unresolved counts remain distinct.
+Unresolved inputs remain explicit but never enter annotations, Evidence Objects,
+provider requests, interpretations, or LLM evidence. Recovery stores only selected
+source records. The final smoke passed with PipelineResult `3.3`, SQLite `4`,
+recovery request `3`, and EvidenceObject `2.5` unchanged.
 
 ### Stage 47 phenotype-extraction LLM contract
 
@@ -590,7 +608,7 @@ their original order.
 
 ```mermaid
 flowchart TD
-    U["Filtered VCF/VCF.GZ/XLSX worksheet 1 or manual table"] --> V["Validation and allele standardization<br/>1-10 variants"]
+    U["Filtered VCF/VCF.GZ/manual table or selected XLSX rows"] --> V["Validation and allele standardization<br/>1-10 variants"]
     V --> A["Primary annotation providers"]
     A --> AO{"Operational failure?"}
     AO -- No --> P["Local HPO + Phen2Gene/MyDisease context"]
@@ -1907,7 +1925,7 @@ and sign-off remain external and must not be recorded as complete before review.
 |---|---|
 | Application entry and configuration | `app.py`, `config.py`, `.env.example` |
 | VCF/manual input processing | `backend/vcf_processing.py`, `backend/pipeline.py`, `frontend/ui.py` |
-| Excel first-worksheet adapter | `backend/excel_processing.py`, `frontend/execution.py` |
+| Selected XLSX worksheet/row workflow | `backend/excel_processing.py`, `frontend/xlsx_selection.py`, `frontend/execution.py`, `frontend/ui.py` |
 | Core annotation providers | `backend/annotation.py` |
 | VEP-to-VariantValidator validation/mapping fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
 | MyVariant-to-Ensembl overlapping-context fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |

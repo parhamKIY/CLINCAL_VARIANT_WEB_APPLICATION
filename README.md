@@ -94,7 +94,9 @@ its original input order.
 - Final Clinical Report schema: `2.0`.
 - SQLite schema: `4`.
 - Evidence Review, confirmation, routing, and final-report schemas: `1.0`.
-- Current verified suite: **1225 passed, 6 skipped**.
+- Latest final selected-input smoke baseline: **1476 passed, 6 skipped**.
+- Latest Testing V3 baseline: **1038 passed, 4 skipped, 440 deselected** at
+  **83.47%** total coverage.
 - External-provider availability is not implied by the offline test result.
 
 Post-closeout selected-input stabilization separates every retained user-selected
@@ -126,8 +128,8 @@ recorded in the unified project declaration.
 
 ## Evidence-resilience closeout (Stages 1–11)
 
-Stages 1–10 of the evidence-resilience workstream are implemented and approved;
-Stage 11 is documentation closeout pending review. This is a separate workstream
+Stages 1–11 of the evidence-resilience workstream are implemented and approved;
+the workstream is closed and does not automatically begin a new stage. This is a separate workstream
 from the historical Stage 83/115 DOCX visual-signoff track and has no automatic
 Stage 12.
 
@@ -187,8 +189,8 @@ interpretation-before-review pipeline through Final Clinical Report delivery,
 persistence, privacy reverification, Testing V3, the V3 release gate, bounded live
 validation, and the final demo/review handoff:
 
-- VCF, VCF.GZ, manual-table, and first-worksheet-only Excel input for 1–10
-  pre-filtered variants;
+- VCF, VCF.GZ, manual-table, and explicitly selected Excel worksheet/source-row
+  input for 1–10 pre-filtered variants;
 - optional de-identified Persian clinical text processed by a separately selected
   **Phenotype Extraction Model**;
 - locally validated, editable, explicitly accepted HPO terms;
@@ -495,7 +497,9 @@ enforces at least 80% coverage. `tests/run_stage60_acceptance.py` adds compilati
 dependency consistency, secret auditing, and one deterministic ten-variant redesigned
 workflow before invoking Testing V3.
 
-The Stage 60 scenario proves first-worksheet-only Excel processing, Persian phenotype
+The Stage 60 scenario retains its historical first-worksheet privacy boundary. The
+current XLSX workflow instead requires explicit worksheet and source-row selection
+before Stage-2 identity preprocessing. The scenario also proves Persian phenotype
 extraction and corrected HPO acceptance, independent task models, shared
 interpretation-model use across conflict states, isolated failures, report editing,
 four-of-ten selection, durable excluded-variant recovery, canonical references,
@@ -529,7 +533,7 @@ that must never enter application artifacts.
 
 ```mermaid
 flowchart TD
-    I["Filtered VCF/VCF.GZ/XLSX worksheet 1 or manual table (1-10 variants)"] --> V["Validate input and standardize alleles"]
+    I["Filtered VCF/VCF.GZ/manual table or selected XLSX rows (1-10 variants)"] --> V["Validate input and standardize alleles"]
     V --> A["Independent variant annotation"]
     A --> P["HPO, phenotype, gene, and disease context"]
     P --> E["Evidence Object V2 and source lineage"]
@@ -970,8 +974,9 @@ production multi-user clinical deployment.
   phenotype extraction and rejected from stored review/report content.
 - Phenotype-extraction and variant-interpretation payloads use separate exact-field
   validators; interpretation cannot receive the Persian clinical-text field.
-- Ignored Excel worksheets are discarded at the adapter boundary and cannot enter
-  downstream provider/model calls, logs, SQLite state, reports, or exports.
+- Unselected Excel worksheets and source rows are discarded at the adapter boundary
+  and cannot enter downstream provider/model calls, logs, SQLite state, reports, or
+  exports.
 - The confirmation button remains disabled until the reviewer explicitly
   attests that the reviewed evidence contains no PHI or direct identifiers;
   editing the Draft clears that attestation and invalidates confirmation.
