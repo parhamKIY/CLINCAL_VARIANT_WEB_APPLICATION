@@ -4597,8 +4597,8 @@ class TestAnnotation:
             max_retries=0,
         )
 
-        assert session.post_calls[0]["timeout"] == 11
-        assert session.genebe_post_calls[0]["timeout"] == 12
+        assert session.post_calls[0]["timeout"] == (5.0, 11.0)
+        assert session.genebe_post_calls[0]["timeout"] == (5.0, 12.0)
         assert session.myvariant_get_calls[0]["timeout"] == 13
         assert session.clinvar_get_calls[0]["timeout"] == 14
         assert session.clingen_get_calls[0]["timeout"] == 15
@@ -5018,7 +5018,10 @@ class TestAnnotation:
             }
         ]
         assert call["auth"] is None
-        assert call["timeout"] == settings.REQUEST_TIMEOUT
+        assert call["timeout"] == (
+            min(5.0, settings.REQUEST_TIMEOUT),
+            float(settings.REQUEST_TIMEOUT),
+        )
         assert call["verify"] is True
 
     def test_genebe_uses_optional_basic_authentication(
@@ -7931,7 +7934,7 @@ class TestAnnotation:
         )
 
         assert annotations[0]["sources"]["vep"]["status"] == "error"
-        assert len(session.post_calls) == 3
+        assert len(session.post_calls) == 2
         assert "request failed" in annotations[0]["warnings"][0]
         assert (
             annotations[0]["sources"]["vep"]["provider"]
@@ -20794,7 +20797,9 @@ class TestAnnotationApiLogging:
                 f"operation={operation} attempt=1 outcome=success"
                 in contents
             )
-        assert len(re.findall(r"duration_ms=\d+", contents)) == 8
+        assert len(re.findall(r"duration_ms=\d+", contents)) == 10
+        assert "event=provider_call provider=vep" in contents
+        assert "event=provider_call provider=genebe" in contents
         assert "http_status=200" in contents
         assert settings.VEP_BASE_URL not in contents
         assert "1:100:A:G" not in contents
@@ -20846,10 +20851,10 @@ class TestAnnotationApiLogging:
             "operation=annotate_batch attempt=1 outcome=timeout"
         ) in contents
         assert (
-            "event=api_retry_scheduled service=ensembl_vep "
-            "operation=annotate_batch next_attempt=2 reason=timeout "
-            "delay_ms=1000"
+            "event=provider_call provider=vep operation=annotate_batch "
+            "attempt=1 status=timeout"
         ) in contents
+        assert "retry_scheduled=true" in contents
         assert (
             "event=api_call service=ensembl_vep "
             "operation=annotate_batch attempt=2 outcome=success"
@@ -21303,6 +21308,7 @@ class TestFrontendExecution:
             input_type: str,
             phenotype_extraction_model: str | None,
             phenotype_extraction_provenance: object,
+            readiness_snapshot: object,
             progress_callback: PipelineProgressCallback | None,
         ) -> PipelineResult:
             assert vcf_path is not None
@@ -21325,6 +21331,7 @@ class TestFrontendExecution:
             observed["phenotype_extraction_provenance"] = (
                 phenotype_extraction_provenance
             )
+            observed["readiness_snapshot"] = readiness_snapshot
             observed["callback"] = progress_callback
             return expected
 
@@ -21355,6 +21362,7 @@ class TestFrontendExecution:
         )
         assert observed["phenotype_extraction_model"] is None
         assert observed["phenotype_extraction_provenance"] is None
+        assert observed["readiness_snapshot"] is None
         assert observed["callback"] is callback
         temporary_path = observed["path"]
         assert isinstance(temporary_path, Path)
@@ -23998,6 +24006,7 @@ class TestFrontendFoundation:
             phenotype_extraction_model: str,
             phenotype_extraction_provenance: object,
             llm_model: str,
+            readiness_snapshot: object,
             progress_callback: PipelineProgressCallback,
         ) -> PipelineResult:
             received.update(
@@ -24013,6 +24022,9 @@ class TestFrontendFoundation:
                         phenotype_extraction_provenance
                     ),
                     "llm_model": llm_model,
+                    "readiness_result_count": len(
+                        getattr(readiness_snapshot, "results")
+                    ),
                 }
             )
             result = create_pipeline_result()
@@ -24137,6 +24149,7 @@ class TestFrontendFoundation:
             "phenotype_extraction_model": "phenotype-test-model",
             "phenotype_extraction_provenance": None,
             "llm_model": "variant-test-model",
+            "readiness_result_count": 0,
         }
         assert app.session_state["pipeline_result"]["status"] == (
             "success"

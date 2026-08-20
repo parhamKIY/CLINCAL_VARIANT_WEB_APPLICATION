@@ -6,6 +6,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Literal
@@ -26,6 +27,10 @@ from backend.evidence_rescue import (
 )
 from backend.erepo import retrieve_expert_curated_context
 from backend.logging_config import get_logger
+from backend.provider_readiness import (
+    ProviderReadinessSnapshot,
+    resolve_provider_readiness_hint,
+)
 from backend.provider_resilience import (
     ProviderCircuitState,
     ProviderInvalidResponseError,
@@ -58,6 +63,8 @@ LOGGER = get_logger("annotation")
 # Ensembl documents a maximum of 200 variants per POST request.
 MAX_VEP_BATCH_SIZE = 200
 MAX_GENEBE_BATCH_SIZE = 1_000
+FAST_CONFIRMATION_CONNECT_TIMEOUT_SECONDS = 1.0
+FAST_CONFIRMATION_READ_TIMEOUT_SECONDS = 3.0
 MAX_STORED_TRANSCRIPTS = 10
 MAX_GENEBE_CONSEQUENCES = 10
 MAX_GENEBE_ACMG_CRITERIA = 50
@@ -243,6 +250,22 @@ class GeneBeResponseError(AnnotationServiceError):
     """Raised when GeneBe returns an invalid successful response."""
 
 
+class GeneBeOperationalError(AnnotationServiceError):
+    """Carry one normalized provider-wide GeneBe operational failure."""
+
+    def __init__(
+        self,
+        message: str,
+        provider_status: ProviderStatus,
+    ) -> None:
+        super().__init__(message)
+        self.provider_status = provider_status
+
+
+class GeneBeVariantLevelError(AnnotationServiceError):
+    """Carry one GeneBe rejection requiring per-variant isolation."""
+
+
 class VepOperationalError(AnnotationServiceError):
     """Carry one normalized VEP operational failure."""
 
@@ -253,6 +276,10 @@ class VepOperationalError(AnnotationServiceError):
     ) -> None:
         super().__init__(message)
         self.provider_status = provider_status
+
+
+class VepVariantLevelError(AnnotationServiceError):
+    """Carry one VEP rejection requiring per-variant isolation."""
 
 
 class MyVariantOperationalError(AnnotationServiceError):
@@ -513,10 +540,83 @@ def _log_api_retry(
     )
 
 
+@dataclass
+class _ReadinessConfirmationState:
+    """Consume one fresh-unreachable hint after a successful confirmation."""
+
+    succeeded: bool = False
+
+
+def _batch_provider_policy(
+    *,
+    provider: str,
+    read_timeout: float,
+    max_retries: int,
+    readiness_snapshot: ProviderReadinessSnapshot | None,
+    confirmation_state: _ReadinessConfirmationState | None,
+) -> tuple[ProviderTimeouts, ProviderRetryPolicy, bool]:
+    """Select one bounded policy from optional readiness context."""
+
+    hint = resolve_provider_readiness_hint(readiness_snapshot, provider)
+    fast_confirmation = (
+        hint.state == "fresh_unreachable"
+        and not (
+            confirmation_state is not None
+            and confirmation_state.succeeded
+        )
+    )
+    if fast_confirmation:
+        return (
+            ProviderTimeouts(
+                connect=FAST_CONFIRMATION_CONNECT_TIMEOUT_SECONDS,
+                read=FAST_CONFIRMATION_READ_TIMEOUT_SECONDS,
+            ),
+            ProviderRetryPolicy(max_attempts=1),
+            True,
+        )
+    normalized_read_timeout = float(read_timeout)
+    return (
+        ProviderTimeouts(
+            connect=min(5.0, normalized_read_timeout),
+            read=normalized_read_timeout,
+        ),
+        ProviderRetryPolicy(max_attempts=min(max_retries + 1, 3)),
+        False,
+    )
+
+
+def _is_variant_level_http_rejection(status_code: int) -> bool:
+    """Return whether an HTTP response requires independent isolation."""
+
+    return status_code in {400, 409, 413, 422}
+
+
+def _consume_reachable_confirmation(
+    *,
+    status_code: int,
+    fast_confirmation: bool,
+    confirmation_state: _ReadinessConfirmationState | None,
+) -> None:
+    """Consume a hint after an HTTP success or variant-level rejection."""
+
+    if (
+        fast_confirmation
+        and confirmation_state is not None
+        and (
+            200 <= status_code < 300
+            or _is_variant_level_http_rejection(status_code)
+        )
+    ):
+        confirmation_state.succeeded = True
+
+
 def _post_vep_batch(
     session: requests.Session,
     vep_inputs: list[str],
     max_retries: int,
+    circuit_state: ProviderCircuitState | None = None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
+    confirmation_state: _ReadinessConfirmationState | None = None,
 ) -> list[dict[str, Any]]:
     """Send one VEP batch with timeout, retry, and response validation."""
     endpoint = f"{settings.VEP_BASE_URL}/vep/homo_sapiens/region"
@@ -535,99 +635,102 @@ def _post_vep_batch(
     if settings.GENOME_ASSEMBLY == "GRCh38":
         params["mane"] = 1
 
-    for attempt in range(max_retries + 1):
-        response: requests.Response | None = None
-        started_at = time.perf_counter()
+    timeouts, retry_policy, fast_confirmation = _batch_provider_policy(
+        provider="vep",
+        read_timeout=settings.VEP_TIMEOUT,
+        max_retries=max_retries,
+        readiness_snapshot=readiness_snapshot,
+        confirmation_state=confirmation_state,
+    )
+    invalid_message: str | None = None
 
+    def operation(
+        timeout: tuple[float, float],
+        attempt: int,
+    ) -> object:
+        nonlocal invalid_message
+        started_at = time.perf_counter()
         try:
             response = session.post(
                 endpoint,
                 headers=headers,
                 params=params,
                 json={"variants": vep_inputs},
-                timeout=settings.VEP_TIMEOUT,
+                timeout=timeout,
                 verify=True,
             )
         except requests.RequestException as exc:
             _log_api_call(
                 service="ensembl_vep",
                 operation="annotate_batch",
-                attempt=attempt,
+                attempt=attempt - 1,
                 started_at=started_at,
                 exception=exc,
             )
-            if attempt >= max_retries:
-                raise VepOperationalError(
-                    "Ensembl VEP request failed because the service "
-                    "was unavailable.",
-                    classify_request_exception(exc),
-                ) from exc
-
-            delay = _retry_delay(attempt)
-            _log_api_retry(
-                service="ensembl_vep",
-                operation="annotate_batch",
-                attempt=attempt,
-                reason=(
-                    "timeout"
-                    if isinstance(exc, requests.Timeout)
-                    else "network_error"
-                ),
-                delay_seconds=delay,
-            )
-            time.sleep(delay)
-            continue
+            raise
 
         _log_api_call(
             service="ensembl_vep",
             operation="annotate_batch",
-            attempt=attempt,
+            attempt=attempt - 1,
             started_at=started_at,
             response=response,
         )
-        if response.status_code in TRANSIENT_HTTP_STATUSES:
-            if attempt < max_retries:
-                delay = _retry_delay(attempt, response)
-                _log_api_retry(
-                    service="ensembl_vep",
-                    operation="annotate_batch",
-                    attempt=attempt,
-                    reason=f"http_{response.status_code}",
-                    delay_seconds=delay,
-                )
-                time.sleep(delay)
-                continue
-
+        _consume_reachable_confirmation(
+            status_code=response.status_code,
+            fast_confirmation=fast_confirmation,
+            confirmation_state=confirmation_state,
+        )
         if not 200 <= response.status_code < 300:
-            raise VepOperationalError(
-                "Ensembl VEP returned HTTP "
-                f"{response.status_code}.",
-                classify_http_status(response.status_code),
-            )
+            if _is_variant_level_http_rejection(response.status_code):
+                raise VepVariantLevelError(
+                    "Ensembl VEP rejected the variant request with "
+                    f"HTTP {response.status_code}."
+                )
+            return response
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise VepOperationalError(
-                "Ensembl VEP returned invalid JSON.",
-                "invalid_response",
+            invalid_message = "Ensembl VEP returned invalid JSON."
+            raise ProviderInvalidResponseError(
+                invalid_message,
+                http_status=response.status_code,
             ) from exc
 
         if not isinstance(payload, list) or any(
             not isinstance(item, dict)
             for item in payload
         ):
-            raise VepOperationalError(
-                "Ensembl VEP returned an unexpected response structure.",
-                "invalid_response",
+            invalid_message = (
+                "Ensembl VEP returned an unexpected response structure."
             )
-
+            raise ProviderInvalidResponseError(
+                invalid_message,
+                http_status=response.status_code,
+            )
         return payload
 
-    raise VepOperationalError(
-        "Ensembl VEP retry loop ended unexpectedly.",
-        "unavailable",
+    result = call_provider_with_policy(
+        provider="vep",
+        operation_name="annotate_batch",
+        operation=operation,
+        timeouts=timeouts,
+        retry_policy=retry_policy,
+        circuit_state=circuit_state,
+        sleep=time.sleep,
     )
+    if result.status == "success" and isinstance(result.value, list):
+        return result.value
+    if result.status == "invalid_response" and invalid_message is not None:
+        message = invalid_message
+    elif result.http_status is not None:
+        message = f"Ensembl VEP returned HTTP {result.http_status}."
+    else:
+        message = (
+            "Ensembl VEP request failed because the service was unavailable."
+        )
+    raise VepOperationalError(message, result.status)
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +755,9 @@ def _post_genebe_batch(
     session: requests.Session,
     variants: list[dict[str, Any]],
     max_retries: int,
+    circuit_state: ProviderCircuitState | None = None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
+    confirmation_state: _ReadinessConfirmationState | None = None,
 ) -> list[dict[str, Any]]:
     """Send one GeneBe batch with bounded reliability controls."""
 
@@ -681,8 +787,20 @@ def _post_genebe_batch(
         else None
     )
 
-    for attempt in range(max_retries + 1):
-        response: requests.Response | None = None
+    timeouts, retry_policy, fast_confirmation = _batch_provider_policy(
+        provider="genebe",
+        read_timeout=settings.GENEBE_TIMEOUT,
+        max_retries=max_retries,
+        readiness_snapshot=readiness_snapshot,
+        confirmation_state=confirmation_state,
+    )
+    invalid_message: str | None = None
+
+    def operation(
+        timeout: tuple[float, float],
+        attempt: int,
+    ) -> object:
+        nonlocal invalid_message
         started_at = time.perf_counter()
         try:
             response = session.post(
@@ -694,75 +812,55 @@ def _post_genebe_batch(
                 params=params,
                 json=variants,
                 auth=auth,
-                timeout=settings.GENEBE_TIMEOUT,
+                timeout=timeout,
                 verify=True,
             )
         except requests.RequestException as exc:
             _log_api_call(
                 service="genebe",
                 operation="annotate_batch",
-                attempt=attempt,
+                attempt=attempt - 1,
                 started_at=started_at,
                 exception=exc,
             )
-            if attempt >= max_retries:
-                raise AnnotationServiceError(
-                    "GeneBe request failed because the service was "
-                    "unavailable."
-                ) from exc
-
-            delay = _retry_delay(attempt)
-            _log_api_retry(
-                service="genebe",
-                operation="annotate_batch",
-                attempt=attempt,
-                reason=(
-                    "timeout"
-                    if isinstance(exc, requests.Timeout)
-                    else "network_error"
-                ),
-                delay_seconds=delay,
-            )
-            time.sleep(delay)
-            continue
+            raise
 
         _log_api_call(
             service="genebe",
             operation="annotate_batch",
-            attempt=attempt,
+            attempt=attempt - 1,
             started_at=started_at,
             response=response,
         )
-        if (
-            response.status_code in TRANSIENT_HTTP_STATUSES
-            and attempt < max_retries
-        ):
-            delay = _retry_delay(attempt, response)
-            _log_api_retry(
-                service="genebe",
-                operation="annotate_batch",
-                attempt=attempt,
-                reason=f"http_{response.status_code}",
-                delay_seconds=delay,
-            )
-            time.sleep(delay)
-            continue
-
+        _consume_reachable_confirmation(
+            status_code=response.status_code,
+            fast_confirmation=fast_confirmation,
+            confirmation_state=confirmation_state,
+        )
         if not 200 <= response.status_code < 300:
-            raise AnnotationServiceError(
-                f"GeneBe returned HTTP {response.status_code}."
-            )
+            if _is_variant_level_http_rejection(response.status_code):
+                raise GeneBeVariantLevelError(
+                    "GeneBe rejected the variant request with "
+                    f"HTTP {response.status_code}."
+                )
+            return response
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise GeneBeResponseError(
-                "GeneBe returned invalid JSON."
+            invalid_message = "GeneBe returned invalid JSON."
+            raise ProviderInvalidResponseError(
+                invalid_message,
+                http_status=response.status_code,
             ) from exc
 
         if not isinstance(payload, dict):
-            raise GeneBeResponseError(
+            invalid_message = (
                 "GeneBe returned an unexpected response structure."
+            )
+            raise ProviderInvalidResponseError(
+                invalid_message,
+                http_status=response.status_code,
             )
         response_variants = payload.get("variants")
         if (
@@ -773,15 +871,34 @@ def _post_genebe_batch(
             )
             or len(response_variants) != len(variants)
         ):
-            raise GeneBeResponseError(
+            invalid_message = (
                 "GeneBe returned an unexpected variant count or "
                 "response structure."
             )
+            raise ProviderInvalidResponseError(
+                invalid_message,
+                http_status=response.status_code,
+            )
         return response_variants
 
-    raise AnnotationServiceError(
-        "GeneBe retry loop ended unexpectedly."
+    result = call_provider_with_policy(
+        provider="genebe",
+        operation_name="annotate_batch",
+        operation=operation,
+        timeouts=timeouts,
+        retry_policy=retry_policy,
+        circuit_state=circuit_state,
+        sleep=time.sleep,
     )
+    if result.status == "success" and isinstance(result.value, list):
+        return result.value
+    if result.status == "invalid_response" and invalid_message is not None:
+        message = invalid_message
+    elif result.http_status is not None:
+        message = f"GeneBe returned HTTP {result.http_status}."
+    else:
+        message = "GeneBe request failed because the service was unavailable."
+    raise GeneBeOperationalError(message, result.status)
 
 
 # ---------------------------------------------------------------------------
@@ -2163,6 +2280,9 @@ def _base_annotation(
     warning: str | None = None,
     retrieved_at: str | None = None,
     vep_failure: ProviderStatus | None = None,
+    vep_failure_scope: (
+        Literal["provider_wide", "variant_level"] | None
+    ) = None,
 ) -> AnnotationData:
     """Build a stable annotation object for success or failure states."""
     warnings_list = [warning] if warning else []
@@ -2208,6 +2328,14 @@ def _base_annotation(
                 "fallback_provider": VARIANTVALIDATOR_PROVIDER_NAME,
                 "fallback_status": "not_triggered",
                 "fallback_failure": None,
+                "failure_scope": (
+                    vep_failure_scope
+                    or (
+                        "provider_wide"
+                        if vep_failure is not None
+                        else None
+                    )
+                ),
                 "source_type": "direct",
                 "provider_version": None,
                 "retrieved_at": retrieved_at or _retrieval_timestamp(),
@@ -2231,6 +2359,8 @@ def _base_annotation(
             "genebe": {
                 "status": "pending",
                 "provider": GENEBE_PROVIDER_NAME,
+                "primary_failure": None,
+                "failure_scope": None,
                 "provider_version": None,
                 "retrieved_at": None,
                 "request_assembly": settings.GENOME_ASSEMBLY,
@@ -2807,9 +2937,13 @@ def _annotate_with_genebe(
     annotations: list[AnnotationData],
     session: requests.Session,
     max_retries: int,
-) -> None:
+    circuit_state: ProviderCircuitState,
+    readiness_snapshot: ProviderReadinessSnapshot | None,
+    confirmation_state: _ReadinessConfirmationState,
+) -> bool:
     """Batch GeneBe evidence without overwriting VEP annotations."""
 
+    provider_wide_failure = False
     for offset in range(0, len(annotations), MAX_GENEBE_BATCH_SIZE):
         batch = annotations[offset:offset + MAX_GENEBE_BATCH_SIZE]
         request_variants = [
@@ -2821,8 +2955,15 @@ def _annotate_with_genebe(
                 session,
                 request_variants,
                 max_retries,
+                circuit_state,
+                readiness_snapshot,
+                confirmation_state,
             )
         except AnnotationServiceError as exc:
+            variant_level = isinstance(exc, GeneBeVariantLevelError)
+            provider_wide_failure = (
+                provider_wide_failure or not variant_level
+            )
             LOGGER.error(
                 "event=annotation_source_failed service=genebe "
                 "error_type=%s",
@@ -2833,8 +2974,26 @@ def _annotate_with_genebe(
                     {
                         "status": (
                             "invalid_response"
-                            if isinstance(exc, GeneBeResponseError)
+                            if variant_level
+                            or (
+                                isinstance(exc, GeneBeOperationalError)
+                                and exc.provider_status == "invalid_response"
+                            )
                             else "unavailable"
+                        ),
+                        "primary_failure": (
+                            None
+                            if variant_level
+                            else (
+                                exc.provider_status
+                                if isinstance(exc, GeneBeOperationalError)
+                                else "unavailable"
+                            )
+                        ),
+                        "failure_scope": (
+                            "variant_level"
+                            if variant_level
+                            else "provider_wide"
                         ),
                         "retrieved_at": _retrieval_timestamp(),
                     }
@@ -2849,10 +3008,13 @@ def _annotate_with_genebe(
                 annotation["sources"]["genebe"].update(
                     {
                         "status": "invalid_response",
+                        "failure_scope": "variant_level",
                         "retrieved_at": _retrieval_timestamp(),
                     }
                 )
                 annotation["warnings"].append(str(exc))
+
+    return provider_wide_failure
 
 
 def _iter_source_records(value: Any) -> Iterator[dict[str, Any]]:
@@ -4865,6 +5027,8 @@ def _retry_failed_source_annotations(
     max_retries: int,
     retry_variant: Callable[[int], AnnotationData],
     progress_callback: AnnotationProgressCallback | None,
+    circuit_state: ProviderCircuitState | None = None,
+    circuit_provider: str | None = None,
 ) -> int:
     """Automatically retry only failed variant/provider pairs."""
 
@@ -4876,7 +5040,11 @@ def _retry_failed_source_annotations(
     retry_rounds = 0
 
     for retry_index in range(max_retries):
-        if not failed_indices:
+        if not failed_indices or (
+            circuit_state is not None
+            and circuit_provider is not None
+            and circuit_state.get(circuit_provider) is not None
+        ):
             break
         retry_rounds = retry_index + 1
         failed_count = len(failed_indices)
@@ -4901,8 +5069,23 @@ def _retry_failed_source_annotations(
         )
         time.sleep(delay)
 
-        for index in failed_indices:
+        circuit_opened = False
+        for position, index in enumerate(failed_indices):
             annotations[index] = retry_variant(index)
+            if (
+                circuit_state is not None
+                and circuit_provider is not None
+                and circuit_state.get(circuit_provider) is not None
+            ):
+                for remaining_index in failed_indices[position + 1:]:
+                    annotations[remaining_index] = retry_variant(
+                        remaining_index
+                    )
+                circuit_opened = True
+                break
+
+        if circuit_opened:
+            break
 
         failed_indices = [
             index
@@ -4916,6 +5099,10 @@ def _retry_failed_source_annotations(
 def _annotate_vep_variant_once(
     variant: VariantData,
     session: requests.Session,
+    max_retries: int,
+    circuit_state: ProviderCircuitState,
+    readiness_snapshot: ProviderReadinessSnapshot | None,
+    confirmation_state: _ReadinessConfirmationState,
 ) -> AnnotationData:
     """Retry one failed VEP variant without restarting successful variants."""
 
@@ -4924,7 +5111,10 @@ def _annotate_vep_variant_once(
         responses = _post_vep_batch(
             session,
             [_to_vep_input(token, variant)],
-            0,
+            max_retries,
+            circuit_state,
+            readiness_snapshot,
+            confirmation_state,
         )
     except AnnotationServiceError as exc:
         LOGGER.error(
@@ -4939,7 +5129,12 @@ def _annotate_vep_variant_once(
             vep_failure=(
                 exc.provider_status
                 if isinstance(exc, VepOperationalError)
-                else "unavailable"
+                else None
+            ),
+            vep_failure_scope=(
+                "variant_level"
+                if isinstance(exc, VepVariantLevelError)
+                else "provider_wide"
             ),
         )
 
@@ -5730,6 +5925,7 @@ def annotate_variants(
     session: requests.Session | None = None,
     progress_callback: AnnotationProgressCallback | None = None,
     use_cache: bool | None = None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
 ) -> list[AnnotationData]:
     """Annotate with VEP, GeneBe, MyVariant, ClinVar, ClinGen, and CSpec evidence.
 
@@ -5738,6 +5934,13 @@ def annotate_variants(
     """
     if isinstance(variants, (str, bytes, dict)):
         raise AnnotationError("variants must be an iterable of dictionaries.")
+    if readiness_snapshot is not None and not isinstance(
+        readiness_snapshot,
+        ProviderReadinessSnapshot,
+    ):
+        raise AnnotationError(
+            "readiness_snapshot must be a ProviderReadinessSnapshot."
+        )
     variant_items = list(variants)
     for index, variant in enumerate(variant_items):
         _validate_variant(variant, index)
@@ -5762,6 +5965,9 @@ def annotate_variants(
     active_session = session or requests.Session()
     owns_session = session is None
     annotations: list[AnnotationData] = []
+    vep_circuit = ProviderCircuitState()
+    vep_confirmation_state = _ReadinessConfirmationState()
+    vep_provider_wide_failure = False
 
     try:
         _notify_annotation_progress(
@@ -5781,8 +5987,15 @@ def annotate_variants(
                     active_session,
                     vep_inputs,
                     resolved_retries,
+                    vep_circuit,
+                    readiness_snapshot,
+                    vep_confirmation_state,
                 )
             except AnnotationServiceError as exc:
+                variant_level = isinstance(exc, VepVariantLevelError)
+                vep_provider_wide_failure = (
+                    vep_provider_wide_failure or not variant_level
+                )
                 LOGGER.error(
                     "event=annotation_source_failed "
                     "service=ensembl_vep error_type=%s",
@@ -5794,9 +6007,18 @@ def annotate_variants(
                         status="error",
                         warning=str(exc),
                         vep_failure=(
-                            exc.provider_status
-                            if isinstance(exc, VepOperationalError)
-                            else "unavailable"
+                            None
+                            if variant_level
+                            else (
+                                exc.provider_status
+                                if isinstance(exc, VepOperationalError)
+                                else "unavailable"
+                            )
+                        ),
+                        vep_failure_scope=(
+                            "variant_level"
+                            if variant_level
+                            else "provider_wide"
                         ),
                     )
                     for _, variant in batch
@@ -5832,16 +6054,24 @@ def annotate_variants(
                     )
                 )
 
-        vep_retry_rounds = _retry_failed_source_annotations(
-            annotations,
-            source="vep",
-            max_retries=resolved_retries,
-            retry_variant=lambda index: _annotate_vep_variant_once(
-                annotations[index]["variant"],
-                active_session,
-            ),
-            progress_callback=progress_callback,
-        )
+        vep_retry_rounds = 0
+        if not vep_provider_wide_failure:
+            vep_retry_rounds = _retry_failed_source_annotations(
+                annotations,
+                source="vep",
+                max_retries=resolved_retries,
+                retry_variant=lambda index: _annotate_vep_variant_once(
+                    annotations[index]["variant"],
+                    active_session,
+                    resolved_retries,
+                    vep_circuit,
+                    readiness_snapshot,
+                    vep_confirmation_state,
+                ),
+                progress_callback=progress_callback,
+                circuit_state=vep_circuit,
+                circuit_provider="vep",
+            )
         variantvalidator_circuit = ProviderCircuitState()
         for annotation in annotations:
             if _source_failed(annotation, "vep"):
@@ -5869,25 +6099,37 @@ def annotate_variants(
             "Sending variants to GeneBe.",
         )
         genebe_baselines = deepcopy(annotations)
-        _annotate_with_genebe(
+        genebe_circuit = ProviderCircuitState()
+        genebe_confirmation_state = _ReadinessConfirmationState()
+        genebe_provider_wide_failure = _annotate_with_genebe(
             annotations,
             active_session,
             resolved_retries,
+            genebe_circuit,
+            readiness_snapshot,
+            genebe_confirmation_state,
         )
-        genebe_retry_rounds = _retry_failed_source_annotations(
-            annotations,
-            source="genebe",
-            max_retries=resolved_retries,
-            retry_variant=lambda index: _retry_annotation_copy(
-                genebe_baselines[index],
-                lambda candidate: _annotate_with_genebe(
-                    [candidate],
-                    active_session,
-                    0,
+        genebe_retry_rounds = 0
+        if not genebe_provider_wide_failure:
+            genebe_retry_rounds = _retry_failed_source_annotations(
+                annotations,
+                source="genebe",
+                max_retries=resolved_retries,
+                retry_variant=lambda index: _retry_annotation_copy(
+                    genebe_baselines[index],
+                    lambda candidate: _annotate_with_genebe(
+                        [candidate],
+                        active_session,
+                        resolved_retries,
+                        genebe_circuit,
+                        readiness_snapshot,
+                        genebe_confirmation_state,
+                    ),
                 ),
-            ),
-            progress_callback=progress_callback,
-        )
+                progress_callback=progress_callback,
+                circuit_state=genebe_circuit,
+                circuit_provider="genebe",
+            )
         genebe_status, genebe_message = _source_progress_summary(
             annotations,
             "genebe",

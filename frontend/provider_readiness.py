@@ -10,8 +10,10 @@ from backend.provider_readiness import (
     LOCAL_FALLBACK_LABELS,
     ProviderReadinessRecommendation,
     ProviderReadinessResult,
+    ProviderReadinessSnapshot,
     ProviderReadinessTarget,
     build_provider_readiness_recommendations,
+    build_provider_readiness_snapshot,
     configured_provider_readiness_targets,
     run_provider_readiness_checks,
 )
@@ -54,6 +56,20 @@ def initialize_provider_readiness_state() -> None:
 
     st.session_state.setdefault(PROVIDER_READINESS_RESULTS_KEY, ())
     st.session_state.setdefault(PROVIDER_READINESS_CHECKED_AT_KEY, None)
+
+
+def current_provider_readiness_snapshot() -> ProviderReadinessSnapshot:
+    """Detach current sidebar results as optional analysis request context."""
+
+    value = st.session_state.get(PROVIDER_READINESS_RESULTS_KEY, ())
+    if not isinstance(value, (list, tuple)):
+        value = ()
+    results = tuple(
+        result
+        for result in value
+        if isinstance(result, ProviderReadinessResult)
+    )
+    return build_provider_readiness_snapshot(results)
 
 
 def _fallback_role(target: ProviderReadinessTarget) -> str:

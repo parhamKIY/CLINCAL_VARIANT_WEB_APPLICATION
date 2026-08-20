@@ -42,8 +42,21 @@ def _fixture(name: str) -> object:
 
 
 def _patch_non_erepo_sources(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_vep(_session: object, inputs: list[str], _retries: int) -> list[dict[str, object]]:
+    def fake_vep(
+        _session: object,
+        inputs: list[str],
+        _retries: int,
+        *_orchestration: object,
+    ) -> list[dict[str, object]]:
         return [{"input": inputs[0], "assembly_name": "GRCh38", "transcript_consequences": []}]
+
+    def fake_genebe(
+        annotations: list[dict[str, object]],
+        *_orchestration: object,
+    ) -> bool:
+        for item in annotations:
+            mark_not_found(item, "genebe")
+        return False
 
     def mark_not_found(annotation: dict[str, object], source: str) -> None:
         sources = annotation["sources"]
@@ -58,7 +71,7 @@ def _patch_non_erepo_sources(monkeypatch: pytest.MonkeyPatch) -> None:
         "_apply_ucsc_normal_population_frequency_fallback",
         lambda *_args: None,
     )
-    monkeypatch.setattr(annotation_module, "_annotate_with_genebe", lambda annotations, *_: [mark_not_found(item, "genebe") for item in annotations])
+    monkeypatch.setattr(annotation_module, "_annotate_with_genebe", fake_genebe)
     for source, function in (
         ("myvariant", "_annotate_with_myvariant"),
         ("clinvar", "_annotate_with_clinvar"),

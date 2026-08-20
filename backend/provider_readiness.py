@@ -1,7 +1,7 @@
-"""Provider-readiness catalog shared by pre-analysis health checks.
+"""Provider-readiness catalog and ephemeral orchestration hints.
 
-The catalog describes operational connectivity only.  It deliberately does
-not change evidence collection, fallback activation, or clinical provenance.
+Readiness describes operational connectivity only. It can shorten confirmation
+of a fresh outage, but never becomes evidence or changes provider semantics.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Callable, Literal, Protocol, Sequence
 from urllib.parse import urlsplit
@@ -21,6 +22,12 @@ from config import settings
 ProbeKind = Literal["transport", "authenticated"]
 CredentialMode = Literal["none", "optional", "required"]
 ReadinessState = Literal["reachable", "unreachable"]
+ReadinessHintState = Literal[
+    "fresh_reachable",
+    "fresh_unreachable",
+    "stale",
+    "unknown",
+]
 RecommendationState = Literal[
     "preferred",
     "awaiting_check",
@@ -28,6 +35,7 @@ RecommendationState = Literal[
     "unavailable",
 ]
 DEFAULT_READINESS_TIMEOUT_SECONDS = 5.0
+PROVIDER_READINESS_TTL_SECONDS = 300.0
 MAX_READINESS_WORKERS = 5
 
 
@@ -68,6 +76,24 @@ class ProviderReadinessResult:
     latency_ms: float | None
     failure_category: str
     probe_kind: ProbeKind
+    checked_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderReadinessSnapshot:
+    """Immutable, non-clinical readiness context for one analysis request."""
+
+    results: tuple[ProviderReadinessResult, ...]
+
+
+@dataclass(frozen=True)
+class ProviderReadinessHint:
+    """Freshness-qualified operational hint for one provider."""
+
+    provider: str
+    state: ReadinessHintState
+    checked_at: str | None
+    failure_category: str | None
 
 
 @dataclass(frozen=True)
@@ -87,6 +113,101 @@ class ProviderReadinessSession(Protocol):
     def head(self, url: str, **kwargs: object) -> requests.Response: ...
 
     def get(self, url: str, **kwargs: object) -> requests.Response: ...
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_timestamp(now: Callable[[], datetime]) -> str:
+    value = now()
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("Readiness clock must return a timezone-aware datetime.")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_provider_readiness_snapshot(
+    results: Sequence[ProviderReadinessResult],
+) -> ProviderReadinessSnapshot:
+    """Detach one bounded readiness result set for backend orchestration."""
+
+    detached = tuple(results)
+    if any(not isinstance(result, ProviderReadinessResult) for result in detached):
+        raise TypeError("Readiness snapshot results must be readiness results.")
+    providers = [result.provider for result in detached]
+    if len(set(providers)) != len(providers):
+        raise ValueError("Readiness snapshot providers must be unique.")
+    return ProviderReadinessSnapshot(results=detached)
+
+
+def resolve_provider_readiness_hint(
+    snapshot: ProviderReadinessSnapshot | None,
+    provider: str,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: float = PROVIDER_READINESS_TTL_SECONDS,
+) -> ProviderReadinessHint:
+    """Return a deterministic operational hint without altering evidence."""
+
+    if not isinstance(provider, str) or not provider.isidentifier():
+        raise ValueError("Provider identifier must be a Python identifier.")
+    if (
+        isinstance(ttl_seconds, bool)
+        or not isinstance(ttl_seconds, (int, float))
+        or not 0 < float(ttl_seconds) <= 3_600
+    ):
+        raise ValueError("Readiness TTL must be greater than 0 and at most 3600.")
+    if snapshot is None:
+        return ProviderReadinessHint(provider, "unknown", None, None)
+    if not isinstance(snapshot, ProviderReadinessSnapshot):
+        raise TypeError("snapshot must be a ProviderReadinessSnapshot.")
+    result = next(
+        (candidate for candidate in snapshot.results if candidate.provider == provider),
+        None,
+    )
+    if result is None or result.checked_at is None:
+        return ProviderReadinessHint(
+            provider,
+            "unknown",
+            None if result is None else result.checked_at,
+            None if result is None else result.failure_category,
+        )
+    current = now or _utc_now()
+    if not isinstance(current, datetime) or current.tzinfo is None:
+        raise ValueError("Readiness comparison time must be timezone-aware.")
+    try:
+        checked_at = datetime.fromisoformat(
+            result.checked_at.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return ProviderReadinessHint(
+            provider,
+            "unknown",
+            result.checked_at,
+            result.failure_category,
+        )
+    if checked_at.tzinfo is None:
+        return ProviderReadinessHint(
+            provider,
+            "unknown",
+            result.checked_at,
+            result.failure_category,
+        )
+    age_seconds = (
+        current.astimezone(timezone.utc) - checked_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if age_seconds < 0 or age_seconds > float(ttl_seconds):
+        state: ReadinessHintState = "stale"
+    elif result.state == "reachable":
+        state = "fresh_reachable"
+    else:
+        state = "fresh_unreachable"
+    return ProviderReadinessHint(
+        provider,
+        state,
+        result.checked_at,
+        result.failure_category,
+    )
 
 
 FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
@@ -307,6 +428,7 @@ def probe_provider_readiness(
     timeout: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
     resolver: Callable[..., object] = socket.getaddrinfo,
     clock: Callable[[], float] = perf_counter,
+    utc_now: Callable[[], datetime] = _utc_now,
 ) -> ProviderReadinessResult:
     """Probe one endpoint without submitting variants or clinical text.
 
@@ -327,6 +449,7 @@ def probe_provider_readiness(
             latency_ms=None,
             failure_category="configuration_error",
             probe_kind=target.probe_kind,
+            checked_at=_utc_timestamp(utc_now),
         )
 
     try:
@@ -340,6 +463,7 @@ def probe_provider_readiness(
             latency_ms=None,
             failure_category="dns_failure",
             probe_kind=target.probe_kind,
+            checked_at=_utc_timestamp(utc_now),
         )
 
     started_at = clock()
@@ -373,6 +497,7 @@ def probe_provider_readiness(
             latency_ms=elapsed,
             failure_category=_request_failure_category(exc),
             probe_kind=target.probe_kind,
+            checked_at=_utc_timestamp(utc_now),
         )
 
     elapsed = round(max(0.0, clock() - started_at) * 1_000, 1)
@@ -392,6 +517,7 @@ def probe_provider_readiness(
         latency_ms=elapsed,
         failure_category=failure_category,
         probe_kind=target.probe_kind,
+        checked_at=_utc_timestamp(utc_now),
     )
 
 
@@ -573,18 +699,24 @@ __all__ = [
     "FALLBACK_CHAINS",
     "LOCAL_FALLBACK_LABELS",
     "MAX_READINESS_WORKERS",
+    "PROVIDER_READINESS_TTL_SECONDS",
     "ProbeKind",
+    "ProviderReadinessHint",
     "ProviderReadinessResult",
     "ProviderReadinessRecommendation",
     "ProviderReadinessSession",
+    "ProviderReadinessSnapshot",
     "ProviderReadinessTarget",
     "QUALITY_SOURCE_CHAINS",
+    "ReadinessHintState",
     "ReadinessState",
     "RecommendationState",
     "build_provider_readiness_recommendations",
+    "build_provider_readiness_snapshot",
     "configured_provider_readiness_targets",
     "probe_provider_readiness",
     "provider_readiness_target_map",
     "recommend_provider_readiness",
+    "resolve_provider_readiness_hint",
     "run_provider_readiness_checks",
 ]

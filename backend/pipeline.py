@@ -68,6 +68,7 @@ from backend.reference_sequence import (
     fetch_reference_sequence_cached,
 )
 from backend.llm import LLMClient
+from backend.provider_readiness import ProviderReadinessSnapshot
 from backend.llm_routing import (
     RoutingProgressCallback,
     Stage35RoutingError,
@@ -2262,6 +2263,7 @@ def _annotate_and_match(
     phen2gene_session: requests.Session | None,
     phen2gene_use_cache: bool,
     mydisease_session: requests.Session | None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> None:
     """Enrich filtered variants and attach optional HPO scores."""
@@ -2296,6 +2298,7 @@ def _annotate_and_match(
         max_retries=annotation_max_retries,
         session=annotation_session,
         progress_callback=update_annotation_progress,
+        readiness_snapshot=readiness_snapshot,
     )
     public_annotations = [
         dict(annotation)
@@ -3214,6 +3217,7 @@ def run_annotation_and_phenotype(
     phen2gene_session: requests.Session | None = None,
     phen2gene_use_cache: bool = True,
     mydisease_session: requests.Session | None = None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
 ) -> PipelineResult:
     """Run annotation, optional HPO matching, and MyDisease enrichment."""
 
@@ -3239,6 +3243,7 @@ def run_annotation_and_phenotype(
         phen2gene_session=phen2gene_session,
         phen2gene_use_cache=phen2gene_use_cache,
         mydisease_session=mydisease_session,
+        readiness_snapshot=readiness_snapshot,
     )
     return validate_pipeline_result(result)
 
@@ -3265,6 +3270,7 @@ def _run_analysis_unpersisted(
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
     report_dir: str | Path | None = None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Run the clinical pipeline before optional database persistence."""
@@ -3380,6 +3386,7 @@ def _run_analysis_unpersisted(
             phen2gene_session=phen2gene_session,
             phen2gene_use_cache=phen2gene_use_cache,
             mydisease_session=mydisease_session,
+            readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
         )
     except AnnotationError as exc:
@@ -3500,6 +3507,7 @@ def run_analysis(
     report_dir: str | Path | None = None,
     database_path: str | Path | None = None,
     persist_analysis: bool = True,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Run analysis through interpretation, then pause for final review."""
@@ -3546,6 +3554,7 @@ def run_analysis(
                 phenotype_extraction_provenance
             ),
             report_dir=report_dir,
+            readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
         )
         if not isinstance(persist_analysis, bool):

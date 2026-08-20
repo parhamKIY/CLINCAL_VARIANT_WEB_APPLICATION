@@ -70,6 +70,7 @@ from frontend.evidence_review import (
 )
 from frontend.evidence_graph import render_evidence_graph
 from frontend.provider_readiness import (
+    current_provider_readiness_snapshot,
     initialize_provider_readiness_state,
     render_provider_readiness,
 )
@@ -1666,6 +1667,7 @@ def _start_submission(
 
     if _analysis_job() is not None:
         return
+    readiness_snapshot = current_provider_readiness_snapshot()
 
     def runner(
         progress_callback: PipelineProgressCallback,
@@ -1678,6 +1680,7 @@ def _start_submission(
             "phenotype_extraction_model": submission["phenotype_extraction_model"],
             "phenotype_extraction_provenance": submission["phenotype_extraction_provenance"],
             "llm_model": submission["llm_model"],
+            "readiness_snapshot": readiness_snapshot,
             "progress_callback": progress_callback,
         }
         if submission["excel_input_records"] is not None:

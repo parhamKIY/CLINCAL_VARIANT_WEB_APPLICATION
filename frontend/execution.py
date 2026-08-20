@@ -48,6 +48,7 @@ from backend.excel_processing import (
     parse_excel_variants,
 )
 from backend.input_preprocessing import classify_source_representation
+from backend.provider_readiness import ProviderReadinessSnapshot
 from backend.vcf_processing import (
     VCFProcessingError,
     process_vcf,
@@ -1190,6 +1191,7 @@ def execute_analysis(
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
     excel_input_records: Sequence[Mapping[str, object]] | None = None,
+    readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
@@ -1228,6 +1230,7 @@ def execute_analysis(
             input_type=input_type or "excel",
             phenotype_extraction_model=phenotype_extraction_model,
             phenotype_extraction_provenance=phenotype_extraction_provenance,
+            readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
         )
         if (
@@ -1254,6 +1257,7 @@ def execute_analysis(
             phenotype_extraction_provenance=(
                 phenotype_extraction_provenance
             ),
+            readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
         )
 
@@ -1275,6 +1279,7 @@ def execute_analysis(
             phenotype_extraction_model=phenotype_extraction_model,
             phenotype_extraction_provenance=phenotype_extraction_provenance,
             excel_input_records=input_records,
+            readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
         )
     _validate_upload_content(payload, suffix)
@@ -1311,6 +1316,7 @@ def execute_analysis(
                 phenotype_extraction_provenance=(
                     phenotype_extraction_provenance
                 ),
+                readiness_snapshot=readiness_snapshot,
                 progress_callback=progress_callback,
             )
     except FrontendExecutionError:
