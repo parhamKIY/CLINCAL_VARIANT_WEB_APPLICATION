@@ -29,6 +29,7 @@ from backend.evidence_rescue import (
     validate_evidence_rescue_trace,
 )
 from backend.llm import LLMClient, LLMResponse, call_llm
+from backend.logging_config import get_logger
 from backend.privacy import (
     ClinicalDataPrivacyError,
     validate_llm_payload,
@@ -55,6 +56,10 @@ from backend.shadow_composition import (
     build_shadow_composition,
     validate_shadow_composition,
 )
+from backend.variant_integrity import (
+    VariantIntegrityError,
+    stable_allele_identity,
+)
 from config import (
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
@@ -63,6 +68,7 @@ from config import (
 
 
 EVIDENCE_SCHEMA_VERSION = "2.5"
+LOGGER = get_logger("report")
 SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = {
     "1.0",
     "2.0",
@@ -165,6 +171,21 @@ adding other clinical claims.
 
 class EvidenceObjectError(ValueError):
     """Raised when an evidence object violates the Stage 7 contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        evidence_step: str | None = None,
+        evidence_field: str | None = None,
+        failure_code: str | None = None,
+        failure_scope: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.evidence_step = evidence_step
+        self.evidence_field = evidence_field
+        self.failure_code = failure_code
+        self.failure_scope = failure_scope
 
 
 class ClinicalReportError(ValueError):
@@ -2782,7 +2803,11 @@ def sanitize_evidence_object(value: object) -> EvidenceObject:
     if serialized_size > MAX_EVIDENCE_SERIALIZED_BYTES:
         raise EvidenceObjectError(
             "Evidence object exceeds the maximum serialized size of "
-            f"{MAX_EVIDENCE_SERIALIZED_BYTES} bytes."
+            f"{MAX_EVIDENCE_SERIALIZED_BYTES} bytes.",
+            evidence_step="serialization_bounds",
+            evidence_field="evidence",
+            failure_code="serialized_size_exceeded",
+            failure_scope="per_variant",
         )
     return clean_evidence
 
@@ -5694,7 +5719,49 @@ def build_evidence_objects(
         try:
             evidence_objects.append(build_evidence_object(candidate))
         except EvidenceObjectError as exc:
+            evidence_step = (
+                exc.evidence_step
+                if exc.evidence_step == "serialization_bounds"
+                else "evidence_object_construction"
+            )
+            evidence_field = (
+                exc.evidence_field
+                if exc.evidence_field == "evidence"
+                else "evidence"
+            )
+            failure_code = (
+                exc.failure_code
+                if exc.failure_code == "serialized_size_exceeded"
+                else "contract_violation"
+            )
+            variant_digest = "unavailable"
+            if isinstance(candidate, dict):
+                variant = candidate.get("variant")
+                if isinstance(variant, dict):
+                    try:
+                        variant_digest = stable_allele_identity(
+                            variant,
+                            assembly=candidate.get("assembly"),
+                        )
+                    except VariantIntegrityError:
+                        pass
+            LOGGER.warning(
+                "event=evidence_construction_failed "
+                "evidence_variant_index=%d "
+                "evidence_variant_digest=%s evidence_step=%s "
+                "evidence_field=%s failure_code=%s "
+                "failure_scope=per_variant",
+                index,
+                variant_digest,
+                evidence_step,
+                evidence_field,
+                failure_code,
+            )
             raise EvidenceObjectError(
-                f"Candidate at index {index} is invalid: {exc}"
+                f"Candidate at index {index} is invalid: {exc}",
+                evidence_step=evidence_step,
+                evidence_field=evidence_field,
+                failure_code=failure_code,
+                failure_scope="per_variant",
             ) from exc
     return evidence_objects
