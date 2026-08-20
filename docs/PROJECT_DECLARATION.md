@@ -684,6 +684,22 @@ variant identity, assembly, source-specific evidence, phenotype context,
 provider statuses, warnings, provenance, and bounded lineage. Raw provider payloads,
 sample fields, and genotype data are excluded.
 
+The `65,536`-byte EvidenceObject envelope remains mandatory. When normalized
+MyDisease context alone exceeds its `16,384`-byte section budget, only optional
+disease synonyms and excess cross-reference aliases are compacted by a fixed
+provider-order policy. Disease identity, gene relationship, phenotype matches, HPO
+evidence, and provider provenance are retained. The object records the omission
+count, a deterministic SHA-256 commitment to omitted content, and an explicit
+limitation warning; scientifically required content is not silently removed, and an
+object that still exceeds the global envelope fails normally.
+
+EvidenceObject construction is isolated per canonical variant. A bounded outcome
+record maps each original variant index to either its validated EvidenceObject index
+or safe failure step/field/code/scope fields. No placeholder EvidenceObject is
+created. If any construction failure remains, successful siblings are preserved and
+persisted, while readiness, interpretation, and report generation remain unstarted
+for that partial batch.
+
 Lineage records provider, upstream dataset/source, retrieval time, derivation, and
 version where available. Shared upstream sources are collapsed before conflict
 assessment so the same database cannot create artificial voting weight through
@@ -1381,9 +1397,12 @@ Variant Report, and Stage 86 review-record identity.
 
 The gate uses an assembly-qualified digest of chromosome, position, reference, and
 alternate allele. Gene is deliberately excluded, so multiple alleles in one gene
-remain separate. Pipeline schema `3.3` retains a separate ordered
+remain separate. Pipeline schema `3.4` retains a separate ordered
 `input_preprocessing_results` ledger for every selected input, while its accepted
 canonical variants retain the existing downstream cardinality and identity gates.
+It also persists one bounded `evidence_construction_outcomes` record per canonical
+variant, allowing successful EvidenceObjects to remain linked to their original
+input indexes when a sibling has a per-variant construction failure.
 An `IDENTITY_UNRESOLVED` input has no canonical link and never becomes an annotation,
 Evidence Object, or LLM input. Schemas `2.8` through `3.2` receive bounded,
 order-preserving migrations without provider or model reruns.
@@ -1741,7 +1760,7 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.3`.
+- Active pipeline schema: `3.4`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
@@ -1752,11 +1771,18 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 - Final Clinical Report schema: `2.0`.
 - Recovery request schema: `3`.
 
-Pipeline schema `3.3` persists an input-preprocessing result for each selected input:
+Pipeline schema `3.4` persists an input-preprocessing result for each selected input:
 source provenance, deterministic status, warnings/failure reason, and an explicit
 canonical-variant/integrity link when identity is established. The selected-input
 count is independent of analyzable downstream cardinality; unresolved inputs are
 retained only at this input boundary.
+
+Schema `3.4` additionally persists bounded construction outcome schema `1.0` for
+each canonical variant. Successful entries map original variant order to the compact
+EvidenceObject list; failed entries retain only canonical identity and safe bounded
+step/field/code/scope diagnostics. Supported schema `3.3` snapshots receive explicit
+success outcomes during migration without provider or model reruns. EvidenceObject
+schema `2.5`, SQLite schema `4`, and recovery request schema `3` remain unchanged.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
 interprets each variant, and persists the ordered review state. Review may edit and

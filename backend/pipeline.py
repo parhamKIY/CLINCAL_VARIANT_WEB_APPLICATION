@@ -99,8 +99,10 @@ from backend.privacy import (
     validate_no_prohibited_fields,
 )
 from backend.report import (
+    EvidenceConstructionOutcome,
     EvidenceObjectError,
-    build_evidence_objects,
+    build_evidence_objects_isolated,
+    validate_evidence_construction_outcome,
 )
 from backend.report_lifecycle import (
     ReportLifecycleError,
@@ -118,6 +120,7 @@ from backend.variant_integrity import (
     build_variant_integrity_records,
     cardinality_counts,
     index_input_variants,
+    stable_allele_identity,
     validate_variant_integrity_record,
 )
 from backend.variant_report import (
@@ -132,7 +135,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.3"
+PIPELINE_SCHEMA_VERSION = "3.4"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -296,6 +299,7 @@ class PipelineResult(TypedDict):
     annotations: list[dict[str, object]]
     phenotype_results: list[dict[str, object]]
     evidence_objects: list[dict[str, object]]
+    evidence_construction_outcomes: list[dict[str, object]]
     evidence_readiness: list[dict[str, object]]
     variant_interpretation_results: list[dict[str, object]]
     draft_variant_reports: list[dict[str, object]]
@@ -539,6 +543,7 @@ def create_pipeline_result() -> PipelineResult:
         "annotations": [],
         "phenotype_results": [],
         "evidence_objects": [],
+        "evidence_construction_outcomes": [],
         "evidence_readiness": [],
         "variant_interpretation_results": [],
         "draft_variant_reports": [],
@@ -567,6 +572,72 @@ def attach_input_preprocessing_results(
         dict(item) for item in input_preprocessing_results
     ]
     return validate_pipeline_result(candidate)
+
+
+def _successful_evidence_construction_outcomes(
+    evidence_objects: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Backfill explicit success outcomes without provider or model work."""
+
+    outcomes: list[dict[str, object]] = []
+    for index, evidence in enumerate(evidence_objects):
+        variant = evidence.get("variant")
+        if not isinstance(variant, Mapping):
+            raise EvidenceObjectError(
+                "Evidence Object identity is missing during outcome migration."
+            )
+        outcomes.append(
+            dict(
+                validate_evidence_construction_outcome(
+                    {
+                        "schema_version": "1.0",
+                        "variant_index": index,
+                        "canonical_variant_identity": stable_allele_identity(
+                            variant,
+                            assembly=evidence.get("assembly"),
+                        ),
+                        "status": "success",
+                        "evidence_object_index": index,
+                        "evidence_step": None,
+                        "evidence_field": None,
+                        "failure_code": None,
+                        "failure_scope": None,
+                    }
+                )
+            )
+        )
+    return outcomes
+
+
+def migrate_pipeline_schema33_to34(raw: object) -> PipelineResult | None:
+    """Add bounded construction outcomes to a valid-shape 3.3 snapshot."""
+
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != "3.3":
+        return None
+    candidate = deepcopy(dict(raw))
+    evidence_objects = candidate.get("evidence_objects")
+    variants = candidate.get("variants")
+    if (
+        not isinstance(evidence_objects, list)
+        or not all(isinstance(item, Mapping) for item in evidence_objects)
+        or not isinstance(variants, list)
+    ):
+        return None
+    if evidence_objects and len(evidence_objects) != len(variants):
+        return None
+    try:
+        candidate["evidence_construction_outcomes"] = (
+            _successful_evidence_construction_outcomes(evidence_objects)
+            if evidence_objects
+            else []
+        )
+    except (EvidenceObjectError, VariantIntegrityError, TypeError, ValueError):
+        return None
+    candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
+    try:
+        return validate_pipeline_result(candidate)
+    except (PipelineResultError, TypeError, ValueError):
+        return None
 
 
 def migrate_pipeline_schema32_to33(raw: object) -> PipelineResult | None:
@@ -652,6 +723,19 @@ def migrate_pipeline_schema32_to33(raw: object) -> PipelineResult | None:
             )
         ]
     except (InputPreprocessingError, KeyError, TypeError, ValueError):
+        return None
+    evidence_objects = candidate.get("evidence_objects")
+    if not isinstance(evidence_objects, list) or not all(
+        isinstance(item, Mapping) for item in evidence_objects
+    ):
+        return None
+    try:
+        candidate["evidence_construction_outcomes"] = (
+            _successful_evidence_construction_outcomes(evidence_objects)
+            if evidence_objects
+            else []
+        )
+    except (EvidenceObjectError, VariantIntegrityError, TypeError, ValueError):
         return None
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
     final_clinical_report = candidate.get("final_clinical_report")
@@ -977,6 +1061,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         "annotations",
         "phenotype_results",
         "evidence_objects",
+        "evidence_construction_outcomes",
         "evidence_readiness",
         "variant_interpretation_results",
         "draft_variant_reports",
@@ -1004,6 +1089,7 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "annotations",
                     "phenotype_results",
                     "evidence_objects",
+                    "evidence_construction_outcomes",
                     "evidence_readiness",
                     "variant_interpretation_results",
                     "draft_variant_reports",
@@ -1031,7 +1117,6 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         for field in (
             "annotations",
             "phenotype_results",
-            "evidence_objects",
         ):
             collection = value[field]
             if collection and len(collection) != variant_count:
@@ -1059,6 +1144,115 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             raise PipelineResultError(
                 "pipeline.variant_integrity_records must preserve input order."
             )
+    evidence_objects = value["evidence_objects"]
+    raw_construction_outcomes = value["evidence_construction_outcomes"]
+    if not raw_construction_outcomes and evidence_objects:
+        if len(evidence_objects) != variant_count:
+            raise PipelineResultError(
+                "Partial Evidence Objects require explicit construction outcomes."
+            )
+        try:
+            value["evidence_construction_outcomes"] = (
+                _successful_evidence_construction_outcomes(evidence_objects)
+            )
+        except (EvidenceObjectError, VariantIntegrityError) as exc:
+            raise PipelineResultError(
+                "pipeline.evidence_construction_outcomes could not be derived."
+            ) from exc
+        raw_construction_outcomes = value["evidence_construction_outcomes"]
+    validated_construction_outcomes: list[EvidenceConstructionOutcome] = []
+    if raw_construction_outcomes:
+        if len(raw_construction_outcomes) != variant_count:
+            raise PipelineResultError(
+                "pipeline.evidence_construction_outcomes must match accepted input cardinality."
+            )
+        try:
+            validated_construction_outcomes = [
+                validate_evidence_construction_outcome(outcome)
+                for outcome in raw_construction_outcomes
+            ]
+        except EvidenceObjectError as exc:
+            raise PipelineResultError(
+                "pipeline.evidence_construction_outcomes is invalid."
+            ) from exc
+        if [
+            outcome["variant_index"]
+            for outcome in validated_construction_outcomes
+        ] != list(range(variant_count)):
+            raise PipelineResultError(
+                "pipeline.evidence_construction_outcomes must preserve input order."
+            )
+        successful_outcomes = [
+            outcome
+            for outcome in validated_construction_outcomes
+            if outcome["status"] == "success"
+        ]
+        if [
+            outcome["evidence_object_index"]
+            for outcome in successful_outcomes
+        ] != list(range(len(successful_outcomes))):
+            raise PipelineResultError(
+                "pipeline.evidence_construction_outcomes has invalid evidence indexes."
+            )
+        if len(evidence_objects) != len(successful_outcomes):
+            raise PipelineResultError(
+                "pipeline.evidence_objects must match successful construction outcomes."
+            )
+        for outcome in validated_construction_outcomes:
+            identity = outcome["canonical_variant_identity"]
+            if validated_integrity_records and identity is not None and (
+                identity
+                != validated_integrity_records[outcome["variant_index"]][
+                    "parser_allele_identity"
+                ]
+            ):
+                raise PipelineResultError(
+                    "Evidence construction outcome identity changed from input identity."
+                )
+            evidence_index = outcome["evidence_object_index"]
+            if evidence_index is None:
+                continue
+            evidence = evidence_objects[evidence_index]
+            evidence_variant = evidence.get("variant")
+            if not isinstance(evidence_variant, Mapping):
+                raise PipelineResultError(
+                    "Evidence construction outcome references invalid evidence."
+                )
+            try:
+                evidence_identity = stable_allele_identity(
+                    evidence_variant,
+                    assembly=evidence.get("assembly"),
+                )
+            except VariantIntegrityError as exc:
+                raise PipelineResultError(
+                    "Evidence construction outcome references invalid identity."
+                ) from exc
+            if evidence_identity != identity:
+                raise PipelineResultError(
+                    "Evidence construction outcome and Evidence Object identities differ."
+                )
+        if len(successful_outcomes) != variant_count:
+            if value["workflow_state"] != "failed":
+                raise PipelineResultError(
+                    "Partial evidence construction must remain a failed workflow."
+                )
+            for field in (
+                "evidence_readiness",
+                "variant_interpretation_results",
+                "draft_variant_reports",
+                "variant_report_records",
+                "evidence_review_reports",
+                "reviewed_evidence_packages",
+                "llm_routing_results",
+            ):
+                if value[field]:
+                    raise PipelineResultError(
+                        "Partial evidence construction cannot produce downstream records."
+                    )
+    elif evidence_objects:
+        raise PipelineResultError(
+            "Evidence Objects require construction outcomes."
+        )
     if (
         not value["input_preprocessing_results"]
         and value["variants"]
@@ -1266,6 +1460,10 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 ),
                 evidence_objects=cast(
                     list[Mapping[str, object]], value["evidence_objects"]
+                ),
+                evidence_construction_outcomes=cast(
+                    list[Mapping[str, object]],
+                    value["evidence_construction_outcomes"],
                 ),
                 draft_reports=cast(
                     list[Mapping[str, object]], draft_variant_reports
@@ -1719,9 +1917,18 @@ def _finish_failed_stage(
             "final_clinical_report",
         )
     )
+    has_isolated_evidence_failure = (
+        stage == "evidence"
+        and code == "evidence_object_failed"
+        and bool(result["evidence_objects"])
+        and any(
+            outcome.get("status") == "failed"
+            for outcome in result["evidence_construction_outcomes"]
+        )
+    )
     result["status"] = (
         "partial"
-        if recoverable and has_retained_output
+        if has_retained_output and (recoverable or has_isolated_evidence_failure)
         else "error"
     )
     result["workflow_state"] = "failed"
@@ -1865,6 +2072,10 @@ def _sync_variant_integrity_records(result: PipelineResult) -> None:
             ),
             evidence_objects=cast(
                 list[Mapping[str, object]], result["evidence_objects"]
+            ),
+            evidence_construction_outcomes=cast(
+                list[Mapping[str, object]],
+                result["evidence_construction_outcomes"],
             ),
             draft_reports=cast(
                 list[Mapping[str, object]], result["draft_variant_reports"]
@@ -2599,9 +2810,32 @@ def _build_evidence_and_report(
         message="Building bounded Evidence Objects.",
     )
     _notify_progress(result, progress_callback)
-    preliminary_evidence = build_evidence_objects(
+    preliminary_batch = build_evidence_objects_isolated(
         result["phenotype_results"]
     )
+    preliminary_evidence = preliminary_batch["evidence_objects"]
+    preliminary_failure = next(
+        (
+            outcome
+            for outcome in preliminary_batch["outcomes"]
+            if outcome["status"] == "failed"
+        ),
+        None,
+    )
+    if preliminary_failure is not None:
+        result["evidence_objects"] = [
+            dict(evidence) for evidence in preliminary_evidence
+        ]
+        result["evidence_construction_outcomes"] = [
+            dict(outcome) for outcome in preliminary_batch["outcomes"]
+        ]
+        raise EvidenceObjectError(
+            "One or more canonical variants failed preliminary Evidence Object construction.",
+            evidence_step=preliminary_failure["evidence_step"],
+            evidence_field=preliminary_failure["evidence_field"],
+            failure_code=preliminary_failure["failure_code"],
+            failure_scope="per_variant",
+        )
     preliminary_readiness = [
         build_evidence_readiness_audit(
             evidence,
@@ -2643,17 +2877,36 @@ def _build_evidence_and_report(
         conditional = candidate.get("conditional_enrichment")
         if isinstance(conditional, Mapping):
             _retain_warnings(result, conditional.get("warnings"))
-    evidence_objects = build_evidence_objects(
+    final_batch = build_evidence_objects_isolated(
         result["phenotype_results"]
     )
+    evidence_objects = final_batch["evidence_objects"]
+    result["evidence_objects"] = [
+        dict(evidence) for evidence in evidence_objects
+    ]
+    result["evidence_construction_outcomes"] = [
+        dict(outcome) for outcome in final_batch["outcomes"]
+    ]
+    final_failure = next(
+        (
+            outcome
+            for outcome in final_batch["outcomes"]
+            if outcome["status"] == "failed"
+        ),
+        None,
+    )
+    if final_failure is not None:
+        raise EvidenceObjectError(
+            "One or more canonical variants failed final Evidence Object construction.",
+            evidence_step=final_failure["evidence_step"],
+            evidence_field=final_failure["evidence_field"],
+            failure_code=final_failure["failure_code"],
+            failure_scope="per_variant",
+        )
     if not evidence_objects:
         raise PipelineError(
             "Evidence Object construction produced no variants."
         )
-    result["evidence_objects"] = [
-        dict(evidence)
-        for evidence in evidence_objects
-    ]
     readiness_audits = [
         build_evidence_readiness_audit(
             evidence,
@@ -4141,6 +4394,8 @@ __all__ = [
     "resume_saved_analysis",
     "retry_failed_variant_interpretation",
     "create_pipeline_result",
+    "migrate_pipeline_schema32_to33",
+    "migrate_pipeline_schema33_to34",
     "run_analysis",
     "run_annovar_like_input_processing",
     "update_draft_variant_report",

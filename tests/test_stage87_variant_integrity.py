@@ -174,6 +174,7 @@ def test_seven_variant_cardinality_and_identity_are_preserved_end_to_end(
     legacy_stage86 = deepcopy(restored)
     legacy_stage86["schema_version"] = "3.0"
     legacy_stage86.pop("variant_integrity_records")
+    legacy_stage86.pop("evidence_construction_outcomes")
     for variant in legacy_stage86["variants"]:
         variant.pop("input_index")
     migrated = _bounded_stage56_pipeline_migration(legacy_stage86)

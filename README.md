@@ -87,7 +87,8 @@ its original input order.
   reviewer-facing fallback transparency, and deterministic failure injection are
   implemented, documented, and offline-verified; the multi-variant resilience gate
   and manual reachability utility are available.
-- Pipeline schema: `3.3`.
+- Pipeline schema: `3.4` (versioned per-variant EvidenceObject construction
+  outcomes; supported `3.3` snapshots migrate without provider/model reruns).
 - Evidence Object schema: `2.5`.
 - Variant Interpretation Result schema: `1.1`.
 - Draft Variant Report schema: `2.2`.

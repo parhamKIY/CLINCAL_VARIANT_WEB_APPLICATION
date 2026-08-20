@@ -23,8 +23,8 @@ def test_authoritative_documents_record_current_versions_and_closeout_state() ->
     assert "EvidenceObject remains `2.5`" in roadmap
     assert "SQLite remains `4`" in roadmap
     assert "pipeline was\n`3.2` at closeout" in roadmap
-    assert "Pipeline schema: `3.3`" in readme
-    assert "Active pipeline schema: `3.3`" in declaration
+    assert "Pipeline schema: `3.4`" in readme
+    assert "Active pipeline schema: `3.4`" in declaration
     assert "Stages 1" in handoff and "COMPLETE / APPROVED" in handoff
     assert "Stages 1" in declaration and "COMPLETE /" in declaration
 

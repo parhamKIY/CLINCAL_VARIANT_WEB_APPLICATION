@@ -1701,6 +1701,24 @@ def _variant_interpretation_response(
     )
 
 
+def _result_with_evidence_objects(
+    evidence_objects: list[dict[str, object]],
+) -> PipelineResult:
+    """Create a cardinality-consistent result for evidence workflow tests."""
+
+    result = create_pipeline_result()
+    result["variant_count"] = len(evidence_objects)
+    result["variants"] = [
+        {
+            **dict(evidence["variant"]),
+            "input_index": index,
+        }
+        for index, evidence in enumerate(evidence_objects)
+    ]
+    result["evidence_objects"] = evidence_objects
+    return result
+
+
 def _write_vcf(
     tmp_path: Path,
     body: str,
@@ -14909,8 +14927,7 @@ class TestStage33EvidenceReview:
         self,
     ) -> None:
         evidence = [self._evidence(), self._evidence()]
-        result = create_pipeline_result()
-        result["evidence_objects"] = evidence
+        result = _result_with_evidence_objects(evidence)
         result["evidence_review_reports"] = [
             dict(report)
             for report in reversed(
@@ -15119,8 +15136,9 @@ class TestStage34EvidenceConfirmation:
         first_evidence = TestEvidenceObject._complete_evidence_object()
         second_evidence = deepcopy(first_evidence)
         second_evidence["variant"]["pos"] = 166848216
-        result = create_pipeline_result()
-        result["evidence_objects"] = [first_evidence, second_evidence]
+        result = _result_with_evidence_objects(
+            [first_evidence, second_evidence]
+        )
         reports = build_evidence_review_reports(
             [first_evidence, second_evidence],
             timestamp="2026-08-06T08:00:00Z",
@@ -15155,8 +15173,7 @@ class TestStage34EvidenceConfirmation:
 
     def test_pipeline_confirm_rejects_mismatched_evidence(self) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()
-        result = create_pipeline_result()
-        result["evidence_objects"] = [evidence]
+        result = _result_with_evidence_objects([evidence])
         matching_report = build_evidence_review_reports(
             [evidence],
             timestamp="2026-08-06T08:00:00Z",
@@ -15184,8 +15201,7 @@ class TestStage34EvidenceConfirmation:
         self,
     ) -> None:
         evidence = TestEvidenceObject._complete_evidence_object()
-        result = create_pipeline_result()
-        result["evidence_objects"] = [evidence]
+        result = _result_with_evidence_objects([evidence])
         report = build_evidence_review_reports(
             [evidence],
             timestamp="2026-08-06T08:00:00Z",
@@ -15356,8 +15372,7 @@ class TestStage35TwoLayerLLMRouting:
         first = TestEvidenceObject._complete_evidence_object()
         second = deepcopy(first)
         second["variant"]["pos"] = 166848216
-        result = create_pipeline_result()
-        result["evidence_objects"] = [first, second]
+        result = _result_with_evidence_objects([first, second])
         reports = build_evidence_review_reports(
             [first, second],
             timestamp="2026-08-07T08:00:00Z",

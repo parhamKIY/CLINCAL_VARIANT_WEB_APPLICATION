@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 from urllib.parse import urlsplit
 
 from backend.conflict_auditor import (
@@ -126,6 +126,9 @@ MAX_EVIDENCE_LINEAGE_RECORDS = 32
 MAX_EVIDENCE_UPSTREAM_SOURCES = 12
 MAX_EVIDENCE_SHARED_UPSTREAM_GROUPS = 16
 MAX_EVIDENCE_SERIALIZED_BYTES = 64 * 1024
+MAX_EVIDENCE_MYDISEASE_SECTION_BYTES = 16 * 1024
+MAX_EVIDENCE_MYDISEASE_SYNONYMS_PER_DISEASE = 5
+MAX_EVIDENCE_MYDISEASE_CROSS_REFERENCES_PER_SOURCE = 5
 MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
 MAX_EVIDENCE_ALLELE_LENGTH = 10_000
 MAX_EVIDENCE_TEXT_LENGTH = 500
@@ -382,6 +385,30 @@ class EvidenceObject(TypedDict):
     capability_results: dict[str, CapabilityResult]
     shadow_composition: NotRequired[dict[str, Any]]
     annotation_promotion: NotRequired[dict[str, Any]]
+
+
+EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION = "1.0"
+
+
+class EvidenceConstructionOutcome(TypedDict):
+    """Bounded per-canonical-variant EvidenceObject construction result."""
+
+    schema_version: str
+    variant_index: int
+    canonical_variant_identity: str | None
+    status: Literal["success", "failed"]
+    evidence_object_index: int | None
+    evidence_step: str | None
+    evidence_field: str | None
+    failure_code: str | None
+    failure_scope: Literal["per_variant"] | None
+
+
+class EvidenceConstructionBatch(TypedDict):
+    """Successful EvidenceObjects plus an outcome for every input candidate."""
+
+    evidence_objects: list[EvidenceObject]
+    outcomes: list[EvidenceConstructionOutcome]
 
 
 class ClinicalInterpretationPrompt(TypedDict):
@@ -3729,6 +3756,142 @@ def _compact_hpo_context(value: object) -> list[dict[str, Any]]:
     ]
 
 
+def _serialized_context_size(value: object) -> int:
+    """Return the deterministic UTF-8 size of one normalized context."""
+
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _compact_mydisease_optional_fields(
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Bound optional MyDisease labels without dropping core evidence fields."""
+
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MYDISEASE_SECTION_BYTES:
+        return context
+
+    omitted: list[dict[str, object]] = []
+    diseases = context.get("diseases")
+    if not isinstance(diseases, list):
+        return context
+
+    def retain_prefix(
+        values: object,
+        *,
+        limit: int,
+        path: str,
+    ) -> None:
+        if not isinstance(values, list) or len(values) <= limit:
+            return
+        for index, item in enumerate(values[limit:], start=limit):
+            omitted.append({"path": f"{path}[{index}]", "value": deepcopy(item)})
+        del values[limit:]
+
+    for disease_index, disease in enumerate(diseases):
+        if not isinstance(disease, dict):
+            continue
+        retain_prefix(
+            disease.get("synonyms"),
+            limit=MAX_EVIDENCE_MYDISEASE_SYNONYMS_PER_DISEASE,
+            path=f"diseases[{disease_index}].synonyms",
+        )
+        cross_references = disease.get("cross_references")
+        if isinstance(cross_references, dict):
+            for source in sorted(cross_references):
+                retain_prefix(
+                    cross_references[source],
+                    limit=MAX_EVIDENCE_MYDISEASE_CROSS_REFERENCES_PER_SOURCE,
+                    path=(
+                        f"diseases[{disease_index}].cross_references.{source}"
+                    ),
+                )
+
+    warning = (
+        "MyDisease optional context was compacted deterministically; "
+        "disease identity, gene relationship, phenotype matches, HPO evidence, "
+        "provider provenance, and omission metadata were retained."
+    )
+    warnings = context.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        context["warnings"] = warnings
+    if omitted and warning not in warnings:
+        warnings.append(warning)
+
+    def attach_metadata() -> None:
+        if not omitted:
+            context.pop("compaction", None)
+            return
+        omitted_digest = hashlib.sha256(
+            json.dumps(
+                omitted,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        context["compaction"] = {
+            "schema_version": "1.0",
+            "policy": "mydisease_optional_context_v1",
+            "applied": True,
+            "section_budget_bytes": MAX_EVIDENCE_MYDISEASE_SECTION_BYTES,
+            "omitted_item_count": len(omitted),
+            "omitted_content_sha256": f"sha256:{omitted_digest}",
+        }
+
+    attach_metadata()
+    optional_lists: list[tuple[str, list[object]]] = []
+    for disease_index in range(len(diseases) - 1, -1, -1):
+        disease = diseases[disease_index]
+        if not isinstance(disease, dict):
+            continue
+        synonyms = disease.get("synonyms")
+        if isinstance(synonyms, list):
+            optional_lists.append(
+                (f"diseases[{disease_index}].synonyms", synonyms)
+            )
+        cross_references = disease.get("cross_references")
+        if isinstance(cross_references, dict):
+            for source in sorted(cross_references, reverse=True):
+                values = cross_references[source]
+                if isinstance(values, list):
+                    optional_lists.append(
+                        (
+                            f"diseases[{disease_index}].cross_references.{source}",
+                            values,
+                        )
+                    )
+
+    while (
+        _serialized_context_size(context) > MAX_EVIDENCE_MYDISEASE_SECTION_BYTES
+    ):
+        target = next(
+            ((path, values) for path, values in optional_lists if values),
+            None,
+        )
+        if target is None:
+            break
+        path, values = target
+        removed_index = len(values) - 1
+        omitted.append(
+            {
+                "path": f"{path}[{removed_index}]",
+                "value": deepcopy(values.pop()),
+            }
+        )
+        attach_metadata()
+    return context
+
+
 def _compact_mydisease_context(value: object) -> dict[str, Any]:
     """Map bounded Stage 28 context into Evidence Object V2."""
 
@@ -3845,7 +4008,7 @@ def _compact_mydisease_context(value: object) -> dict[str, Any]:
             if isinstance(raw_local, list)
             else []
         )
-    return context
+    return _compact_mydisease_optional_fields(context)
 
 
 def _compact_medgen_disease_hpo_context(value: object) -> dict[str, Any]:
@@ -5699,10 +5862,102 @@ def build_evidence_object(candidate: object) -> EvidenceObject:
     return sanitize_evidence_object(evidence)
 
 
-def build_evidence_objects(
+def validate_evidence_construction_outcome(
+    value: object,
+) -> EvidenceConstructionOutcome:
+    """Validate one bounded construction outcome without exception text."""
+
+    fields = frozenset(EvidenceConstructionOutcome.__required_keys__)
+    if not isinstance(value, dict) or set(value) != fields:
+        raise EvidenceObjectError(
+            "Evidence construction outcome fields are invalid."
+        )
+    outcome = deepcopy(value)
+    if outcome["schema_version"] != EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION:
+        raise EvidenceObjectError(
+            "Evidence construction outcome schema is unsupported."
+        )
+    variant_index = outcome["variant_index"]
+    if (
+        isinstance(variant_index, bool)
+        or not isinstance(variant_index, int)
+        or variant_index < 0
+    ):
+        raise EvidenceObjectError(
+            "Evidence construction outcome variant index is invalid."
+        )
+    identity = outcome["canonical_variant_identity"]
+    if identity is not None and (
+        not isinstance(identity, str)
+        or not re.fullmatch(r"allele-sha256:[0-9a-f]{64}", identity)
+    ):
+        raise EvidenceObjectError(
+            "Evidence construction outcome identity is invalid."
+        )
+    status = outcome["status"]
+    evidence_object_index = outcome["evidence_object_index"]
+    diagnostics = (
+        outcome["evidence_step"],
+        outcome["evidence_field"],
+        outcome["failure_code"],
+        outcome["failure_scope"],
+    )
+    if status == "success":
+        if identity is None or (
+            isinstance(evidence_object_index, bool)
+            or not isinstance(evidence_object_index, int)
+            or evidence_object_index < 0
+        ):
+            raise EvidenceObjectError(
+                "Successful evidence construction outcome is invalid."
+            )
+        if any(item is not None for item in diagnostics):
+            raise EvidenceObjectError(
+                "Successful evidence construction outcome has failure data."
+            )
+    elif status == "failed":
+        if evidence_object_index is not None:
+            raise EvidenceObjectError(
+                "Failed evidence construction outcome references evidence."
+            )
+        if (
+            outcome["evidence_step"]
+            not in {"serialization_bounds", "evidence_object_construction"}
+            or outcome["evidence_field"] != "evidence"
+            or outcome["failure_code"]
+            not in {"serialized_size_exceeded", "contract_violation"}
+            or outcome["failure_scope"] != "per_variant"
+        ):
+            raise EvidenceObjectError(
+                "Failed evidence construction outcome diagnostics are invalid."
+            )
+    else:
+        raise EvidenceObjectError(
+            "Evidence construction outcome status is invalid."
+        )
+    return cast(EvidenceConstructionOutcome, outcome)
+
+
+def _candidate_identity(candidate: object) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    variant = candidate.get("variant")
+    if not isinstance(variant, dict):
+        return None
+    try:
+        return stable_allele_identity(
+            variant,
+            assembly=candidate.get("assembly"),
+        )
+    except VariantIntegrityError:
+        return None
+
+
+def build_evidence_objects_isolated(
     candidates: Iterable[dict[str, Any]],
-) -> list[EvidenceObject]:
-    """Convert an iterable of candidates without mutating its items."""
+) -> EvidenceConstructionBatch:
+    """Build all candidates and retain bounded outcomes for failures."""
+
     if isinstance(candidates, (str, bytes, dict)):
         raise EvidenceObjectError(
             "Candidates must be an iterable of dictionaries."
@@ -5715,36 +5970,34 @@ def build_evidence_objects(
         ) from exc
 
     evidence_objects: list[EvidenceObject] = []
+    outcomes: list[EvidenceConstructionOutcome] = []
     for index, candidate in enumerate(iterator):
         try:
-            evidence_objects.append(build_evidence_object(candidate))
-        except EvidenceObjectError as exc:
+            evidence = build_evidence_object(candidate)
+        except (
+            EvidenceObjectError,
+            ActiveAnnotationPromotionError,
+            ShadowCompositionError,
+        ) as exc:
             evidence_step = (
                 exc.evidence_step
-                if exc.evidence_step == "serialization_bounds"
+                if isinstance(exc, EvidenceObjectError)
+                and exc.evidence_step == "serialization_bounds"
                 else "evidence_object_construction"
             )
             evidence_field = (
                 exc.evidence_field
-                if exc.evidence_field == "evidence"
+                if isinstance(exc, EvidenceObjectError)
+                and exc.evidence_field == "evidence"
                 else "evidence"
             )
             failure_code = (
                 exc.failure_code
-                if exc.failure_code == "serialized_size_exceeded"
+                if isinstance(exc, EvidenceObjectError)
+                and exc.failure_code == "serialized_size_exceeded"
                 else "contract_violation"
             )
-            variant_digest = "unavailable"
-            if isinstance(candidate, dict):
-                variant = candidate.get("variant")
-                if isinstance(variant, dict):
-                    try:
-                        variant_digest = stable_allele_identity(
-                            variant,
-                            assembly=candidate.get("assembly"),
-                        )
-                    except VariantIntegrityError:
-                        pass
+            variant_identity = _candidate_identity(candidate)
             LOGGER.warning(
                 "event=evidence_construction_failed "
                 "evidence_variant_index=%d "
@@ -5752,16 +6005,69 @@ def build_evidence_objects(
                 "evidence_field=%s failure_code=%s "
                 "failure_scope=per_variant",
                 index,
-                variant_digest,
+                variant_identity or "unavailable",
                 evidence_step,
                 evidence_field,
                 failure_code,
             )
-            raise EvidenceObjectError(
-                f"Candidate at index {index} is invalid: {exc}",
-                evidence_step=evidence_step,
-                evidence_field=evidence_field,
-                failure_code=failure_code,
-                failure_scope="per_variant",
-            ) from exc
-    return evidence_objects
+            outcomes.append(
+                validate_evidence_construction_outcome(
+                    {
+                        "schema_version": EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION,
+                        "variant_index": index,
+                        "canonical_variant_identity": variant_identity,
+                        "status": "failed",
+                        "evidence_object_index": None,
+                        "evidence_step": evidence_step,
+                        "evidence_field": evidence_field,
+                        "failure_code": failure_code,
+                        "failure_scope": "per_variant",
+                    }
+                )
+            )
+            continue
+        evidence_object_index = len(evidence_objects)
+        evidence_objects.append(evidence)
+        outcomes.append(
+            validate_evidence_construction_outcome(
+                {
+                    "schema_version": EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION,
+                    "variant_index": index,
+                    "canonical_variant_identity": stable_allele_identity(
+                        evidence["variant"],
+                        assembly=evidence["assembly"],
+                    ),
+                    "status": "success",
+                    "evidence_object_index": evidence_object_index,
+                    "evidence_step": None,
+                    "evidence_field": None,
+                    "failure_code": None,
+                    "failure_scope": None,
+                }
+            )
+        )
+    return {
+        "evidence_objects": evidence_objects,
+        "outcomes": outcomes,
+    }
+
+
+def build_evidence_objects(
+    candidates: Iterable[dict[str, Any]],
+) -> list[EvidenceObject]:
+    """Compatibility wrapper that raises if any candidate fails."""
+
+    batch = build_evidence_objects_isolated(candidates)
+    failed = next(
+        (outcome for outcome in batch["outcomes"] if outcome["status"] == "failed"),
+        None,
+    )
+    if failed is not None:
+        raise EvidenceObjectError(
+            f"Candidate at index {failed['variant_index']} is invalid.",
+            evidence_step=failed["evidence_step"],
+            evidence_field=failed["evidence_field"],
+            failure_code=failed["failure_code"],
+            failure_scope="per_variant",
+        )
+    return batch["evidence_objects"]

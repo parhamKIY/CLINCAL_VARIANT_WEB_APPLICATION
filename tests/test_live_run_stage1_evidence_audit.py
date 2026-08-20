@@ -13,8 +13,8 @@ from backend.report import (
     EvidenceObjectError,
     build_evidence_object,
     build_evidence_objects,
+    build_evidence_objects_isolated,
 )
-from backend.variant_integrity import stable_allele_identity
 from tests.test_pipeline import TestEvidenceObject as EvidenceFactory
 
 
@@ -221,24 +221,14 @@ def _live_shape_candidate(index: int) -> dict[str, object]:
 
 
 def _calibrated_failing_candidate(index: int = 3) -> dict[str, object]:
-    """Create a safe live-shape candidate just below the preliminary cap."""
+    """Create the historical safe live shape that exceeded the final cap."""
 
     candidate = _live_shape_candidate(index)
     mydisease = candidate["mydisease"]
     assert isinstance(mydisease, dict)
     diseases = mydisease["diseases"]
     assert isinstance(diseases, list)
-    target_floor = MAX_EVIDENCE_SERIALIZED_BYTES - 2_500
-    synonym_index = 0
-    while True:
-        evidence = build_evidence_object(candidate)
-        serialized_size = len(
-            json.dumps(evidence, ensure_ascii=False, allow_nan=False).encode(
-                "utf-8"
-            )
-        )
-        if serialized_size >= target_floor:
-            break
+    for synonym_index in range(120):
         disease = diseases[synonym_index % len(diseases)]
         assert isinstance(disease, dict)
         synonyms = disease["synonyms"]
@@ -247,48 +237,33 @@ def _calibrated_failing_candidate(index: int = 3) -> dict[str, object]:
             f"Synthetic bounded disease synonym {synonym_index:03d} "
             + ("context " * 40)
         )
-        synonym_index += 1
-        assert synonym_index < 400
     candidate["conditional_enrichment"] = _population_fallback()
     return candidate
 
 
-def test_live_shape_identifies_safe_serialization_bound_diagnostic(
+def test_live_shape_is_compacted_without_a_failure_diagnostic(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     candidates = [_live_shape_candidate(index) for index in range(3)]
     candidates.append(_calibrated_failing_candidate())
-    failing_variant = candidates[3]["variant"]
-    assert isinstance(failing_variant, dict)
-    expected_digest = stable_allele_identity(
-        failing_variant,
-        assembly=candidates[3]["assembly"],
-    )
-
     with caplog.at_level(logging.WARNING):
-        with pytest.raises(EvidenceObjectError) as raised:
-            build_evidence_objects(candidates)
+        evidence_objects = build_evidence_objects(candidates)
 
-    assert raised.value.evidence_step == "serialization_bounds"
-    assert raised.value.evidence_field == "evidence"
-    assert raised.value.failure_code == "serialized_size_exceeded"
-    assert raised.value.failure_scope == "per_variant"
-    diagnostic = next(
-        record.message
+    assert len(evidence_objects) == 4
+    assert evidence_objects[3]["phenotype_relationship"]["mydisease"][
+        "compaction"
+    ]["applied"] is True
+    assert not any(
+        "event=evidence_construction_failed" in record.message
         for record in caplog.records
-        if "event=evidence_construction_failed" in record.message
     )
-    assert "evidence_variant_index=3" in diagnostic
-    assert f"evidence_variant_digest={expected_digest}" in diagnostic
-    assert "failure_code=serialized_size_exceeded" in diagnostic
-    assert "0/1" not in diagnostic
 
 
-def test_one_failing_variant_aborts_batch_and_discards_built_sibling(
+def test_one_failing_variant_is_isolated_without_discarding_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = _live_shape_candidate(0)
-    failing = _calibrated_failing_candidate(1)
+    failing = _live_shape_candidate(1)
     third = _live_shape_candidate(2)
     entered: list[int] = []
     real_builder = build_evidence_object
@@ -298,22 +273,26 @@ def test_one_failing_variant_aborts_batch_and_discards_built_sibling(
         variant = candidate["variant"]
         assert isinstance(variant, dict)
         entered.append(int(variant["pos"]))
+        if variant["pos"] == 166_848_216:
+            raise EvidenceObjectError("Synthetic per-variant contract failure.")
         return real_builder(candidate)
 
     monkeypatch.setattr("backend.report.build_evidence_object", traced_builder)
-    evidence_objects: list[dict[str, object]] = []
+    batch = build_evidence_objects_isolated([first, failing, third])
 
-    with pytest.raises(EvidenceObjectError) as raised:
-        evidence_objects = build_evidence_objects([first, failing, third])
+    assert entered == [166_848_215, 166_848_216, 166_848_217]
+    assert [item["variant"]["pos"] for item in batch["evidence_objects"]] == [
+        166_848_215,
+        166_848_217,
+    ]
+    assert [item["status"] for item in batch["outcomes"]] == [
+        "success",
+        "failed",
+        "success",
+    ]
 
-    assert "Candidate at index 1 is invalid" in str(raised.value)
-    assert entered == [166_848_215, 166_848_216]
-    assert evidence_objects == []
-    assert real_builder(first)["variant"]["pos"] == 166_848_215
-    assert real_builder(third)["variant"]["pos"] == 166_848_217
 
-
-def test_live_shape_preliminary_evidence_builds_before_final_size_failure() -> None:
+def test_live_shape_preliminary_and_final_evidence_remain_bounded() -> None:
     final_candidate = _calibrated_failing_candidate()
     preliminary_candidate = deepcopy(final_candidate)
     preliminary_candidate.pop("conditional_enrichment")
@@ -326,5 +305,12 @@ def test_live_shape_preliminary_evidence_builds_before_final_size_failure() -> N
     )
 
     assert preliminary_size <= MAX_EVIDENCE_SERIALIZED_BYTES
-    with pytest.raises(EvidenceObjectError, match="maximum serialized size"):
-        build_evidence_object(final_candidate)
+    final = build_evidence_object(final_candidate)
+    final_size = len(
+        json.dumps(final, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    )
+
+    assert final_size <= MAX_EVIDENCE_SERIALIZED_BYTES
+    assert final["phenotype_relationship"]["mydisease"]["compaction"][
+        "applied"
+    ] is True

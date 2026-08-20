@@ -167,6 +167,7 @@ def build_variant_integrity_records(
     *,
     assembly: str,
     evidence_objects: Sequence[Mapping[str, object]] = (),
+    evidence_construction_outcomes: Sequence[Mapping[str, object]] = (),
     draft_reports: Sequence[Mapping[str, object]] = (),
     review_records: Sequence[Mapping[str, object]] = (),
 ) -> list[VariantIntegrityRecord]:
@@ -201,10 +202,58 @@ def build_variant_integrity_records(
         index_field="variant_index",
         path="review_records",
     )
-    if evidence_objects and len(evidence_objects) != count:
-        raise VariantIntegrityError(
-            "Evidence Object count does not match accepted input cardinality."
-        )
+    evidence_indexes_by_input: dict[int, int] = {}
+    if evidence_construction_outcomes:
+        if len(evidence_construction_outcomes) != count:
+            raise VariantIntegrityError(
+                "Evidence construction outcomes do not match accepted input cardinality."
+            )
+        successful_indexes: list[int] = []
+        for expected_index, outcome in enumerate(evidence_construction_outcomes):
+            if outcome.get("variant_index") != expected_index:
+                raise VariantIntegrityError(
+                    "Evidence construction outcomes do not preserve input order."
+                )
+            status = outcome.get("status")
+            evidence_index = outcome.get("evidence_object_index")
+            if status == "success":
+                if (
+                    isinstance(evidence_index, bool)
+                    or not isinstance(evidence_index, int)
+                    or evidence_index < 0
+                ):
+                    raise VariantIntegrityError(
+                        "Successful construction outcome has no evidence index."
+                    )
+                successful_indexes.append(evidence_index)
+                evidence_indexes_by_input[expected_index] = evidence_index
+            elif status == "failed":
+                if evidence_index is not None:
+                    raise VariantIntegrityError(
+                        "Failed construction outcome references evidence."
+                    )
+            else:
+                raise VariantIntegrityError(
+                    "Evidence construction outcome status is invalid."
+                )
+        if successful_indexes != list(range(len(successful_indexes))):
+            raise VariantIntegrityError(
+                "Evidence construction outcome indexes are not contiguous."
+            )
+        if len(evidence_objects) != len(successful_indexes):
+            raise VariantIntegrityError(
+                "Evidence Object count does not match successful construction outcomes."
+            )
+        if len(successful_indexes) != count and (draft_reports or review_records):
+            raise VariantIntegrityError(
+                "Partial evidence construction cannot produce report records."
+            )
+    elif evidence_objects:
+        if len(evidence_objects) != count:
+            raise VariantIntegrityError(
+                "Evidence Object count does not match accepted input cardinality."
+            )
+        evidence_indexes_by_input = {index: index for index in range(count)}
 
     records: list[VariantIntegrityRecord] = []
     for input_index in range(count):
@@ -214,9 +263,24 @@ def build_variant_integrity_records(
         normalized_identity = stable_allele_identity(
             normalized_variants[input_index], assembly=assembly
         )
+        outcome = (
+            evidence_construction_outcomes[input_index]
+            if evidence_construction_outcomes
+            else None
+        )
+        outcome_identity = (
+            outcome.get("canonical_variant_identity")
+            if outcome is not None
+            else None
+        )
+        if outcome_identity is not None and outcome_identity != parser_identity:
+            raise VariantIntegrityError(
+                "Evidence construction outcome identity changed from parser identity."
+            )
         evidence_identity: str | None = None
-        if evidence_objects:
-            evidence = evidence_objects[input_index]
+        evidence_index = evidence_indexes_by_input.get(input_index)
+        if evidence_index is not None:
+            evidence = evidence_objects[evidence_index]
             evidence_variant = evidence.get("variant")
             evidence_assembly = evidence.get("assembly")
             if not isinstance(evidence_variant, Mapping):
@@ -225,6 +289,10 @@ def build_variant_integrity_records(
                 evidence_variant,
                 assembly=evidence_assembly,
             )
+            if outcome_identity is not None and evidence_identity != outcome_identity:
+                raise VariantIntegrityError(
+                    "Evidence construction outcome and Evidence Object identities differ."
+                )
 
         draft_report_id = None
         if draft_reports:
