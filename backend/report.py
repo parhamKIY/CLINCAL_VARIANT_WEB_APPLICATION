@@ -127,6 +127,9 @@ MAX_EVIDENCE_UPSTREAM_SOURCES = 12
 MAX_EVIDENCE_SHARED_UPSTREAM_GROUPS = 16
 MAX_EVIDENCE_SERIALIZED_BYTES = 64 * 1024
 MAX_EVIDENCE_MYDISEASE_SECTION_BYTES = 16 * 1024
+MAX_EVIDENCE_LITERATURE_SECTION_BYTES = 8 * 1024
+MAX_EVIDENCE_PREDICTORS_SECTION_BYTES = 6 * 1024
+MAX_EVIDENCE_MEDGEN_SECTION_BYTES = 5 * 1024
 MAX_EVIDENCE_MYDISEASE_SYNONYMS_PER_DISEASE = 5
 MAX_EVIDENCE_MYDISEASE_CROSS_REFERENCES_PER_SOURCE = 5
 MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
@@ -1217,7 +1220,10 @@ def _validate_medgen_disease_hpo_context(value: object) -> None:
     schema_version = value.get("schema_version")
     if (
         (schema_version == "1.0" and set(value) != legacy_expected)
-        or (schema_version == "1.1" and set(value) != current_expected)
+        or (
+            schema_version == "1.1"
+            and not (current_expected <= set(value) <= current_expected | {"compaction"})
+        )
         or schema_version not in {"1.0", "1.1"}
         or value.get("provider_id") != "ncbi_medgen"
     ):
@@ -3764,8 +3770,6 @@ def _serialized_context_size(value: object) -> int:
             value,
             ensure_ascii=False,
             allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
         ).encode("utf-8")
     )
 
@@ -4011,13 +4015,228 @@ def _compact_mydisease_context(value: object) -> dict[str, Any]:
     return _compact_mydisease_optional_fields(context)
 
 
+def _compact_literature_context(
+    literature: dict[str, Any],
+) -> dict[str, Any]:
+    """Bound optional literature context deterministically within budget."""
+
+    if not isinstance(literature, dict) or not literature:
+        return literature
+    if _serialized_context_size(literature) <= MAX_EVIDENCE_LITERATURE_SECTION_BYTES:
+        return literature
+
+    omitted: list[dict[str, object]] = []
+    articles = literature.get("articles")
+    if not isinstance(articles, list):
+        return literature
+
+    warning = (
+        "Literature optional context was compacted deterministically; "
+        "article identifiers, journals, publication dates, DOIs, and "
+        "omission metadata were retained."
+    )
+    warnings = literature.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        literature["warnings"] = warnings
+
+    def attach_metadata() -> None:
+        if not omitted:
+            literature.pop("compaction", None)
+            return
+        omitted_digest = hashlib.sha256(
+            json.dumps(
+                omitted,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        literature["compaction"] = {
+            "schema_version": "1.0",
+            "policy": "literature_optional_context_v1",
+            "applied": True,
+            "section_budget_bytes": MAX_EVIDENCE_LITERATURE_SECTION_BYTES,
+            "omitted_item_count": len(omitted),
+            "omitted_content_sha256": f"sha256:{omitted_digest}",
+        }
+        if warning not in warnings:
+            warnings.append(warning)
+
+    # Step 1: Bound author arrays to first 3 authors
+    for article_index, article in enumerate(articles):
+        if not isinstance(article, dict):
+            continue
+        authors = article.get("authors")
+        if isinstance(authors, list) and len(authors) > 3:
+            for author_idx, extra_author in enumerate(authors[3:], start=3):
+                omitted.append({
+                    "path": f"articles[{article_index}].authors[{author_idx}]",
+                    "value": deepcopy(extra_author),
+                })
+            del authors[3:]
+
+    attach_metadata()
+    if _serialized_context_size(literature) <= MAX_EVIDENCE_LITERATURE_SECTION_BYTES:
+        return literature
+
+    # Step 2: Bound long redundant URLs when PMID or DOI is present
+    for article_index, article in enumerate(articles):
+        if not isinstance(article, dict):
+            continue
+        url = article.get("url")
+        if url and (article.get("pmid") or article.get("doi")):
+            omitted.append({
+                "path": f"articles[{article_index}].url",
+                "value": url,
+            })
+            article["url"] = None
+
+    attach_metadata()
+    if _serialized_context_size(literature) <= MAX_EVIDENCE_LITERATURE_SECTION_BYTES:
+        return literature
+
+    # Step 3: Bound long article titles (> 120 chars)
+    for article_index, article in enumerate(articles):
+        if not isinstance(article, dict):
+            continue
+        title = article.get("title")
+        if isinstance(title, str) and len(title) > 120:
+            omitted.append({
+                "path": f"articles[{article_index}].title",
+                "value": title,
+            })
+            article["title"] = title[:117] + "..."
+
+    attach_metadata()
+    if _serialized_context_size(literature) <= MAX_EVIDENCE_LITERATURE_SECTION_BYTES:
+        return literature
+
+    # Step 4: Drop extra articles from end of list
+    while articles and _serialized_context_size(literature) > MAX_EVIDENCE_LITERATURE_SECTION_BYTES:
+        removed_idx = len(articles) - 1
+        omitted.append({
+            "path": f"articles[{removed_idx}]",
+            "value": deepcopy(articles.pop()),
+        })
+        attach_metadata()
+
+    return literature
+
+
+def _compact_predictors_context(
+    predictors: dict[str, Any],
+) -> dict[str, Any]:
+    """Bound optional in-silico predictor context deterministically within budget."""
+
+    if not isinstance(predictors, dict) or not predictors:
+        return predictors
+    if _serialized_context_size(predictors) <= MAX_EVIDENCE_PREDICTORS_SECTION_BYTES:
+        return predictors
+
+    omitted: list[dict[str, object]] = []
+
+    def attach_metadata() -> None:
+        if not omitted:
+            predictors.pop("compaction", None)
+            return
+        omitted_digest = hashlib.sha256(
+            json.dumps(
+                omitted,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        predictors["compaction"] = {
+            "schema_version": "1.0",
+            "policy": "predictors_optional_context_v1",
+            "applied": True,
+            "section_budget_bytes": MAX_EVIDENCE_PREDICTORS_SECTION_BYTES,
+            "omitted_item_count": len(omitted),
+            "omitted_content_sha256": f"sha256:{omitted_digest}",
+        }
+
+    # Step 1: Remove verbose explanation fields from nested predictor records
+    verbose_keys = ("detail", "description", "comments", "rankscore", "raw_score", "qual", "info")
+    for group_key, group_val in predictors.items():
+        if group_key == "compaction":
+            continue
+        if isinstance(group_val, dict):
+            for pred_key, pred_val in group_val.items():
+                if isinstance(pred_val, dict):
+                    for vkey in verbose_keys:
+                        if vkey in pred_val:
+                            omitted.append({
+                                "path": f"{group_key}.{pred_key}.{vkey}",
+                                "value": deepcopy(pred_val.pop(vkey)),
+                            })
+                elif isinstance(pred_val, str) and len(pred_val) > 80:
+                    omitted.append({
+                        "path": f"{group_key}.{pred_key}",
+                        "value": pred_val,
+                    })
+                    group_val[pred_key] = pred_val[:77] + "..."
+        elif isinstance(group_val, str) and len(group_val) > 80:
+            omitted.append({
+                "path": group_key,
+                "value": group_val,
+            })
+            predictors[group_key] = group_val[:77] + "..."
+
+    attach_metadata()
+    if _serialized_context_size(predictors) <= MAX_EVIDENCE_PREDICTORS_SECTION_BYTES:
+        return predictors
+
+    # Step 2: Prune long strings if still oversized
+    for group_key, group_val in predictors.items():
+        if group_key == "compaction":
+            continue
+        if isinstance(group_val, dict):
+            for pred_key, pred_val in group_val.items():
+                if isinstance(pred_val, str) and len(pred_val) > 40:
+                    omitted.append({
+                        "path": f"{group_key}.{pred_key}",
+                        "value": pred_val,
+                    })
+                    group_val[pred_key] = pred_val[:37] + "..."
+
+    attach_metadata()
+    if _serialized_context_size(predictors) <= MAX_EVIDENCE_PREDICTORS_SECTION_BYTES:
+        return predictors
+
+    # Step 3: Omit entries from the end of predictor dictionaries until within budget
+    for group_key in sorted(predictors.keys(), reverse=True):
+        if group_key == "compaction":
+            continue
+        group_val = predictors[group_key]
+        if isinstance(group_val, dict):
+            for pred_key in sorted(group_val.keys(), reverse=True):
+                if _serialized_context_size(predictors) <= MAX_EVIDENCE_PREDICTORS_SECTION_BYTES:
+                    break
+                omitted.append({
+                    "path": f"{group_key}.{pred_key}",
+                    "value": deepcopy(group_val.pop(pred_key)),
+                })
+                attach_metadata()
+        elif _serialized_context_size(predictors) > MAX_EVIDENCE_PREDICTORS_SECTION_BYTES:
+            omitted.append({
+                "path": group_key,
+                "value": deepcopy(predictors.pop(group_key)),
+            })
+            attach_metadata()
+
+    return predictors
+
 def _compact_medgen_disease_hpo_context(value: object) -> dict[str, Any]:
-    """Retain compact Stage 3 MedGen context with no provider raw payload."""
+    """Retain compact Stage 3 MedGen context with deterministic budget enforcement."""
     source = _candidate_mapping(value)
     if not source:
         return {}
     records = source.get("records")
-    return {
+    context = {
         **_selected_context(
             source,
             (
@@ -4042,6 +4261,78 @@ def _compact_medgen_disease_hpo_context(value: object) -> dict[str, Any]:
             if isinstance(record, dict)
         ] if isinstance(records, list) else [],
     }
+
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_SECTION_BYTES:
+        return context
+
+    omitted: list[dict[str, object]] = []
+    medgen_records = context.get("records", [])
+
+    def attach_metadata() -> None:
+        if not omitted:
+            context.pop("compaction", None)
+            return
+        omitted_digest = hashlib.sha256(
+            json.dumps(
+                omitted,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        context["compaction"] = {
+            "schema_version": "1.0",
+            "policy": "medgen_optional_context_v1",
+            "applied": True,
+            "section_budget_bytes": MAX_EVIDENCE_MEDGEN_SECTION_BYTES,
+            "omitted_item_count": len(omitted),
+            "omitted_content_sha256": f"sha256:{omitted_digest}",
+        }
+
+    # Step 1: Prune long definitions from records
+    for idx, rec in enumerate(medgen_records):
+        if not isinstance(rec, dict):
+            continue
+        definition = rec.get("definition")
+        if definition:
+            omitted.append({
+                "path": f"records[{idx}].definition",
+                "value": definition,
+            })
+            rec["definition"] = None
+
+    attach_metadata()
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_SECTION_BYTES:
+        return context
+
+    # Step 2: Prune verbose source_metadata if present
+    for idx, rec in enumerate(medgen_records):
+        if not isinstance(rec, dict):
+            continue
+        source_meta = rec.get("source_metadata")
+        if isinstance(source_meta, list) and len(source_meta) > 1:
+            for s_idx, extra_s in enumerate(source_meta[1:], start=1):
+                omitted.append({
+                    "path": f"records[{idx}].source_metadata[{s_idx}]",
+                    "value": deepcopy(extra_s),
+                })
+            del source_meta[1:]
+
+    attach_metadata()
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_SECTION_BYTES:
+        return context
+
+    # Step 3: Omit extra records from end of list
+    while medgen_records and _serialized_context_size(context) > MAX_EVIDENCE_MEDGEN_SECTION_BYTES:
+        removed_idx = len(medgen_records) - 1
+        omitted.append({
+            "path": f"records[{removed_idx}]",
+            "value": deepcopy(medgen_records.pop()),
+        })
+        attach_metadata()
+
+    return context
 
 
 def _compact_medgen_phenotype_gene_context(value: object) -> list[dict[str, Any]]:
@@ -4338,6 +4629,7 @@ def _compact_conditional_enrichment(value: object) -> dict[str, Any]:
         if isinstance(articles, list)
         else []
     )
+    literature = _compact_literature_context(literature)
     fallback = _selected_context(
         _candidate_mapping(source.get("myvariant_fallback")),
         (
@@ -5642,12 +5934,12 @@ def _build_v2_sections(
                     genebe.get("population_annotations", {})
                 ),
             },
-            "predictors": {
+            "predictors": _compact_predictors_context({
                 "vep": vep_predictors,
                 "genebe": deepcopy(
                     genebe.get("predictor_annotations", {})
                 ),
-            },
+            }),
         },
         "pathogenicity": {
             "automated_acmg_classification": genebe.get(
