@@ -18,6 +18,7 @@ from backend.excel_processing import (
 )
 from backend.error_handling import safe_ui_error_message
 from backend.llm import LLMError, get_available_llm_models
+from backend.llm_preflight import LLMPreflightResult, check_llm_connectivity
 from backend.phenotype_llm import (
     PhenotypeExtractionError,
     extract_hpo_candidates,
@@ -118,6 +119,8 @@ PHENOTYPE_MODEL_KEY = "selected_phenotype_extraction_model"
 VARIANT_MODEL_KEY = "selected_variant_interpretation_model"
 LLM_PROVIDER_MODELS_KEY = "llm_provider_models"
 LLM_PROVIDER_MODELS_ERROR_KEY = "llm_provider_models_error"
+LLM_PREFLIGHT_PHENOTYPE_KEY = "llm_preflight_phenotype"
+LLM_PREFLIGHT_VARIANT_KEY = "llm_preflight_variant"
 ANALYSIS_JOB_QUERY_PARAM = "analysis_job"
 ANALYSIS_RESULT_QUERY_PARAM = "analysis"
 LAST_SESSION_OFFER_KEY = "last_session_offer_id"
@@ -319,6 +322,8 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
     st.session_state.setdefault(LLM_PROVIDER_MODELS_KEY, ())
     st.session_state.setdefault(LLM_PROVIDER_MODELS_ERROR_KEY, False)
+    st.session_state.setdefault(LLM_PREFLIGHT_PHENOTYPE_KEY, None)
+    st.session_state.setdefault(LLM_PREFLIGHT_VARIANT_KEY, None)
     initialize_provider_readiness_state()
     _initialize_task_model(
         PHENOTYPE_MODEL_KEY,
@@ -853,6 +858,54 @@ def _task_models_changed() -> None:
     """
 
     _clear_hpo_candidate_draft()
+    # Reset preflight badges so stale results do not linger for the new model.
+    st.session_state[LLM_PREFLIGHT_PHENOTYPE_KEY] = None
+    st.session_state[LLM_PREFLIGHT_VARIANT_KEY] = None
+
+
+def _run_preflight_check(model: str, state_key: str) -> None:
+    """Run one preflight check and store the result in session state.
+
+    Never raises.  Any exception is caught and stored as a failed result.
+    """
+    try:
+        result = check_llm_connectivity(model)
+    except Exception:  # noqa: BLE001
+        from backend.llm_preflight import LLMPreflightResult
+        from datetime import datetime, timezone
+        result = LLMPreflightResult(
+            ok=False,
+            model=model,
+            failure_category="Request failed",
+            response_ms=None,
+            checked_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        )
+    st.session_state[state_key] = result
+
+
+def _render_preflight_status(state_key: str) -> None:
+    """Render one preflight badge near a model selector.
+
+    Shows nothing when the check has not been run yet.
+    """
+    result: LLMPreflightResult | None = st.session_state.get(state_key)
+    if result is None:
+        return
+    if result.ok:
+        parts = [':green[🟢 Functional]']
+        if result.response_ms is not None:
+            parts.append(f'— {result.response_ms} ms')
+        if result.checked_at:
+            from datetime import datetime, timezone
+            try:
+                dt = datetime.fromisoformat(result.checked_at.replace('Z', '+00:00'))
+                parts.append(f'· Checked {dt.strftime("%H:%M")}'  )
+            except ValueError:
+                pass
+        st.caption(' '.join(parts))
+    else:
+        category = result.failure_category or 'Request failed'
+        st.caption(f':red[🔴 Non-functional] · {category}')
 
 
 def _render_task_model_selectors() -> tuple[str, str]:
@@ -916,6 +969,7 @@ def _render_task_model_selectors() -> tuple[str, str]:
                     "clinical-text to HPO-candidate task."
                 ),
             )
+        _render_preflight_status(LLM_PREFLIGHT_PHENOTYPE_KEY)
         with interpretation_column:
             variant_model = st.selectbox(
                 "Variant Interpretation Model",
@@ -935,6 +989,32 @@ def _render_task_model_selectors() -> tuple[str, str]:
                     "conflict status remains evidence context only."
                 ),
             )
+        _render_preflight_status(LLM_PREFLIGHT_VARIANT_KEY)
+        # Reload-check row
+        if not job_active:
+            reload_pheno_col, reload_var_col, _ = st.columns([1, 1, 2])
+            with reload_pheno_col:
+                if st.button(
+                    'Reload check',
+                    key='preflight_reload_phenotype',
+                    icon=':material/wifi_tethering:',
+                    help='Test phenotype extraction model connectivity',
+                ):
+                    _run_preflight_check(
+                        st.session_state.get(PHENOTYPE_MODEL_KEY, ''),
+                        LLM_PREFLIGHT_PHENOTYPE_KEY,
+                    )
+            with reload_var_col:
+                if st.button(
+                    'Reload check',
+                    key='preflight_reload_variant',
+                    icon=':material/wifi_tethering:',
+                    help='Test variant interpretation model connectivity',
+                ):
+                    _run_preflight_check(
+                        st.session_state.get(VARIANT_MODEL_KEY, ''),
+                        LLM_PREFLIGHT_VARIANT_KEY,
+                    )
         st.caption(
             f"Phenotype extraction: {phenotype_model}  |  "
             f"Variant interpretation: {variant_model}"
