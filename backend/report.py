@@ -130,6 +130,7 @@ MAX_EVIDENCE_MYDISEASE_SECTION_BYTES = 16 * 1024
 MAX_EVIDENCE_LITERATURE_SECTION_BYTES = 8 * 1024
 MAX_EVIDENCE_PREDICTORS_SECTION_BYTES = 6 * 1024
 MAX_EVIDENCE_MEDGEN_SECTION_BYTES = 5 * 1024
+MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES = 4 * 1024
 MAX_EVIDENCE_MYDISEASE_SYNONYMS_PER_DISEASE = 5
 MAX_EVIDENCE_MYDISEASE_CROSS_REFERENCES_PER_SOURCE = 5
 MAX_EVIDENCE_IDENTIFIER_LENGTH = 128
@@ -1459,7 +1460,7 @@ def _validate_medgen_gene_disease_context(value: object) -> None:
         "attempts", "http_status", "records", "candidate_diagnostics",
         "upstream_sources", "enrichment_decision",
     }
-    if set(value) != _gd_expected:
+    if not (_gd_expected <= set(value) <= _gd_expected | {"compaction"}):
         raise EvidenceObjectError("medgen_gene_disease_context fields are invalid.")
     if (
         value.get("schema_version") != "1.0"
@@ -3854,6 +3855,14 @@ def _compact_mydisease_optional_fields(
 
     attach_metadata()
     optional_lists: list[tuple[str, list[object]]] = []
+
+    inferred = context.get("inferred_pathway_context")
+    if isinstance(inferred, list):
+        optional_lists.append(("inferred_pathway_context", inferred))
+    local_ctx = context.get("local_phenotype_context")
+    if isinstance(local_ctx, list):
+        optional_lists.append(("local_phenotype_context", local_ctx))
+
     for disease_index in range(len(diseases) - 1, -1, -1):
         disease = diseases[disease_index]
         if not isinstance(disease, dict):
@@ -3874,6 +3883,26 @@ def _compact_mydisease_optional_fields(
                             values,
                         )
                     )
+        clinical_modifier = disease.get("clinical_modifier")
+        if isinstance(clinical_modifier, list):
+            optional_lists.append(
+                (f"diseases[{disease_index}].clinical_modifier", clinical_modifier)
+            )
+        clinical_course = disease.get("clinical_course")
+        if isinstance(clinical_course, list):
+            optional_lists.append(
+                (f"diseases[{disease_index}].clinical_course", clinical_course)
+            )
+        inheritance = disease.get("inheritance")
+        if isinstance(inheritance, list):
+            optional_lists.append(
+                (f"diseases[{disease_index}].inheritance", inheritance)
+            )
+        supporting_hpo = disease.get("supporting_hpo_terms")
+        if isinstance(supporting_hpo, list):
+            optional_lists.append(
+                (f"diseases[{disease_index}].supporting_hpo_terms", supporting_hpo)
+            )
 
     while (
         _serialized_context_size(context) > MAX_EVIDENCE_MYDISEASE_SECTION_BYTES
@@ -3893,6 +3922,15 @@ def _compact_mydisease_optional_fields(
             }
         )
         attach_metadata()
+
+    while diseases and _serialized_context_size(context) > MAX_EVIDENCE_MYDISEASE_SECTION_BYTES:
+        removed_idx = len(diseases) - 1
+        omitted.append({
+            "path": f"diseases[{removed_idx}]",
+            "value": deepcopy(diseases.pop()),
+        })
+        attach_metadata()
+
     return context
 
 
@@ -4374,12 +4412,12 @@ def _compact_medgen_phenotype_gene_context(value: object) -> list[dict[str, Any]
 
 
 def _compact_medgen_gene_disease_context(value: object) -> dict[str, Any]:
-    """Retain compact Stage 5 MedGen gene-disease context with no provider raw payload."""
+    """Retain compact Stage 5 MedGen gene-disease context with deterministic budget enforcement."""
     source = _candidate_mapping(value)
     if not source:
         return {}
     records = source.get("records")
-    return {
+    context = {
         **_selected_context(
             source,
             (
@@ -4404,6 +4442,88 @@ def _compact_medgen_gene_disease_context(value: object) -> dict[str, Any]:
             if isinstance(record, dict)
         ] if isinstance(records, list) else [],
     }
+
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES:
+        return context
+
+    omitted: list[dict[str, object]] = []
+    medgen_records = context.get("records", [])
+
+    def attach_metadata() -> None:
+        if not omitted:
+            context.pop("compaction", None)
+            return
+        omitted_digest = hashlib.sha256(
+            json.dumps(
+                omitted,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        context["compaction"] = {
+            "schema_version": "1.0",
+            "policy": "medgen_gene_disease_optional_context_v1",
+            "applied": True,
+            "section_budget_bytes": MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES,
+            "omitted_item_count": len(omitted),
+            "omitted_content_sha256": f"sha256:{omitted_digest}",
+        }
+
+    # Step 1: Prune candidate_diagnostics
+    candidate_diags = context.get("candidate_diagnostics")
+    if isinstance(candidate_diags, list) and candidate_diags:
+        while candidate_diags:
+            omitted.append({
+                "path": f"candidate_diagnostics[{len(candidate_diags)-1}]",
+                "value": deepcopy(candidate_diags.pop()),
+            })
+    attach_metadata()
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES:
+        return context
+
+    # Step 2: Prune definitions from records
+    for idx, rec in enumerate(medgen_records):
+        if not isinstance(rec, dict):
+            continue
+        definition = rec.get("definition")
+        if definition:
+            omitted.append({
+                "path": f"records[{idx}].definition",
+                "value": definition,
+            })
+            rec["definition"] = None
+    attach_metadata()
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES:
+        return context
+
+    # Step 3: Prune duplicate source_metadata from records
+    for idx, rec in enumerate(medgen_records):
+        if not isinstance(rec, dict):
+            continue
+        source_meta = rec.get("source_metadata")
+        if isinstance(source_meta, list) and len(source_meta) > 1:
+            for s_idx, extra_s in enumerate(source_meta[1:], start=1):
+                omitted.append({
+                    "path": f"records[{idx}].source_metadata[{s_idx}]",
+                    "value": deepcopy(extra_s),
+                })
+            del source_meta[1:]
+    attach_metadata()
+    if _serialized_context_size(context) <= MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES:
+        return context
+
+    # Step 4: Drop extra records
+    while medgen_records and _serialized_context_size(context) > MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES:
+        removed_idx = len(medgen_records) - 1
+        omitted.append({
+            "path": f"records[{removed_idx}]",
+            "value": deepcopy(medgen_records.pop()),
+        })
+        attach_metadata()
+
+    return context
 
 
 def _compact_cspec_context(value: object) -> list[dict[str, Any]]:

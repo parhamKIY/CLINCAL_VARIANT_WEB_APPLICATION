@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from copy import deepcopy
 
 import pytest
 
 from backend.report import (
     MAX_EVIDENCE_LITERATURE_SECTION_BYTES,
+    MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES,
     MAX_EVIDENCE_MEDGEN_SECTION_BYTES,
     MAX_EVIDENCE_MYDISEASE_SECTION_BYTES,
     MAX_EVIDENCE_PREDICTORS_SECTION_BYTES,
@@ -245,6 +247,194 @@ def test_oversized_medgen_context_is_compacted_deterministically() -> None:
         assert "epilepsy" in record["title"]
         assert record["gene_association_match_state"] == "exact_gene_association"
         assert record["matched_hpo_terms"] == [{"hpo_id": "HP:0001250", "label": "Seizures"}]
+
+
+def test_oversized_mydisease_with_large_supporting_hpo_and_clinical_course_is_compacted_strictly_under_16kb() -> None:
+    candidate = _live_shape_candidate(0)
+    # Add diseases with extensive supporting_hpo_terms and clinical_course
+    candidate["mydisease"]["inferred_pathway_context"] = [
+        {
+            "disease_id": f"MONDO:000{i:04d}",
+            "association_type": "inferred_via_pathway",
+            "classification_effect": "contributory",
+            "inference_gene": "LMNA",
+            "pathway_id": f"REACTOME:R-HSA-{100000+i}",
+            "pathway_name": f"Nuclear envelope lamin assembly signaling cascade pathway {i}",
+            "provider": "Reactome",
+            "upstream_source": "Reactome",
+        }
+        for i in range(10)
+    ]
+    candidate["mydisease"]["diseases"] = [
+        {
+            "disease_id": f"MONDO:001467{i}",
+            "disease_name": f"Emery-Dreifuss muscular dystrophy type {i}",
+            "synonyms": [f"Synonym {j} for EDMD disorder {i}" for j in range(10)],
+            "primary_source": "MONDO",
+            "cross_references": {
+                "omim": [f"60720{i}"],
+                "orphanet": [f"ORPHA{200+i}"],
+            },
+            "gene_disease_relation": "causative_germline_mutation",
+            "matched_patient_hpo_terms": ["HP:0001250"],
+            "unmatched_patient_hpo_terms": ["HP:0001257"],
+            "phenotype_match_count": 1,
+            "phenotype_match_status": "partial_match",
+            "upstream_sources": ["MyDisease.info", "MONDO", "OMIM"],
+            "warnings": [],
+            "supporting_hpo_terms": [
+                {
+                    "hpo_id": f"HP:000{1000+j:04d}",
+                    "hpo_name": f"Phenotypic feature finding {j} associated with Emery-Dreifuss syndrome",
+                    "biocuration": "HPO:probinson",
+                    "upstream_source": "HPO",
+                }
+                for j in range(20)
+            ],
+            "inheritance": [
+                {
+                    "hpo_id": "HP:0000005",
+                    "hpo_name": "Autosomal dominant inheritance",
+                    "biocuration": "HPO:probinson",
+                    "upstream_source": "HPO",
+                }
+            ],
+            "clinical_course": [
+                {
+                    "hpo_id": f"HP:001{2000+j:04d}",
+                    "hpo_name": f"Clinical progression stage {j} during adolescent disease onset",
+                    "biocuration": "HPO:probinson",
+                    "upstream_source": "HPO",
+                }
+                for j in range(10)
+            ],
+            "clinical_modifier": [],
+        }
+        for i in range(5)
+    ]
+
+    original = deepcopy(candidate)
+    first = build_evidence_object(candidate)
+    second = build_evidence_object(candidate)
+
+    assert first == second
+    assert candidate == original
+
+    mydisease = first["phenotype_relationship"]["mydisease"]
+    assert _serialized_size(mydisease) <= MAX_EVIDENCE_MYDISEASE_SECTION_BYTES
+    compaction = mydisease["compaction"]
+    assert compaction["schema_version"] == "1.0"
+    assert compaction["policy"] == "mydisease_optional_context_v1"
+    assert compaction["applied"] is True
+    assert compaction["section_budget_bytes"] == MAX_EVIDENCE_MYDISEASE_SECTION_BYTES
+    assert compaction["omitted_item_count"] > 0
+    assert compaction["omitted_content_sha256"].startswith("sha256:")
+
+    # Disease identities and gene relations preserved
+    retained_diseases = mydisease["diseases"]
+    assert len(retained_diseases) > 0
+    for d in retained_diseases:
+        assert d["disease_id"].startswith("MONDO:")
+        assert d["gene_disease_relation"] == "causative_germline_mutation"
+        assert d["matched_patient_hpo_terms"] == ["HP:0001250"]
+
+
+def test_oversized_medgen_gene_disease_context_is_compacted_strictly_under_4kb() -> None:
+    candidate = _live_shape_candidate(0)
+    candidate["medgen_gene_disease_context"] = {
+        "schema_version": "1.0",
+        "provider": "NCBI MedGen",
+        "provider_id": "ncbi_medgen",
+        "provider_role": "primary_fallback",
+        "primary_provider": "clingen",
+        "primary_retrieval_state": "unavailable",
+        "status": "success",
+        "retrieval_state": "available",
+        "retrieved_at": "2026-08-20T12:00:00Z",
+        "query_gene": "LMNA",
+        "query_key": "LMNA",
+        "attempts": 1,
+        "http_status": 200,
+        "upstream_sources": ["NCBI MedGen", "OMIM"],
+        "enrichment_decision": {
+            "triggered": True,
+            "reason_codes": ["clingen_unavailable"],
+            "target_semantic_node": "gene_disease_context",
+            "primary_retrieval_state": "unavailable",
+            "required_fields_missing": ["gene_disease_evidence"],
+            "query_key": "LMNA",
+        },
+        "candidate_diagnostics": [
+            {
+                "medgen_uid": f"DIAG_{i}",
+                "concept_id": f"C00{i}",
+                "title": f"Diagnostic title {i}",
+                "gene_association_match_state": "gene_mismatch",
+                "rejection_reason": "Gene symbol mismatch against ClinGen database query",
+            }
+            for i in range(10)
+        ],
+        "records": [
+            {
+                "medgen_uid": f"UID{i:05d}",
+                "concept_id": f"C000{i:04d}",
+                "title": f"Cardiomyopathy dilated 1A phenotype {i}",
+                "semantic_type": "Disease or Syndrome",
+                "definition": "Detailed description of LMNA gene-disease association and clinical morbid map " * 8,
+                "gene_association_match_state": "exact_gene_association",
+                "gene_association_basis": "omim_morbid_map",
+                "hpo_terms": [{"hpo_id": "HP:0001250", "label": "Seizures"}],
+                "source_metadata": [
+                    {"database": "OMIM", "code": f"11520{i}", "scui": None, "term_type": None}
+                    for i in range(5)
+                ],
+                "upstream_sources": ["NCBI MedGen", "OMIM"],
+            }
+            for i in range(8)
+        ],
+    }
+
+    original = deepcopy(candidate)
+    first = build_evidence_object(candidate)
+    second = build_evidence_object(candidate)
+
+    assert first == second
+    assert candidate == original
+
+    medgen_gd = first["pathogenicity"]["medgen_gene_disease_context"]
+    assert _serialized_size(medgen_gd) <= MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES
+    compaction = medgen_gd["compaction"]
+    assert compaction["schema_version"] == "1.0"
+    assert compaction["policy"] == "medgen_gene_disease_optional_context_v1"
+    assert compaction["applied"] is True
+    assert compaction["section_budget_bytes"] == MAX_EVIDENCE_MEDGEN_GD_SECTION_BYTES
+    assert compaction["omitted_item_count"] > 0
+    assert compaction["omitted_content_sha256"].startswith("sha256:")
+
+    retained_records = medgen_gd["records"]
+    assert len(retained_records) > 0
+    for r in retained_records:
+        assert r["concept_id"].startswith("C000")
+        assert r["gene_association_match_state"] == "exact_gene_association"
+
+
+def test_exact_live_lmna_candidate_stays_strictly_under_global_64kb_limit() -> None:
+    conn = sqlite3.connect(r"storage/database/clinical_variant.sqlite3")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT pipeline_json FROM pipeline_states WHERE analysis_id='analysis-50b60fea0b5a49b79cf8741cf4cf5fba'"
+    )
+    row = cursor.fetchone()
+    if not row:
+        pytest.skip("Live analysis database entry not found")
+    pj = json.loads(row[0])
+    candidate = pj["phenotype_results"][1]
+
+    evidence = build_evidence_object(candidate)
+    total_size = _serialized_size(evidence)
+
+    assert total_size <= MAX_EVIDENCE_SERIALIZED_BYTES
+    assert total_size <= 61_000  # Proves > 4KB headroom below 65,536 limit
 
 
 def test_fully_enriched_variant_stays_strictly_under_global_64kb_limit() -> None:
