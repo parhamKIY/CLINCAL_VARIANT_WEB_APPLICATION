@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from backend.llm import LLMClient, LLMRequest, LLMResponse
+from backend.llm import (
+    LLMClient,
+    LLMJSONObject,
+    LLMRequest,
+    LLMResponse,
+    OpenAICompatibleAdapter,
+)
 from backend.phenotype_llm import (
     PHENOTYPE_EXTRACTION_PROMPT_VERSION,
     PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA,
@@ -240,3 +246,209 @@ def test_local_validation_corrects_id_from_unique_ontology_label(
         }
     ]
     assert result["rejected_candidates"] == []
+
+
+class _MultiResponseFakeSession:
+    """Fake HTTP session providing sequential responses for Adapter testing."""
+
+    def __init__(self, responses: list[tuple[int, object]]) -> None:
+        self.responses = responses
+        self.post_calls: list[dict[str, object]] = []
+
+    def post(self, url: str, **kwargs: object) -> _FakeHTTPResponse:
+        self.post_calls.append({"url": url, **kwargs})
+        if not self.responses:
+            raise AssertionError("No more responses configured in fake session.")
+        status_code, body = self.responses.pop(0)
+        return _FakeHTTPResponse(status_code, body)
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status_code: int, body: object = None) -> None:
+        self.status_code = status_code
+        self._body = body
+
+    def json(self) -> object:
+        return self._body
+
+    def raise_for_status(self) -> None:
+        pass
+
+
+@pytest.mark.testing_v3_phenotype
+def test_gemini_compatible_json_object_generation_path_works() -> None:
+    """Direct LLMJSONObject generation path parses and validates correctly."""
+    payload = {
+        "phenotype_candidates": [
+            {
+                "hpo_id": "HP:0001250",
+                "label": "Seizure",
+                "source_phrase_fa": "تشنج دارد",
+            }
+        ],
+        "disease_mentions": [],
+        "negated_phenotype_mentions": [],
+        "uncertain_phenotype_mentions": [],
+        "unmapped_clinical_phrases": [],
+    }
+    adapter = _Adapter(payload)
+    result = extract_hpo_candidates(
+        "بیمار تشنج دارد.",
+        client=LLMClient(adapter),
+        response_format=LLMJSONObject(),
+    )
+    assert len(result["phenotype_candidates"]) == 1
+    assert result["phenotype_candidates"][0]["hpo_id"] == "HP:0001250"
+    assert adapter.requests[0].response_format == LLMJSONObject()
+
+
+@pytest.mark.testing_v3_phenotype
+def test_adapter_falls_back_to_json_object_on_gemini_schema_rejection() -> None:
+    """When a provider rejects strict json_schema with HTTP 400, fallback to json_object succeeds."""
+    extraction_payload = {
+        "phenotype_candidates": [
+            {
+                "hpo_id": "HP:0001250",
+                "label": "Seizure",
+                "source_phrase_fa": "تشنج دارد",
+            }
+        ],
+        "disease_mentions": [],
+        "negated_phenotype_mentions": [],
+        "uncertain_phenotype_mentions": [],
+        "unmapped_clinical_phrases": [],
+    }
+    fake_session = _MultiResponseFakeSession(
+        [
+            (400, {"error": {"message": "Invalid JSON schema keyword: pattern"}}),
+            (
+                200,
+                {
+                    "model": "gemini-3.1-flash-lite",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(extraction_payload, ensure_ascii=False),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            ),
+        ]
+    )
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        api_key="test-key",
+        model="gemini-3.1-flash-lite",
+        timeout=10,
+        session=fake_session,
+    )
+    result = extract_hpo_candidates(
+        "بیمار تشنج دارد.",
+        client=LLMClient(adapter),
+    )
+    assert len(fake_session.post_calls) == 2
+    # First call attempted strict json_schema
+    assert fake_session.post_calls[0]["json"]["response_format"]["type"] == "json_schema"
+    # Second fallback call used json_object
+    assert fake_session.post_calls[1]["json"]["response_format"] == {"type": "json_object"}
+    # Result safely parsed and validated through Python pipeline
+    assert len(result["phenotype_candidates"]) == 1
+    assert result["phenotype_candidates"][0]["hpo_id"] == "HP:0001250"
+
+
+@pytest.mark.testing_v3_phenotype
+def test_adapter_preserves_strict_json_schema_when_supported_200() -> None:
+    """When a provider natively accepts strict json_schema with HTTP 200, no fallback is triggered."""
+    extraction_payload = {
+        "phenotype_candidates": [
+            {
+                "hpo_id": "HP:0001250",
+                "label": "Seizure",
+                "source_phrase_fa": "تشنج دارد",
+            }
+        ],
+        "disease_mentions": [],
+        "negated_phenotype_mentions": [],
+        "uncertain_phenotype_mentions": [],
+        "unmapped_clinical_phrases": [],
+    }
+    fake_session = _MultiResponseFakeSession(
+        [
+            (
+                200,
+                {
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(extraction_payload, ensure_ascii=False),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        ]
+    )
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        model="gpt-4o",
+        timeout=10,
+        session=fake_session,
+    )
+    result = extract_hpo_candidates(
+        "بیمار تشنج دارد.",
+        client=LLMClient(adapter),
+    )
+    assert len(fake_session.post_calls) == 1
+    assert fake_session.post_calls[0]["json"]["response_format"]["type"] == "json_schema"
+    assert len(result["phenotype_candidates"]) == 1
+
+
+@pytest.mark.testing_v3_phenotype
+def test_invalid_json_rejected_by_local_validation() -> None:
+    """Malformed non-JSON output is safely rejected by local _parse_extraction."""
+    class _MalformedAdapter:
+        def generate(self, request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="This is not valid JSON.",
+                model="test-model",
+                finish_reason="stop",
+            )
+
+    with pytest.raises(PhenotypeExtractionError, match="not valid JSON"):
+        extract_hpo_candidates(
+            "بیمار تشنج دارد.",
+            client=LLMClient(_MalformedAdapter()),
+        )
+
+
+@pytest.mark.testing_v3_phenotype
+def test_invalid_hpo_id_rejected_by_local_validation() -> None:
+    """Invalid HPO ID format in model output is rejected by local validation."""
+    payload = {
+        "phenotype_candidates": [
+            {
+                "hpo_id": "INVALID:123",
+                "label": "Seizure",
+                "source_phrase_fa": "تشنج دارد",
+            }
+        ],
+        "disease_mentions": [],
+        "negated_phenotype_mentions": [],
+        "uncertain_phenotype_mentions": [],
+        "unmapped_clinical_phrases": [],
+    }
+    with pytest.raises(PhenotypeExtractionError, match="invalid HPO ID"):
+        extract_hpo_candidates(
+            "بیمار تشنج دارد.",
+            client=LLMClient(_Adapter(payload)),
+        )
+

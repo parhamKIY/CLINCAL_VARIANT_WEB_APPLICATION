@@ -253,13 +253,22 @@ class LLMJSONSchema:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMJSONObject:
+    """Provider-neutral generic JSON object response contract."""
+
+    def to_provider_payload(self) -> dict[str, object]:
+        """Return an isolated OpenAI-compatible response-format value."""
+        return {"type": "json_object"}
+
+
+@dataclass(frozen=True, slots=True)
 class LLMRequest:
     """Validated input passed from application code to an LLM adapter."""
 
     messages: tuple[LLMMessage, ...]
     temperature: float = 0.0
     max_tokens: int = 1000
-    response_format: LLMJSONSchema | None = None
+    response_format: LLMJSONSchema | LLMJSONObject | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -294,10 +303,10 @@ class LLMRequest:
             )
         if (
             self.response_format is not None
-            and not isinstance(self.response_format, LLMJSONSchema)
+            and not isinstance(self.response_format, (LLMJSONSchema, LLMJSONObject))
         ):
             raise LLMValidationError(
-                "response_format must be an LLMJSONSchema object or None."
+                "response_format must be an LLMJSONSchema, LLMJSONObject, or None."
             )
 
 
@@ -542,6 +551,43 @@ class OpenAICompatibleAdapter:
                 "Could not connect to the LLM provider.",
                 schema_error="connection_failed",
             ) from exc
+
+        if (
+            response.status_code in {400, 422}
+            and isinstance(request.response_format, LLMJSONSchema)
+        ):
+            fallback_payload = dict(payload)
+            fallback_payload["response_format"] = {"type": "json_object"}
+            LOGGER.info(
+                "event=llm_response_format_fallback model=%s "
+                "reason=json_schema_unsupported_status_%d",
+                self._model,
+                response.status_code,
+            )
+            try:
+                fallback_response = self._session.post(
+                    self._endpoint,
+                    json=fallback_payload,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=self._timeout,
+                    verify=True,
+                )
+            except requests.Timeout as exc:
+                raise LLMTimeoutError(
+                    "The LLM provider request timed out."
+                ) from exc
+            except requests.RequestException as exc:
+                raise LLMRequestError(
+                    "Could not connect to the LLM provider.",
+                    schema_error="connection_failed",
+                ) from exc
+
+            if 200 <= fallback_response.status_code < 300:
+                response = fallback_response
 
         self._raise_for_status(response)
 
@@ -792,7 +838,7 @@ def call_llm(
     client: LLMClient | None = None,
     model: str | None = None,
     max_retries: int | None = None,
-    response_format: LLMJSONSchema | None = None,
+    response_format: LLMJSONSchema | LLMJSONObject | None = None,
 ) -> LLMResponse:
     """Call an LLM without exposing provider-specific SDK details."""
 
@@ -883,8 +929,9 @@ __all__ = [
     "LLMClient",
     "LLMConfigurationError",
     "LLMError",
-    "LLMMessage",
+    "LLMJSONObject",
     "LLMJSONSchema",
+    "LLMMessage",
     "LLMQuotaError",
     "LLMRateLimitError",
     "LLMRequest",

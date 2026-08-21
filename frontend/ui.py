@@ -950,7 +950,7 @@ def _render_model_preflight_card(
     preflight_key: str,
     reload_button_key: str,
     job_active: bool,
-) -> str:
+) -> str | None:
     """Render one self-contained model health card and return the selected model.
 
     The card contains:
@@ -1002,7 +1002,7 @@ def _render_model_preflight_card(
             st.session_state.get(selector_key, ""),
             preflight_key,
         )
-    return selected_model or ""
+    return selected_model
 
 
 def _render_task_model_selectors() -> tuple[str, str]:

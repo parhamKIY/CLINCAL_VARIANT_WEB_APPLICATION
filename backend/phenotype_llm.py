@@ -10,6 +10,7 @@ from typing import TypedDict
 
 from backend.llm import (
     LLMClient,
+    LLMJSONObject,
     LLMJSONSchema,
     LLMResponse,
     call_llm,
@@ -381,6 +382,7 @@ def extract_hpo_candidates(
     model: str | None = None,
     client: LLMClient | None = None,
     max_retries: int | None = None,
+    response_format: LLMJSONSchema | LLMJSONObject | None = None,
 ) -> PhenotypeExtractionResult:
     """Extract format-valid HPO candidates from sanitized Persian text."""
 
@@ -420,7 +422,11 @@ def extract_hpo_candidates(
         client=client,
         model=(None if client is not None else selected_model.strip()),
         max_retries=max_retries,
-        response_format=PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA,
+        response_format=(
+            PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA
+            if response_format is None
+            else response_format
+        ),
     )
     parsed = _parse_extraction(response, clinical_text_fa=sanitized_text)
     return {
@@ -444,6 +450,7 @@ def extract_hpo_candidates(
 
 __all__ = [
     "HPO_ID_PATTERN",
+    "LLMJSONObject",
     "MAX_PHENOTYPE_CANDIDATES",
     "MAX_NON_HPO_MENTIONS",
     "MAX_TOTAL_EXTRACTED_MENTIONS",
