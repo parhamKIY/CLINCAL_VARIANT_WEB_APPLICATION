@@ -883,42 +883,136 @@ def _run_preflight_check(model: str, state_key: str) -> None:
     st.session_state[state_key] = result
 
 
-def _render_preflight_status(state_key: str) -> None:
-    """Render one preflight badge near a model selector.
+def _render_preflight_health(
+    result: "LLMPreflightResult | None",
+) -> None:
+    """Render the connection-health row inside a model card.
 
-    Shows nothing when the check has not been run yet.
+    Three visual states:
+    - Not checked: neutral grey text.
+    - Functional:  green dot, latency, and last-checked time.
+    - Non-functional: red dot and safe failure category.
     """
-    result: LLMPreflightResult | None = st.session_state.get(state_key)
     if result is None:
+        st.markdown(
+            "<span style='color:#888;font-size:0.82rem;'>"
+            "⬤ &nbsp;Not checked yet</span>",
+            unsafe_allow_html=True,
+        )
         return
+
     if result.ok:
-        parts = [':green[🟢 Functional]']
-        if result.response_ms is not None:
-            parts.append(f'— {result.response_ms} ms')
+        latency = (
+            f"Response: {result.response_ms} ms"
+            if result.response_ms is not None
+            else ""
+        )
+        checked = ""
         if result.checked_at:
             from datetime import datetime, timezone
             try:
-                dt = datetime.fromisoformat(result.checked_at.replace('Z', '+00:00'))
-                parts.append(f'· Checked {dt.strftime("%H:%M")}'  )
+                dt = datetime.fromisoformat(
+                    result.checked_at.replace("Z", "+00:00")
+                )
+                checked = f"Checked: {dt.strftime('%H:%M')}"
             except ValueError:
                 pass
-        st.caption(' '.join(parts))
+        detail = "  ·  ".join(p for p in (latency, checked) if p)
+        st.markdown(
+            "<span style='color:#00c853;font-size:0.85rem;font-weight:600;'>"
+            "⬤ Functional</span>"
+            + (
+                f"<span style='color:#888;font-size:0.78rem;'>&nbsp;&nbsp;{detail}</span>"
+                if detail else ""
+            ),
+            unsafe_allow_html=True,
+        )
     else:
-        category = result.failure_category or 'Request failed'
-        st.caption(f':red[🔴 Non-functional] · {category}')
+        category = result.failure_category or "Request failed"
+        st.markdown(
+            "<span style='color:#ff1744;font-size:0.85rem;font-weight:600;'>"
+            f"⬤ Non-functional</span>"
+            "<span style='color:#ff6e6e;font-size:0.78rem;'>"
+            f"&nbsp;&nbsp;{category}</span>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_model_preflight_card(
+    *,
+    title: str,
+    selector_label: str,
+    selector_key: str,
+    selector_help: str,
+    selector_placeholder: str,
+    configured_default: str,
+    provider_models: tuple[str, ...],
+    preflight_key: str,
+    reload_button_key: str,
+    job_active: bool,
+) -> str:
+    """Render one self-contained model health card and return the selected model.
+
+    The card contains:
+    - Section title
+    - Model selectbox
+    - Connection health badge (green / red / neutral)
+    - Latency and last-checked time (on success)
+    - Reload check button (disabled while a job is running)
+    """
+    st.markdown(
+        f"<p style='font-size:0.78rem;font-weight:600;text-transform:uppercase;"
+        f"letter-spacing:0.06em;color:#aaa;margin-bottom:2px;'>{title}</p>",
+        unsafe_allow_html=True,
+    )
+    selected_model = st.selectbox(
+        selector_label,
+        _task_model_options(
+            configured_default,
+            provider_models,
+            st.session_state.get(selector_key),
+        ),
+        key=selector_key,
+        placeholder=selector_placeholder,
+        filter_mode="contains",
+        accept_new_options=True,
+        disabled=job_active,
+        on_change=_task_models_changed,
+        help=selector_help,
+        label_visibility="collapsed",
+    )
+    _render_preflight_health(st.session_state.get(preflight_key))
+    st.caption(
+        "Preflight connectivity test (does not use clinical data)",
+        help=(
+            "Sends a minimal anonymous request to verify that the selected "
+            "model is reachable and the API key is accepted. "
+            "No patient information is transmitted."
+        ),
+    )
+    if st.button(
+        "Reload check",
+        key=reload_button_key,
+        icon=":material/wifi_tethering:",
+        disabled=job_active,
+        help="Re-run the connectivity check for this model",
+        use_container_width=True,
+    ):
+        _run_preflight_check(
+            st.session_state.get(selector_key, ""),
+            preflight_key,
+        )
+    return selected_model or ""
 
 
 def _render_task_model_selectors() -> tuple[str, str]:
-    """Render one independent model choice for each accepted LLM task."""
+    """Render one independent model-health card for each accepted LLM task."""
 
     with st.container(border=True):
         st.subheader("Task-specific models")
-        st.caption(
-            "Choose one model for Persian phenotype extraction and one "
-            "model for variant interpretation. Conflict status does not "
-            "select a different model."
-        )
         job_active = _analysis_job() is not None
+
+        # Provider catalog loader (unchanged behaviour)
         if st.button(
             "Load models from provider",
             key="load_provider_models",
@@ -929,9 +1023,7 @@ def _render_task_model_selectors() -> tuple[str, str]:
             provider_models, provider_error = _provider_llm_models()
             st.session_state[LLM_PROVIDER_MODELS_KEY] = provider_models
             st.session_state[LLM_PROVIDER_MODELS_ERROR_KEY] = provider_error
-        provider_models = tuple(
-            st.session_state[LLM_PROVIDER_MODELS_KEY]
-        )
+        provider_models = tuple(st.session_state[LLM_PROVIDER_MODELS_KEY])
         if provider_models:
             st.caption(
                 f"Loaded {len(provider_models)} current provider models. "
@@ -949,76 +1041,44 @@ def _render_task_model_selectors() -> tuple[str, str]:
                 "catalog or enter another supported model identifier."
             )
 
-        phenotype_column, interpretation_column = st.columns(2)
+        st.divider()
+
+        phenotype_column, interpretation_column = st.columns(2, gap="large")
         with phenotype_column:
-            phenotype_model = st.selectbox(
-                "Phenotype Extraction Model",
-                _task_model_options(
-                    settings.PHENOTYPE_EXTRACTION_MODEL,
-                    provider_models,
-                    st.session_state.get(PHENOTYPE_MODEL_KEY),
-                ),
-                key=PHENOTYPE_MODEL_KEY,
-                placeholder="Select or enter a phenotype model",
-                filter_mode="contains",
-                accept_new_options=True,
-                disabled=job_active,
-                on_change=_task_models_changed,
-                help=(
-                    "Used only for the optional de-identified Persian "
-                    "clinical-text to HPO-candidate task."
-                ),
-            )
-        _render_preflight_status(LLM_PREFLIGHT_PHENOTYPE_KEY)
+            with st.container(border=True):
+                phenotype_model = _render_model_preflight_card(
+                    title="Phenotype Extraction",
+                    selector_label="Phenotype Extraction Model",
+                    selector_key=PHENOTYPE_MODEL_KEY,
+                    selector_help=(
+                        "Used only for the optional de-identified Persian "
+                        "clinical-text to HPO-candidate task."
+                    ),
+                    selector_placeholder="Select or enter a phenotype model",
+                    configured_default=settings.PHENOTYPE_EXTRACTION_MODEL,
+                    provider_models=provider_models,
+                    preflight_key=LLM_PREFLIGHT_PHENOTYPE_KEY,
+                    reload_button_key="preflight_reload_phenotype",
+                    job_active=job_active,
+                )
         with interpretation_column:
-            variant_model = st.selectbox(
-                "Variant Interpretation Model",
-                _task_model_options(
-                    settings.VARIANT_INTERPRETATION_MODEL,
-                    provider_models,
-                    st.session_state.get(VARIANT_MODEL_KEY),
-                ),
-                key=VARIANT_MODEL_KEY,
-                placeholder="Select or enter an interpretation model",
-                filter_mode="contains",
-                accept_new_options=True,
-                disabled=job_active,
-                on_change=_task_models_changed,
-                help=(
-                    "Selected once for every variant; deterministic "
-                    "conflict status remains evidence context only."
-                ),
-            )
-        _render_preflight_status(LLM_PREFLIGHT_VARIANT_KEY)
-        # Reload-check row
-        if not job_active:
-            reload_pheno_col, reload_var_col, _ = st.columns([1, 1, 2])
-            with reload_pheno_col:
-                if st.button(
-                    'Reload check',
-                    key='preflight_reload_phenotype',
-                    icon=':material/wifi_tethering:',
-                    help='Test phenotype extraction model connectivity',
-                ):
-                    _run_preflight_check(
-                        st.session_state.get(PHENOTYPE_MODEL_KEY, ''),
-                        LLM_PREFLIGHT_PHENOTYPE_KEY,
-                    )
-            with reload_var_col:
-                if st.button(
-                    'Reload check',
-                    key='preflight_reload_variant',
-                    icon=':material/wifi_tethering:',
-                    help='Test variant interpretation model connectivity',
-                ):
-                    _run_preflight_check(
-                        st.session_state.get(VARIANT_MODEL_KEY, ''),
-                        LLM_PREFLIGHT_VARIANT_KEY,
-                    )
-        st.caption(
-            f"Phenotype extraction: {phenotype_model}  |  "
-            f"Variant interpretation: {variant_model}"
-        )
+            with st.container(border=True):
+                variant_model = _render_model_preflight_card(
+                    title="Variant Interpretation",
+                    selector_label="Variant Interpretation Model",
+                    selector_key=VARIANT_MODEL_KEY,
+                    selector_help=(
+                        "Selected once for every variant; deterministic "
+                        "conflict status remains evidence context only."
+                    ),
+                    selector_placeholder="Select or enter an interpretation model",
+                    configured_default=settings.VARIANT_INTERPRETATION_MODEL,
+                    provider_models=provider_models,
+                    preflight_key=LLM_PREFLIGHT_VARIANT_KEY,
+                    reload_button_key="preflight_reload_variant",
+                    job_active=job_active,
+                )
+
     return phenotype_model, variant_model
 
 
