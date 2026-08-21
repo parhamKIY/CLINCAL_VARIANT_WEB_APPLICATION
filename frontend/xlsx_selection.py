@@ -33,6 +33,13 @@ def select_excel_input_records(
     return [dict(record) for record in records if record.get("row") in selected]
 
 
+def _display_text(value: object) -> str | None:
+    """Safely format string-intended columns for tabular display without dtype collisions."""
+    if value is None:
+        return None
+    return str(value)
+
+
 def source_row_display_rows(
     records: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
@@ -41,13 +48,13 @@ def source_row_display_rows(
     return [
         {
             "Source row": record.get("row"),
-            "CHROM": record.get("chrom"),
+            "CHROM": _display_text(record.get("chrom")),
             "Start": record.get("start"),
             "End": record.get("end"),
-            "REF": record.get("ref"),
-            "ALT": record.get("alt"),
+            "REF": _display_text(record.get("ref")),
+            "ALT": _display_text(record.get("alt")),
             "QUAL": record.get("qual"),
-            "Source FILTER": record.get("filter"),
+            "Source FILTER": _display_text(record.get("filter")),
             "DP": record.get("depth"),
             "AD": record.get("ad"),
             "GQ": record.get("gq"),

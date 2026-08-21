@@ -75,15 +75,21 @@ def build_variant_rows(
     rows: list[dict[str, object]] = []
     for item in variants:
         variant = _variant(item)
+        chrom = variant.get("chrom")
+        ref = variant.get("ref")
+        alt = variant.get("alt")
+        filter_status = variant.get("filter")
         rows.append(
             {
                 "Variant": _variant_label(item),
-                "Chromosome": variant.get("chrom"),
+                "Chromosome": str(chrom) if chrom is not None else None,
                 "Position": variant.get("pos"),
-                "Reference": variant.get("ref"),
-                "Alternate": variant.get("alt"),
+                "Reference": str(ref) if ref is not None else None,
+                "Alternate": str(alt) if alt is not None else None,
                 "Quality": variant.get("qual"),
-                "Filter": variant.get("filter"),
+                "Filter": (
+                    str(filter_status) if filter_status is not None else None
+                ),
             }
         )
     return rows
