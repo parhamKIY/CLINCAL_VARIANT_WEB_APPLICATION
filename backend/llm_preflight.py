@@ -16,6 +16,8 @@ Guarantees:
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
@@ -24,11 +26,13 @@ from backend.llm import (
     LLMAuthenticationError,
     LLMConfigurationError,
     LLMError,
+    LLMJSONObject,
     LLMMessage,
     LLMQuotaError,
     LLMRateLimitError,
     LLMRequest,
     LLMRequestError,
+    LLMResponseError,
     LLMTimeoutError,
     OpenAICompatibleAdapter,
 )
@@ -38,11 +42,12 @@ from config import settings
 
 LOGGER = get_logger("llm_preflight")
 
-# Preflight request constants — minimal, anonymous, deterministic.
-_PREFLIGHT_SYSTEM = "Respond only with the word: ready"
+# Preflight request constants — minimal, anonymous, deterministic structured JSON check.
+_PREFLIGHT_SYSTEM = "Respond only with a JSON object: {\"status\": \"ready\"}"
 _PREFLIGHT_USER = "ready"
-_PREFLIGHT_MAX_TOKENS = 5
+_PREFLIGHT_MAX_TOKENS = 15
 _PREFLIGHT_TEMPERATURE = 0.0
+_PREFLIGHT_RESPONSE_FORMAT = LLMJSONObject()
 
 # Maximum time (seconds) the preflight check may block the UI.
 # Always smaller than the pipeline LLM_TIMEOUT so as not to stall startup.
@@ -54,6 +59,7 @@ _CATEGORY_AUTH = "Invalid API key"
 _CATEGORY_QUOTA = "Quota exhausted"
 _CATEGORY_UNAVAILABLE = "Model unavailable"
 _CATEGORY_TIMEOUT = "Timeout"
+_CATEGORY_STRUCTURED_OUTPUT = "Structured output unsupported"
 _CATEGORY_FAILED = "Request failed"
 
 
@@ -79,7 +85,12 @@ def _map_failure_category(error: LLMError) -> str:
         return _CATEGORY_TIMEOUT
     if isinstance(error, LLMConfigurationError):
         return _CATEGORY_UNAVAILABLE
-    # LLMRequestError, LLMResponseError, and any other LLMError subclass.
+    if isinstance(error, LLMResponseError):
+        return _CATEGORY_STRUCTURED_OUTPUT
+    if isinstance(error, LLMRequestError):
+        if getattr(error, "http_status", None) in {400, 422}:
+            return _CATEGORY_STRUCTURED_OUTPUT
+        return _CATEGORY_FAILED
     return _CATEGORY_FAILED
 
 
@@ -165,11 +176,25 @@ def check_llm_connectivity(
         ),
         temperature=_PREFLIGHT_TEMPERATURE,
         max_tokens=_PREFLIGHT_MAX_TOKENS,
+        response_format=_PREFLIGHT_RESPONSE_FORMAT,
     )
 
     started = perf_counter()
     try:
-        adapter.generate(request)
+        response = adapter.generate(request)
+        try:
+            parsed = json.loads(response.content)
+            if not isinstance(parsed, Mapping):
+                raise LLMResponseError(
+                    "The preflight JSON response is not an object.",
+                    failure_type="output_schema_failure",
+                )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMResponseError(
+                "The preflight response is not valid JSON.",
+                failure_type="output_parse_failure",
+            ) from exc
+
         elapsed_ms = max(0, round((perf_counter() - started) * 1000))
         LOGGER.info(
             "event=llm_preflight outcome=ok model=%s duration_ms=%d",

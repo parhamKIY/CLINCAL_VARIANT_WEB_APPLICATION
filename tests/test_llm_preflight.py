@@ -46,14 +46,17 @@ def _ok_response_body() -> dict:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": "ready"},
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"status": "ready"}),
+                },
                 "finish_reason": "stop",
             }
         ],
         "usage": {
             "prompt_tokens": 5,
-            "completion_tokens": 1,
-            "total_tokens": 6,
+            "completion_tokens": 5,
+            "total_tokens": 10,
         },
     }
 
@@ -339,4 +342,96 @@ def test_preflight_no_clinical_data_in_request(
         )
 
     # Token budget must be minimal
-    assert payload.get("max_tokens", 9999) <= 10
+    assert payload.get("max_tokens", 9999) <= 20
+    assert payload.get("response_format") == {"type": "json_object"}
+
+
+def test_preflight_structured_output_rejected_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 400 rejection on response_format maps to 'Structured output unsupported'."""
+
+    fake_session = _FakeHTTPSession(
+        _FakeHTTPResponse(
+            400,
+            {"error": {"message": "response_format json_object is not supported by model"}},
+        )
+    )
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("gemini-3.1-flash-lite")
+
+    assert result.ok is False
+    assert result.failure_category == "Structured output unsupported"
+
+
+def test_preflight_structured_output_rejected_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 422 rejection on response_format maps to 'Structured output unsupported'."""
+
+    fake_session = _FakeHTTPSession(
+        _FakeHTTPResponse(
+            422,
+            {"error": {"message": "Unprocessable response_format"}},
+        )
+    )
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("some-legacy-model")
+
+    assert result.ok is False
+    assert result.failure_category == "Structured output unsupported"
+
+
+def test_preflight_structured_output_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 response with non-JSON content maps to 'Structured output unsupported'."""
+
+    non_json_body = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "I am ready!"},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    fake_session = _FakeHTTPSession(_FakeHTTPResponse(200, non_json_body))
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("test-model")
+
+    assert result.ok is False
+    assert result.failure_category == "Structured output unsupported"
+
+
+def test_preflight_structured_output_non_object_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 response with JSON array rather than object maps to 'Structured output unsupported'."""
+
+    array_json_body = {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": '["ready"]'},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    fake_session = _FakeHTTPSession(_FakeHTTPResponse(200, array_json_body))
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("test-model")
+
+    assert result.ok is False
+    assert result.failure_category == "Structured output unsupported"
+
