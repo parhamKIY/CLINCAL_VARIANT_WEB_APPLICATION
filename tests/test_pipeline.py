@@ -19858,8 +19858,9 @@ class TestCompletePipelineHappyPath:
                 "stage": "input",
                 "code": "invalid_input",
                 "message": (
-                    "Exactly one of vcf_path or manual_variants must "
-                    "be provided."
+                    "The analysis input is incomplete or invalid. Review "
+                    "the selected input and phenotype terms, then try "
+                    "again."
                 ),
                 "recoverable": False,
             }
@@ -20623,7 +20624,10 @@ class TestSafeErrorHandling:
 
         assert public_error == {
             "code": "invalid_input",
-            "message": "Exactly one input source must be provided.",
+            "message": (
+                "The analysis input is incomplete or invalid. Review the "
+                "selected input and phenotype terms, then try again."
+            ),
             "recoverable": False,
         }
 
@@ -21957,12 +21961,14 @@ class TestFrontendResults:
         assert phenotype_rows[0]["Phenotype score"] == 0.5
         assert phenotype_rows[0]["Matched HPO"] == "HP:0001250"
         assert phenotype_rows[0]["Phenotype-gene availability"] == (
-            "available"
+            "Evidence available"
         )
         assert phenotype_rows[0]["Phenotype-gene score"] == 0.81
         assert phenotype_rows[0]["Phenotype-gene rank"] == 12
-        assert phenotype_rows[0]["MyDisease result"] == "available"
-        assert phenotype_rows[0]["MyDisease HTTP status"] == 200
+        assert phenotype_rows[0]["MyDisease result"] == (
+            "Evidence available"
+        )
+        assert "MyDisease HTTP status" not in phenotype_rows[0]
         assert phenotype_rows[0]["MyDisease provider total"] == 2
         assert phenotype_rows[0]["MyDisease provider returned"] == 2
         assert phenotype_rows[0]["MyDisease diseases"] == 1
@@ -24293,7 +24299,6 @@ class TestFrontendFoundation:
                 "Fallback used",
                 "Primary provider failure",
                 "MyDisease result",
-                "MyDisease HTTP status",
                 "MyDisease provider total",
                 "MyDisease provider returned",
                 "MyDisease diseases",

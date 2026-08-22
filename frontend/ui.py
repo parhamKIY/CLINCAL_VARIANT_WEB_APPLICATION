@@ -1434,7 +1434,7 @@ def _prepare_input(
     try:
         normalized_variants = _normalize_manual_table(manual_table)
     except ValueError as exc:
-        st.error(str(exc))
+        st.error(safe_ui_error_message(exc, context="manual_input"))
         return None
 
     return {
@@ -1481,7 +1481,7 @@ def _render_xlsx_row_selection(
             st.session_state.pop("xlsx_selected_source_rows", None)
         worksheets = discover_excel_worksheets(payload)
     except ExcelProcessingError as exc:
-        st.error(str(exc))
+        st.error(safe_ui_error_message(exc, context="excel_upload"))
         return None
 
     st.caption(
@@ -1507,7 +1507,7 @@ def _render_xlsx_row_selection(
             worksheet_name=selected_worksheet,
         )
     except ExcelProcessingError as exc:
-        st.error(str(exc))
+        st.error(safe_ui_error_message(exc, context="excel_upload"))
         return None
 
     worksheet_count = next(
@@ -1529,7 +1529,12 @@ def _render_xlsx_row_selection(
         selected_records = select_excel_input_records(records, selected_rows)
     except XLSXSelectionError as exc:
         if selected_rows:
-            st.error(str(exc))
+            st.error(
+                safe_ui_error_message(
+                    exc,
+                    context="excel_selection",
+                )
+            )
         else:
             st.info("Select 1–10 source rows before analysis.")
         return None
@@ -1663,7 +1668,7 @@ def _result_status(
         result["status"] == "partial"
         and result["current_stage"] == "completed"
     ):
-        return "Analysis completed with warnings", "complete", True
+        return "Analysis completed partially", "complete", True
     if result["status"] == "partial":
         return "Analysis stopped with partial results", "error", True
     if result["status"] == "error":
@@ -1735,10 +1740,17 @@ def _render_pipeline_issues(result: PipelineResult) -> None:
     """Render frontend-safe pipeline issues without tracebacks."""
 
     for issue in result["errors"]:
+        stage = issue["stage"]
+        stage_label = (
+            _pipeline_stage_label(stage, result)
+            if stage in PIPELINE_STAGE_LABELS
+            else "Analysis"
+        )
+        message = f"{stage_label}: {issue['message']}"
         if issue["recoverable"]:
-            st.warning(issue["message"])
+            st.warning(message)
         else:
-            st.error(issue["message"])
+            st.error(message)
 
 
 def _render_pipeline_status(result: PipelineResult) -> None:
@@ -1850,7 +1862,10 @@ def _start_submission(
             recovery_request=recovery_request,
         )
     except FrontendExecutionError as exc:
-        st.session_state[ANALYSIS_NOTICE_KEY] = str(exc)
+        st.session_state[ANALYSIS_NOTICE_KEY] = safe_ui_error_message(
+            exc,
+            context="analysis_start",
+        )
         st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"
         return
     st.session_state[ANALYSIS_JOB_KEY] = job
@@ -1891,8 +1906,12 @@ def _finish_analysis_job(job: AnalysisJob) -> None:
         )
     elif view.state == "error":
         st.session_state[ANALYSIS_NOTICE_KEY] = (
-            view.error_message
-            or "An unexpected internal error stopped the analysis."
+            safe_ui_error_message(
+                FrontendExecutionError(
+                    view.error_message or "analysis worker failed"
+                ),
+                context="analysis_worker",
+            )
         )
         st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "error"
 

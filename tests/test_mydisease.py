@@ -349,7 +349,9 @@ def test_empty_response_is_successful_no_association() -> None:
     assert evidence["provider_total"] == 0
     assert result["unavailable_count"] == 0
     rows = build_phenotype_rows(result["variants"])
-    assert rows[0]["MyDisease result"] == "no_association"
+    assert rows[0]["MyDisease result"] == (
+        "No matching evidence found"
+    )
 
 
 def test_unsupported_gene_is_not_queried() -> None:

@@ -53,7 +53,7 @@ def test_summary_uses_exact_variant_report_and_attention_counts() -> None:
     }
 
     assert build_analysis_summary(result) == {
-        "headline": "Analysis complete",
+        "headline": "Analysis completed partially",
         "input_message": "Excel input validated",
         "variants_analyzed": 7,
         "draft_reports_prepared": 7,
@@ -130,9 +130,9 @@ def test_completed_ui_leads_with_summary_and_collapses_provider_details(
 
     assert not app.exception
     subheaders = [item.value for item in app.subheader]
-    assert subheaders.index("Analysis complete") < subheaders.index(
-        "STAGE95_REPORT_SURFACE"
-    )
+    assert subheaders.index(
+        "Analysis completed partially"
+    ) < subheaders.index("STAGE95_REPORT_SURFACE")
     assert any(item.value == "Excel input validated" for item in app.caption)
     rendered = [item.value for item in app.markdown]
     assert "**2** variants analyzed" in rendered

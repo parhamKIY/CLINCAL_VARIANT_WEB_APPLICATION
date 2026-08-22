@@ -31,6 +31,11 @@ UIErrorContext = Literal[
     "phenotype_search",
     "phenotype_extraction",
     "phenotype_acceptance",
+    "manual_input",
+    "excel_upload",
+    "excel_selection",
+    "analysis_start",
+    "analysis_worker",
 ]
 
 
@@ -67,7 +72,10 @@ def map_pipeline_exception(
     if isinstance(error, PipelineInputError):
         public_error: PublicError = {
             "code": "invalid_input",
-            "message": str(error),
+            "message": (
+                "The analysis input is incomplete or invalid. Review the "
+                "selected input and phenotype terms, then try again."
+            ),
             "recoverable": False,
         }
     elif isinstance(error, VCFProcessingError):
@@ -92,8 +100,8 @@ def map_pipeline_exception(
         public_error = {
             "code": "evidence_object_failed",
             "message": (
-                "The available evidence could not be converted into the "
-                "required clinical format."
+                "Evidence construction could not be completed for this "
+                "variant."
             ),
             "recoverable": False,
         }
@@ -127,15 +135,18 @@ def map_pipeline_exception(
     elif isinstance(error, LLMTimeoutError):
         public_error = {
             "code": "llm_interpretation_failed",
-            "message": "The LLM request timed out.",
+            "message": (
+                "Automated interpretation could not be completed. "
+                "Technical details were recorded. Try again later."
+            ),
             "recoverable": True,
         }
     elif isinstance(error, LLMRequestError):
         public_error = {
             "code": "llm_interpretation_failed",
             "message": (
-                "The LLM provider is temporarily unavailable. Try again "
-                "later."
+                "Automated interpretation could not be completed. "
+                "Technical details were recorded. Try again later."
             ),
             "recoverable": True,
         }
@@ -159,8 +170,9 @@ def map_pipeline_exception(
         public_error = {
             "code": "llm_interpretation_failed",
             "message": (
-                "The LLM response could not be safely validated. Try "
-                "again."
+                "Automated interpretation returned an unusable response. "
+                "No interpretation was accepted. Technical details were "
+                "recorded."
             ),
             "recoverable": True,
         }
@@ -168,8 +180,8 @@ def map_pipeline_exception(
         public_error = {
             "code": "llm_interpretation_failed",
             "message": (
-                "Clinical interpretation could not be completed. Try "
-                "again later."
+                "Automated interpretation could not be completed. "
+                "Technical details were recorded."
             ),
             "recoverable": True,
         }
@@ -177,7 +189,8 @@ def map_pipeline_exception(
         public_error = {
             "code": "report_generation_failed",
             "message": (
-                "The clinical report could not be generated or saved."
+                "Report generation could not be completed. The available "
+                "analysis results remain available for review."
             ),
             "recoverable": True,
         }
@@ -232,6 +245,26 @@ def safe_ui_error_message(
             "phenotype_acceptance": (
                 "The edited candidates could not be accepted. Correct or "
                 "remove invalid HPO identifiers and try again."
+            ),
+            "manual_input": (
+                "The manual variant input is incomplete or invalid. Review "
+                "the highlighted rows and try again."
+            ),
+            "excel_upload": (
+                "The Excel workbook could not be read safely. Check the "
+                "file and try again."
+            ),
+            "excel_selection": (
+                "The selected Excel rows could not be accepted. Select 1–10 "
+                "valid source rows and try again."
+            ),
+            "analysis_start": (
+                "The analysis could not be started. Technical details were "
+                "recorded; try again."
+            ),
+            "analysis_worker": (
+                "The analysis stopped unexpectedly. Technical details were "
+                "recorded; retained results remain unchanged."
             ),
         }
         message = messages[context]

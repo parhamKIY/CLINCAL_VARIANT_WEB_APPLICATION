@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from typing import TypedDict
+
 import streamlit as st
 
 from backend.fallback_transparency import build_fallback_notices
@@ -24,6 +27,24 @@ SOURCE_CAPABILITIES = {
     "clinvar": "clinvar_evidence",
     "clingen": "gene_disease_validity",
 }
+PROVIDER_LABELS = {
+    "ensembl_vep": "Ensembl VEP",
+    "variantvalidator": "VariantValidator",
+    "myvariant": "MyVariant.info",
+    "ensembl_variation": "Ensembl Variation",
+    "ncbi_clinvar": "ClinVar",
+    "ucsc_gencc": "ClinGen/GenCC",
+}
+
+
+class PartialAnalysisPresentation(TypedDict):
+    """User-facing summary of retained and failed variant workflows."""
+
+    headline: str
+    message: str
+    successful_variant_count: int
+    failed_variant_count: int
+    rows: list[dict[str, str]]
 
 
 def _dictionary(value: object) -> dict[str, object]:
@@ -65,6 +86,246 @@ def _joined_text(value: object) -> str | None:
         return None
     items = [str(item) for item in value if str(item).strip()]
     return ", ".join(items) if items else None
+
+
+def _provider_state_label(value: object) -> str:
+    normalized = str(value or "").strip().casefold().replace(" ", "_")
+    if normalized in {"success", "available", "supported"}:
+        return "Evidence available"
+    if normalized == "available_via_fallback":
+        return "Evidence available through fallback"
+    if normalized in {"no_match", "not_found", "no_association"}:
+        return "No matching evidence found"
+    if normalized in {
+        "error",
+        "unavailable",
+        "timeout",
+        "connection_error",
+        "server_error",
+        "invalid_response",
+    }:
+        return "Provider unavailable"
+    if normalized in {"not_triggered", "not_applicable", "skipped"}:
+        return "Not queried"
+    if normalized == "partial":
+        return "Completed with limitations"
+    return (
+        "Status not recorded"
+        if not normalized
+        else normalized.replace("_", " ").title()
+    )
+
+
+def _provider_failure_label(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().casefold()
+    if normalized in {"timeout", "request_timeout"}:
+        return "Provider timed out"
+    if normalized in {"rate_limited", "http_429"}:
+        return "Provider rate limit reached"
+    if normalized in {
+        "connection_error",
+        "server_error",
+        "http_5xx",
+        "unavailable",
+    }:
+        return "Provider unavailable"
+    if normalized in {"authentication_error", "forbidden"}:
+        return "Provider access unavailable"
+    return "Provider request could not be completed"
+
+
+def build_evidence_source_presentations(
+    evidence: Mapping[str, object],
+) -> list[dict[str, str | None]]:
+    """Project source availability without losing fallback semantics."""
+
+    statuses = evidence.get("source_statuses")
+    source_statuses = statuses if isinstance(statuses, Mapping) else {}
+    capabilities = evidence.get("capability_results")
+    capability_results = (
+        capabilities if isinstance(capabilities, Mapping) else {}
+    )
+    rows: list[dict[str, str | None]] = []
+    for source in ("vep", "myvariant", "clinvar", "clingen"):
+        capability = SOURCE_CAPABILITIES[source]
+        retained = capability_results.get(capability)
+        if isinstance(retained, Mapping):
+            provider = retained.get("provider")
+            provider_key = (
+                provider.strip().casefold()
+                if isinstance(provider, str)
+                else ""
+            )
+            presentation_input = {
+                **dict(retained),
+                "source": PROVIDER_LABELS.get(
+                    provider_key,
+                    SOURCE_LABELS[source],
+                ),
+                "capability": capability,
+                "operational_status": (
+                    retained.get("primary_failure")
+                    or retained.get("status")
+                ),
+            }
+        else:
+            value = str(source_statuses.get(source, "not_assessed"))
+            presentation_input = {
+                "source": SOURCE_LABELS[source],
+                "capability": capability,
+                "status": value,
+                "operational_status": value,
+                "provider_role": "primary",
+                "fallback_used": False,
+            }
+        presented = build_reviewer_source_status(presentation_input)
+        rows.append(
+            {
+                "Source": SOURCE_LABELS[source],
+                "State": presented["category"],
+                "Explanation": presented["message"],
+                "Recovery": presented["recovery"],
+            }
+        )
+    return rows
+
+
+def _indexed_records(value: object) -> dict[int, Mapping[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return {}
+    indexed: dict[int, Mapping[str, object]] = {}
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        variant_index = item.get("variant_index")
+        if (
+            isinstance(variant_index, int)
+            and not isinstance(variant_index, bool)
+            and variant_index >= 0
+        ):
+            indexed[variant_index] = item
+    return indexed
+
+
+def _interpretation_failure_presentation(
+    _failure_type: object,
+) -> tuple[str, str, str]:
+    return (
+        "Automated interpretation",
+        (
+            "Automated interpretation could not be completed for this "
+            "variant; its collected evidence was retained."
+        ),
+        (
+            "Retry automated interpretation later or continue with manual "
+            "evidence review."
+        ),
+    )
+
+
+def build_partial_analysis_presentation(
+    result: Mapping[str, object],
+) -> PartialAnalysisPresentation:
+    """Describe partial per-variant outcomes without internal error tokens."""
+
+    variants = result.get("variants")
+    variant_items = (
+        variants
+        if isinstance(variants, Sequence)
+        and not isinstance(variants, (str, bytes))
+        else ()
+    )
+    evidence_outcomes = _indexed_records(
+        result.get("evidence_construction_outcomes")
+    )
+    interpretations = _indexed_records(
+        result.get("variant_interpretation_results")
+    )
+    rows: list[dict[str, str]] = []
+    successful_count = 0
+    failed_count = 0
+    completed_workflow = result.get("current_stage") == "completed"
+
+    for index, value in enumerate(variant_items):
+        variant = dict(value) if isinstance(value, Mapping) else {}
+        evidence_outcome = evidence_outcomes.get(index)
+        interpretation = interpretations.get(index)
+        if (
+            evidence_outcome is not None
+            and evidence_outcome.get("status") == "failed"
+        ):
+            workflow_result = "Failed"
+            failure_category = "Evidence construction"
+            explanation = (
+                "Evidence construction could not be completed for this "
+                "variant."
+            )
+            next_action = (
+                "Review the variant input and retained technical record "
+                "before retrying."
+            )
+            failed_count += 1
+        elif (
+            interpretation is not None
+            and interpretation.get("status") == "failed"
+        ):
+            workflow_result = "Failed"
+            (
+                failure_category,
+                explanation,
+                next_action,
+            ) = _interpretation_failure_presentation(
+                interpretation.get("error_type")
+            )
+            failed_count += 1
+        else:
+            workflow_result = (
+                "Completed with limitations"
+                if completed_workflow
+                else "Evidence retained"
+            )
+            failure_category = "None for this variant"
+            explanation = (
+                "The variant completed with the evidence available from "
+                "reachable sources."
+                if completed_workflow
+                else (
+                    "Evidence construction completed, but later workflow "
+                    "steps were not completed."
+                )
+            )
+            next_action = (
+                "Review the retained evidence and recorded limitations."
+            )
+            successful_count += 1
+        rows.append(
+            {
+                "Variant": _variant_label(variant),
+                "Workflow result": workflow_result,
+                "Failure category": failure_category,
+                "Explanation": explanation,
+                "Next action": next_action,
+            }
+        )
+
+    message = (
+        "The workflow completed, but one or more variants have missing "
+        "sources, limitations, or failed interpretation steps."
+        if completed_workflow
+        else (
+            "The workflow stopped after retaining usable results. Failed "
+            "variants and available next actions are listed below."
+        )
+    )
+    return {
+        "headline": "Analysis completed partially",
+        "message": message,
+        "successful_variant_count": successful_count,
+        "failed_variant_count": failed_count,
+        "rows": rows,
+    }
 
 
 def build_variant_rows(
@@ -242,19 +503,22 @@ def build_phenotype_rows(
                     result.get("hpo_terms")
                 ),
                 "Phenotype-gene provider": phen2gene.get("provider"),
-                "Phenotype-gene availability": phen2gene.get(
-                    "availability"
+                "Phenotype-gene availability": _provider_state_label(
+                    phen2gene.get("availability")
                 ),
                 "Phenotype-gene score": phen2gene.get("score"),
                 "Phenotype-gene rank": phen2gene.get("rank"),
                 "Phenotype-gene method": phen2gene.get("method"),
-                "Phenotype-gene status": phen2gene.get("status"),
-                "Fallback used": phen2gene.get("fallback_used", False),
-                "Primary provider failure": phen2gene.get(
-                    "primary_failure"
+                "Phenotype-gene status": _provider_state_label(
+                    phen2gene.get("status")
                 ),
-                "MyDisease result": mydisease.get("status"),
-                "MyDisease HTTP status": mydisease.get("http_status"),
+                "Fallback used": phen2gene.get("fallback_used", False),
+                "Primary provider failure": _provider_failure_label(
+                    phen2gene.get("primary_failure")
+                ),
+                "MyDisease result": _provider_state_label(
+                    mydisease.get("status")
+                ),
                 "MyDisease provider total": mydisease.get(
                     "provider_total"
                 ),
@@ -508,7 +772,6 @@ def _render_phenotype_table(result: PipelineResult) -> None:
             "Fallback used",
             "Primary provider failure",
             "MyDisease result",
-            "MyDisease HTTP status",
             "MyDisease provider total",
             "MyDisease provider returned",
             "MyDisease diseases",
@@ -527,9 +790,6 @@ def _render_phenotype_table(result: PipelineResult) -> None:
                 st.column_config.NumberColumn(format="%d")
             ),
             "MyDisease diseases": st.column_config.NumberColumn(
-                format="%d"
-            ),
-            "MyDisease HTTP status": st.column_config.NumberColumn(
                 format="%d"
             ),
             "MyDisease provider total": st.column_config.NumberColumn(
@@ -593,24 +853,16 @@ def _render_phenotype_table(result: PipelineResult) -> None:
 def _render_source_statuses(evidence: dict[str, object]) -> None:
     """Render the four normalized annotation source statuses."""
 
-    statuses = _dictionary(evidence.get("source_statuses"))
     with st.container(horizontal=True):
-        for source in ("vep", "myvariant", "clinvar", "clingen"):
-            value = str(statuses.get(source, "not available"))
-            presented = build_reviewer_source_status(
-                {
-                    "source": SOURCE_LABELS[source],
-                    "capability": SOURCE_CAPABILITIES[source],
-                    "status": value,
-                    "operational_status": value,
-                    "provider_role": "primary",
-                    "fallback_used": False,
-                }
-            )
+        for presented in build_evidence_source_presentations(evidence):
+            recovery = presented["Recovery"]
+            help_message = str(presented["Explanation"])
+            if recovery:
+                help_message = f"{help_message} {recovery}"
             st.metric(
-                SOURCE_LABELS[source],
-                presented["category"],
-                help=presented["message"],
+                str(presented["Source"]),
+                str(presented["State"]),
+                help=help_message,
                 border=True,
             )
 
@@ -892,6 +1144,41 @@ def _render_input_preprocessing(result: PipelineResult) -> None:
         st.dataframe(rows, hide_index=True)
 
 
+def _render_partial_analysis(result: PipelineResult) -> None:
+    """Show retained and failed variant outcomes for a partial run."""
+
+    if result["status"] != "partial":
+        return
+    presentation = build_partial_analysis_presentation(result)
+    with st.container(border=True):
+        st.subheader(presentation["headline"])
+        st.warning(presentation["message"])
+        with st.container(horizontal=True):
+            st.metric(
+                "Successful variants",
+                presentation["successful_variant_count"],
+                border=True,
+            )
+            st.metric(
+                "Failed variants",
+                presentation["failed_variant_count"],
+                border=True,
+            )
+        if presentation["rows"]:
+            st.dataframe(
+                presentation["rows"],
+                hide_index=True,
+                key="partial_analysis_variant_outcomes",
+                column_order=(
+                    "Variant",
+                    "Workflow result",
+                    "Failure category",
+                    "Explanation",
+                    "Next action",
+                ),
+            )
+
+
 def render_analysis_results(result: PipelineResult) -> None:
     """Render retained Stage 10 collections without raw provider payloads."""
 
@@ -912,6 +1199,8 @@ def render_analysis_results(result: PipelineResult) -> None:
             len(result["evidence_objects"]),
             border=True,
         )
+
+    _render_partial_analysis(result)
 
     variants_tab, annotations_tab, phenotype_tab, evidence_tab = (
         st.tabs(
@@ -944,6 +1233,8 @@ def render_analysis_results(result: PipelineResult) -> None:
 
 __all__ = [
     "build_annotation_rows",
+    "build_evidence_source_presentations",
+    "build_partial_analysis_presentation",
     "build_variant_rows",
     "build_phenotype_rows",
     "render_analysis_results",

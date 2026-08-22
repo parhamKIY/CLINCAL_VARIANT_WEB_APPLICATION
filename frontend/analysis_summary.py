@@ -99,10 +99,12 @@ def build_analysis_summary(result: Mapping[str, object]) -> AnalysisSummary:
     status = str(result.get("status") or "").casefold()
     current_stage = str(result.get("current_stage") or "").casefold()
     headline = (
-        "Analysis complete"
-        if current_stage == "completed"
+        "Analysis completed partially"
+        if status == "partial"
+        else "Analysis complete"
+        if status == "success" and current_stage == "completed"
         else "Analysis requires attention"
-        if status in {"partial", "error"}
+        if status == "error"
         else "Analysis in progress"
     )
     context = result.get("analysis_context")
