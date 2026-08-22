@@ -133,6 +133,37 @@ PHENOTYPE_EXTRACTION_PAYLOAD_FIELDS = frozenset(
 VARIANT_INTERPRETATION_PAYLOAD_FIELDS = frozenset(
     {"evidence", "prompt_mode", "reference_catalog", "task"}
 )
+VARIANT_INTERPRETATION_PROHIBITED_EVIDENCE_FIELDS = frozenset(
+    {
+        "annotation_promotion",
+        "attempts",
+        "candidate_diagnostics",
+        "candidate_rejections",
+        "candidates_rejected",
+        "candidates_returned",
+        "circuit_open",
+        "detail_attempts",
+        "detail_http_status",
+        "enrichment_decision",
+        "fallback_http_status",
+        "human_review",
+        "http_status",
+        "intermediate_http_status",
+        "omitted_content_sha256",
+        "primary_circuit_open",
+        "primary_http_status",
+        "primary_request_attempts",
+        "post_review",
+        "request_attempts",
+        "retry_after",
+        "retry_count",
+        "section_budget_bytes",
+        "shadow_composition",
+    }
+)
+VARIANT_INTERPRETATION_COMPACTION_FIELDS = frozenset(
+    {"applied", "omitted_item_count"}
+)
 VARIANT_REFERENCE_CATALOG_FIELDS = frozenset(
     {"identifier", "identifier_type", "reference_id", "source", "title"}
 )
@@ -336,6 +367,34 @@ def validate_variant_interpretation_payload(value: object) -> None:
         raise ClinicalDataPrivacyError(
             "Variant interpretation payload contains phenotype-extraction text."
         )
+
+    def validate_evidence_projection(item: object) -> None:
+        if isinstance(item, Mapping):
+            for key, nested in item.items():
+                normalized = _normalize_field_name(key)
+                if normalized in (
+                    VARIANT_INTERPRETATION_PROHIBITED_EVIDENCE_FIELDS
+                ):
+                    raise ClinicalDataPrivacyError(
+                        "Variant interpretation evidence contains internal "
+                        "operational metadata."
+                    )
+                if normalized == "compaction":
+                    if not isinstance(nested, Mapping) or {
+                        _normalize_field_name(field) for field in nested
+                    } != VARIANT_INTERPRETATION_COMPACTION_FIELDS:
+                        raise ClinicalDataPrivacyError(
+                            "Variant interpretation compaction summary is invalid."
+                        )
+                validate_evidence_projection(nested)
+        elif (
+            isinstance(item, Sequence)
+            and not isinstance(item, (str, bytes, bytearray))
+        ):
+            for nested in item:
+                validate_evidence_projection(nested)
+
+    validate_evidence_projection(evidence)
     validate_llm_payload(value)
 
 

@@ -409,7 +409,11 @@ def test_shadow_does_not_change_readiness_or_real_prompt_payload() -> None:
         variant_index=0,
     )
     assert readiness_with == readiness_without
-    assert shadow_free_evidence_for_llm(evidence_with_shadow) == evidence_without_shadow
+    projected_with = shadow_free_evidence_for_llm(evidence_with_shadow)
+    projected_without = shadow_free_evidence_for_llm(evidence_without_shadow)
+    assert projected_with == projected_without
+    assert "human_review" not in projected_with
+    assert "post_review" not in projected_with["conflict_audit"]
     assert _build_prompt(
         evidence_with_shadow,
         prompt_mode="standard",

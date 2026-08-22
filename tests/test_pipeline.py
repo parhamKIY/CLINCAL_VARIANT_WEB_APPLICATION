@@ -241,6 +241,7 @@ from backend.privacy import (
     validate_variant_interpretation_payload,
 )
 from backend.reference_model import build_reference_model_v2
+from backend.shadow_composition import shadow_free_evidence_for_llm
 from backend.references import (
     CanonicalReferenceError,
     build_canonical_references,
@@ -17762,7 +17763,9 @@ class TestStage58PrivacySafetyReverification:
             phenotype_payload
         ) == phenotype_payload
 
-        evidence = TestEvidenceObject._complete_evidence_object()
+        evidence = shadow_free_evidence_for_llm(
+            TestEvidenceObject._complete_evidence_object()
+        )
         references = [
             {
                 "reference_id": reference["reference_id"],

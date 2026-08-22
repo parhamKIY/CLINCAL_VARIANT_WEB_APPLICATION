@@ -10,6 +10,11 @@ from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from backend.privacy import (
+    VARIANT_INTERPRETATION_COMPACTION_FIELDS,
+    VARIANT_INTERPRETATION_PROHIBITED_EVIDENCE_FIELDS,
+)
+
 
 SHADOW_COMPOSITION_SCHEMA_VERSION = "1.0"
 FIELD_NAMES = (
@@ -534,17 +539,26 @@ def build_shadow_composition(candidate: Mapping[str, object]) -> ShadowCompositi
 
 
 def shadow_free_evidence_for_llm(evidence: Mapping[str, object]) -> dict[str, object]:
-    """Return active semantic evidence without non-evidentiary diagnostics."""
+    """Return semantic evidence without non-evidentiary operational data."""
 
-    def project(value: object) -> object:
+    def project(value: object, *, field_name: str | None = None) -> object:
         if isinstance(value, Mapping):
+            if field_name == "compaction":
+                return {
+                    field: project(value[field], field_name=field)
+                    for field in sorted(
+                        VARIANT_INTERPRETATION_COMPACTION_FIELDS
+                    )
+                    if field in value
+                }
             return {
-                key: project(item)
+                key: project(item, field_name=key)
                 for key, item in value.items()
-                if key != "candidate_diagnostics"
+                if key
+                not in VARIANT_INTERPRETATION_PROHIBITED_EVIDENCE_FIELDS
             }
         if isinstance(value, list):
-            return [project(item) for item in value]
+            return [project(item, field_name=field_name) for item in value]
         return deepcopy(value)
 
     result = project(evidence)

@@ -50,11 +50,12 @@ from config import settings
 
 
 VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.1"
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.3"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.4"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
         "variant-interpretation-v1.1",
         "variant-interpretation-v1.2",
+        "variant-interpretation-v1.3",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
     }
 )
@@ -289,6 +290,13 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "association was identified, continue from the remaining evidence, "
         "and do not treat mismatch as benign or negative pathogenicity "
         "evidence.",
+        "11. Patient- or user-supplied phenotype context is case context, not "
+        "independent scientific evidence. It cannot prove a disease, variant "
+        "effect, or pathogenicity assertion.",
+        "12. Preserve provider observation states exactly. Operational "
+        "unavailability is not biological absence, no_match is not negative "
+        "evidence, and an unavailable result must never be described as "
+        "available.",
         "",
         "Human review is required before this interpretation can contribute "
         "to a final report.",
