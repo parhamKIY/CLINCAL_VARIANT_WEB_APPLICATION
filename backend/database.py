@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
+from backend.logging_config import get_logger
 from backend.report import (
     MAX_CLINICAL_REPORT_TEXT_BYTES,
     MAX_EVIDENCE_ALLELE_LENGTH,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from backend.pipeline import PipelineResult
 
 
+LOGGER = get_logger("database")
 DATABASE_SCHEMA_VERSION = 4
 DATABASE_BUSY_TIMEOUT_MS = 5_000
 MAX_ANALYSIS_WARNINGS = 100
@@ -488,6 +490,17 @@ class StoredAnalysisRecord(AnalysisRecord):
     candidates: list[StoredCandidateVariant]
     evidence_objects: list[EvidenceObject]
     report_path: str | None
+
+
+class AnalysisRetentionResult(TypedDict):
+    """Bounded, non-sensitive outcome of one retention cleanup."""
+
+    enabled: bool
+    max_records: int
+    records_evaluated: int
+    records_removed: int
+    records_retained: int
+    reason: str
 
 
 def _resolve_database_path(
@@ -1421,6 +1434,223 @@ def save_report(
     return stored_reference
 
 
+def cleanup_analysis_records(
+    *,
+    database_path: str | Path | None = None,
+    protected_analysis_ids: Iterable[str] = (),
+) -> AnalysisRetentionResult:
+    """Deterministically enforce the configured analysis-count boundary."""
+
+    enabled = settings.ANALYSIS_RETENTION_ENABLED
+    maximum = settings.ANALYSIS_RETENTION_MAX_RECORDS
+    preserve_failed = settings.ANALYSIS_RETENTION_PRESERVE_FAILED
+    allow_report_deletion = (
+        settings.ANALYSIS_RETENTION_ALLOW_REPORT_DELETION
+    )
+    if not all(
+        isinstance(value, bool)
+        for value in (
+            enabled,
+            preserve_failed,
+            allow_report_deletion,
+        )
+    ):
+        raise DatabaseConfigurationError(
+            "Analysis retention flags must be booleans."
+        )
+    if (
+        isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+        or maximum <= 0
+    ):
+        raise DatabaseConfigurationError(
+            "The analysis retention maximum must be a positive integer."
+        )
+    if (
+        isinstance(protected_analysis_ids, (str, bytes))
+        or not isinstance(protected_analysis_ids, Iterable)
+    ):
+        raise DatabaseConfigurationError(
+            "Protected analysis IDs must be a collection."
+        )
+    protected_ids = tuple(
+        sorted(
+            {
+                _validate_analysis_id(analysis_id)
+                for analysis_id in protected_analysis_ids
+            }
+        )
+    )
+
+    LOGGER.info(
+        "event=analysis_retention_started enabled=%s policy=max_records "
+        "max_records=%d preserve_failed=%s allow_report_deletion=%s",
+        enabled,
+        maximum,
+        preserve_failed,
+        allow_report_deletion,
+    )
+    connection: sqlite3.Connection | None = None
+    try:
+        resolved_path = initialize_database(database_path)
+        connection = connect_database(resolved_path)
+        connection.execute("BEGIN IMMEDIATE")
+        records_evaluated = int(
+            connection.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
+        )
+        if not enabled:
+            records_removed = 0
+            records_retained = records_evaluated
+            reason = "disabled"
+        elif records_evaluated <= maximum:
+            records_removed = 0
+            records_retained = records_evaluated
+            reason = "within_limit"
+        else:
+            excess_count = records_evaluated - maximum
+            protected_clause = ""
+            parameters: list[object] = [
+                int(not preserve_failed),
+                int(allow_report_deletion),
+            ]
+            if protected_ids:
+                placeholders = ",".join("?" for _ in protected_ids)
+                protected_clause = (
+                    f"AND a.analysis_id NOT IN ({placeholders})"
+                )
+                parameters.extend(protected_ids)
+            parameters.append(excess_count)
+            # A lifecycle snapshot proves the multi-table write completed.
+            # Running snapshots and incomplete/legacy rows are never pruned.
+            removable_rows = connection.execute(
+                f"""
+                SELECT a.analysis_id
+                FROM analyses AS a
+                JOIN pipeline_states AS p
+                  ON p.analysis_id = a.analysis_id
+                WHERE a.status IN ('success', 'partial', 'error')
+                AND (
+                    ? = 1
+                    OR (a.status <> 'error' AND p.workflow_state <> 'failed')
+                )
+                AND p.workflow_state NOT IN (
+                    'analysis_running',
+                    'finalization_running',
+                    'phase_a_running',
+                    'phase_b_running'
+                )
+                AND (
+                    ? = 1
+                    OR (
+                        NOT EXISTS (
+                            SELECT 1
+                            FROM reports AS r
+                            WHERE r.analysis_id = a.analysis_id
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM finalization_states AS f
+                            WHERE f.analysis_id = a.analysis_id
+                              AND (
+                                  f.confirmation_state = 'finalized'
+                                  OR f.final_report_id IS NOT NULL
+                                  OR f.final_report_json IS NOT NULL
+                              )
+                        )
+                    )
+                )
+                {protected_clause}
+                ORDER BY a.created_at ASC, a.analysis_id ASC
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+            removable_ids = [
+                str(row["analysis_id"])
+                for row in removable_rows
+            ]
+            if removable_ids:
+                connection.executemany(
+                    "DELETE FROM analyses WHERE analysis_id = ?",
+                    ((analysis_id,) for analysis_id in removable_ids),
+                )
+            records_retained = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM analyses"
+                ).fetchone()[0]
+            )
+            records_removed = records_evaluated - records_retained
+            reason = (
+                "limit_enforced"
+                if records_retained <= maximum
+                else "protected_records_exceeded_limit"
+            )
+        connection.commit()
+    except DatabaseError as exc:
+        if connection is not None:
+            connection.rollback()
+        LOGGER.error(
+            "event=analysis_retention_finished status=error "
+            "records_evaluated=0 records_removed=0 records_retained=0 "
+            "reason=database_error error_type=%s",
+            type(exc).__name__,
+        )
+        raise
+    except sqlite3.Error as exc:
+        if connection is not None:
+            connection.rollback()
+        LOGGER.error(
+            "event=analysis_retention_finished status=error "
+            "records_evaluated=0 records_removed=0 records_retained=0 "
+            "reason=database_error error_type=%s",
+            type(exc).__name__,
+        )
+        raise DatabaseWriteError(
+            "Analysis retention cleanup could not be completed."
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    result: AnalysisRetentionResult = {
+        "enabled": enabled,
+        "max_records": maximum,
+        "records_evaluated": records_evaluated,
+        "records_removed": records_removed,
+        "records_retained": records_retained,
+        "reason": reason,
+    }
+    LOGGER.info(
+        "event=analysis_retention_finished status=success "
+        "records_evaluated=%d records_removed=%d records_retained=%d "
+        "reason=%s",
+        result["records_evaluated"],
+        result["records_removed"],
+        result["records_retained"],
+        result["reason"],
+    )
+    return result
+
+
+def _cleanup_after_pipeline_state_save(
+    database_path: Path,
+    analysis_id: str,
+) -> None:
+    """Run retention after a resumable commit without changing its outcome."""
+
+    try:
+        cleanup_analysis_records(
+            database_path=database_path,
+            protected_analysis_ids=(analysis_id,),
+        )
+    except DatabaseError as exc:
+        LOGGER.warning(
+            "event=analysis_retention_trigger_finished status=error "
+            "reason=database_error error_type=%s",
+            type(exc).__name__,
+        )
+
+
 def save_complete_analysis(
     *,
     status: str,
@@ -2280,6 +2510,10 @@ def save_pipeline_state(
         ) from exc
     finally:
         connection.close()
+    _cleanup_after_pipeline_state_save(
+        resolved_database_path,
+        analysis_id,
+    )
     return validated
 
 
@@ -2659,6 +2893,7 @@ __all__ = [
     "MAX_PIPELINE_STATE_JSON_BYTES",
     "ANALYSIS_STATUSES",
     "AnalysisRecord",
+    "AnalysisRetentionResult",
     "AnalysisNotFoundError",
     "StoredCandidateVariant",
     "StoredAnalysisRecord",
@@ -2670,6 +2905,7 @@ __all__ = [
     "DatabaseValidationError",
     "DatabaseWriteError",
     "connect_database",
+    "cleanup_analysis_records",
     "get_analysis",
     "initialize_database",
     "load_pipeline_state",

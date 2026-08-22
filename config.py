@@ -620,6 +620,26 @@ class Settings:
         "storage/database/clinical_variant.sqlite3",
     )
 
+    ANALYSIS_RETENTION_ENABLED: bool = _get_bool(
+        "ANALYSIS_RETENTION_ENABLED",
+        True,
+    )
+
+    ANALYSIS_RETENTION_MAX_RECORDS: int = _get_positive_int(
+        "ANALYSIS_RETENTION_MAX_RECORDS",
+        1_000,
+    )
+
+    ANALYSIS_RETENTION_PRESERVE_FAILED: bool = _get_bool(
+        "ANALYSIS_RETENTION_PRESERVE_FAILED",
+        True,
+    )
+
+    ANALYSIS_RETENTION_ALLOW_REPORT_DELETION: bool = _get_bool(
+        "ANALYSIS_RETENTION_ALLOW_REPORT_DELETION",
+        False,
+    )
+
     CACHE_DIR: Path = _resolve_path(
         "CACHE_DIR",
         "data/cache",
@@ -900,6 +920,24 @@ class Settings:
         if cls.MAX_UNCOMPRESSED_VCF_BYTES > 500_000_000:
             raise RuntimeError(
                 "MAX_UNCOMPRESSED_VCF_BYTES cannot exceed 500000000."
+            )
+
+        retention_flags = (
+            cls.ANALYSIS_RETENTION_ENABLED,
+            cls.ANALYSIS_RETENTION_PRESERVE_FAILED,
+            cls.ANALYSIS_RETENTION_ALLOW_REPORT_DELETION,
+        )
+        if not all(isinstance(value, bool) for value in retention_flags):
+            raise RuntimeError(
+                "Analysis retention flags must be booleans."
+            )
+        if (
+            isinstance(cls.ANALYSIS_RETENTION_MAX_RECORDS, bool)
+            or not isinstance(cls.ANALYSIS_RETENTION_MAX_RECORDS, int)
+            or cls.ANALYSIS_RETENTION_MAX_RECORDS <= 0
+        ):
+            raise RuntimeError(
+                "ANALYSIS_RETENTION_MAX_RECORDS must be a positive integer."
             )
 
         if cls.DATABASE_PATH.exists() and cls.DATABASE_PATH.is_dir():
