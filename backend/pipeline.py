@@ -3753,12 +3753,39 @@ def run_analysis(
                 manual_variants=manual_variants,
                 phenotypes=phenotypes,
             )
-            _persist_terminal_result(
-                request,
-                result,
-                database_path=database_path,
-                report_dir=report_dir,
+            persistence_started_at = perf_counter()
+            persistence_status = "failed"
+            LOGGER.info(
+                "event=analysis_persistence_started variant_count=%d",
+                result["variant_count"],
             )
+            try:
+                _persist_terminal_result(
+                    request,
+                    result,
+                    database_path=database_path,
+                    report_dir=report_dir,
+                )
+                persistence_status = (
+                    "assigned"
+                    if result["analysis_id"] is not None
+                    else "unavailable"
+                )
+            finally:
+                LOGGER.info(
+                    "event=analysis_persistence_finished status=%s "
+                    "analysis_id=%s variant_count=%d duration_ms=%d",
+                    persistence_status,
+                    result["analysis_id"],
+                    result["variant_count"],
+                    max(
+                        0,
+                        int(
+                            (perf_counter() - persistence_started_at)
+                            * 1000
+                        ),
+                    ),
+                )
 
         validated = validate_pipeline_result(result)
         LOGGER.info(
