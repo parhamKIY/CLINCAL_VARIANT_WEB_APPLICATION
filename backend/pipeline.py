@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from copy import deepcopy
 from pathlib import Path
+from time import perf_counter
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
@@ -142,6 +144,17 @@ MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
 ANALYSIS_ID_PATTERN = re.compile(r"analysis-[0-9a-f]{32}")
 LOGGER = get_logger("pipeline")
+
+_STAGE_STARTED_AT: ContextVar[dict[tuple[int, str], float] | None] = (
+    ContextVar("pipeline_stage_started_at", default=None)
+)
+_TERMINAL_STAGE_STATUSES = frozenset(
+    {"success", "warning", "error", "skipped"}
+)
+_OPERATIONAL_ANNOTATION_FAILURE_STATUSES = frozenset(
+    {"error", "unavailable", "invalid_response"}
+)
+_ANNOTATION_NO_MATCH_STATUSES = frozenset({"no_match", "not_found"})
 
 PipelineStatus = Literal[
     "pending",
@@ -1732,6 +1745,39 @@ def _notify_progress(
         return
 
 
+def _safe_model_identifier(value: object) -> str:
+    """Return a bounded model identifier without logging free-form data."""
+
+    if (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", value)
+    ):
+        return value
+    return "unspecified"
+
+
+def _stage_model_identifier(
+    result: PipelineResult,
+    stage: str,
+    explicit_model: object = None,
+) -> str:
+    """Resolve safe logging-only model metadata for the LLM stage."""
+
+    if stage != "llm":
+        return "not_applicable"
+    if explicit_model is not None:
+        return _safe_model_identifier(explicit_model)
+    context = result.get("analysis_context")
+    configured_model = (
+        context.get("variant_interpretation_model")
+        if isinstance(context, Mapping)
+        else None
+    )
+    return _safe_model_identifier(
+        configured_model or settings.VARIANT_INTERPRETATION_MODEL
+    )
+
+
 def _set_stage(
     result: PipelineResult,
     stage: str,
@@ -1739,32 +1785,72 @@ def _set_stage(
     *,
     progress_percent: int,
     message: str | None = None,
+    failure_category: str | None = None,
+    model_identifier: object = None,
 ) -> None:
     """Update one known stage without changing the result schema."""
 
     stage_index = PIPELINE_STAGE_ORDER.index(stage)
+    previous_status = result["stages"][stage_index]["status"]
     result["stages"][stage_index] = {
         "stage": stage,
         "status": status,
         "progress_percent": progress_percent,
         "message": message,
     }
-    if status == "running":
+    timing_key = (id(result), stage)
+    stage_timings = dict(_STAGE_STARTED_AT.get() or {})
+    safe_model = _stage_model_identifier(
+        result,
+        stage,
+        model_identifier,
+    )
+    if status == "running" and previous_status != "running":
+        stage_timings[timing_key] = perf_counter()
+        _STAGE_STARTED_AT.set(stage_timings)
         LOGGER.info(
-            "event=pipeline_stage_started stage=%s",
+            "event=pipeline_stage_started stage=%s "
+            "model_identifier=%s",
             stage,
+            safe_model,
         )
-    elif status in {
-        "success",
-        "warning",
-        "error",
-        "skipped",
-    }:
+    elif (
+        status in _TERMINAL_STAGE_STATUSES
+        and previous_status not in _TERMINAL_STAGE_STATUSES
+    ):
+        started_at = stage_timings.pop(timing_key, None)
+        _STAGE_STARTED_AT.set(stage_timings)
+        duration_ms = (
+            max(0, int((perf_counter() - started_at) * 1000))
+            if started_at is not None
+            else 0
+        )
+        safe_failure_category = (
+            failure_category
+            if isinstance(failure_category, str)
+            and re.fullmatch(
+                r"[a-z][a-z0-9_]{0,79}", failure_category
+            )
+            else "none"
+        )
         LOGGER.info(
-            "event=pipeline_stage_finished stage=%s status=%s",
+            "event=pipeline_stage_finished stage=%s status=%s "
+            "duration_ms=%d failure_category=%s "
+            "model_identifier=%s",
             stage,
             status,
+            duration_ms,
+            safe_failure_category,
+            safe_model,
         )
+        if status == "error":
+            LOGGER.warning(
+                "event=pipeline_stage_failed stage=%s "
+                "error_category=%s duration_ms=%d",
+                stage,
+                safe_failure_category,
+                duration_ms,
+            )
 
 
 def _set_api_status(
@@ -1781,6 +1867,73 @@ def _set_api_status(
         "status": status,
         "message": " ".join(message.split())[:500],
     }
+    if source in ANNOTATION_API_ORDER:
+        provider_stage = "annotation"
+    elif source in {"phen2gene", "mydisease"}:
+        provider_stage = "phenotype"
+    else:
+        provider_stage = "llm"
+    LOGGER.info(
+        "event=pipeline_provider_status stage=%s provider=%s status=%s",
+        provider_stage,
+        source,
+        status,
+    )
+
+
+def _log_annotation_provider_summaries(
+    annotations: Sequence[Mapping[str, object]],
+) -> None:
+    """Log bounded provider outcomes without annotation payloads."""
+
+    for provider in ANNOTATION_API_ORDER:
+        statuses: list[str] = []
+        fallback_used_count = 0
+        for annotation in annotations:
+            sources = annotation.get("sources")
+            if not isinstance(sources, Mapping):
+                continue
+            source = sources.get(provider)
+            if not isinstance(source, Mapping):
+                continue
+            source_status = source.get("status")
+            if isinstance(source_status, str):
+                statuses.append(source_status)
+            if source.get("fallback_used") is True:
+                fallback_used_count += 1
+
+        operational_failure_count = sum(
+            status in _OPERATIONAL_ANNOTATION_FAILURE_STATUSES
+            for status in statuses
+        )
+        no_match_count = sum(
+            status in _ANNOTATION_NO_MATCH_STATUSES
+            for status in statuses
+        )
+        if statuses and operational_failure_count == len(statuses):
+            summary_status = "failed"
+        elif operational_failure_count or fallback_used_count or any(
+            status in {"partial", "unsupported"}
+            for status in statuses
+        ):
+            summary_status = "degraded"
+        elif statuses and no_match_count == len(statuses):
+            summary_status = "no_match"
+        elif statuses:
+            summary_status = "success"
+        else:
+            summary_status = "not_reported"
+        LOGGER.info(
+            "event=annotation_provider_summary provider=%s status=%s "
+            "variant_count=%d operational_failure_count=%d "
+            "no_match_count=%d fallback_used_count=%d",
+            provider,
+            summary_status,
+            len(statuses),
+            operational_failure_count,
+            no_match_count,
+            fallback_used_count,
+        )
 
 
 def _append_warning(
@@ -1869,6 +2022,7 @@ def _finish_failed_stage(
         "error",
         progress_percent=100,
         message=normalized_message,
+        failure_category=code,
     )
     failed_index = PIPELINE_STAGE_ORDER.index(stage)
     for later_stage in PIPELINE_STAGE_ORDER[failed_index + 1:]:
@@ -2316,6 +2470,7 @@ def _annotate_and_match(
         ) from exc
     result["annotations"] = public_annotations
     _retain_annotation_warnings(result, result["annotations"])
+    _log_annotation_provider_summaries(result["annotations"])
     annotation_status: PipelineStageStatus = (
         "warning"
         if any(
@@ -2954,6 +3109,9 @@ def _build_evidence_and_report(
         "running",
         progress_percent=0,
         message="Interpreting every variant before final review.",
+        model_identifier=(
+            llm_model or settings.VARIANT_INTERPRETATION_MODEL
+        ),
     )
     _set_api_status(
         result,
@@ -3042,6 +3200,16 @@ def _build_evidence_and_report(
         llm_status,
         progress_percent=100,
         message=llm_message,
+        failure_category=(
+            "per_variant_interpretation_failure"
+            if failed_interpretations
+            else None
+        ),
+        model_identifier=(
+            result["analysis_context"]["variant_interpretation_model"]
+            or llm_model
+            or settings.VARIANT_INTERPRETATION_MODEL
+        ),
     )
     _set_api_status(result, "llm", llm_status, llm_message)
     LOGGER.info(
@@ -3276,6 +3444,16 @@ def _run_analysis_unpersisted(
     """Run the clinical pipeline before optional database persistence."""
 
     result = create_pipeline_result()
+    result["status"] = "running"
+    result["current_stage"] = "input"
+    result["progress_percent"] = 5
+    _set_stage(
+        result,
+        "input",
+        "running",
+        progress_percent=0,
+        message="Validating analysis input.",
+    )
     try:
         request = validate_analysis_input(
             vcf_path=vcf_path,
@@ -3321,9 +3499,6 @@ def _run_analysis_unpersisted(
             progress_callback=progress_callback,
         )
 
-    result["status"] = "running"
-    result["current_stage"] = "input"
-    result["progress_percent"] = 5
     _set_stage(
         result,
         "input",
@@ -3525,6 +3700,7 @@ def run_analysis(
     )
     run_id = f"run-{uuid4().hex}"
     context_token = bind_analysis_run_id(run_id)
+    analysis_started_at = perf_counter()
     LOGGER.info(
         "event=analysis_started input_mode=%s phenotype_count=%d",
         input_mode,
@@ -3587,17 +3763,19 @@ def run_analysis(
         validated = validate_pipeline_result(result)
         LOGGER.info(
             "event=analysis_finished status=%s analysis_id=%s "
-            "warning_count=%d error_count=%d",
+            "warning_count=%d error_count=%d duration_ms=%d",
             validated["status"],
             validated["analysis_id"],
             len(validated["warnings"]),
             len(validated["errors"]),
+            max(0, int((perf_counter() - analysis_started_at) * 1000)),
         )
         return validated
     except Exception as exc:
         LOGGER.error(
-            "event=analysis_aborted error_type=%s",
+            "event=analysis_aborted error_type=%s duration_ms=%d",
             type(exc).__name__,
+            max(0, int((perf_counter() - analysis_started_at) * 1000)),
         )
         raise
     finally:

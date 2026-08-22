@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Literal, NotRequired, TypedDict, cast
 from urllib.parse import urlsplit
 
@@ -6381,6 +6382,8 @@ def build_evidence_objects_isolated(
             "Candidates must be an iterable of dictionaries."
         ) from exc
 
+    started_at = perf_counter()
+    LOGGER.info("event=evidence_construction_started")
     evidence_objects: list[EvidenceObject] = []
     outcomes: list[EvidenceConstructionOutcome] = []
     for index, candidate in enumerate(iterator):
@@ -6458,6 +6461,38 @@ def build_evidence_objects_isolated(
                 }
             )
         )
+    failure_count = sum(
+        outcome["status"] == "failed" for outcome in outcomes
+    )
+    serialization_failure_count = sum(
+        outcome["failure_code"] == "serialized_size_exceeded"
+        for outcome in outcomes
+    )
+    if failure_count and evidence_objects:
+        construction_status = "partial"
+    elif failure_count:
+        construction_status = "failed"
+    else:
+        construction_status = "success"
+    if serialization_failure_count and evidence_objects:
+        serialization_validation = "partial"
+    elif serialization_failure_count:
+        serialization_validation = "failed"
+    elif evidence_objects:
+        serialization_validation = "passed"
+    else:
+        serialization_validation = "not_reached"
+    LOGGER.info(
+        "event=evidence_construction_finished status=%s duration_ms=%d "
+        "candidate_count=%d evidence_object_count=%d failure_count=%d "
+        "serialization_validation=%s",
+        construction_status,
+        max(0, int((perf_counter() - started_at) * 1000)),
+        len(outcomes),
+        len(evidence_objects),
+        failure_count,
+        serialization_validation,
+    )
     return {
         "evidence_objects": evidence_objects,
         "outcomes": outcomes,

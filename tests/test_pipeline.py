@@ -20930,6 +20930,43 @@ class TestPipelineLifecycleLogging:
                 f"stage={stage} status=success"
                 in contents
             )
+            assert re.search(
+                rf"event=pipeline_stage_finished stage={stage} "
+                rf"status=success duration_ms=\d+",
+                contents,
+            )
+            assert contents.count(
+                f"event=pipeline_stage_started stage={stage}"
+            ) == 1
+            assert contents.count(
+                "event=pipeline_stage_finished "
+                f"stage={stage} status=success"
+            ) == 1
+        assert (
+            "event=pipeline_stage_started stage=llm "
+            f"model_identifier={settings.VARIANT_INTERPRETATION_MODEL}"
+            in contents
+        )
+        assert (
+            "event=pipeline_stage_finished stage=llm status=success "
+            "duration_ms="
+        ) in contents
+        assert (
+            f"model_identifier={settings.VARIANT_INTERPRETATION_MODEL}"
+            in contents
+        )
+        assert (
+            "event=annotation_provider_summary provider=vep "
+            "status=success variant_count=1 operational_failure_count=0 "
+            "no_match_count=0 fallback_used_count=0"
+        ) in contents
+        assert contents.count(
+            "event=evidence_construction_started"
+        ) == 2
+        assert contents.count(
+            "event=evidence_construction_finished status=success "
+        ) == 2
+        assert "serialization_validation=passed" in contents
         assert (
             "event=analysis_finished status=success "
             f"analysis_id={result['analysis_id']}"
@@ -20972,7 +21009,9 @@ class TestPipelineLifecycleLogging:
             result = run_analysis(
                 vcf_path=None,
                 manual_variants=None,
-                phenotypes=[],
+                phenotypes=[
+                    "patient-name sentinel private-context-4837"
+                ],
             )
             for handler in logging.getLogger(
                 APP_LOGGER_NAME
@@ -20985,13 +21024,29 @@ class TestPipelineLifecycleLogging:
         assert result["status"] == "error"
         assert (
             "event=analysis_started input_mode=invalid "
-            "phenotype_count=0"
+            "phenotype_count=1"
         ) in contents
+        assert contents.count(
+            "event=pipeline_stage_started stage=input"
+        ) == 1
         assert (
             "event=pipeline_stage_finished stage=input status=error"
         ) in contents
+        assert re.search(
+            r"event=pipeline_stage_finished stage=input status=error "
+            r"duration_ms=\d+ failure_category=invalid_input",
+            contents,
+        )
+        assert re.search(
+            r"run_id=(run-[0-9a-f]{32}).*"
+            r"event=pipeline_stage_failed stage=input "
+            r"error_category=invalid_input duration_ms=\d+",
+            contents,
+        )
         assert "event=analysis_finished status=error" in contents
         assert "Exactly one of" not in contents
+        assert "patient-name sentinel" not in contents
+        assert "private-context-4837" not in contents
 
 
 @pytest.mark.stage14_security
