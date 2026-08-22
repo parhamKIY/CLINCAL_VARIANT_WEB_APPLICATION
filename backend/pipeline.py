@@ -1416,6 +1416,12 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "pipeline.variant_interpretation_results is invalid."
                 ) from exc
             previous_index = index
+        if value["status"] == "success" and any(
+            item["status"] == "failed" for item in interpretation_results
+        ):
+            raise PipelineResultError(
+                "pipeline with failed variant interpretations must remain partial."
+            )
     draft_variant_reports = value["draft_variant_reports"]
     if draft_variant_reports:
         if len(draft_variant_reports) != len(value["evidence_objects"]):
