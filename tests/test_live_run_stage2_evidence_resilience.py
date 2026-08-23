@@ -445,7 +445,7 @@ def test_pipeline_33_migration_adds_success_outcomes_without_rerun() -> None:
     migrated = migrate_pipeline_schema33_to34(legacy)
 
     assert migrated is not None
-    assert migrated["schema_version"] == "3.5"
+    assert migrated["schema_version"] == "3.6"
     assert migrated["analysis_context"]["clinical_entities"] is None
     assert migrated["evidence_objects"] == [evidence]
     assert [
@@ -454,7 +454,7 @@ def test_pipeline_33_migration_adds_success_outcomes_without_rerun() -> None:
 
 
 def test_stage2_schema_versions_are_bounded_to_the_approved_extension() -> None:
-    assert PIPELINE_SCHEMA_VERSION == "3.5"
+    assert PIPELINE_SCHEMA_VERSION == "3.6"
     assert EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION == "1.0"
     assert EVIDENCE_SCHEMA_VERSION == "2.5"
     assert DATABASE_SCHEMA_VERSION == 4

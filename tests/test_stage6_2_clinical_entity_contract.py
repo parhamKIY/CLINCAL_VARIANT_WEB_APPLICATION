@@ -254,6 +254,7 @@ def test_analysis_context_and_recovery_preserve_entities_separately() -> None:
             "input_type": "manual",
             "accepted_hpo_terms": ["HP:0000618"],
             "clinical_entities": entities,
+            "disease_resolutions": None,
             "phenotype_extraction_model": "entity-model",
             "variant_interpretation_model": "interpretation-model",
             "phenotype_extraction_provenance": None,

@@ -243,6 +243,15 @@ empty candidate list. `PHENOTYPE_EXTRACTION_MODEL` and
 `VARIANT_INTERPRETATION_MODEL` are separate validated settings. Provider failures
 remain explicit and do not disable the existing manual HPO path.
 
+Explicit `DISEASE` entities now enter a separate deterministic resolver boundary.
+The resolver performs formatting normalization and unique exact-name lookup against
+the installed, versioned HPO disease-annotation release. A unique match retains its
+source identifier and label; no match, ambiguity, or unavailable resolver data remains
+explicit. Results are stored only as case-context `disease_resolutions`; they do not
+enter accepted HPO terms, Phen2Gene, EvidenceObjects, ACMG logic, interpretation
+prompts, or reports. MyDisease and MedGen remain in their approved gene-first evidence
+roles and are not relabeled as user-term resolvers.
+
 ### Stage 48 local validation and explicit acceptance
 
 `backend/phenotype_selection.py` validates every model suggestion against the
@@ -1761,7 +1770,7 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.5`.
+- Active pipeline schema: `3.6`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
@@ -1770,7 +1779,7 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 - Variant Report Lifecycle schema: `1.0`.
 - Variant Integrity Record schema: `1.0`.
 - Final Clinical Report schema: `2.0`.
-- Recovery request schema: `3`.
+- Recovery request schema: `4`.
 
 Pipeline schema `3.4` persists an input-preprocessing result for each selected input:
 source provenance, deterministic status, warnings/failure reason, and an explicit
@@ -1783,7 +1792,15 @@ each canonical variant. Successful entries map original variant order to the com
 EvidenceObject list; failed entries retain only canonical identity and safe bounded
 step/field/code/scope diagnostics. Supported schema `3.3` snapshots receive explicit
 success outcomes during migration without provider or model reruns. EvidenceObject
-schema `2.5`, SQLite schema `4`, and recovery request schema `3` remain unchanged.
+schema `2.5` and SQLite schema `4` remain unchanged by that migration; recovery
+request schema `4` carries bounded clinical entities.
+
+Pipeline schema `3.5` added the bounded case-specific `clinical_entities` collection.
+Schema `3.6` adds nullable `disease_resolutions` sidecar metadata to the analysis
+context. New analyses record a deterministic ordered result for every explicit disease
+entity; schema `3.5` snapshots migrate to `null` without fabricating historical
+resolution. SQLite remains `4`, recovery remains `4`, and EvidenceObject remains
+`2.5`.
 
 Analysis collects evidence, performs pre-review audit and optional enrichment,
 interprets each variant, and persists the ordered review state. Review may edit and

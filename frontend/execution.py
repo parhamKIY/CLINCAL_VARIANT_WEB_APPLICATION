@@ -492,6 +492,7 @@ def _persist_recovery_request(
                 "input_type": request["input_type"],
                 "accepted_hpo_terms": request["phenotypes"],
                 "clinical_entities": request.get("clinical_entities"),
+                "disease_resolutions": None,
                 "phenotype_extraction_model": request[
                     "phenotype_extraction_model"
                 ],
@@ -644,6 +645,7 @@ def _load_recovery_request(
                 "input_type": input_type,
                 "accepted_hpo_terms": phenotypes,
                 "clinical_entities": clinical_entities,
+                "disease_resolutions": None,
                 "phenotype_extraction_model": phenotype_model,
                 "variant_interpretation_model": llm_model,
                 "phenotype_extraction_provenance": phenotype_provenance,

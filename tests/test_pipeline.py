@@ -17043,6 +17043,7 @@ class TestStage60EndToEndAcceptanceV3:
             "input_type": "excel",
             "accepted_hpo_terms": accepted_hpo_ids,
             "clinical_entities": phenotype_result["clinical_entities"],
+            "disease_resolutions": [],
             "phenotype_extraction_model": "stage60-phenotype-model",
             "variant_interpretation_model": (
                 "stage60-interpretation-model"
@@ -17411,6 +17412,7 @@ class TestStage57PersistenceSchemaV3:
             "input_type": "excel",
             "accepted_hpo_terms": list(accepted_hpo_terms),
             "clinical_entities": [],
+            "disease_resolutions": [],
             "phenotype_extraction_model": "phenotype-model-v3",
             "variant_interpretation_model": interpretation_model,
             "phenotype_extraction_provenance": {

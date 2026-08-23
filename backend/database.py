@@ -2166,6 +2166,7 @@ def _bounded_stage56_pipeline_migration(
         migrate_pipeline_schema32_to33,
         migrate_pipeline_schema33_to34,
         migrate_pipeline_schema34_to35,
+        migrate_pipeline_schema35_to36,
         validate_pipeline_result,
     )
     from backend.evidence_readiness import (
@@ -2191,6 +2192,8 @@ def _bounded_stage56_pipeline_migration(
         except (TypeError, ValueError):
             return None
     source_version = candidate.get("schema_version")
+    if source_version == "3.5":
+        return migrate_pipeline_schema35_to36(candidate)
     if source_version == "3.4":
         return migrate_pipeline_schema34_to35(candidate)
     if source_version == "3.3":
@@ -2577,6 +2580,7 @@ def load_pipeline_state(
             "3.2",
             "3.3",
             "3.4",
+            "3.5",
         }:
             migrated = _bounded_stage56_pipeline_migration(raw)
             if migrated is None:
@@ -2612,7 +2616,8 @@ def load_pipeline_state(
             validated["schema_version"] != row["pipeline_schema_version"]
             and not (
                 migrated_from_legacy_schema
-                and row["pipeline_schema_version"] in {"3.1", "3.2", "3.3"}
+                and row["pipeline_schema_version"]
+                in {"3.1", "3.2", "3.3", "3.4", "3.5"}
             )
         )
         or _derive_review_state(validated) != row["review_state"]

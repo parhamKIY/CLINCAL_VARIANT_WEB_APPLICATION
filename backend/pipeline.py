@@ -62,6 +62,14 @@ from backend.clinical_entities import (
     ClinicalEntityError,
     validate_clinical_entities,
 )
+from backend.disease_resolution import (
+    DiseaseResolutionError,
+    DiseaseResolutionResult,
+    DiseaseResolver,
+    normalize_disease_name,
+    route_clinical_entities,
+    validate_disease_resolution_results,
+)
 from backend.input_preprocessing import (
     InputPreprocessingError,
     InputPreprocessingStatus,
@@ -143,7 +151,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.5"
+PIPELINE_SCHEMA_VERSION = "3.6"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -270,6 +278,7 @@ class AnalysisContext(TypedDict):
     input_type: PersistedInputType | None
     accepted_hpo_terms: list[str]
     clinical_entities: list[ClinicalEntity] | None
+    disease_resolutions: list[DiseaseResolutionResult] | None
     phenotype_extraction_model: str | None
     variant_interpretation_model: str | None
     phenotype_extraction_provenance: dict[str, object] | None
@@ -553,6 +562,7 @@ def create_pipeline_result() -> PipelineResult:
             "input_type": None,
             "accepted_hpo_terms": [],
             "clinical_entities": [],
+            "disease_resolutions": [],
             "phenotype_extraction_model": None,
             "variant_interpretation_model": None,
             "phenotype_extraction_provenance": None,
@@ -672,6 +682,24 @@ def migrate_pipeline_schema34_to35(raw: object) -> PipelineResult | None:
             **dict(context),
             "clinical_entities": None,
         }
+    candidate["schema_version"] = "3.5"
+    return migrate_pipeline_schema35_to36(candidate)
+
+
+def migrate_pipeline_schema35_to36(raw: object) -> PipelineResult | None:
+    """Add nullable disease resolution context to a 3.5 snapshot."""
+
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != "3.5":
+        return None
+    candidate = deepcopy(dict(raw))
+    context = candidate.get("analysis_context")
+    if not isinstance(context, Mapping):
+        return None
+    if "disease_resolutions" not in context:
+        candidate["analysis_context"] = {
+            **dict(context),
+            "disease_resolutions": None,
+        }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
     try:
         return validate_pipeline_result(candidate)
@@ -783,6 +811,14 @@ def migrate_pipeline_schema32_to33(raw: object) -> PipelineResult | None:
             **dict(analysis_context),
             "clinical_entities": None,
         }
+    analysis_context = candidate.get("analysis_context")
+    if isinstance(analysis_context, Mapping) and "disease_resolutions" not in (
+        analysis_context
+    ):
+        candidate["analysis_context"] = {
+            **dict(analysis_context),
+            "disease_resolutions": None,
+        }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
     final_clinical_report = candidate.get("final_clinical_report")
     if isinstance(final_clinical_report, Mapping):
@@ -831,13 +867,45 @@ def validate_analysis_context(value: object) -> AnalysisContext:
             "pipeline.analysis_context.accepted_hpo_terms is invalid."
         )
     clinical_entities = value["clinical_entities"]
+    validated_entities: list[ClinicalEntity] = []
     if clinical_entities is not None:
         try:
-            validate_clinical_entities(clinical_entities)
+            validated_entities = validate_clinical_entities(
+                clinical_entities
+            )
         except ClinicalEntityError as exc:
             raise PipelineResultError(
                 "pipeline.analysis_context.clinical_entities is invalid."
             ) from exc
+    disease_resolutions = value["disease_resolutions"]
+    if disease_resolutions is not None:
+        try:
+            validated_resolutions = validate_disease_resolution_results(
+                disease_resolutions
+            )
+        except DiseaseResolutionError as exc:
+            raise PipelineResultError(
+                "pipeline.analysis_context.disease_resolutions is invalid."
+            ) from exc
+        disease_entities = [
+            entity for entity in validated_entities
+            if entity["entity_type"] == "DISEASE"
+        ]
+        if len(disease_entities) != len(validated_resolutions) or any(
+            resolution["original_text"] != entity["original_text"]
+            or resolution["normalized_name"]
+            != normalize_disease_name(entity["normalized_text"])
+            or resolution["assertion"] != entity["assertion"]
+            for entity, resolution in zip(
+                disease_entities,
+                validated_resolutions,
+                strict=True,
+            )
+        ):
+            raise PipelineResultError(
+                "pipeline.analysis_context.disease_resolutions are not "
+                "linked to explicit disease entities."
+            )
     for field in (
         "phenotype_extraction_model",
         "variant_interpretation_model",
@@ -3389,6 +3457,7 @@ def run_annovar_like_input_processing(
                     if clinical_entities is not None
                     else []
                 ),
+                "disease_resolutions": None,
                 "phenotype_extraction_model": None,
                 "variant_interpretation_model": None,
                 "phenotype_extraction_provenance": None,
@@ -3423,6 +3492,7 @@ def run_annovar_like_input_processing(
                 if clinical_entities is not None
                 else []
             ),
+            "disease_resolutions": None,
             "phenotype_extraction_model": None,
             "variant_interpretation_model": None,
             "phenotype_extraction_provenance": None,
@@ -3504,6 +3574,7 @@ def _run_analysis_unpersisted(
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
     clinical_entities: Sequence[Mapping[str, object]] | None = None,
+    disease_resolver: DiseaseResolver | None = None,
     report_dir: str | Path | None = None,
     readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
@@ -3550,6 +3621,7 @@ def _run_analysis_unpersisted(
             if clinical_entities is not None
             else []
         ),
+        "disease_resolutions": None,
         "phenotype_extraction_model": phenotype_extraction_model,
         "variant_interpretation_model": llm_model,
         "phenotype_extraction_provenance": (
@@ -3568,6 +3640,28 @@ def _run_analysis_unpersisted(
             default_code="invalid_input",
             default_message="The analysis context is invalid.",
             default_recoverable=False,
+            progress_callback=progress_callback,
+        )
+
+    try:
+        routed_entities = route_clinical_entities(
+            result["analysis_context"]["clinical_entities"] or [],
+            disease_resolver=disease_resolver,
+        )
+        context["disease_resolutions"] = routed_entities[
+            "disease_resolutions"
+        ]
+        result["analysis_context"] = validate_analysis_context(context)
+    except (DiseaseResolutionError, PipelineResultError) as exc:
+        return _finish_exception(
+            result,
+            stage="input",
+            error=exc,
+            default_code="invalid_disease_resolution",
+            default_message=(
+                "Disease context could not be resolved safely."
+            ),
+            default_recoverable=True,
             progress_callback=progress_callback,
         )
 
@@ -3752,6 +3846,7 @@ def run_analysis(
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
     clinical_entities: Sequence[Mapping[str, object]] | None = None,
+    disease_resolver: DiseaseResolver | None = None,
     report_dir: str | Path | None = None,
     database_path: str | Path | None = None,
     persist_analysis: bool = True,
@@ -3803,6 +3898,7 @@ def run_analysis(
                 phenotype_extraction_provenance
             ),
             clinical_entities=clinical_entities,
+            disease_resolver=disease_resolver,
             report_dir=report_dir,
             readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
@@ -4685,6 +4781,7 @@ __all__ = [
     "migrate_pipeline_schema32_to33",
     "migrate_pipeline_schema33_to34",
     "migrate_pipeline_schema34_to35",
+    "migrate_pipeline_schema35_to36",
     "run_analysis",
     "run_annovar_like_input_processing",
     "update_draft_variant_report",

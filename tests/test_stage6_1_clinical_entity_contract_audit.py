@@ -75,6 +75,7 @@ def test_explicit_persian_disease_survives_into_analysis_context() -> None:
                 "candidate_hpo_ids": ["HP:0000618"],
             },
             "clinical_entities": clinical_entities,
+            "disease_resolutions": None,
         }
     )
 
