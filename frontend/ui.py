@@ -109,6 +109,7 @@ HPO_MODEL_CANDIDATES_KEY = "hpo_model_candidates"
 HPO_MODEL_REJECTIONS_KEY = "hpo_model_rejections"
 PHENOTYPE_NON_HPO_MENTIONS_KEY = "phenotype_non_hpo_mentions"
 PHENOTYPE_EXTRACTION_PROVENANCE_KEY = "phenotype_extraction_provenance"
+CLINICAL_ENTITIES_KEY = "clinical_entities"
 HPO_CANDIDATE_EDITOR_KEY = "hpo_candidate_editor"
 PIPELINE_RESULT_KEY = "pipeline_result"
 ANALYSIS_JOB_KEY = "analysis_job"
@@ -171,6 +172,7 @@ class AnalysisSubmission(TypedDict):
     manual_variants: list[dict[str, object]] | None
     excel_input_records: list[dict[str, object]] | None
     phenotypes: list[str]
+    clinical_entities: list[dict[str, object]]
     input_type: str
     phenotype_extraction_model: str
     phenotype_extraction_provenance: dict[str, object] | None
@@ -300,6 +302,9 @@ def _restore_refresh_state() -> None:
     st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = deepcopy(
         context["phenotype_extraction_provenance"]
     )
+    st.session_state[CLINICAL_ENTITIES_KEY] = deepcopy(
+        context["clinical_entities"] or []
+    )
     st.session_state[ANALYSIS_NOTICE_KEY] = (
         "Restored the saved analysis after page refresh."
     )
@@ -315,6 +320,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(HPO_MODEL_REJECTIONS_KEY, [])
     st.session_state.setdefault(PHENOTYPE_NON_HPO_MENTIONS_KEY, {})
     st.session_state.setdefault(PHENOTYPE_EXTRACTION_PROVENANCE_KEY, None)
+    st.session_state.setdefault(CLINICAL_ENTITIES_KEY, [])
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
@@ -549,6 +555,7 @@ def _clear_hpo_candidate_draft() -> None:
     st.session_state[HPO_MODEL_REJECTIONS_KEY] = []
     st.session_state[PHENOTYPE_NON_HPO_MENTIONS_KEY] = {}
     st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = None
+    st.session_state[CLINICAL_ENTITIES_KEY] = []
     st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
 
 
@@ -601,6 +608,9 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 )
             )
         else:
+            st.session_state[CLINICAL_ENTITIES_KEY] = deepcopy(
+                extraction.get("clinical_entities", [])
+            )
             st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = {
                 "schema_version": extraction["schema_version"],
                 "task": extraction["task"],
@@ -1415,6 +1425,9 @@ def _prepare_input(
             "manual_variants": None,
             "excel_input_records": excel_input_records,
             "phenotypes": phenotype_ids,
+            "clinical_entities": deepcopy(
+                st.session_state.get(CLINICAL_ENTITIES_KEY, [])
+            ),
             "input_type": (
                 "excel"
                 if filename.casefold().endswith(".xlsx")
@@ -1442,6 +1455,9 @@ def _prepare_input(
         "manual_variants": normalized_variants,
         "excel_input_records": None,
         "phenotypes": phenotype_ids,
+        "clinical_entities": deepcopy(
+            st.session_state.get(CLINICAL_ENTITIES_KEY, [])
+        ),
         "input_type": "manual",
         "phenotype_extraction_model": phenotype_model,
         "phenotype_extraction_provenance": st.session_state.get(
@@ -1828,6 +1844,7 @@ def _start_submission(
             "uploaded_vcf": submission["uploaded_vcf"],
             "manual_variants": submission["manual_variants"],
             "phenotypes": submission["phenotypes"],
+            "clinical_entities": submission["clinical_entities"],
             "input_type": submission["input_type"],
             "phenotype_extraction_model": submission["phenotype_extraction_model"],
             "phenotype_extraction_provenance": submission["phenotype_extraction_provenance"],
@@ -1847,6 +1864,7 @@ def _start_submission(
             uploaded_vcf=submission["uploaded_vcf"],
             manual_variants=submission["manual_variants"],
             phenotypes=submission["phenotypes"],
+            clinical_entities=submission["clinical_entities"],
             input_type=submission["input_type"],
             phenotype_extraction_model=submission[
                 "phenotype_extraction_model"

@@ -8,6 +8,14 @@ import unicodedata
 from collections.abc import Mapping
 from typing import TypedDict
 
+from backend.clinical_entities import (
+    CLINICAL_ASSERTIONS,
+    CLINICAL_ENTITY_TYPES,
+    ClinicalEntity,
+    ClinicalEntityError,
+    normalize_clinical_entity_text,
+    validate_clinical_entities,
+)
 from backend.llm import (
     LLMClient,
     LLMJSONObject,
@@ -24,8 +32,8 @@ from backend.privacy import (
 from config import settings
 
 
-PHENOTYPE_EXTRACTION_SCHEMA_VERSION = "2.0"
-PHENOTYPE_EXTRACTION_PROMPT_VERSION = "phenotype-extraction-v2.0"
+PHENOTYPE_EXTRACTION_SCHEMA_VERSION = "3.0"
+PHENOTYPE_EXTRACTION_PROMPT_VERSION = "phenotype-extraction-v3.0"
 MAX_PHENOTYPE_CANDIDATES = 25
 MAX_NON_HPO_MENTIONS = 25
 MAX_TOTAL_EXTRACTED_MENTIONS = 50
@@ -39,20 +47,25 @@ PHENOTYPE_EXTRACTION_OUTPUT_FIELDS = (
     "uncertain_phenotype_mentions",
     "unmapped_clinical_phrases",
 )
+PHENOTYPE_EXTRACTION_RESPONSE_FIELDS = (
+    "clinical_entities",
+    "unmapped_clinical_phrases",
+)
 
-PHENOTYPE_EXTRACTION_SYSTEM_PROMPT = """You classify all independent clinical mentions in a short de-identified Persian clinical description and extract candidate Human Phenotype Ontology terms only for affirmed phenotypic abnormalities.
+PHENOTYPE_EXTRACTION_SYSTEM_PROMPT = """You classify all independent clinical mentions in a short de-identified Persian clinical description. Return explicit PHENOTYPE and DISEASE mentions while preserving their assertion state, and return candidate Human Phenotype Ontology terms only for present phenotypic abnormalities.
 
 Hard constraints:
 1. Examine every line, sentence, and clause. Return all independent clinical mentions, not only the first or most salient mention.
-2. Put each explicit mention in exactly one output category.
-3. phenotype_candidates contains only affirmed/current phenotypic abnormalities that are explicitly supported by the text.
-4. A disease or syndrome name, including Waardenburg syndrome, belongs in disease_mentions and must not be converted into an HPO phenotype unless a separate phenotype is explicitly stated.
-5. Put explicitly absent or denied findings in negated_phenotype_mentions. Put possible, suspected, or uncertain findings in uncertain_phenotype_mentions. Neither category may produce an HPO candidate.
-6. Put relevant text that cannot safely be mapped or is not a phenotype/disease mention in unmapped_clinical_phrases.
-7. Do not diagnose a disease or infer a disease name when it is not explicitly supported.
+2. Put each explicit mention in exactly one output category: clinical_entities or unmapped_clinical_phrases.
+3. Every clinical entity must have entity_type PHENOTYPE or DISEASE and assertion PRESENT, SUSPECTED, NEGATED, or HISTORICAL.
+   Possible, suspected, or uncertain mentions use SUSPECTED; explicitly absent or negated mentions use NEGATED.
+4. A disease or syndrome name, including Waardenburg syndrome, is a DISEASE entity and must not be converted into an HPO phenotype unless a separate phenotype is explicitly stated.
+5. Do not diagnose a disease or infer a disease name when it is not explicitly supported. Symptoms alone must never introduce a disease entity.
+6. HPO identifiers and labels are permitted only for PRESENT PHENOTYPE entities. For DISEASE entities and non-present phenotypes, hpo_id and label must both be null.
+7. Put relevant text that cannot safely be classified as an explicit phenotype or disease mention in unmapped_clinical_phrases.
 8. Do not interpret genetic variants, recommend treatment, or provide medical advice.
-9. Do not invent HPO identifiers. If no affirmed phenotype is sufficiently supported, return an empty phenotype_candidates list.
-10. Preserve a short verbatim Persian source phrase from the supplied text for every returned item.
+9. Do not invent HPO identifiers. If an explicit present phenotype cannot be safely mapped, return it as a PHENOTYPE entity with null hpo_id and label.
+10. Preserve a short verbatim Persian source phrase from the supplied text as original_text for every entity and source_phrase_fa for every unmapped phrase.
 11. Do not duplicate an HPO identifier or classify the same source phrase in multiple categories.
 12. Return only the required structured response. Do not add prose or URLs.
 
@@ -72,56 +85,51 @@ _SOURCE_MENTION_SCHEMA = {
 }
 
 PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA = LLMJSONSchema(
-    name="phenotype_hpo_candidates",
+    name="clinical_entity_candidates",
     strict=True,
     schema={
         "type": "object",
         "additionalProperties": False,
-        "required": list(PHENOTYPE_EXTRACTION_OUTPUT_FIELDS),
+        "required": list(PHENOTYPE_EXTRACTION_RESPONSE_FIELDS),
         "properties": {
-            "phenotype_candidates": {
+            "clinical_entities": {
                 "type": "array",
-                "maxItems": MAX_PHENOTYPE_CANDIDATES,
+                "maxItems": MAX_TOTAL_EXTRACTED_MENTIONS,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "required": [
+                        "original_text",
+                        "entity_type",
+                        "assertion",
                         "hpo_id",
                         "label",
-                        "source_phrase_fa",
                     ],
                     "properties": {
-                        "hpo_id": {
-                            "type": "string",
-                            "pattern": r"^HP:\d{7}$",
-                        },
-                        "label": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": MAX_HPO_LABEL_CHARACTERS,
-                        },
-                        "source_phrase_fa": {
+                        "original_text": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": MAX_SOURCE_PHRASE_CHARACTERS,
                         },
+                        "entity_type": {
+                            "type": "string",
+                            "enum": sorted(CLINICAL_ENTITY_TYPES),
+                        },
+                        "assertion": {
+                            "type": "string",
+                            "enum": sorted(CLINICAL_ASSERTIONS),
+                        },
+                        "hpo_id": {
+                            "type": ["string", "null"],
+                            "pattern": r"^HP:\d{7}$",
+                        },
+                        "label": {
+                            "type": ["string", "null"],
+                            "minLength": 1,
+                            "maxLength": MAX_HPO_LABEL_CHARACTERS,
+                        },
                     },
                 },
-            },
-            "disease_mentions": {
-                "type": "array",
-                "maxItems": MAX_NON_HPO_MENTIONS,
-                "items": _SOURCE_MENTION_SCHEMA,
-            },
-            "negated_phenotype_mentions": {
-                "type": "array",
-                "maxItems": MAX_NON_HPO_MENTIONS,
-                "items": _SOURCE_MENTION_SCHEMA,
-            },
-            "uncertain_phenotype_mentions": {
-                "type": "array",
-                "maxItems": MAX_NON_HPO_MENTIONS,
-                "items": _SOURCE_MENTION_SCHEMA,
             },
             "unmapped_clinical_phrases": {
                 "type": "array",
@@ -158,6 +166,7 @@ class PhenotypeExtractionResult(TypedDict):
     task: str
     prompt_version: str
     model: str
+    clinical_entities: list[ClinicalEntity]
     phenotype_candidates: list[PhenotypeCandidate]
     disease_mentions: list[ClinicalMention]
     negated_phenotype_mentions: list[ClinicalMention]
@@ -228,6 +237,170 @@ def _grounded_source_phrase(
     return phrase
 
 
+def _parse_current_extraction_payload(
+    payload: Mapping[str, object],
+    *,
+    clinical_text_fa: str,
+) -> dict[str, object]:
+    raw_entities = payload["clinical_entities"]
+    if not isinstance(raw_entities, list):
+        raise PhenotypeExtractionError("clinical_entities must be a list.")
+    if len(raw_entities) > MAX_TOTAL_EXTRACTED_MENTIONS:
+        raise PhenotypeExtractionError(
+            "The clinical-entity response has too many entities."
+        )
+
+    entities: list[ClinicalEntity] = []
+    candidates: list[PhenotypeCandidate] = []
+    disease_mentions: list[ClinicalMention] = []
+    negated_mentions: list[ClinicalMention] = []
+    uncertain_mentions: list[ClinicalMention] = []
+    seen_phrases: set[str] = set()
+    seen_hpo_ids: set[str] = set()
+    entity_fields = {
+        "original_text",
+        "entity_type",
+        "assertion",
+        "hpo_id",
+        "label",
+    }
+    for index, raw_entity in enumerate(raw_entities):
+        if not isinstance(raw_entity, Mapping) or set(raw_entity) != entity_fields:
+            raise PhenotypeExtractionError(
+                f"clinical_entities[{index}] has invalid fields."
+            )
+        phrase = _grounded_source_phrase(
+            raw_entity["original_text"],
+            field=f"clinical_entities[{index}].original_text",
+            clinical_text_fa=clinical_text_fa,
+        )
+        normalized_phrase = _normalize_persian_for_grounding(phrase)
+        if normalized_phrase in seen_phrases:
+            raise PhenotypeExtractionError(
+                "The clinical-entity response contains a duplicate source phrase."
+            )
+        seen_phrases.add(normalized_phrase)
+        entity_type = raw_entity["entity_type"]
+        assertion = raw_entity["assertion"]
+        try:
+            entity = validate_clinical_entities(
+                [
+                    {
+                        "original_text": phrase,
+                        "normalized_text": normalize_clinical_entity_text(phrase),
+                        "entity_type": entity_type,
+                        "assertion": assertion,
+                    }
+                ]
+            )[0]
+        except ClinicalEntityError as exc:
+            raise PhenotypeExtractionError(str(exc)) from exc
+
+        hpo_id = raw_entity["hpo_id"]
+        label = raw_entity["label"]
+        if entity_type == "DISEASE":
+            if hpo_id is not None or label is not None:
+                raise PhenotypeExtractionError(
+                    "A disease entity must not carry HPO data."
+                )
+            disease_mentions.append({"source_phrase_fa": phrase})
+        elif assertion == "PRESENT":
+            if (hpo_id is None) != (label is None):
+                raise PhenotypeExtractionError(
+                    "A phenotype HPO ID and label must be supplied together."
+                )
+            if hpo_id is not None:
+                if (
+                    not isinstance(hpo_id, str)
+                    or HPO_ID_PATTERN.fullmatch(hpo_id) is None
+                ):
+                    raise PhenotypeExtractionError(
+                        f"clinical_entities[{index}] has an invalid HPO ID."
+                    )
+                if hpo_id in seen_hpo_ids:
+                    raise PhenotypeExtractionError(
+                        "The clinical-entity response contains duplicate HPO IDs."
+                    )
+                if re.search(
+                    r"(?:^|\s)(?:سندر(?:و)?م|syndrome)(?:\s|$)",
+                    normalized_phrase,
+                    flags=re.IGNORECASE,
+                ):
+                    raise PhenotypeExtractionError(
+                        "A disease or syndrome mention cannot be returned as an "
+                        "HPO phenotype candidate."
+                    )
+                seen_hpo_ids.add(hpo_id)
+                candidates.append(
+                    {
+                        "hpo_id": hpo_id,
+                        "label": _bounded_response_text(
+                            label,
+                            field=f"clinical_entities[{index}].label",
+                            maximum=MAX_HPO_LABEL_CHARACTERS,
+                        ),
+                        "source_phrase_fa": phrase,
+                    }
+                )
+        else:
+            if hpo_id is not None or label is not None:
+                raise PhenotypeExtractionError(
+                    "A non-present phenotype must not carry HPO data."
+                )
+            mention = {"source_phrase_fa": phrase}
+            if assertion == "NEGATED":
+                negated_mentions.append(mention)
+            elif assertion == "SUSPECTED":
+                uncertain_mentions.append(mention)
+        entities.append(entity)
+
+    raw_unmapped = payload["unmapped_clinical_phrases"]
+    if not isinstance(raw_unmapped, list):
+        raise PhenotypeExtractionError(
+            "unmapped_clinical_phrases must be a list."
+        )
+    if len(raw_unmapped) > MAX_NON_HPO_MENTIONS:
+        raise PhenotypeExtractionError(
+            "unmapped_clinical_phrases has too many items."
+        )
+    unmapped_mentions: list[ClinicalMention] = []
+    for index, raw_mention in enumerate(raw_unmapped):
+        if (
+            not isinstance(raw_mention, Mapping)
+            or set(raw_mention) != {"source_phrase_fa"}
+        ):
+            raise PhenotypeExtractionError(
+                f"unmapped_clinical_phrases[{index}] has invalid fields."
+            )
+        phrase = _grounded_source_phrase(
+            raw_mention["source_phrase_fa"],
+            field=f"unmapped_clinical_phrases[{index}].source_phrase_fa",
+            clinical_text_fa=clinical_text_fa,
+        )
+        normalized_phrase = _normalize_persian_for_grounding(phrase)
+        if normalized_phrase in seen_phrases:
+            raise PhenotypeExtractionError(
+                "The same source phrase appears in multiple categories."
+            )
+        seen_phrases.add(normalized_phrase)
+        unmapped_mentions.append({"source_phrase_fa": phrase})
+
+    if len(entities) + len(unmapped_mentions) > MAX_TOTAL_EXTRACTED_MENTIONS:
+        raise PhenotypeExtractionError(
+            "The clinical-entity response has too many total mentions."
+        )
+    parsed: dict[str, object] = {
+        "clinical_entities": validate_clinical_entities(entities),
+        "phenotype_candidates": candidates,
+        "disease_mentions": disease_mentions,
+        "negated_phenotype_mentions": negated_mentions,
+        "uncertain_phenotype_mentions": uncertain_mentions,
+        "unmapped_clinical_phrases": unmapped_mentions,
+    }
+    validate_llm_payload(parsed)
+    return parsed
+
+
 def _parse_extraction(
     response: LLMResponse,
     *,
@@ -252,6 +425,13 @@ def _parse_extraction(
         raise PhenotypeExtractionError(
             "The phenotype-extraction response is not valid JSON."
         ) from exc
+    if isinstance(payload, Mapping) and set(payload) == set(
+        PHENOTYPE_EXTRACTION_RESPONSE_FIELDS
+    ):
+        return _parse_current_extraction_payload(
+            payload,
+            clinical_text_fa=clinical_text_fa,
+        )
     if not isinstance(payload, Mapping) or set(payload) != set(
         PHENOTYPE_EXTRACTION_OUTPUT_FIELDS
     ):
@@ -372,6 +552,41 @@ def _parse_extraction(
         raise PhenotypeExtractionError(
             "The phenotype-extraction response has too many total mentions."
         )
+    legacy_entities: list[ClinicalEntity] = []
+    for candidate in candidates:
+        legacy_entities.append(
+            {
+                "original_text": candidate["source_phrase_fa"],
+                "normalized_text": normalize_clinical_entity_text(
+                    candidate["source_phrase_fa"]
+                ),
+                "entity_type": "PHENOTYPE",
+                "assertion": "PRESENT",
+            }
+        )
+    # Schema 2.0 disease mentions had no assertion state. Keep their legacy
+    # display projection, but do not fabricate a ClinicalEntity assertion.
+    for field, entity_type, assertion in (
+        ("negated_phenotype_mentions", "PHENOTYPE", "NEGATED"),
+        ("uncertain_phenotype_mentions", "PHENOTYPE", "SUSPECTED"),
+    ):
+        for mention in parsed[field]:
+            legacy_entities.append(
+                {
+                    "original_text": mention["source_phrase_fa"],
+                    "normalized_text": normalize_clinical_entity_text(
+                        mention["source_phrase_fa"]
+                    ),
+                    "entity_type": entity_type,
+                    "assertion": assertion,
+                }
+            )
+    try:
+        parsed["clinical_entities"] = validate_clinical_entities(
+            legacy_entities
+        )
+    except ClinicalEntityError as exc:
+        raise PhenotypeExtractionError(str(exc)) from exc
     validate_llm_payload(parsed)
     return parsed
 
@@ -434,6 +649,7 @@ def extract_hpo_candidates(
         "task": PHENOTYPE_EXTRACTION_TASK,
         "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
         "model": response.model,
+        "clinical_entities": parsed["clinical_entities"],
         "phenotype_candidates": parsed["phenotype_candidates"],
         "disease_mentions": parsed["disease_mentions"],
         "negated_phenotype_mentions": parsed[
@@ -457,6 +673,7 @@ __all__ = [
     "PHENOTYPE_EXTRACTION_OUTPUT_FIELDS",
     "PHENOTYPE_EXTRACTION_PROMPT_VERSION",
     "PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA",
+    "PHENOTYPE_EXTRACTION_RESPONSE_FIELDS",
     "PHENOTYPE_EXTRACTION_SCHEMA_VERSION",
     "PHENOTYPE_EXTRACTION_SYSTEM_PROMPT",
     "PHENOTYPE_EXTRACTION_TASK",

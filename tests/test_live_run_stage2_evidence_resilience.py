@@ -439,12 +439,14 @@ def test_pipeline_33_migration_adds_success_outcomes_without_rerun() -> None:
     ]
     legacy = deepcopy(current)
     legacy["schema_version"] = "3.3"
+    legacy["analysis_context"].pop("clinical_entities")
     legacy.pop("evidence_construction_outcomes")
 
     migrated = migrate_pipeline_schema33_to34(legacy)
 
     assert migrated is not None
-    assert migrated["schema_version"] == "3.4"
+    assert migrated["schema_version"] == "3.5"
+    assert migrated["analysis_context"]["clinical_entities"] is None
     assert migrated["evidence_objects"] == [evidence]
     assert [
         item["status"] for item in migrated["evidence_construction_outcomes"]
@@ -452,8 +454,8 @@ def test_pipeline_33_migration_adds_success_outcomes_without_rerun() -> None:
 
 
 def test_stage2_schema_versions_are_bounded_to_the_approved_extension() -> None:
-    assert PIPELINE_SCHEMA_VERSION == "3.4"
+    assert PIPELINE_SCHEMA_VERSION == "3.5"
     assert EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION == "1.0"
     assert EVIDENCE_SCHEMA_VERSION == "2.5"
     assert DATABASE_SCHEMA_VERSION == 4
-    assert RECOVERY_REQUEST_SCHEMA_VERSION == 3
+    assert RECOVERY_REQUEST_SCHEMA_VERSION == 4

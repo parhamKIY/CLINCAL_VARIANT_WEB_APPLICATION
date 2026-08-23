@@ -125,7 +125,7 @@ RAW_VCF_LINE_PATTERN = re.compile(
 )
 CLINICAL_REDACTED = "[REDACTED CLINICAL DATA]"
 MAX_PHENOTYPE_CLINICAL_TEXT_CHARACTERS = 4_000
-PHENOTYPE_EXTRACTION_TASK = "extract_hpo_candidates"
+PHENOTYPE_EXTRACTION_TASK = "extract_clinical_entities"
 VARIANT_INTERPRETATION_TASK = "interpret_variant"
 PHENOTYPE_EXTRACTION_PAYLOAD_FIELDS = frozenset(
     {"clinical_text_fa", "task"}
@@ -518,7 +518,7 @@ def sanitize_phenotype_clinical_text(value: object) -> str:
     sanitized = redact_clinical_text(normalized).strip()
     validate_llm_payload(
         {
-            "task": "extract_hpo_candidates",
+            "task": PHENOTYPE_EXTRACTION_TASK,
             "clinical_text_fa": sanitized,
         }
     )

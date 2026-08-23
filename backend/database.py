@@ -2165,6 +2165,7 @@ def _bounded_stage56_pipeline_migration(
         PIPELINE_SCHEMA_VERSION,
         migrate_pipeline_schema32_to33,
         migrate_pipeline_schema33_to34,
+        migrate_pipeline_schema34_to35,
         validate_pipeline_result,
     )
     from backend.evidence_readiness import (
@@ -2190,6 +2191,8 @@ def _bounded_stage56_pipeline_migration(
         except (TypeError, ValueError):
             return None
     source_version = candidate.get("schema_version")
+    if source_version == "3.4":
+        return migrate_pipeline_schema34_to35(candidate)
     if source_version == "3.3":
         return migrate_pipeline_schema33_to34(candidate)
     if source_version == "3.2":
@@ -2566,7 +2569,15 @@ def load_pipeline_state(
     migrated_from_legacy_schema = False
     try:
         raw = json.loads(raw_json)
-        if isinstance(raw, dict) and raw.get("schema_version") in {"3.1", "3.2", "3.3"}:
+        if isinstance(raw, dict) and raw.get("schema_version") in {
+            "2.8",
+            "2.9",
+            "3.0",
+            "3.1",
+            "3.2",
+            "3.3",
+            "3.4",
+        }:
             migrated = _bounded_stage56_pipeline_migration(raw)
             if migrated is None:
                 raise DatabaseReadError(

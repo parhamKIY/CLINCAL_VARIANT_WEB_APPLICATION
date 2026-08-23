@@ -12907,6 +12907,20 @@ class TestStage47PhenotypeExtractionLLM:
             "task": PHENOTYPE_EXTRACTION_TASK,
             "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
             "model": "phenotype-model",
+            "clinical_entities": [
+                {
+                    "original_text": "حملات تشنج",
+                    "normalized_text": "حملات تشنج",
+                    "entity_type": "PHENOTYPE",
+                    "assertion": "PRESENT",
+                },
+                {
+                    "original_text": "تاخیر تکاملی",
+                    "normalized_text": "تاخیر تکاملی",
+                    "entity_type": "PHENOTYPE",
+                    "assertion": "PRESENT",
+                },
+            ],
             "phenotype_candidates": [
                 {
                     "hpo_id": "HP:0001250",
@@ -12940,7 +12954,7 @@ class TestStage47PhenotypeExtractionLLM:
             "do not invent hpo identifiers",
             "do not interpret genetic variants",
             "recommend treatment",
-            "return an empty phenotype_candidates list",
+            "hpo_id and label must both be null",
         ):
             assert constraint in system_prompt
 
@@ -17008,6 +17022,7 @@ class TestStage60EndToEndAcceptanceV3:
             vcf_path=None,
             manual_variants=normalized_variants,
             phenotypes=accepted_hpo_ids,
+            clinical_entities=phenotype_result["clinical_entities"],
             input_type="excel",
             phenotype_extraction_model=phenotype_result["model"],
             phenotype_extraction_provenance=provenance,
@@ -17027,6 +17042,7 @@ class TestStage60EndToEndAcceptanceV3:
         assert analysis["analysis_context"] == {
             "input_type": "excel",
             "accepted_hpo_terms": accepted_hpo_ids,
+            "clinical_entities": phenotype_result["clinical_entities"],
             "phenotype_extraction_model": "stage60-phenotype-model",
             "variant_interpretation_model": (
                 "stage60-interpretation-model"
@@ -17394,6 +17410,7 @@ class TestStage57PersistenceSchemaV3:
         result["analysis_context"] = {
             "input_type": "excel",
             "accepted_hpo_terms": list(accepted_hpo_terms),
+            "clinical_entities": [],
             "phenotype_extraction_model": "phenotype-model-v3",
             "variant_interpretation_model": interpretation_model,
             "phenotype_extraction_provenance": {
@@ -17686,6 +17703,7 @@ class TestStage57PersistenceSchemaV3:
         expected["analysis_context"] = {
             "input_type": "excel",
             "accepted_hpo_terms": ["HP:0001250"],
+            "clinical_entities": [],
             "phenotype_extraction_model": "phenotype-restored-v3",
             "variant_interpretation_model": "variant-restored-v3",
             "phenotype_extraction_provenance": {
@@ -17758,7 +17776,7 @@ class TestStage58PrivacySafetyReverification:
         self,
     ) -> None:
         phenotype_payload = {
-            "task": "extract_hpo_candidates",
+            "task": PHENOTYPE_EXTRACTION_TASK,
             "clinical_text_fa": "کودک دچار تشنج است.",
         }
         assert validate_phenotype_extraction_payload(
@@ -21368,6 +21386,7 @@ class TestFrontendExecution:
             vcf_path: str | Path | None,
             manual_variants: list[dict[str, object]] | None,
             phenotypes: list[str],
+            clinical_entities: object,
             llm_model: str | None,
             input_type: str,
             phenotype_extraction_model: str | None,
@@ -21387,6 +21406,7 @@ class TestFrontendExecution:
             )
             observed["manual_variants"] = manual_variants
             observed["phenotypes"] = phenotypes
+            observed["clinical_entities"] = clinical_entities
             observed["llm_model"] = llm_model
             observed["input_type"] = input_type
             observed["phenotype_extraction_model"] = (
@@ -21420,6 +21440,7 @@ class TestFrontendExecution:
         assert observed["contents"] == payload
         assert observed["manual_variants"] is None
         assert observed["phenotypes"] == ["HP:0001250"]
+        assert observed["clinical_entities"] is None
         assert observed["llm_model"] is None
         assert observed["input_type"] == (
             "vcf_gz" if filename.endswith(".gz") else "vcf"
@@ -23470,6 +23491,14 @@ class TestFrontendFoundation:
                 "task": PHENOTYPE_EXTRACTION_TASK,
                 "prompt_version": PHENOTYPE_EXTRACTION_PROMPT_VERSION,
                 "model": model,
+                "clinical_entities": [
+                    {
+                        "original_text": "سندرم نمونه",
+                        "normalized_text": "سندرم نمونه",
+                        "entity_type": "DISEASE",
+                        "assertion": "PRESENT",
+                    }
+                ],
                 "phenotype_candidates": [
                     {
                         "hpo_id": "HP:0001250",
@@ -23547,6 +23576,14 @@ class TestFrontendFoundation:
             "model": settings.PHENOTYPE_EXTRACTION_MODEL,
             "candidate_hpo_ids": ["HP:0001250"],
         }
+        assert app.session_state["clinical_entities"] == [
+            {
+                "original_text": "سندرم نمونه",
+                "normalized_text": "سندرم نمونه",
+                "entity_type": "DISEASE",
+                "assertion": "PRESENT",
+            }
+        ]
         assert any(
             button.label == "Accept HPO candidates"
             for button in app.button
@@ -24068,6 +24105,7 @@ class TestFrontendFoundation:
             uploaded_vcf: object,
             manual_variants: list[dict[str, object]] | None,
             phenotypes: list[str],
+            clinical_entities: list[dict[str, object]],
             input_type: str,
             phenotype_extraction_model: str,
             phenotype_extraction_provenance: object,
@@ -24080,6 +24118,7 @@ class TestFrontendFoundation:
                     "uploaded_vcf": uploaded_vcf,
                     "manual_variants": manual_variants,
                     "phenotypes": phenotypes,
+                    "clinical_entities": clinical_entities,
                     "input_type": input_type,
                     "phenotype_extraction_model": (
                         phenotype_extraction_model
@@ -24211,6 +24250,7 @@ class TestFrontendFoundation:
             "uploaded_vcf": None,
             "manual_variants": manual_rows,
             "phenotypes": [],
+            "clinical_entities": [],
             "input_type": "manual",
             "phenotype_extraction_model": "phenotype-test-model",
             "phenotype_extraction_provenance": None,

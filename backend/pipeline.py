@@ -57,6 +57,11 @@ from backend.final_clinical_report import (
     compose_final_clinical_report,
     validate_final_clinical_report,
 )
+from backend.clinical_entities import (
+    ClinicalEntity,
+    ClinicalEntityError,
+    validate_clinical_entities,
+)
 from backend.input_preprocessing import (
     InputPreprocessingError,
     InputPreprocessingStatus,
@@ -138,7 +143,7 @@ from backend.vcf_processing import (
     process_vcf,
 )
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
-PIPELINE_SCHEMA_VERSION = "3.4"
+PIPELINE_SCHEMA_VERSION = "3.5"
 MAX_PIPELINE_PHENOTYPES = 50
 MAX_PIPELINE_WARNINGS = 100
 MAX_PIPELINE_ERRORS = 100
@@ -264,6 +269,7 @@ class AnalysisContext(TypedDict):
 
     input_type: PersistedInputType | None
     accepted_hpo_terms: list[str]
+    clinical_entities: list[ClinicalEntity] | None
     phenotype_extraction_model: str | None
     variant_interpretation_model: str | None
     phenotype_extraction_provenance: dict[str, object] | None
@@ -546,6 +552,7 @@ def create_pipeline_result() -> PipelineResult:
         "analysis_context": {
             "input_type": None,
             "accepted_hpo_terms": [],
+            "clinical_entities": [],
             "phenotype_extraction_model": None,
             "variant_interpretation_model": None,
             "phenotype_extraction_provenance": None,
@@ -647,6 +654,24 @@ def migrate_pipeline_schema33_to34(raw: object) -> PipelineResult | None:
         )
     except (EvidenceObjectError, VariantIntegrityError, TypeError, ValueError):
         return None
+    candidate["schema_version"] = "3.4"
+    return migrate_pipeline_schema34_to35(candidate)
+
+
+def migrate_pipeline_schema34_to35(raw: object) -> PipelineResult | None:
+    """Add nullable clinical entities to a valid-shape 3.4 snapshot."""
+
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != "3.4":
+        return None
+    candidate = deepcopy(dict(raw))
+    context = candidate.get("analysis_context")
+    if not isinstance(context, Mapping):
+        return None
+    if "clinical_entities" not in context:
+        candidate["analysis_context"] = {
+            **dict(context),
+            "clinical_entities": None,
+        }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
     try:
         return validate_pipeline_result(candidate)
@@ -751,6 +776,13 @@ def migrate_pipeline_schema32_to33(raw: object) -> PipelineResult | None:
         )
     except (EvidenceObjectError, VariantIntegrityError, TypeError, ValueError):
         return None
+    if isinstance(analysis_context, Mapping) and "clinical_entities" not in (
+        analysis_context
+    ):
+        candidate["analysis_context"] = {
+            **dict(analysis_context),
+            "clinical_entities": None,
+        }
     candidate["schema_version"] = PIPELINE_SCHEMA_VERSION
     final_clinical_report = candidate.get("final_clinical_report")
     if isinstance(final_clinical_report, Mapping):
@@ -798,6 +830,14 @@ def validate_analysis_context(value: object) -> AnalysisContext:
         raise PipelineResultError(
             "pipeline.analysis_context.accepted_hpo_terms is invalid."
         )
+    clinical_entities = value["clinical_entities"]
+    if clinical_entities is not None:
+        try:
+            validate_clinical_entities(clinical_entities)
+        except ClinicalEntityError as exc:
+            raise PipelineResultError(
+                "pipeline.analysis_context.clinical_entities is invalid."
+            ) from exc
     for field in (
         "phenotype_extraction_model",
         "variant_interpretation_model",
@@ -3306,6 +3346,7 @@ def run_annovar_like_input_processing(
     input_records: Sequence[Mapping[str, object]],
     phenotypes: list[str] | tuple[str, ...],
     *,
+    clinical_entities: Sequence[Mapping[str, object]] | None = None,
     reference_fetcher: Callable[..., Mapping[str, object]] | None = None,
 ) -> PipelineResult:
     """Process source records through the canonical input boundary only."""
@@ -3343,6 +3384,11 @@ def run_annovar_like_input_processing(
             {
                 "input_type": "excel",
                 "accepted_hpo_terms": list(phenotypes),
+                "clinical_entities": (
+                    [dict(entity) for entity in clinical_entities]
+                    if clinical_entities is not None
+                    else []
+                ),
                 "phenotype_extraction_model": None,
                 "variant_interpretation_model": None,
                 "phenotype_extraction_provenance": None,
@@ -3368,6 +3414,20 @@ def run_annovar_like_input_processing(
         phenotypes=phenotypes,
     )
     result = create_pipeline_result()
+    result["analysis_context"] = validate_analysis_context(
+        {
+            "input_type": "excel",
+            "accepted_hpo_terms": list(phenotypes),
+            "clinical_entities": (
+                [dict(entity) for entity in clinical_entities]
+                if clinical_entities is not None
+                else []
+            ),
+            "phenotype_extraction_model": None,
+            "variant_interpretation_model": None,
+            "phenotype_extraction_provenance": None,
+        }
+    )
     _process_filtered_variants(
         request,
         result,
@@ -3443,6 +3503,7 @@ def _run_analysis_unpersisted(
     input_type: PersistedInputType | None = None,
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
+    clinical_entities: Sequence[Mapping[str, object]] | None = None,
     report_dir: str | Path | None = None,
     readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
@@ -3484,6 +3545,11 @@ def _run_analysis_unpersisted(
     context: dict[str, object] = {
         "input_type": resolved_input_type,
         "accepted_hpo_terms": list(request["phenotypes"]),
+        "clinical_entities": (
+            [dict(entity) for entity in clinical_entities]
+            if clinical_entities is not None
+            else []
+        ),
         "phenotype_extraction_model": phenotype_extraction_model,
         "variant_interpretation_model": llm_model,
         "phenotype_extraction_provenance": (
@@ -3685,6 +3751,7 @@ def run_analysis(
     input_type: PersistedInputType | None = None,
     phenotype_extraction_model: str | None = None,
     phenotype_extraction_provenance: Mapping[str, object] | None = None,
+    clinical_entities: Sequence[Mapping[str, object]] | None = None,
     report_dir: str | Path | None = None,
     database_path: str | Path | None = None,
     persist_analysis: bool = True,
@@ -3735,6 +3802,7 @@ def run_analysis(
             phenotype_extraction_provenance=(
                 phenotype_extraction_provenance
             ),
+            clinical_entities=clinical_entities,
             report_dir=report_dir,
             readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
@@ -4616,6 +4684,7 @@ __all__ = [
     "create_pipeline_result",
     "migrate_pipeline_schema32_to33",
     "migrate_pipeline_schema33_to34",
+    "migrate_pipeline_schema34_to35",
     "run_analysis",
     "run_annovar_like_input_processing",
     "update_draft_variant_report",

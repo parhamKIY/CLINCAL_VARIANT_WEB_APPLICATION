@@ -134,8 +134,19 @@ def test_prompt_and_schema_require_exhaustive_mention_classification() -> None:
         assert requirement in prompt
 
     schema = PHENOTYPE_EXTRACTION_RESPONSE_SCHEMA.schema
-    assert schema["required"] == list(_empty_payload())
-    assert set(schema["properties"]) == set(_empty_payload())
+    assert schema["required"] == [
+        "clinical_entities",
+        "unmapped_clinical_phrases",
+    ]
+    assert set(schema["properties"]) == set(schema["required"])
+    entity_schema = schema["properties"]["clinical_entities"]["items"]
+    assert entity_schema["required"] == [
+        "original_text",
+        "entity_type",
+        "assertion",
+        "hpo_id",
+        "label",
+    ]
 
 
 @pytest.mark.testing_v3_phenotype
@@ -451,4 +462,3 @@ def test_invalid_hpo_id_rejected_by_local_validation() -> None:
             "بیمار تشنج دارد.",
             client=LLMClient(_Adapter(payload)),
         )
-

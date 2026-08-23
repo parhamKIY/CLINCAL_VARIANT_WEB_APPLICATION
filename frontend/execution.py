@@ -28,6 +28,11 @@ from typing import (
 )
 from uuid import uuid4
 
+from backend.clinical_entities import (
+    ClinicalEntity,
+    ClinicalEntityError,
+    validate_clinical_entities,
+)
 from backend.database import (
     DatabaseError,
     load_pipeline_state,
@@ -97,7 +102,7 @@ AnalysisRunner = Callable[
 ANALYSIS_JOB_TOKEN_PATTERN = re.compile(r"job-[0-9a-f]{32}")
 MAX_RECOVERABLE_ANALYSIS_JOBS = 32
 RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS = 60 * 60
-RECOVERY_REQUEST_SCHEMA_VERSION = 3
+RECOVERY_REQUEST_SCHEMA_VERSION = 4
 MAX_RECOVERY_REQUEST_BYTES = 1024 * 1024
 LAST_SESSION_FILENAME = "last_session.json"
 
@@ -109,6 +114,7 @@ class AnalysisRecoveryRequest(TypedDict):
     manual_variants: list[dict[str, object]]
     excel_input_records: NotRequired[list[dict[str, object]]]
     phenotypes: list[str]
+    clinical_entities: list[ClinicalEntity] | None
     llm_model: str | None
     input_type: str
     phenotype_extraction_model: str | None
@@ -485,6 +491,7 @@ def _persist_recovery_request(
             {
                 "input_type": request["input_type"],
                 "accepted_hpo_terms": request["phenotypes"],
+                "clinical_entities": request.get("clinical_entities"),
                 "phenotype_extraction_model": request[
                     "phenotype_extraction_model"
                 ],
@@ -506,6 +513,7 @@ def _persist_recovery_request(
         schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
         manual_variants=request["manual_variants"],
         phenotypes=context["accepted_hpo_terms"],
+        clinical_entities=context["clinical_entities"],
         llm_model=context["variant_interpretation_model"],
         input_type=context["input_type"],
         phenotype_extraction_model=context[
@@ -576,7 +584,8 @@ def _load_recovery_request(
     if not isinstance(value, dict):
         _delete_recovery_request(token)
         return None
-    if value.get("schema_version") != RECOVERY_REQUEST_SCHEMA_VERSION:
+    recovery_schema_version = value.get("schema_version")
+    if recovery_schema_version not in {3, RECOVERY_REQUEST_SCHEMA_VERSION}:
         _delete_recovery_request(token)
         return None
     created_at = value.get("created_at")
@@ -585,6 +594,11 @@ def _load_recovery_request(
         value.get("excel_input_records")
     )
     phenotypes = value.get("phenotypes")
+    clinical_entities = (
+        value.get("clinical_entities")
+        if recovery_schema_version == RECOVERY_REQUEST_SCHEMA_VERSION
+        else None
+    )
     llm_model = value.get("llm_model")
     input_type = value.get("input_type")
     phenotype_model = value.get("phenotype_extraction_model")
@@ -629,6 +643,7 @@ def _load_recovery_request(
             {
                 "input_type": input_type,
                 "accepted_hpo_terms": phenotypes,
+                "clinical_entities": clinical_entities,
                 "phenotype_extraction_model": phenotype_model,
                 "variant_interpretation_model": llm_model,
                 "phenotype_extraction_provenance": phenotype_provenance,
@@ -641,6 +656,7 @@ def _load_recovery_request(
         schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
         manual_variants=variants,
         phenotypes=context["accepted_hpo_terms"],
+        clinical_entities=context["clinical_entities"],
         llm_model=context["variant_interpretation_model"],
         input_type=cast(str, context["input_type"]),
         phenotype_extraction_model=context[
@@ -1072,6 +1088,7 @@ def prepare_analysis_recovery_request(
     uploaded_vcf: UploadedVCF | None,
     manual_variants: Sequence[Mapping[str, object]] | None,
     phenotypes: list[str],
+    clinical_entities: Sequence[Mapping[str, object]] | None = None,
     llm_model: str | None,
     input_type: str | None = None,
     phenotype_extraction_model: str | None = None,
@@ -1087,11 +1104,20 @@ def prepare_analysis_recovery_request(
             "Choose either a variant-file upload or manual table rows."
         )
     try:
+        normalized_clinical_entities = validate_clinical_entities(
+            [] if clinical_entities is None else clinical_entities
+        )
+    except ClinicalEntityError as exc:
+        raise FrontendExecutionError(
+            "The clinical entity context is invalid."
+        ) from exc
+    try:
         if excel_input_records is not None:
             request = AnalysisRecoveryRequest(
                 schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
                 manual_variants=[],
                 phenotypes=list(phenotypes),
+                clinical_entities=normalized_clinical_entities,
                 llm_model=llm_model,
                 input_type=input_type or "excel",
                 phenotype_extraction_model=phenotype_extraction_model,
@@ -1129,6 +1155,7 @@ def prepare_analysis_recovery_request(
                     schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
                     manual_variants=[dict(variant) for variant in variants],
                     phenotypes=list(phenotypes),
+                    clinical_entities=normalized_clinical_entities,
                     llm_model=llm_model,
                     input_type=input_type or "excel",
                     phenotype_extraction_model=phenotype_extraction_model,
@@ -1165,6 +1192,7 @@ def prepare_analysis_recovery_request(
         schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
         manual_variants=[dict(variant) for variant in variants],
         phenotypes=list(phenotypes),
+        clinical_entities=normalized_clinical_entities,
         llm_model=llm_model,
         input_type=(
             input_type
@@ -1186,6 +1214,7 @@ def execute_analysis(
     uploaded_vcf: UploadedVCF | None,
     manual_variants: Sequence[Mapping[str, object]] | None,
     phenotypes: list[str],
+    clinical_entities: Sequence[Mapping[str, object]] | None = None,
     llm_model: str | None = None,
     input_type: str | None = None,
     phenotype_extraction_model: str | None = None,
@@ -1211,6 +1240,7 @@ def execute_analysis(
         prepared = run_annovar_like_input_processing(
             excel_input_records,
             phenotypes=phenotypes,
+            clinical_entities=clinical_entities,
         )
         if not prepared["variants"]:
             return prepared
@@ -1226,6 +1256,7 @@ def execute_analysis(
             vcf_path=None,
             manual_variants=canonical_variants,
             phenotypes=phenotypes,
+            clinical_entities=clinical_entities,
             llm_model=llm_model,
             input_type=input_type or "excel",
             phenotype_extraction_model=phenotype_extraction_model,
@@ -1251,6 +1282,7 @@ def execute_analysis(
             vcf_path=None,
             manual_variants=manual_variants,
             phenotypes=phenotypes,
+            clinical_entities=clinical_entities,
             llm_model=llm_model,
             input_type=input_type or "manual",
             phenotype_extraction_model=phenotype_extraction_model,
@@ -1274,6 +1306,7 @@ def execute_analysis(
             uploaded_vcf=None,
             manual_variants=None,
             phenotypes=phenotypes,
+            clinical_entities=clinical_entities,
             llm_model=llm_model,
             input_type=input_type or "excel",
             phenotype_extraction_model=phenotype_extraction_model,
@@ -1307,6 +1340,7 @@ def execute_analysis(
                 vcf_path=temporary_path,
                 manual_variants=None,
                 phenotypes=phenotypes,
+                clinical_entities=clinical_entities,
                 llm_model=llm_model,
                 input_type=(
                     input_type
@@ -1378,6 +1412,7 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
                 else request["manual_variants"]
             ),
             phenotypes=request["phenotypes"],
+            clinical_entities=request["clinical_entities"],
             llm_model=request["llm_model"],
             input_type=request["input_type"],
             phenotype_extraction_model=request[

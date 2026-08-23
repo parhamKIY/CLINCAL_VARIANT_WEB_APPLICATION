@@ -222,20 +222,21 @@ recovery request `3`, and EvidenceObject `2.5` unchanged.
 
 ### Stage 47 phenotype-extraction LLM contract
 
-`backend/phenotype_llm.py` defines one dedicated task:
-`extract_hpo_candidates`. Before any model request, the Persian clinical description
+`backend/phenotype_llm.py` defines one dedicated extraction task:
+`extract_clinical_entities`. Before any model request, the Persian clinical description
 must be non-empty, no longer than 4,000 characters, free of invalid control
 characters, and redacted by the shared privacy layer. The outbound user payload is
 limited to `clinical_text_fa` and `task`; raw VCF data, genotypes, sample data, and
 identifiers are prohibited.
 
-The model response uses a strict JSON-schema contract containing only a bounded
-`candidates` array. Every candidate must contain exactly `hpo_id`, `label`, and
-`source_phrase_fa`. Stage 47 enforces the exact `HP:ddddddd` format, bounded text,
-unique identifiers, safe completion state, and strict response fields. These are
-format-level checks; Stage 48 performs the separate local ontology acceptance gate.
+The model response uses a strict JSON-schema contract containing bounded
+`clinical_entities` and `unmapped_clinical_phrases` arrays. Every entity preserves
+grounded source text, an explicit `PHENOTYPE` or `DISEASE` type, and one of
+`PRESENT`, `SUSPECTED`, `NEGATED`, or `HISTORICAL`. HPO identifiers remain allowed
+only for present phenotype entities and continue through the separate local ontology
+acceptance gate; disease entities are not converted to HPO.
 
-The system prompt restricts this model to phenotype extraction and prohibits
+The system prompt restricts this model to explicit clinical-entity extraction and prohibits
 diagnosis, unsupported disease inference, invented HPO identifiers, variant
 interpretation, and treatment recommendations. Insufficient evidence produces an
 empty candidate list. `PHENOTYPE_EXTRACTION_MODEL` and
@@ -1760,7 +1761,7 @@ retaining their exact status codes. These are maintenance corrections to Stages 
 
 ## 8. Pipeline, persistence, and refresh recovery
 
-- Active pipeline schema: `3.4`.
+- Active pipeline schema: `3.5`.
 - SQLite schema: `4`.
 - Evidence Review Report schema: `1.0`.
 - Reviewed Evidence Package schema: `1.0`.
