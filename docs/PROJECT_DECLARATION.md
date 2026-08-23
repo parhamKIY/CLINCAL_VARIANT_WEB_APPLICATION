@@ -1802,6 +1802,16 @@ entity; schema `3.5` snapshots migrate to `null` without fabricating historical
 resolution. SQLite remains `4`, recovery remains `4`, and EvidenceObject remains
 `2.5`.
 
+The Stage 6 reviewer workflow now separates phenotype/finding mentions from
+disease/context mentions, preserves assertion state, and requires explicit acceptance
+before analysis. Reviewers may edit bounded text/assertion values or reject rows;
+linked HPO suggestions remain subject to the existing independent local validation and
+acceptance path. The canonical pipeline snapshot and recovery request preserve only
+reviewed entities, so no SQLite migration is required. Results display this data in a
+clinical-context panel explicitly labeled as not variant evidence, diagnosis, or ACMG
+classification. The full boundary is documented in
+`docs/persian_clinical_entity_extraction.md`.
+
 Analysis collects evidence, performs pre-review audit and optional enrichment,
 interprets each variant, and persists the ordered review state. Review may edit and
 confirm evidence while retaining the pre-review interpretation provenance.
@@ -1813,8 +1823,9 @@ Long analyses execute in cancellable background jobs. The browser stores only an
 opaque, unguessable recovery token. A page refresh reconnects to an active in-process
 job; when the job has completed and the result was persisted, the UI reloads it from
 SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
-A private one-hour checkpoint stores normalized variants, HPO terms, task model
-choices, and bounded extraction provenance, never raw VCF content. For an XLSX
+A private one-hour checkpoint stores normalized variants, HPO terms, reviewed
+clinical entities, task model choices, and bounded extraction provenance, never raw
+VCF content. For an XLSX
 zero-allele source form it also stores only the bounded user-selected source records
 needed to repeat GRCh38 identity verification; unselected worksheets and rows never
 enter the checkpoint.

@@ -31,6 +31,7 @@ UIErrorContext = Literal[
     "phenotype_search",
     "phenotype_extraction",
     "phenotype_acceptance",
+    "clinical_entity_acceptance",
     "manual_input",
     "excel_upload",
     "excel_selection",
@@ -245,6 +246,10 @@ def safe_ui_error_message(
             "phenotype_acceptance": (
                 "The edited candidates could not be accepted. Correct or "
                 "remove invalid HPO identifiers and try again."
+            ),
+            "clinical_entity_acceptance": (
+                "The edited clinical entities could not be accepted. Correct "
+                "or remove invalid entries and try again."
             ),
             "manual_input": (
                 "The manual variant input is incomplete or invalid. Review "

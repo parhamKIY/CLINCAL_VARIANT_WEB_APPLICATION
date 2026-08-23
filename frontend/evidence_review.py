@@ -175,6 +175,126 @@ def _render_technical_diagnostics(
         )
 
 
+def build_clinical_context_view(
+    result: PipelineResult,
+) -> dict[str, object]:
+    """Project case context for reviewers without entering report evidence."""
+
+    context = result["analysis_context"]
+    entities = context["clinical_entities"]
+    if entities is None:
+        return {
+            "capture_state": "NOT_CAPTURED",
+            "observed_findings": [],
+            "disease_context": [],
+        }
+    resolutions = context["disease_resolutions"]
+    resolution_rows = [] if resolutions is None else list(resolutions)
+    resolution_index = 0
+    observed_findings: list[dict[str, object]] = []
+    disease_context: list[dict[str, object]] = []
+    for entity in entities:
+        if entity["entity_type"] == "PHENOTYPE":
+            observed_findings.append(
+                {
+                    "text": entity["original_text"],
+                    "type": "PHENOTYPE",
+                    "assertion": entity["assertion"],
+                }
+            )
+            continue
+        resolution = (
+            resolution_rows[resolution_index]
+            if resolution_index < len(resolution_rows)
+            else None
+        )
+        resolution_index += 1
+        disease_context.append(
+            {
+                "text": entity["original_text"],
+                "type": "DISEASE",
+                "assertion": entity["assertion"],
+                "resolution_status": (
+                    resolution["resolution_status"]
+                    if resolution is not None
+                    else "NOT_CAPTURED"
+                ),
+                "preferred_label": (
+                    resolution["preferred_label"]
+                    if resolution is not None
+                    else None
+                ),
+                "identifier": (
+                    resolution["identifier"]
+                    if resolution is not None
+                    else None
+                ),
+            }
+        )
+    return {
+        "capture_state": "CAPTURED",
+        "observed_findings": observed_findings,
+        "disease_context": disease_context,
+    }
+
+
+def _render_clinical_context(result: PipelineResult) -> None:
+    """Show reviewed clinical assertions as context, never as evidence."""
+
+    view = build_clinical_context_view(result)
+    with st.container(border=True):
+        st.markdown("### Reviewed clinical context")
+        st.caption(
+            "Case-specific reviewer-confirmed context. These assertions are "
+            "not variant evidence, a diagnosis, or an ACMG classification."
+        )
+        if view["capture_state"] == "NOT_CAPTURED":
+            st.info(
+                "Clinical entities were not captured for this historical "
+                "analysis."
+            )
+            return
+        observed_findings = cast(
+            list[dict[str, object]], view["observed_findings"]
+        )
+        disease_context = cast(
+            list[dict[str, object]], view["disease_context"]
+        )
+        st.markdown("**Observed findings**")
+        if observed_findings:
+            st.table(
+                [
+                    {
+                        "Entity": row["text"],
+                        "Type": row["type"],
+                        "Assertion": row["assertion"],
+                    }
+                    for row in observed_findings
+                ]
+            )
+        else:
+            st.caption("No reviewed phenotype/finding entity was captured.")
+        st.markdown("**Disease/context mentions**")
+        if disease_context:
+            st.table(
+                [
+                    {
+                        "Entity": row["text"],
+                        "Type": row["type"],
+                        "Assertion": row["assertion"],
+                        "Resolution": row["resolution_status"],
+                        "Resolved concept": (
+                            row["preferred_label"] or "Not resolved"
+                        ),
+                        "Identifier": row["identifier"] or "Not available",
+                    }
+                    for row in disease_context
+                ]
+            )
+        else:
+            st.caption("No reviewed disease/context entity was captured.")
+
+
 def _render_variant_status_cards(result: PipelineResult) -> None:
     """Render Stage 96 variant-first status and warning cards."""
 
@@ -1346,6 +1466,7 @@ def render_evidence_review(
     retry_model = strong_model or light_model
     st.subheader("Draft Variant Review — Evidence and interpretation")
     _render_notice()
+    _render_clinical_context(result)
     reports = result.get("evidence_review_reports", [])
     if not reports:
         st.info("No editable evidence review reports are available.")
@@ -1465,6 +1586,7 @@ def render_evidence_review(
 __all__ = [
     "REVIEW_DRAFTS_KEY",
     "REVIEW_PACKAGES_KEY",
+    "build_clinical_context_view",
     "clear_evidence_review_state",
     "interpretation_failure_message",
     "render_evidence_review",

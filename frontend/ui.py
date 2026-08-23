@@ -1,5 +1,6 @@
 """Presentation-only Streamlit interface for the analysis pipeline."""
 
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from hashlib import sha256
 from math import isfinite
@@ -11,6 +12,11 @@ import pandas as pd
 import streamlit as st
 
 from backend.database import DatabaseError, load_pipeline_state
+from backend.clinical_entities import (
+    ClinicalEntityError,
+    normalize_clinical_entity_text,
+    validate_clinical_entities,
+)
 from backend.excel_processing import (
     ExcelProcessingError,
     discover_excel_worksheets,
@@ -110,6 +116,10 @@ HPO_MODEL_REJECTIONS_KEY = "hpo_model_rejections"
 PHENOTYPE_NON_HPO_MENTIONS_KEY = "phenotype_non_hpo_mentions"
 PHENOTYPE_EXTRACTION_PROVENANCE_KEY = "phenotype_extraction_provenance"
 CLINICAL_ENTITIES_KEY = "clinical_entities"
+CLINICAL_ENTITY_DRAFTS_KEY = "clinical_entity_review_drafts"
+CLINICAL_ENTITY_REVIEW_COMPLETE_KEY = "clinical_entity_review_complete"
+CLINICAL_ENTITY_FINDINGS_EDITOR_KEY = "clinical_entity_findings_editor"
+CLINICAL_ENTITY_DISEASE_EDITOR_KEY = "clinical_entity_disease_editor"
 HPO_CANDIDATE_EDITOR_KEY = "hpo_candidate_editor"
 PIPELINE_RESULT_KEY = "pipeline_result"
 ANALYSIS_JOB_KEY = "analysis_job"
@@ -305,6 +315,12 @@ def _restore_refresh_state() -> None:
     st.session_state[CLINICAL_ENTITIES_KEY] = deepcopy(
         context["clinical_entities"] or []
     )
+    st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = (
+        prepare_clinical_entity_review_rows(
+            context["clinical_entities"] or []
+        )
+    )
+    st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
     st.session_state[ANALYSIS_NOTICE_KEY] = (
         "Restored the saved analysis after page refresh."
     )
@@ -321,6 +337,8 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(PHENOTYPE_NON_HPO_MENTIONS_KEY, {})
     st.session_state.setdefault(PHENOTYPE_EXTRACTION_PROVENANCE_KEY, None)
     st.session_state.setdefault(CLINICAL_ENTITIES_KEY, [])
+    st.session_state.setdefault(CLINICAL_ENTITY_DRAFTS_KEY, [])
+    st.session_state.setdefault(CLINICAL_ENTITY_REVIEW_COMPLETE_KEY, True)
     st.session_state.setdefault(PIPELINE_RESULT_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_KEY, None)
     st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
@@ -556,17 +574,231 @@ def _clear_hpo_candidate_draft() -> None:
     st.session_state[PHENOTYPE_NON_HPO_MENTIONS_KEY] = {}
     st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = None
     st.session_state[CLINICAL_ENTITIES_KEY] = []
+    st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = []
+    st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
+    st.session_state.pop(CLINICAL_ENTITY_FINDINGS_EDITOR_KEY, None)
+    st.session_state.pop(CLINICAL_ENTITY_DISEASE_EDITOR_KEY, None)
     st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
+
+
+def prepare_clinical_entity_review_rows(
+    entities: object,
+) -> list[dict[str, object]]:
+    """Create editable reviewer rows without accepting extracted entities."""
+
+    validated = validate_clinical_entities(entities)
+    return [
+        {"source_index": index, "include": True, **entity}
+        for index, entity in enumerate(validated)
+    ]
+
+
+def accept_clinical_entity_review_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Validate explicitly retained reviewer rows in source order."""
+
+    retained: list[tuple[int, dict[str, object]]] = []
+    seen_indexes: set[int] = set()
+    for row in rows:
+        include = row.get("include")
+        if not isinstance(include, bool):
+            raise ClinicalEntityError(
+                "Clinical entity review selection is invalid."
+            )
+        source_index = row.get("source_index")
+        if (
+            not isinstance(source_index, int)
+            or isinstance(source_index, bool)
+            or source_index < 0
+            or source_index in seen_indexes
+        ):
+            raise ClinicalEntityError(
+                "Clinical entity review order is invalid."
+            )
+        seen_indexes.add(source_index)
+        if not include:
+            continue
+        original_text = row.get("original_text")
+        retained.append(
+            (
+                source_index,
+                {
+                    "original_text": original_text,
+                    "normalized_text": normalize_clinical_entity_text(
+                        original_text
+                    ),
+                    "entity_type": row.get("entity_type"),
+                    "assertion": row.get("assertion"),
+                },
+            )
+        )
+    retained.sort(key=lambda item: item[0])
+    return [
+        dict(entity)
+        for entity in validate_clinical_entities(
+            [entity for _, entity in retained]
+        )
+    ]
+
+
+def _clinical_entity_review_changed() -> None:
+    """Invalidate prior acceptance when a reviewer edits the draft."""
+
+    st.session_state[CLINICAL_ENTITIES_KEY] = []
+    st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = False
+    _clear_analysis_result()
+
+
+def _retain_hpo_candidates_for_reviewed_entities(
+    entities: Sequence[Mapping[str, object]],
+) -> None:
+    """Keep model HPO suggestions linked to retained present findings."""
+
+    accepted_phrases = {
+        normalize_clinical_entity_text(entity["original_text"])
+        for entity in entities
+        if entity.get("entity_type") == "PHENOTYPE"
+        and entity.get("assertion") == "PRESENT"
+    }
+    retained_candidates = []
+    for candidate in st.session_state[HPO_MODEL_CANDIDATES_KEY]:
+        try:
+            source_phrase = normalize_clinical_entity_text(
+                candidate.get("source_phrase_fa")
+            )
+        except ClinicalEntityError:
+            continue
+        if source_phrase in accepted_phrases:
+            retained_candidates.append(candidate)
+    st.session_state[HPO_MODEL_CANDIDATES_KEY] = retained_candidates
+    st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
+
+
+def _render_clinical_entity_review() -> bool:
+    """Render separated reviewer controls and return acceptance state."""
+
+    drafts = st.session_state[CLINICAL_ENTITY_DRAFTS_KEY]
+    if not drafts:
+        return bool(st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY])
+
+    st.markdown("#### Clinical entity review")
+    st.caption(
+        "Review every extracted mention before analysis. These records are "
+        "case-specific clinical context, not variant evidence or a diagnosis."
+    )
+    edited_groups: list[pd.DataFrame] = []
+    for entity_type, heading, editor_key in (
+        (
+            "PHENOTYPE",
+            "Observed findings",
+            CLINICAL_ENTITY_FINDINGS_EDITOR_KEY,
+        ),
+        (
+            "DISEASE",
+            "Disease/context mentions",
+            CLINICAL_ENTITY_DISEASE_EDITOR_KEY,
+        ),
+    ):
+        rows = [
+            row for row in drafts if row["entity_type"] == entity_type
+        ]
+        if not rows:
+            continue
+        st.markdown(f"**{heading}**")
+        st.caption(
+            "Assertion state is preserved; inclusion is an explicit reviewer "
+            "choice."
+        )
+        edited_groups.append(
+            st.data_editor(
+                pd.DataFrame(rows),
+                key=editor_key,
+                hide_index=True,
+                num_rows="fixed",
+                disabled=["source_index", "entity_type", "normalized_text"],
+                column_order=(
+                    "include",
+                    "original_text",
+                    "entity_type",
+                    "assertion",
+                    "normalized_text",
+                ),
+                column_config={
+                    "source_index": None,
+                    "include": st.column_config.CheckboxColumn(
+                        "Include", default=True
+                    ),
+                    "original_text": st.column_config.TextColumn(
+                        "Entity text", required=True, max_chars=500
+                    ),
+                    "entity_type": st.column_config.TextColumn("Type"),
+                    "assertion": st.column_config.SelectboxColumn(
+                        "Assertion",
+                        options=[
+                            "PRESENT",
+                            "SUSPECTED",
+                            "NEGATED",
+                            "HISTORICAL",
+                        ],
+                        required=True,
+                    ),
+                    "normalized_text": st.column_config.TextColumn(
+                        "Normalized text"
+                    ),
+                },
+                on_change=_clinical_entity_review_changed,
+            )
+        )
+
+    if not st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY]:
+        st.warning("Clinical entities are awaiting reviewer confirmation.")
+    if not st.button(
+        "Accept clinical entities",
+        key="accept_clinical_entities",
+        type="primary",
+        icon=":material/check:",
+    ):
+        return bool(st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY])
+
+    rows = [
+        row
+        for edited in edited_groups
+        for row in edited.to_dict(orient="records")
+    ]
+    try:
+        accepted = accept_clinical_entity_review_rows(rows)
+    except ClinicalEntityError as exc:
+        st.error(
+            safe_ui_error_message(
+                exc,
+                context="clinical_entity_acceptance",
+            )
+        )
+        return False
+    st.session_state[CLINICAL_ENTITIES_KEY] = accepted
+    st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = (
+        prepare_clinical_entity_review_rows(accepted)
+    )
+    st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
+    _retain_hpo_candidates_for_reviewed_entities(accepted)
+    _clear_analysis_result()
+    st.success(
+        f"Accepted {len(accepted)} reviewed clinical "
+        f"{'entity' if len(accepted) == 1 else 'entities'}."
+    )
+    return True
 
 
 def _render_phenotype_extraction(phenotype_model: str) -> None:
     """Render optional extraction, local validation, editing, and acceptance."""
 
-    st.markdown("**Optional Persian phenotype extraction**")
+    st.markdown("**Optional Persian clinical entity extraction**")
     st.caption(
-        "Enter only a short de-identified clinical description. Suggestions "
-        "are checked against the installed HPO ontology and are not used "
-        "until you explicitly accept them. "
+        "Enter only a short de-identified clinical description. Findings and "
+        "disease/context mentions remain separate and are not used until "
+        "you explicitly review them. HPO suggestions are also checked "
+        "against the installed local ontology. "
         f"Selected model: {phenotype_model}."
     )
     clinical_text = st.text_area(
@@ -578,13 +810,13 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
         on_change=_clear_hpo_candidate_draft,
     )
     if st.button(
-        "Extract HPO candidates",
+        "Extract clinical entities",
         key="extract_hpo_candidates",
         icon=":material/auto_awesome:",
         disabled=not clinical_text.strip(),
     ):
         try:
-            with st.spinner("Extracting and validating HPO candidates..."):
+            with st.spinner("Extracting and validating clinical entities..."):
                 extraction = extract_hpo_candidates(
                     clinical_text,
                     model=phenotype_model,
@@ -608,8 +840,15 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 )
             )
         else:
-            st.session_state[CLINICAL_ENTITIES_KEY] = deepcopy(
+            extracted_entities = deepcopy(
                 extraction.get("clinical_entities", [])
+            )
+            st.session_state[CLINICAL_ENTITIES_KEY] = []
+            st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = (
+                prepare_clinical_entity_review_rows(extracted_entities)
+            )
+            st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = (
+                not bool(extracted_entities)
             )
             st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = {
                 "schema_version": extraction["schema_version"],
@@ -622,18 +861,9 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 ],
             }
             st.session_state[PHENOTYPE_NON_HPO_MENTIONS_KEY] = {
-                "Disease or syndrome mentions": extraction[
-                    "disease_mentions"
-                ],
-                "Negated phenotype mentions": extraction[
-                    "negated_phenotype_mentions"
-                ],
-                "Uncertain phenotype mentions": extraction[
-                    "uncertain_phenotype_mentions"
-                ],
                 "Unmapped clinical phrases": extraction[
                     "unmapped_clinical_phrases"
-                ],
+                ]
             }
             st.session_state[HPO_MODEL_CANDIDATES_KEY] = [
                 {"include": True, **candidate}
@@ -643,6 +873,8 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 validation["rejected_candidates"]
             )
             st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
+            st.session_state.pop(CLINICAL_ENTITY_FINDINGS_EDITOR_KEY, None)
+            st.session_state.pop(CLINICAL_ENTITY_DISEASE_EDITOR_KEY, None)
             if (
                 not validation["validated_candidates"]
                 and not validation["rejected_candidates"]
@@ -663,6 +895,8 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
                 )
             )
 
+    entity_review_complete = _render_clinical_entity_review()
+
     rejected_candidates = st.session_state[HPO_MODEL_REJECTIONS_KEY]
     if rejected_candidates:
         rejected_ids = ", ".join(
@@ -676,6 +910,12 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
 
     candidates = st.session_state[HPO_MODEL_CANDIDATES_KEY]
     if not candidates:
+        return
+    if not entity_review_complete:
+        st.info(
+            "Review the extracted clinical entities before accepting linked "
+            "HPO candidates."
+        )
         return
     st.caption(
         "Edit identifiers or source phrases, remove rows, and choose which "
@@ -1403,6 +1643,15 @@ def _prepare_input(
 ) -> AnalysisSubmission | None:
     """Validate frontend presence rules and build one submission."""
 
+    if (
+        st.session_state.get(CLINICAL_ENTITY_DRAFTS_KEY)
+        and not st.session_state.get(CLINICAL_ENTITY_REVIEW_COMPLETE_KEY)
+    ):
+        st.error(
+            "Review and accept or reject the extracted clinical entities "
+            "before starting analysis."
+        )
+        return None
     phenotype_ids = [
         term["id"] for term in st.session_state[SELECTED_HPO_KEY]
     ]

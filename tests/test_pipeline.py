@@ -17706,6 +17706,7 @@ class TestStage57PersistenceSchemaV3:
             "input_type": "excel",
             "accepted_hpo_terms": ["HP:0001250"],
             "clinical_entities": [],
+            "disease_resolutions": [],
             "phenotype_extraction_model": "phenotype-restored-v3",
             "variant_interpretation_model": "variant-restored-v3",
             "phenotype_extraction_provenance": {
@@ -23495,6 +23496,12 @@ class TestFrontendFoundation:
                 "model": model,
                 "clinical_entities": [
                     {
+                        "original_text": "تشنج",
+                        "normalized_text": "تشنج",
+                        "entity_type": "PHENOTYPE",
+                        "assertion": "PRESENT",
+                    },
+                    {
                         "original_text": "سندرم نمونه",
                         "normalized_text": "سندرم نمونه",
                         "entity_type": "DISEASE",
@@ -23559,11 +23566,13 @@ class TestFrontendFoundation:
             for area in app.text_area
             if area.label == "Persian clinical description"
         )
-        description.set_value("کودک دچار تشنج است.").run(timeout=10)
+        description.set_value(
+            "کودک دچار تشنج است و سندرم نمونه دارد."
+        ).run(timeout=10)
         next(
             button
             for button in app.button
-            if button.label == "Extract HPO candidates"
+            if button.label == "Extract clinical entities"
         ).click().run(timeout=10)
 
         assert not app.exception
@@ -23578,7 +23587,27 @@ class TestFrontendFoundation:
             "model": settings.PHENOTYPE_EXTRACTION_MODEL,
             "candidate_hpo_ids": ["HP:0001250"],
         }
+        assert app.session_state["clinical_entities"] == []
+        assert app.session_state["clinical_entity_review_complete"] is False
+        assert any(
+            "Disease/context mentions" in item.value
+            for item in app.markdown
+        )
+
+        next(
+            button
+            for button in app.button
+            if button.label == "Accept clinical entities"
+        ).click().run(timeout=10)
+
+        assert not app.exception
         assert app.session_state["clinical_entities"] == [
+            {
+                "original_text": "تشنج",
+                "normalized_text": "تشنج",
+                "entity_type": "PHENOTYPE",
+                "assertion": "PRESENT",
+            },
             {
                 "original_text": "سندرم نمونه",
                 "normalized_text": "سندرم نمونه",
@@ -23589,10 +23618,6 @@ class TestFrontendFoundation:
         assert any(
             button.label == "Accept HPO candidates"
             for button in app.button
-        )
-        assert any(
-            "Disease or syndrome mentions: سندرم نمونه" in message.value
-            for message in app.info
         )
 
         next(
@@ -23653,7 +23678,7 @@ class TestFrontendFoundation:
         next(
             button
             for button in app.button
-            if button.label == "Extract HPO candidates"
+            if button.label == "Extract clinical entities"
         ).click().run(timeout=10)
 
         assert not app.exception
@@ -23690,7 +23715,7 @@ class TestFrontendFoundation:
         next(
             button
             for button in app.button
-            if button.label == "Extract HPO candidates"
+            if button.label == "Extract clinical entities"
         ).click().run(timeout=10)
 
         assert not app.exception
