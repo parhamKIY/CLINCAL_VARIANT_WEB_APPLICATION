@@ -329,6 +329,8 @@ from frontend.ui import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Full reachable-history scanning can exceed 30 seconds on cold Windows CI.
+SECRETS_AUDIT_TIMEOUT_SECONDS = 120
 pytestmark = [
     pytest.mark.stage43_testing_v2,
     pytest.mark.stage59_testing_v3,
@@ -1084,7 +1086,7 @@ class TestStage15SecretsAudit:
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SECRETS_AUDIT_TIMEOUT_SECONDS,
         )
 
         assert completed.returncode == 0, completed.stderr
