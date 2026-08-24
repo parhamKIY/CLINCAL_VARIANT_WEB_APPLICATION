@@ -683,10 +683,7 @@ def _render_clinical_entity_review() -> bool:
         return bool(st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY])
 
     st.markdown("#### Clinical entity review")
-    st.caption(
-        "Review every extracted mention before analysis. These records are "
-        "case-specific clinical context, not variant evidence or a diagnosis."
-    )
+    st.caption("Review every extracted mention before analysis.")
     edited_groups: list[pd.DataFrame] = []
     for entity_type, heading, editor_key in (
         (
@@ -706,10 +703,16 @@ def _render_clinical_entity_review() -> bool:
         if not rows:
             continue
         st.markdown(f"**{heading}**")
-        st.caption(
-            "Assertion state is preserved; inclusion is an explicit reviewer "
-            "choice."
-        )
+        if entity_type == "PHENOTYPE":
+            st.caption(
+                "Reviewer-accepted findings may be used for phenotype-based "
+                "analysis; assertion state remains visible."
+            )
+        else:
+            st.caption(
+                "Context only — disease mentions do not directly become "
+                "variant evidence."
+            )
         edited_groups.append(
             st.data_editor(
                 pd.DataFrame(rows),
@@ -751,7 +754,9 @@ def _render_clinical_entity_review() -> bool:
             )
         )
 
-    if not st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY]:
+    if st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY]:
+        st.success("Clinical entity review accepted.")
+    else:
         st.warning("Clinical entities are awaiting reviewer confirmation.")
     if not st.button(
         "Accept clinical entities",
@@ -783,10 +788,7 @@ def _render_clinical_entity_review() -> bool:
     st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
     _retain_hpo_candidates_for_reviewed_entities(accepted)
     _clear_analysis_result()
-    st.success(
-        f"Accepted {len(accepted)} reviewed clinical "
-        f"{'entity' if len(accepted) == 1 else 'entities'}."
-    )
+    st.success("Clinical entity review accepted.")
     return True
 
 
@@ -1000,18 +1002,18 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
     st.rerun()
 
 
-def _render_hpo_picker(phenotype_model: str) -> None:
-    """Render local HPO search and selected-phenotype controls."""
+def _render_manual_hpo_selection() -> None:
+    """Render supplemental local HPO search and selection controls."""
 
-    with st.container(border=True):
-        st.subheader("Phenotypes")
+    with st.expander(
+        "Add phenotype manually",
+        expanded=False,
+        icon=":material/add:",
+    ):
         st.caption(
-            "Search the locally installed Human Phenotype Ontology "
-            "by term, synonym, or HPO ID."
+            "Optionally supplement the reviewed findings by searching the "
+            "installed Human Phenotype Ontology."
         )
-        _render_phenotype_extraction(phenotype_model)
-        st.divider()
-
         with st.form("hpo_search_form", border=False):
             query = st.text_input(
                 "Search HPO terms",
@@ -1068,35 +1070,54 @@ def _render_hpo_picker(phenotype_model: str) -> None:
                         {"id": choice["id"], "name": choice["name"]}
                     )
                     _clear_analysis_result()
+                    st.rerun()
                 elif choice is not None:
                     st.info(f"{choice['id']} is already selected.")
 
-        selected_terms = st.session_state[SELECTED_HPO_KEY]
-        st.markdown("**Selected phenotypes**")
-        if not selected_terms:
-            st.caption("No phenotypes selected. This input is optional.")
-            return
 
-        for term in selected_terms:
-            with st.container(
-                horizontal=True,
-                vertical_alignment="center",
-                gap="small",
+def _render_accepted_hpo_terms() -> None:
+    """Show the reviewer-approved HPO context without a legacy duplicate."""
+
+    selected_terms = st.session_state[SELECTED_HPO_KEY]
+    if not selected_terms:
+        return
+
+    st.markdown("**Accepted HPO terms**")
+    for term in selected_terms:
+        with st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            gap="small",
+        ):
+            st.write(f"**{term['id']}** — {term['name']}")
+            if st.button(
+                "Remove",
+                key=f"remove_{term['id']}",
+                icon=":material/delete:",
+                help=f"Remove {term['id']}",
             ):
-                st.write(f"**{term['id']}** — {term['name']}")
-                if st.button(
-                    "Remove",
-                    key=f"remove_{term['id']}",
-                    icon=":material/delete:",
-                    help=f"Remove {term['id']}",
-                ):
-                    st.session_state[SELECTED_HPO_KEY] = [
-                        selected
-                        for selected in selected_terms
-                        if selected["id"] != term["id"]
-                    ]
-                    _clear_analysis_result()
-                    st.rerun()
+                st.session_state[SELECTED_HPO_KEY] = [
+                    selected
+                    for selected in selected_terms
+                    if selected["id"] != term["id"]
+                ]
+                _clear_analysis_result()
+                st.rerun()
+
+
+def _render_hpo_picker(phenotype_model: str) -> None:
+    """Render clinical entity review and supplemental HPO controls."""
+
+    with st.container(border=True):
+        st.subheader("Phenotypes")
+        st.caption(
+            "Phenotypes are used for phenotype-based analysis. Disease "
+            "mentions are retained as clinical context and are not used as "
+            "direct variant evidence."
+        )
+        _render_phenotype_extraction(phenotype_model)
+        _render_accepted_hpo_terms()
+        _render_manual_hpo_selection()
 
 
 def _task_models_changed() -> None:
