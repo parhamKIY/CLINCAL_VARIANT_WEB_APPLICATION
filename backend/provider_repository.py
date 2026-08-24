@@ -17,6 +17,7 @@ from backend.evidence_repository import (
     EvidenceRepositoryValidationError,
 )
 from backend.evidence_repository_freshness import EvidenceFreshnessPolicy
+from backend.execution_trace import record_execution_event
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
     OPERATIONAL_FAILURE_STATUSES,
@@ -344,6 +345,15 @@ def execute_provider_with_repository(
             context.provider,
             context.semantic_node,
         )
+        record_execution_event(
+            "repository_record_rejected",
+            scope="repository",
+            provider=context.provider,
+            capability=context.semantic_node,
+            status="invalid",
+            outcome_category="invalid_record",
+            reason_category="integrity_or_validation_failure",
+        )
         cached = None
     except (EvidenceRepositoryError, EvidenceRepositoryValidationError):
         LOGGER.warning(
@@ -351,6 +361,15 @@ def execute_provider_with_repository(
             "provider=%s semantic_node=%s",
             context.provider,
             context.semantic_node,
+        )
+        record_execution_event(
+            "repository_lookup_failed",
+            scope="repository",
+            provider=context.provider,
+            capability=context.semantic_node,
+            status="error",
+            outcome_category="repository_error",
+            reason_category="repository_error",
         )
         cached = None
     if cached is not None:
@@ -366,6 +385,28 @@ def execute_provider_with_repository(
             context.provider,
             context.semantic_node,
             invalid_records,
+        )
+        record_execution_event(
+            "repository_lookup_hit",
+            scope="repository",
+            provider=context.provider,
+            capability=context.semantic_node,
+            status="success",
+            outcome_category="cache_hit",
+            source_mode="repository_cache",
+            provider_role=context.provider_role,
+            fallback_for=context.fallback_for,
+        )
+        record_execution_event(
+            "provider_source_selected",
+            scope="provider",
+            provider=context.provider,
+            capability=context.semantic_node,
+            status=str(cached.get("status", "success")),
+            outcome_category="success",
+            source_mode="repository_cache",
+            provider_role=context.provider_role,
+            fallback_for=context.fallback_for,
         )
         return cached
     metric_store._increment("cache_misses")
@@ -383,6 +424,20 @@ def execute_provider_with_repository(
         context.semantic_node,
         str(stale_found).casefold(),
         str(bool(invalid_records)).casefold(),
+    )
+    record_execution_event(
+        (
+            "repository_lookup_stale"
+            if stale_found
+            else "repository_lookup_miss"
+        ),
+        scope="repository",
+        provider=context.provider,
+        capability=context.semantic_node,
+        status="stale" if stale_found else "missing",
+        outcome_category="cache_miss",
+        provider_role=context.provider_role,
+        fallback_for=context.fallback_for,
     )
 
     raw_live_result = live_call()
@@ -429,7 +484,7 @@ def execute_provider_with_repository(
                 context.semantic_node,
                 observation_status,
             )
-    return _decorate_result(
+    decorated = _decorate_result(
         live_result,
         context=context,
         source_mode="live_provider",
@@ -437,6 +492,20 @@ def execute_provider_with_repository(
         cache_retrieved_at=None,
         upstream_version=upstream_version,
     )
+    record_execution_event(
+        "provider_source_selected",
+        scope="provider",
+        provider=context.provider,
+        capability=context.semantic_node,
+        status=str(decorated.get("status", "success")),
+        outcome_category=(
+            "no_match" if observation_status == "no_match" else "success"
+        ),
+        source_mode="live_provider",
+        provider_role=context.provider_role,
+        fallback_for=context.fallback_for,
+    )
+    return decorated
 
 
 __all__ = [

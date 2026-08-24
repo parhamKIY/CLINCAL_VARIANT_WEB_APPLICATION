@@ -7,8 +7,10 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Literal, TypedDict, cast
 
+from backend.execution_trace import record_execution_event
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -878,6 +880,7 @@ def _recovery_retry_count(
 def _execute_interpretation_request(
     evidence: EvidenceObject,
     *,
+    variant_index: int,
     user_prompt: str,
     model: str,
     client: LLMClient | None,
@@ -916,6 +919,7 @@ def _execute_interpretation_request(
                     max_retries=max_retries,
                 ),
                 response_format=VARIANT_INTERPRETATION_RESPONSE_SCHEMA,
+                trace_variant_index=variant_index,
             )
             parsed = _parse_response(
                 response,
@@ -949,6 +953,18 @@ def _execute_interpretation_request(
                         getattr(exc, "schema_error", None),
                         allowed=SAFE_SCHEMA_ERRORS,
                     ),
+                )
+                record_execution_event(
+                    "llm_retry_scheduled",
+                    scope="llm",
+                    stage="llm",
+                    variant_index=variant_index,
+                    attempt=2,
+                    status="scheduled",
+                    outcome_category="structured_output_repair",
+                    reason_category=failure_type,
+                    model_identifier=model,
+                    retry_scheduled=True,
                 )
                 continue
             raise
@@ -995,6 +1011,8 @@ def interpret_variant(
     readiness_audit: Mapping[str, object] | None = None,
 ) -> VariantInterpretationResult:
     """Interpret one validated Evidence Object with one selected model."""
+
+    interpretation_started_at = perf_counter()
 
     if client is not None and model is not None:
         raise VariantInterpretationError(
@@ -1051,6 +1069,14 @@ def interpret_variant(
             "Evidence is not ready for interpretation."
         )
     configured_model = _configured_model(model)
+    record_execution_event(
+        "variant_interpretation_started",
+        scope="variant",
+        stage="llm",
+        variant_index=variant_index,
+        status="running",
+        model_identifier=configured_model,
+    )
     configured_fallback_model = _fallback_model(
         primary_client=client,
         fallback_client=fallback_client,
@@ -1076,6 +1102,7 @@ def interpret_variant(
     try:
         response, parsed, _ = _execute_interpretation_request(
             evidence,
+            variant_index=variant_index,
             user_prompt=user_prompt,
             model=configured_model,
             client=client,
@@ -1102,9 +1129,20 @@ def interpret_variant(
             configured_fallback_model,
             failure_type,
         )
+        record_execution_event(
+            "llm_recovery_started",
+            scope="llm",
+            stage="llm",
+            variant_index=variant_index,
+            status="running",
+            outcome_category="fallback_model",
+            reason_category=failure_type,
+            model_identifier=configured_fallback_model,
+        )
         try:
             response, parsed, _ = _execute_interpretation_request(
                 evidence,
+                variant_index=variant_index,
                 user_prompt=user_prompt,
                 model=configured_fallback_model,
                 client=fallback_client,
@@ -1152,7 +1190,41 @@ def interpret_variant(
         "generated_at": _timestamp(timestamp),
         "error_type": None,
     }
-    return validate_variant_interpretation_result(result, evidence=evidence)
+    validated_result = validate_variant_interpretation_result(
+        result,
+        evidence=evidence,
+    )
+    if ai_classification is not None:
+        record_execution_event(
+            "llm_output_classification_generated",
+            scope="llm",
+            stage="llm",
+            variant_index=variant_index,
+            status="success",
+            model_identifier=active_model,
+        )
+    record_execution_event(
+        "llm_output_interpretation_generated",
+        scope="llm",
+        stage="llm",
+        variant_index=variant_index,
+        status="success",
+        model_identifier=active_model,
+    )
+    record_execution_event(
+        "variant_interpretation_completed",
+        scope="variant",
+        stage="llm",
+        variant_index=variant_index,
+        status="success",
+        outcome_category="success",
+        duration_ms=max(
+            0,
+            round((perf_counter() - interpretation_started_at) * 1000),
+        ),
+        model_identifier=active_model,
+    )
+    return validated_result
 
 
 def _failed_result(
@@ -1194,7 +1266,21 @@ def _failed_result(
         "generated_at": _timestamp(timestamp),
         "error_type": diagnostic["failure_type"],
     }
-    return validate_variant_interpretation_result(result, evidence=evidence)
+    validated_result = validate_variant_interpretation_result(
+        result,
+        evidence=evidence,
+    )
+    record_execution_event(
+        "variant_interpretation_failed",
+        scope="variant",
+        stage="llm",
+        variant_index=variant_index,
+        status="failed",
+        outcome_category="failed",
+        reason_category=diagnostic["failure_type"],
+        model_identifier=diagnostic["model"],
+    )
+    return validated_result
 
 
 def interpret_variants(

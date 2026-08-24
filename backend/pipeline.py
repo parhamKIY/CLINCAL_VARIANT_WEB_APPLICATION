@@ -32,6 +32,12 @@ from backend.error_handling import (
     PipelineResultError,
     map_pipeline_exception,
 )
+from backend.execution_trace import (
+    AnalysisExecutionTrace,
+    bind_execution_trace,
+    record_execution_event,
+    reset_execution_trace,
+)
 from backend.evidence_confirmation import (
     EvidenceConfirmationError,
     confirm_evidence_review,
@@ -168,6 +174,43 @@ _OPERATIONAL_ANNOTATION_FAILURE_STATUSES = frozenset(
     {"error", "unavailable", "invalid_response"}
 )
 _ANNOTATION_NO_MATCH_STATUSES = frozenset({"no_match", "not_found"})
+_TRACE_STAGE_EVENTS = {
+    "input": (
+        "input_validation_started",
+        "input_validated",
+        "input_validation_failed",
+    ),
+    "vcf_processing": (
+        "preprocessing_started",
+        "preprocessing_completed",
+        "preprocessing_failed",
+    ),
+    "annotation": (
+        "annotation_started",
+        "annotation_completed",
+        "annotation_failed",
+    ),
+    "phenotype": (
+        "phenotype_processing_started",
+        "phenotype_processing_completed",
+        "phenotype_processing_failed",
+    ),
+    "evidence": (
+        "evidence_collection_started",
+        "evidence_collection_completed",
+        "evidence_collection_failed",
+    ),
+    "llm": (
+        "interpretation_started",
+        "interpretation_completed",
+        "interpretation_failed",
+    ),
+    "report": (
+        "report_generation_started",
+        "report_generated",
+        "report_generation_failed",
+    ),
+}
 
 PipelineStatus = Literal[
     "pending",
@@ -1928,6 +1971,17 @@ def _set_stage(
             stage,
             safe_model,
         )
+        record_execution_event(
+            _TRACE_STAGE_EVENTS[stage][0],
+            scope=(
+                "llm"
+                if stage == "llm"
+                else "report" if stage == "report" else "stage"
+            ),
+            stage=stage,
+            status="running",
+            model_identifier=(safe_model if stage == "llm" else None),
+        )
     elif (
         status in _TERMINAL_STAGE_STATUSES
         and previous_status not in _TERMINAL_STAGE_STATUSES
@@ -1965,6 +2019,28 @@ def _set_stage(
                 safe_failure_category,
                 duration_ms,
             )
+        record_execution_event(
+            _TRACE_STAGE_EVENTS[stage][2 if status == "error" else 1],
+            scope=(
+                "llm"
+                if stage == "llm"
+                else "report" if stage == "report" else "stage"
+            ),
+            stage=stage,
+            status=status,
+            outcome_category=(
+                safe_failure_category
+                if status == "error"
+                else "completed_with_warnings"
+                if status == "warning"
+                else status
+            ),
+            duration_ms=duration_ms,
+            reason_category=(
+                safe_failure_category if status == "error" else None
+            ),
+            model_identifier=(safe_model if stage == "llm" else None),
+        )
 
 
 def _set_api_status(
@@ -2003,7 +2079,7 @@ def _log_annotation_provider_summaries(
     for provider in ANNOTATION_API_ORDER:
         statuses: list[str] = []
         fallback_used_count = 0
-        for annotation in annotations:
+        for variant_index, annotation in enumerate(annotations):
             sources = annotation.get("sources")
             if not isinstance(sources, Mapping):
                 continue
@@ -2015,6 +2091,76 @@ def _log_annotation_provider_summaries(
                 statuses.append(source_status)
             if source.get("fallback_used") is True:
                 fallback_used_count += 1
+            actual_provider = source.get("provider")
+            trace_provider = (
+                actual_provider
+                if isinstance(actual_provider, str) and actual_provider.strip()
+                else provider
+            )
+            source_mode = source.get("source_mode")
+            trace_source_mode = (
+                source_mode
+                if source_mode in {"live_provider", "repository_cache"}
+                else None
+            )
+            provider_role = source.get("provider_role")
+            trace_provider_role = (
+                provider_role
+                if provider_role in {"primary", "fallback"}
+                else "fallback"
+                if source.get("fallback_used") is True
+                else "primary"
+            )
+            outcome_category = (
+                "success"
+                if source_status in {"success", "available", "partial"}
+                else "no_match"
+                if source_status in _ANNOTATION_NO_MATCH_STATUSES
+                else source_status
+                if isinstance(source_status, str)
+                else "unknown"
+            )
+            record_execution_event(
+                "provider_route_completed",
+                scope="provider",
+                stage="annotation",
+                variant_index=variant_index,
+                provider=trace_provider,
+                capability=provider,
+                status=(
+                    source_status if isinstance(source_status, str) else "unknown"
+                ),
+                outcome_category=outcome_category,
+                source_mode=trace_source_mode,
+                provider_role=trace_provider_role,
+            )
+            if source.get("fallback_used") is True:
+                record_execution_event(
+                    "fallback_activated",
+                    scope="provider",
+                    stage="annotation",
+                    variant_index=variant_index,
+                    provider=trace_provider,
+                    capability=provider,
+                    status=(
+                        source_status
+                        if isinstance(source_status, str)
+                        else "unknown"
+                    ),
+                    outcome_category=outcome_category,
+                    source_mode=trace_source_mode,
+                    provider_role="fallback",
+                    fallback_for=(
+                        source.get("fallback_for")
+                        if isinstance(source.get("fallback_for"), str)
+                        else None
+                    ),
+                    reason_category=(
+                        source.get("primary_failure")
+                        if isinstance(source.get("primary_failure"), str)
+                        else None
+                    ),
+                )
 
         operational_failure_count = sum(
             status in _OPERATIONAL_ANNOTATION_FAILURE_STATUSES
@@ -2419,6 +2565,14 @@ def _process_filtered_variants(
         raise PipelineError(
             "Accepted input variant order could not be established."
         ) from exc
+    for variant_index in range(len(indexed_variants)):
+        record_execution_event(
+            "variant_processing_started",
+            scope="variant",
+            stage="vcf_processing",
+            variant_index=variant_index,
+            status="running",
+        )
     result["variants"] = [
         minimize_variant(variant)
         for variant in indexed_variants
@@ -2437,6 +2591,15 @@ def _process_filtered_variants(
         raise PipelineError(
             "Parser and normalized variant identity did not match."
         ) from exc
+    for variant_index in range(result["variant_count"]):
+        record_execution_event(
+            "variant_processing_completed",
+            scope="variant",
+            stage="vcf_processing",
+            variant_index=variant_index,
+            status="success",
+            outcome_category="canonical_identity_validated",
+        )
     if adapted_input_records is None:
         result["input_preprocessing_results"] = [
             dict(
@@ -2584,6 +2747,14 @@ def _annotate_and_match(
         ) from exc
     result["annotations"] = public_annotations
     _retain_annotation_warnings(result, result["annotations"])
+    for variant_index in range(len(result["annotations"])):
+        record_execution_event(
+            "annotation_completed",
+            scope="variant",
+            stage="annotation",
+            variant_index=variant_index,
+            status="success",
+        )
     _log_annotation_provider_summaries(result["annotations"])
     annotation_status: PipelineStageStatus = (
         "warning"
@@ -3159,6 +3330,28 @@ def _build_evidence_and_report(
     result["evidence_construction_outcomes"] = [
         dict(outcome) for outcome in final_batch["outcomes"]
     ]
+    for variant_index, outcome in enumerate(final_batch["outcomes"]):
+        outcome_status = outcome.get("status")
+        failure_code = outcome.get("failure_code")
+        record_execution_event(
+            (
+                "evidence_created"
+                if outcome_status == "success"
+                else "evidence_creation_failed"
+            ),
+            scope="variant",
+            stage="evidence",
+            variant_index=variant_index,
+            status=(
+                outcome_status if isinstance(outcome_status, str) else "unknown"
+            ),
+            outcome_category=(
+                "success" if outcome_status == "success" else "failed"
+            ),
+            reason_category=(
+                failure_code if isinstance(failure_code, str) else None
+            ),
+        )
     final_failure = next(
         (
             outcome
@@ -3852,6 +4045,7 @@ def run_analysis(
     persist_analysis: bool = True,
     readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
+    execution_trace: AnalysisExecutionTrace | None = None,
 ) -> PipelineResult:
     """Run analysis through interpretation, then pause for final review."""
 
@@ -3868,13 +4062,21 @@ def run_analysis(
     )
     run_id = f"run-{uuid4().hex}"
     context_token = bind_analysis_run_id(run_id)
+    trace_token = None
     analysis_started_at = perf_counter()
-    LOGGER.info(
-        "event=analysis_started input_mode=%s phenotype_count=%d",
-        input_mode,
-        phenotype_count,
-    )
     try:
+        if execution_trace is not None:
+            trace_token = bind_execution_trace(execution_trace, run_id)
+        LOGGER.info(
+            "event=analysis_started input_mode=%s phenotype_count=%d",
+            input_mode,
+            phenotype_count,
+        )
+        record_execution_event(
+            "analysis_started",
+            scope="analysis",
+            status="running",
+        )
         result = _run_analysis_unpersisted(
             vcf_path=vcf_path,
             phenotypes=phenotypes,
@@ -3967,6 +4169,26 @@ def run_analysis(
             len(validated["errors"]),
             max(0, int((perf_counter() - analysis_started_at) * 1000)),
         )
+        interpretation_results = validated["variant_interpretation_results"]
+        succeeded_count = sum(
+            item["status"] == "success" for item in interpretation_results
+        )
+        failed_count = sum(
+            item["status"] == "failed" for item in interpretation_results
+        ) + max(0, validated["variant_count"] - len(interpretation_results))
+        record_execution_event(
+            "analysis_completed",
+            scope="analysis",
+            status=validated["status"],
+            outcome_category=validated["status"],
+            duration_ms=max(
+                0,
+                int((perf_counter() - analysis_started_at) * 1000),
+            ),
+            variant_count=validated["variant_count"],
+            succeeded_count=succeeded_count,
+            failed_count=failed_count,
+        )
         return validated
     except Exception as exc:
         LOGGER.error(
@@ -3974,8 +4196,21 @@ def run_analysis(
             type(exc).__name__,
             max(0, int((perf_counter() - analysis_started_at) * 1000)),
         )
+        record_execution_event(
+            "analysis_aborted",
+            scope="analysis",
+            status="error",
+            outcome_category="failed",
+            duration_ms=max(
+                0,
+                int((perf_counter() - analysis_started_at) * 1000),
+            ),
+            reason_category="pipeline_exception",
+        )
         raise
     finally:
+        if trace_token is not None:
+            reset_execution_trace(trace_token)
         reset_analysis_run_id(context_token)
 
 

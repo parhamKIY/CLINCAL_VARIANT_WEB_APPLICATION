@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from backend.execution_trace import record_execution_event
 from backend.logging_config import get_logger
 from config import settings
 
@@ -840,6 +841,7 @@ def call_llm(
     model: str | None = None,
     max_retries: int | None = None,
     response_format: LLMJSONSchema | LLMJSONObject | None = None,
+    trace_variant_index: int | None = None,
 ) -> LLMResponse:
     """Call an LLM without exposing provider-specific SDK details."""
 
@@ -895,16 +897,73 @@ def call_llm(
         )
 
     for attempt in range(resolved_retries + 1):
+        attempt_started_at = perf_counter()
+        record_execution_event(
+            "llm_call_started",
+            scope="llm",
+            stage="llm",
+            variant_index=trace_variant_index,
+            attempt=attempt + 1,
+            status="running",
+            model_identifier=model or settings.LLM_MODEL,
+        )
         try:
-            return active_client.generate(request)
+            response = active_client.generate(request)
+            record_execution_event(
+                "llm_call_completed",
+                scope="llm",
+                stage="llm",
+                variant_index=trace_variant_index,
+                attempt=attempt + 1,
+                status="success",
+                outcome_category="success",
+                duration_ms=max(
+                    0,
+                    round((perf_counter() - attempt_started_at) * 1000),
+                ),
+                model_identifier=response.model,
+            )
+            return response
         except (
             LLMAuthenticationError,
             LLMConfigurationError,
             LLMResponseError,
             LLMValidationError,
-        ):
+        ) as exc:
+            outcome = _llm_error_outcome(exc)
+            record_execution_event(
+                "llm_call_failed",
+                scope="llm",
+                stage="llm",
+                variant_index=trace_variant_index,
+                attempt=attempt + 1,
+                status="failed",
+                outcome_category=outcome,
+                duration_ms=max(
+                    0,
+                    round((perf_counter() - attempt_started_at) * 1000),
+                ),
+                reason_category=outcome,
+                model_identifier=model or settings.LLM_MODEL,
+            )
             raise
         except LLMRequestError as exc:
+            outcome = _llm_error_outcome(exc)
+            record_execution_event(
+                "llm_call_failed",
+                scope="llm",
+                stage="llm",
+                variant_index=trace_variant_index,
+                attempt=attempt + 1,
+                status="failed",
+                outcome_category=outcome,
+                duration_ms=max(
+                    0,
+                    round((perf_counter() - attempt_started_at) * 1000),
+                ),
+                reason_category=outcome,
+                model_identifier=model or settings.LLM_MODEL,
+            )
             if not _is_retryable_request_error(exc):
                 exc.attempt = attempt + 1
                 raise
@@ -918,6 +977,18 @@ def call_llm(
                 attempt + 2,
                 _llm_error_outcome(exc),
                 round(delay_seconds * 1000),
+            )
+            record_execution_event(
+                "llm_retry_scheduled",
+                scope="llm",
+                stage="llm",
+                variant_index=trace_variant_index,
+                attempt=attempt + 2,
+                status="scheduled",
+                outcome_category="retry",
+                reason_category=outcome,
+                model_identifier=model or settings.LLM_MODEL,
+                retry_scheduled=True,
             )
             sleep(delay_seconds)
 

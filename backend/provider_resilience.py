@@ -12,6 +12,7 @@ from typing import Any, Callable, Generic, Literal, TypeVar, TypedDict, cast
 
 import requests
 
+from backend.execution_trace import record_execution_event
 from backend.logging_config import get_logger
 
 
@@ -869,6 +870,26 @@ def _log_policy_event(
         circuit_state,
         str(retry_scheduled).casefold(),
         fallback_transition,
+    )
+    record_execution_event(
+        (
+            "provider_attempt_completed"
+            if event == "provider_call"
+            else event
+        ),
+        scope="provider",
+        provider=provider,
+        capability=operation_name,
+        attempt=attempt,
+        status=status,
+        outcome_category=status,
+        duration_ms=duration_ms,
+        source_mode=("live_provider" if event == "provider_call" else None),
+        reason_category=(
+            status if status not in {"success", "no_match"} else None
+        ),
+        retry_scheduled=retry_scheduled,
+        circuit_state=circuit_state,
     )
 
 
