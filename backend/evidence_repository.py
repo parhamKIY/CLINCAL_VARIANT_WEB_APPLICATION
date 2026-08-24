@@ -16,6 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from backend.privacy import (
@@ -30,10 +31,11 @@ from backend.variant_integrity import (
 from config import PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE, settings
 
 
-EVIDENCE_REPOSITORY_SCHEMA_VERSION = 1
+EVIDENCE_REPOSITORY_SCHEMA_VERSION = 2
 EVIDENCE_REPOSITORY_RECORD_SCHEMA_VERSION = "1.0"
 EVIDENCE_REPOSITORY_BUSY_TIMEOUT_MS = 5_000
 _REPOSITORY_TABLE = "evidence_repository_records"
+_REPOSITORY_LOOKUP_INDEX = "evidence_repository_lookup_v2"
 _IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9_.:-]{0,127}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _RECORD_ID_PATTERN = re.compile(r"repository-sha256:[0-9a-f]{64}")
@@ -93,6 +95,15 @@ _REPOSITORY_COLUMNS = (
     "stored_at",
     "payload_sha256",
     "schema_version",
+)
+_REPOSITORY_LOOKUP_COLUMNS = (
+    "canonical_digest",
+    "semantic_node",
+    "provider",
+    "query_identity_hash",
+    "retrieved_at",
+    "stored_at",
+    "record_id",
 )
 
 
@@ -361,6 +372,8 @@ class EvidenceRepository:
                 "analysis persistence."
             )
         self.database_path = resolved
+        self._initialization_lock = RLock()
+        self._initialized = False
 
     def _connect(self) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
@@ -408,7 +421,7 @@ class EvidenceRepository:
         }
 
     @staticmethod
-    def _validate_schema(connection: sqlite3.Connection) -> None:
+    def _validate_table_schema(connection: sqlite3.Connection) -> None:
         if EvidenceRepository._application_tables(connection) != {
             _REPOSITORY_TABLE
         }:
@@ -426,103 +439,155 @@ class EvidenceRepository:
                 "The evidence repository schema is incomplete or unexpected."
             )
 
+    @staticmethod
+    def _validate_schema(connection: sqlite3.Connection) -> None:
+        EvidenceRepository._validate_table_schema(connection)
+        index_columns = tuple(
+            str(row["name"])
+            for row in connection.execute(
+                f'PRAGMA index_info("{_REPOSITORY_LOOKUP_INDEX}")'
+            )
+        )
+        if index_columns != _REPOSITORY_LOOKUP_COLUMNS:
+            raise EvidenceRepositoryIntegrityError(
+                "The evidence repository schema is incomplete or unexpected."
+            )
+
+    @staticmethod
+    def _create_lookup_index(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            f"""
+            CREATE INDEX {_REPOSITORY_LOOKUP_INDEX}
+            ON {_REPOSITORY_TABLE} (
+                {', '.join(_REPOSITORY_LOOKUP_COLUMNS)}
+            )
+            """
+        )
+
     def initialize(self) -> Path:
         """Create or verify the isolated repository schema."""
 
-        try:
-            self.database_path.parent.mkdir(
-                mode=PRIVATE_DIRECTORY_MODE,
-                parents=True,
-                exist_ok=True,
-            )
-            self.database_path.parent.chmod(PRIVATE_DIRECTORY_MODE)
-        except OSError as exc:
-            raise EvidenceRepositoryConfigurationError(
-                "The evidence repository directory could not be prepared."
-            ) from exc
+        with self._initialization_lock:
+            try:
+                self.database_path.parent.mkdir(
+                    mode=PRIVATE_DIRECTORY_MODE,
+                    parents=True,
+                    exist_ok=True,
+                )
+                self.database_path.parent.chmod(PRIVATE_DIRECTORY_MODE)
+            except OSError as exc:
+                raise EvidenceRepositoryConfigurationError(
+                    "The evidence repository directory could not be prepared."
+                ) from exc
 
+            connection = self._connect()
+            try:
+                journal_mode = connection.execute(
+                    "PRAGMA journal_mode = WAL"
+                ).fetchone()[0]
+                if str(journal_mode).casefold() != "wal":
+                    raise EvidenceRepositoryStorageError(
+                        "The evidence repository could not enable WAL mode."
+                    )
+                connection.execute("BEGIN IMMEDIATE")
+                schema_version = int(
+                    connection.execute("PRAGMA user_version").fetchone()[0]
+                )
+                if schema_version > EVIDENCE_REPOSITORY_SCHEMA_VERSION:
+                    raise EvidenceRepositoryIntegrityError(
+                        "The evidence repository was created by a newer version."
+                    )
+                if schema_version == 0:
+                    if self._application_tables(connection):
+                        raise EvidenceRepositoryIntegrityError(
+                            "The existing evidence repository has no supported "
+                            "schema version."
+                        )
+                    connection.execute(
+                        """
+                        CREATE TABLE evidence_repository_records (
+                            record_id TEXT PRIMARY KEY,
+                            canonical_digest TEXT NOT NULL,
+                            assembly TEXT NOT NULL,
+                            chromosome TEXT NOT NULL,
+                            position INTEGER NOT NULL CHECK (position > 0),
+                            reference_allele TEXT NOT NULL,
+                            alternate_allele TEXT NOT NULL,
+                            semantic_node TEXT NOT NULL,
+                            provider TEXT NOT NULL,
+                            provider_role TEXT NOT NULL
+                                CHECK (provider_role IN ('primary', 'fallback')),
+                            source TEXT NOT NULL,
+                            query_identity_hash TEXT NOT NULL,
+                            observation_status TEXT NOT NULL
+                                CHECK (observation_status IN ('success', 'no_match')),
+                            normalized_payload_json TEXT NOT NULL,
+                            retrieved_at TEXT NOT NULL,
+                            stored_at TEXT NOT NULL,
+                            payload_sha256 TEXT NOT NULL,
+                            schema_version TEXT NOT NULL
+                        ) WITHOUT ROWID
+                        """
+                    )
+                    self._create_lookup_index(connection)
+                    connection.execute(
+                        f"PRAGMA user_version = {EVIDENCE_REPOSITORY_SCHEMA_VERSION}"
+                    )
+                elif schema_version == 1:
+                    self._validate_table_schema(connection)
+                    connection.execute(
+                        "DROP INDEX IF EXISTS evidence_repository_lookup"
+                    )
+                    self._create_lookup_index(connection)
+                    connection.execute(
+                        f"PRAGMA user_version = {EVIDENCE_REPOSITORY_SCHEMA_VERSION}"
+                    )
+                self._validate_schema(connection)
+                connection.commit()
+            except EvidenceRepositoryError:
+                connection.rollback()
+                raise
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise EvidenceRepositoryStorageError(
+                    "The evidence repository schema could not be initialized."
+                ) from exc
+            finally:
+                connection.close()
+            try:
+                self.database_path.chmod(PRIVATE_FILE_MODE)
+            except OSError as exc:
+                raise EvidenceRepositoryConfigurationError(
+                    "The evidence repository permissions could not be secured."
+                ) from exc
+            self._initialized = True
+            return self.database_path
+
+    def _connect_verified(self) -> sqlite3.Connection:
+        """Open one operation connection after bounded schema initialization."""
+
+        with self._initialization_lock:
+            if not self._initialized or not self.database_path.is_file():
+                self.initialize()
         connection = self._connect()
         try:
-            journal_mode = connection.execute(
-                "PRAGMA journal_mode = WAL"
-            ).fetchone()[0]
-            if str(journal_mode).casefold() != "wal":
-                raise EvidenceRepositoryStorageError(
-                    "The evidence repository could not enable WAL mode."
-                )
-            connection.execute("BEGIN IMMEDIATE")
             schema_version = int(
                 connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if schema_version > EVIDENCE_REPOSITORY_SCHEMA_VERSION:
+            if schema_version != EVIDENCE_REPOSITORY_SCHEMA_VERSION:
                 raise EvidenceRepositoryIntegrityError(
-                    "The evidence repository was created by a newer version."
-                )
-            if schema_version == 0:
-                if self._application_tables(connection):
-                    raise EvidenceRepositoryIntegrityError(
-                        "The existing evidence repository has no supported "
-                        "schema version."
-                    )
-                connection.execute(
-                    """
-                    CREATE TABLE evidence_repository_records (
-                        record_id TEXT PRIMARY KEY,
-                        canonical_digest TEXT NOT NULL,
-                        assembly TEXT NOT NULL,
-                        chromosome TEXT NOT NULL,
-                        position INTEGER NOT NULL CHECK (position > 0),
-                        reference_allele TEXT NOT NULL,
-                        alternate_allele TEXT NOT NULL,
-                        semantic_node TEXT NOT NULL,
-                        provider TEXT NOT NULL,
-                        provider_role TEXT NOT NULL
-                            CHECK (provider_role IN ('primary', 'fallback')),
-                        source TEXT NOT NULL,
-                        query_identity_hash TEXT NOT NULL,
-                        observation_status TEXT NOT NULL
-                            CHECK (observation_status IN ('success', 'no_match')),
-                        normalized_payload_json TEXT NOT NULL,
-                        retrieved_at TEXT NOT NULL,
-                        stored_at TEXT NOT NULL,
-                        payload_sha256 TEXT NOT NULL,
-                        schema_version TEXT NOT NULL
-                    ) WITHOUT ROWID
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE INDEX evidence_repository_lookup
-                    ON evidence_repository_records (
-                        canonical_digest,
-                        semantic_node,
-                        provider,
-                        retrieved_at
-                    )
-                    """
-                )
-                connection.execute(
-                    f"PRAGMA user_version = {EVIDENCE_REPOSITORY_SCHEMA_VERSION}"
+                    "The evidence repository schema is unsupported."
                 )
             self._validate_schema(connection)
-            connection.commit()
+            return connection
         except EvidenceRepositoryError:
-            connection.rollback()
+            connection.close()
             raise
         except sqlite3.Error as exc:
-            connection.rollback()
-            raise EvidenceRepositoryStorageError(
-                "The evidence repository schema could not be initialized."
-            ) from exc
-        finally:
             connection.close()
-        try:
-            self.database_path.chmod(PRIVATE_FILE_MODE)
-        except OSError as exc:
-            raise EvidenceRepositoryConfigurationError(
-                "The evidence repository permissions could not be secured."
+            raise EvidenceRepositoryStorageError(
+                "The evidence repository schema could not be verified."
             ) from exc
-        return self.database_path
 
     def store_provider_observation(
         self,
@@ -653,8 +718,7 @@ class EvidenceRepository:
             EVIDENCE_REPOSITORY_RECORD_SCHEMA_VERSION,
         )
 
-        self.initialize()
-        connection = self._connect()
+        connection = self._connect_verified()
         try:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -857,8 +921,7 @@ class EvidenceRepository:
             parameters.append(
                 _sha256(_canonical_json_bytes(safe_query_identity))
             )
-        self.initialize()
-        connection = self._connect()
+        connection = self._connect_verified()
         try:
             rows = connection.execute(
                 f"""
@@ -881,8 +944,7 @@ class EvidenceRepository:
     def scan_integrity(self) -> EvidenceRepositoryIntegrityScan:
         """Inspect all records while withholding corrupted stored content."""
 
-        self.initialize()
-        connection = self._connect()
+        connection = self._connect_verified()
         try:
             rows = connection.execute(
                 f"""
@@ -914,8 +976,7 @@ class EvidenceRepository:
     def remove_invalid_records(self) -> EvidenceRepositoryInvalidCleanup:
         """Delete only records that fail deterministic integrity checks."""
 
-        self.initialize()
-        connection = self._connect()
+        connection = self._connect_verified()
         try:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(

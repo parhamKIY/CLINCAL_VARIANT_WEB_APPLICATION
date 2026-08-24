@@ -347,19 +347,28 @@ def _all_paragraphs(document: Document):
 
 
 def _replace_paragraph_text(paragraph, replacements: dict[str, str]) -> None:
-    for run in paragraph.runs:
+    runs = list(paragraph.runs)
+    for run, original_text in zip(
+        runs,
+        (run.text for run in runs),
+        strict=True,
+    ):
+        updated_text = original_text
         for token, value in replacements.items():
-            if token in run.text:
-                run.text = run.text.replace(token, value)
-    remaining = [token for token in replacements if token in paragraph.text]
+            if token in updated_text:
+                updated_text = updated_text.replace(token, value)
+        if updated_text != original_text:
+            run.text = updated_text
+    paragraph_text = paragraph.text
+    remaining = [token for token in replacements if token in paragraph_text]
     if not remaining:
         return
-    text = paragraph.text
+    text = paragraph_text
     for token in remaining:
         text = text.replace(token, replacements[token])
-    if paragraph.runs:
-        paragraph.runs[0].text = text
-        for run in paragraph.runs[1:]:
+    if runs:
+        runs[0].text = text
+        for run in runs[1:]:
             run.text = ""
     else:
         paragraph.add_run(text)

@@ -336,7 +336,7 @@ def test_repository_schema_is_isolated_from_clinical_persistence(
     finally:
         connection.close()
 
-    assert schema_version == EVIDENCE_REPOSITORY_SCHEMA_VERSION == 1
+    assert schema_version == EVIDENCE_REPOSITORY_SCHEMA_VERSION == 2
     assert settings.EVIDENCE_REPOSITORY_PATH != settings.DATABASE_PATH
     assert "analysis_id" not in columns
     assert not {
