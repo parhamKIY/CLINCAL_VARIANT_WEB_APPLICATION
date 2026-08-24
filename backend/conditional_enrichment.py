@@ -25,9 +25,11 @@ from backend.evidence_repository import (
     EvidenceRepository,
     EvidenceRepositoryError,
 )
+from backend.evidence_repository_freshness import EvidenceFreshnessPolicy
 from backend.logging_config import get_logger
 from backend.provider_repository import (
     ProviderRepositoryContext,
+    ProviderRepositoryMetrics,
     ProviderRepositoryResultError,
     execute_provider_with_repository,
 )
@@ -1040,6 +1042,11 @@ def fetch_ensembl_population_evidence(
     repository_provider_role: ProviderRole = "primary",
     repository_fallback_for: str | None = None,
     repository_primary_failure: ProviderStatus | None = None,
+    repository_freshness_policy: EvidenceFreshnessPolicy | None = None,
+    repository_metrics: ProviderRepositoryMetrics | None = None,
+    repository_clock: Callable[[], datetime] = lambda: datetime.now(
+        timezone.utc
+    ),
 ) -> dict[str, Any]:
     """Fetch or reuse exact validated Ensembl population evidence."""
 
@@ -1086,6 +1093,9 @@ def fetch_ensembl_population_evidence(
             source="ensembl_variation",
             query_identifier=rsid,
         ),
+        freshness_policy=repository_freshness_policy,
+        metrics=repository_metrics,
+        clock=repository_clock,
     )
 
 
@@ -1327,6 +1337,11 @@ def fetch_gnomad_evidence(
     circuit_state: ProviderCircuitState | None = None,
     evidence_repository: EvidenceRepository | None = None,
     use_repository: bool | None = None,
+    repository_freshness_policy: EvidenceFreshnessPolicy | None = None,
+    repository_metrics: ProviderRepositoryMetrics | None = None,
+    repository_clock: Callable[[], datetime] = lambda: datetime.now(
+        timezone.utc
+    ),
 ) -> dict[str, Any]:
     """Fetch or reuse exact validated gnomAD population evidence."""
 
@@ -1384,6 +1399,9 @@ def fetch_gnomad_evidence(
             source="gnomad",
             query_identifier=variant_id,
         ),
+        freshness_policy=repository_freshness_policy,
+        metrics=repository_metrics,
+        clock=repository_clock,
     )
 
 
@@ -1692,6 +1710,11 @@ def fetch_population_evidence_with_fallback(
     circuit_state: ProviderCircuitState | None = None,
     evidence_repository: EvidenceRepository | None = None,
     use_repository: bool | None = None,
+    repository_freshness_policy: EvidenceFreshnessPolicy | None = None,
+    repository_metrics: ProviderRepositoryMetrics | None = None,
+    repository_clock: Callable[[], datetime] = lambda: datetime.now(
+        timezone.utc
+    ),
 ) -> dict[str, Any]:
     """Use UCSC then Ensembl after an operational gnomAD failure."""
 
@@ -1701,6 +1724,9 @@ def fetch_population_evidence_with_fallback(
         circuit_state=circuit_state,
         evidence_repository=evidence_repository,
         use_repository=use_repository,
+        repository_freshness_policy=repository_freshness_policy,
+        repository_metrics=repository_metrics,
+        repository_clock=repository_clock,
     )
     primary_failure = primary.get("primary_failure")
     continued_after_no_match = primary.get("status") == "no_match"
@@ -1746,6 +1772,9 @@ def fetch_population_evidence_with_fallback(
             if continued_after_no_match
             else cast(ProviderStatus, primary_failure)
         ),
+        repository_freshness_policy=repository_freshness_policy,
+        repository_metrics=repository_metrics,
+        repository_clock=repository_clock,
     )
     if fallback.get("status") == "missing_identifier":
         primary.update(

@@ -140,6 +140,24 @@ class EvidenceRepositoryRecord:
     schema_version: str
 
 
+@dataclass(frozen=True)
+class EvidenceRepositoryIntegrityScan:
+    """Bounded integrity scan without exposing invalid stored content."""
+
+    records: tuple[EvidenceRepositoryRecord, ...]
+    total_records: int
+    invalid_records: int
+
+
+@dataclass(frozen=True)
+class EvidenceRepositoryInvalidCleanup:
+    """Result of an explicit invalid-record cleanup operation."""
+
+    records_evaluated: int
+    records_removed: int
+    records_retained: int
+
+
 def _canonical_json_bytes(value: object) -> bytes:
     try:
         return json.dumps(
@@ -860,6 +878,81 @@ class EvidenceRepository:
         finally:
             connection.close()
 
+    def scan_integrity(self) -> EvidenceRepositoryIntegrityScan:
+        """Inspect all records while withholding corrupted stored content."""
+
+        self.initialize()
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM {_REPOSITORY_TABLE}
+                ORDER BY stored_at, record_id
+                """
+            ).fetchall()
+            verified: list[EvidenceRepositoryRecord] = []
+            invalid_records = 0
+            for row in rows:
+                try:
+                    verified.append(self._verified_record(row))
+                except EvidenceRepositoryIntegrityError:
+                    invalid_records += 1
+            return EvidenceRepositoryIntegrityScan(
+                records=tuple(verified),
+                total_records=len(rows),
+                invalid_records=invalid_records,
+            )
+        except EvidenceRepositoryError:
+            raise
+        except sqlite3.Error as exc:
+            raise EvidenceRepositoryStorageError(
+                "The evidence repository integrity scan failed."
+            ) from exc
+        finally:
+            connection.close()
+
+    def remove_invalid_records(self) -> EvidenceRepositoryInvalidCleanup:
+        """Delete only records that fail deterministic integrity checks."""
+
+        self.initialize()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"""
+                SELECT * FROM {_REPOSITORY_TABLE}
+                ORDER BY stored_at, record_id
+                """
+            ).fetchall()
+            invalid_record_ids: list[str] = []
+            for row in rows:
+                try:
+                    self._verified_record(row)
+                except EvidenceRepositoryIntegrityError:
+                    invalid_record_ids.append(str(row["record_id"]))
+            for record_id in invalid_record_ids:
+                connection.execute(
+                    f"DELETE FROM {_REPOSITORY_TABLE} WHERE record_id = ?",
+                    (record_id,),
+                )
+            connection.commit()
+            removed = len(invalid_record_ids)
+            return EvidenceRepositoryInvalidCleanup(
+                records_evaluated=len(rows),
+                records_removed=removed,
+                records_retained=len(rows) - removed,
+            )
+        except EvidenceRepositoryError:
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise EvidenceRepositoryStorageError(
+                "Invalid evidence repository records could not be removed."
+            ) from exc
+        finally:
+            connection.close()
+
 
 __all__ = [
     "EVIDENCE_REPOSITORY_RECORD_SCHEMA_VERSION",
@@ -868,6 +961,8 @@ __all__ = [
     "EvidenceRepositoryConfigurationError",
     "EvidenceRepositoryError",
     "EvidenceRepositoryIntegrityError",
+    "EvidenceRepositoryIntegrityScan",
+    "EvidenceRepositoryInvalidCleanup",
     "EvidenceRepositoryRecord",
     "EvidenceRepositoryStorageError",
     "EvidenceRepositoryValidationError",

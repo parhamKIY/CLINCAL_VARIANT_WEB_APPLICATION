@@ -6,14 +6,17 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import Lock
 from typing import Any, Literal, cast
 
 from backend.evidence_repository import (
     EvidenceRepository,
     EvidenceRepositoryError,
+    EvidenceRepositoryIntegrityError,
     EvidenceRepositoryRecord,
     EvidenceRepositoryValidationError,
 )
+from backend.evidence_repository_freshness import EvidenceFreshnessPolicy
 from backend.logging_config import get_logger
 from backend.provider_resilience import (
     OPERATIONAL_FAILURE_STATUSES,
@@ -45,6 +48,32 @@ _PAYLOAD_FIELDS = frozenset(
 
 class ProviderRepositoryResultError(ValueError):
     """Raised when a normalized provider result violates its boundary."""
+
+
+class ProviderRepositoryMetrics:
+    """Thread-safe payload-free repository lookup counters."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._counts = {
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "stale_lookups": 0,
+            "invalid_records_rejected": 0,
+        }
+
+    def _increment(self, field: str, amount: int = 1) -> None:
+        with self._lock:
+            self._counts[field] += amount
+
+    def snapshot(self) -> dict[str, int]:
+        """Return bounded counters without query or clinical context."""
+
+        with self._lock:
+            return dict(self._counts)
+
+
+PROVIDER_REPOSITORY_METRICS = ProviderRepositoryMetrics()
 
 
 @dataclass(frozen=True)
@@ -204,8 +233,9 @@ def _load_cached_result(
     *,
     context: ProviderRepositoryContext,
     validate_result: ProviderResultValidator,
-    clock: ProviderClock,
-) -> dict[str, Any] | None:
+    freshness_policy: EvidenceFreshnessPolicy,
+    now: datetime,
+) -> tuple[dict[str, Any] | None, bool, int]:
     records = repository.find_by_canonical_identity(
         canonical_variant=context.canonical_variant,
         assembly=context.assembly,
@@ -213,29 +243,51 @@ def _load_cached_result(
         provider=context.provider,
         query_identity=context.query_identity,
     )
+    stale_found = False
+    invalid_records = 0
     for record in reversed(records):
         if (
             record.provider_role != context.provider_role
             or record.source != context.source
         ):
             continue
-        cached = _payload_result(
+        decision = freshness_policy.evaluate(
             record,
-            context=context,
-            validate_result=validate_result,
+            now=now,
+            expected_source_version=context.upstream_version,
         )
+        if decision.state == "stale":
+            stale_found = True
+            break
+        if decision.state == "unusable":
+            invalid_records += 1
+            continue
+        try:
+            cached = _payload_result(
+                record,
+                context=context,
+                validate_result=validate_result,
+            )
+        except ProviderRepositoryResultError:
+            invalid_records += 1
+            continue
         if cached is None:
+            invalid_records += 1
             continue
         result, upstream_version = cached
-        return _decorate_result(
-            result,
-            context=context,
-            source_mode="repository_cache",
-            original_retrieved_at=record.retrieved_at,
-            cache_retrieved_at=_timestamp(clock()),
-            upstream_version=upstream_version,
+        return (
+            _decorate_result(
+                result,
+                context=context,
+                source_mode="repository_cache",
+                original_retrieved_at=record.retrieved_at,
+                cache_retrieved_at=_timestamp(now),
+                upstream_version=upstream_version,
+            ),
+            stale_found,
+            invalid_records,
         )
-    return None
+    return None, stale_found, invalid_records
 
 
 def execute_provider_with_repository(
@@ -246,6 +298,8 @@ def execute_provider_with_repository(
     validate_result: ProviderResultValidator,
     resolve_status: ProviderStatusResolver = default_observation_status,
     clock: ProviderClock = lambda: datetime.now(UTC),
+    freshness_policy: EvidenceFreshnessPolicy | None = None,
+    metrics: ProviderRepositoryMetrics | None = None,
 ) -> dict[str, Any]:
     """Reuse or store one fully normalized, revalidated provider result."""
 
@@ -261,27 +315,75 @@ def execute_provider_with_repository(
         raise ProviderRepositoryResultError(
             "Provider repository callbacks must be callable."
         )
+    policy = freshness_policy or EvidenceFreshnessPolicy.from_settings()
+    if not isinstance(policy, EvidenceFreshnessPolicy):
+        raise ProviderRepositoryResultError(
+            "freshness_policy must be an EvidenceFreshnessPolicy."
+        )
+    metric_store = metrics or PROVIDER_REPOSITORY_METRICS
+    if not isinstance(metric_store, ProviderRepositoryMetrics):
+        raise ProviderRepositoryResultError(
+            "metrics must be ProviderRepositoryMetrics."
+        )
+    lookup_time = clock()
+    stale_found = False
+    invalid_records = 0
     try:
-        cached = _load_cached_result(
+        cached, stale_found, invalid_records = _load_cached_result(
             repository,
             context=context,
             validate_result=validate_result,
-            clock=clock,
+            freshness_policy=policy,
+            now=lookup_time,
         )
-    except (
-        EvidenceRepositoryError,
-        EvidenceRepositoryValidationError,
-        ProviderRepositoryResultError,
-    ):
+    except (EvidenceRepositoryIntegrityError, ProviderRepositoryResultError):
+        invalid_records = 1
         LOGGER.warning(
-            "event=evidence_repository_lookup_failed provider=%s "
-            "semantic_node=%s",
+            "event=evidence_repository_lookup outcome=invalid "
+            "provider=%s semantic_node=%s",
+            context.provider,
+            context.semantic_node,
+        )
+        cached = None
+    except (EvidenceRepositoryError, EvidenceRepositoryValidationError):
+        LOGGER.warning(
+            "event=evidence_repository_lookup outcome=repository_error "
+            "provider=%s semantic_node=%s",
             context.provider,
             context.semantic_node,
         )
         cached = None
     if cached is not None:
+        metric_store._increment("cache_hits")
+        if invalid_records:
+            metric_store._increment(
+                "invalid_records_rejected",
+                invalid_records,
+            )
+        LOGGER.info(
+            "event=evidence_repository_lookup outcome=hit provider=%s "
+            "semantic_node=%s invalid_records=%s",
+            context.provider,
+            context.semantic_node,
+            invalid_records,
+        )
         return cached
+    metric_store._increment("cache_misses")
+    if stale_found:
+        metric_store._increment("stale_lookups")
+    if invalid_records:
+        metric_store._increment(
+            "invalid_records_rejected",
+            invalid_records,
+        )
+    LOGGER.info(
+        "event=evidence_repository_lookup outcome=miss provider=%s "
+        "semantic_node=%s stale=%s invalid=%s",
+        context.provider,
+        context.semantic_node,
+        str(stale_found).casefold(),
+        str(bool(invalid_records)).casefold(),
+    )
 
     raw_live_result = live_call()
     if not isinstance(raw_live_result, Mapping):
@@ -339,7 +441,9 @@ def execute_provider_with_repository(
 
 __all__ = [
     "PROVIDER_REPOSITORY_PAYLOAD_SCHEMA_VERSION",
+    "PROVIDER_REPOSITORY_METRICS",
     "ProviderRepositoryContext",
+    "ProviderRepositoryMetrics",
     "ProviderRepositoryResultError",
     "default_observation_status",
     "execute_provider_with_repository",

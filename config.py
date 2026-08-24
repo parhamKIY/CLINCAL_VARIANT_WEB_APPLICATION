@@ -625,6 +625,23 @@ class Settings:
         "storage/evidence_repository/evidence_repository.sqlite3",
     )
 
+    EVIDENCE_REPOSITORY_DEFAULT_TTL_SECONDS: int = _get_positive_int(
+        "EVIDENCE_REPOSITORY_DEFAULT_TTL_SECONDS",
+        86_400,
+    )
+
+    EVIDENCE_REPOSITORY_GNOMAD_TTL_SECONDS: int = _get_positive_int(
+        "EVIDENCE_REPOSITORY_GNOMAD_TTL_SECONDS",
+        604_800,
+    )
+
+    EVIDENCE_REPOSITORY_ENSEMBL_VARIATION_TTL_SECONDS: int = (
+        _get_positive_int(
+            "EVIDENCE_REPOSITORY_ENSEMBL_VARIATION_TTL_SECONDS",
+            86_400,
+        )
+    )
+
     ANALYSIS_RETENTION_ENABLED: bool = _get_bool(
         "ANALYSIS_RETENTION_ENABLED",
         True,
@@ -943,6 +960,21 @@ class Settings:
         ):
             raise RuntimeError(
                 "ANALYSIS_RETENTION_MAX_RECORDS must be a positive integer."
+            )
+
+        repository_ttls = (
+            cls.EVIDENCE_REPOSITORY_DEFAULT_TTL_SECONDS,
+            cls.EVIDENCE_REPOSITORY_GNOMAD_TTL_SECONDS,
+            cls.EVIDENCE_REPOSITORY_ENSEMBL_VARIATION_TTL_SECONDS,
+        )
+        if not all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value > 0
+            for value in repository_ttls
+        ):
+            raise RuntimeError(
+                "Evidence repository TTL values must be positive integers."
             )
 
         if cls.DATABASE_PATH.exists() and cls.DATABASE_PATH.is_dir():
