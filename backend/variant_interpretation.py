@@ -49,14 +49,16 @@ from backend.variant_integrity import stable_allele_identity
 from config import settings
 
 
-VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.1"
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.5"
+VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.2"
+SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset({"1.1", "1.2"})
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.6"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
         "variant-interpretation-v1.1",
         "variant-interpretation-v1.2",
         "variant-interpretation-v1.3",
         "variant-interpretation-v1.4",
+        "variant-interpretation-v1.5",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
     }
 )
@@ -78,6 +80,15 @@ PhenotypeConclusion = Literal[
     "no supported association found",
     "phenotype evidence unavailable",
 ]
+AIClassification = Literal[
+    "Pathogenic",
+    "Likely pathogenic",
+    "Uncertain significance",
+    "Likely benign",
+    "Benign",
+    "Insufficient evidence",
+]
+AI_CLASSIFICATIONS = frozenset(cast(tuple[str, ...], AIClassification.__args__))
 PHENOTYPE_CONCLUSIONS = frozenset(
     cast(tuple[str, ...], PhenotypeConclusion.__args__)
 )
@@ -213,6 +224,7 @@ class VariantInterpretationResult(TypedDict):
     provider: str
     configured_model: str
     response_model: str | None
+    ai_classification: AIClassification | None
     interpretation: str | None
     conflict_assessment: str | None
     warnings: list[str]
@@ -225,6 +237,9 @@ class VariantInterpretationResult(TypedDict):
 INTERPRETATION_RESULT_FIELDS = frozenset(
     VariantInterpretationResult.__required_keys__
 )
+LEGACY_INTERPRETATION_RESULT_FIELDS = (
+    INTERPRETATION_RESULT_FIELDS - {"ai_classification"}
+)
 
 VARIANT_INTERPRETATION_RESPONSE_SCHEMA = LLMJSONSchema(
     name="variant_interpretation",
@@ -233,12 +248,17 @@ VARIANT_INTERPRETATION_RESPONSE_SCHEMA = LLMJSONSchema(
         "type": "object",
         "additionalProperties": False,
         "required": [
+            "ai_classification",
             "interpretation",
             "conflict_assessment",
             "phenotype_conclusion",
             "warnings",
         ],
         "properties": {
+            "ai_classification": {
+                "type": "string",
+                "enum": sorted(AI_CLASSIFICATIONS),
+            },
             "interpretation": {
                 "type": "string",
                 "minLength": 1,
@@ -283,8 +303,10 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "5. If meaningful conflict is present, explain the disagreement and "
         "state when it remains unresolved. Otherwise synthesize "
         "conservatively without claiming certainty.",
-        "6. Do not diagnose, recommend treatment, give medical advice, or "
-        "create a final application classification.",
+        "6. Return one controlled-vocabulary draft AI classification based "
+        "only on the supplied evidence. It is not a final application "
+        "classification, independent ACMG/AMP adjudication, or substitute "
+        "for human review.",
         "7. Cite only supplied reference IDs using [R1], [R2], and so on. "
         "Never invent a reference ID or supply a URL.",
         "8. Return only the required structured response. Do not add URLs.",
@@ -538,7 +560,7 @@ def _parse_response(
     *,
     evidence: EvidenceObject,
     allowed_reference_ids: set[str],
-) -> tuple[str, str, list[str], list[str]]:
+) -> tuple[AIClassification | None, str, str, list[str], list[str]]:
     if response.finish_reason not in {None, "stop"}:
         raise VariantInterpretationError(
             "The interpretation response did not finish safely.",
@@ -566,13 +588,18 @@ def _parse_response(
             failure_type="output_parse_failure",
             schema_error="invalid_json",
         ) from exc
-    expected = {
+    required_fields = {
         "interpretation",
         "conflict_assessment",
         "phenotype_conclusion",
         "warnings",
     }
-    if not isinstance(payload, Mapping) or set(payload) != expected:
+    allowed_fields = required_fields | {"ai_classification"}
+    if (
+        not isinstance(payload, Mapping)
+        or not required_fields.issubset(payload)
+        or not set(payload).issubset(allowed_fields)
+    ):
         raise VariantInterpretationError(
             "The interpretation response has invalid fields.",
             failure_type="output_schema_failure",
@@ -597,6 +624,22 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="phenotype_conclusion_mismatch",
         )
+    raw_ai_classification = payload.get("ai_classification")
+    classification_warning: str | None = None
+    if "ai_classification" not in payload:
+        ai_classification: AIClassification | None = None
+        classification_warning = (
+            "AI draft classification was unavailable because the model "
+            "response did not include it."
+        )
+    elif raw_ai_classification not in AI_CLASSIFICATIONS:
+        ai_classification = None
+        classification_warning = (
+            "AI draft classification was unavailable because the model "
+            "returned an unsupported value."
+        )
+    else:
+        ai_classification = cast(AIClassification, raw_ai_classification)
     raw_warnings = payload["warnings"]
     if (
         not isinstance(raw_warnings, list)
@@ -621,6 +664,11 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="duplicate_warnings",
         )
+    if classification_warning is not None and classification_warning not in warnings:
+        warnings = [
+            *warnings[: MAX_INTERPRETATION_WARNINGS - 1],
+            classification_warning,
+        ]
     interpretation = _bounded_output_text(
         payload["interpretation"],
         field="interpretation",
@@ -670,6 +718,7 @@ def _parse_response(
     try:
         validate_llm_payload(
             {
+                "ai_classification": ai_classification,
                 "interpretation": interpretation,
                 "conflict_assessment": conflict_assessment,
                 "warnings": warnings,
@@ -681,7 +730,7 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="privacy_rejection",
         ) from exc
-    return interpretation, conflict_assessment, warnings, citations
+    return ai_classification, interpretation, conflict_assessment, warnings, citations
 
 
 def _usage(response: LLMResponse) -> dict[str, int | None] | None:
@@ -833,7 +882,11 @@ def _execute_interpretation_request(
     model: str,
     client: LLMClient | None,
     max_retries: int | None,
-) -> tuple[LLMResponse, tuple[str, str, list[str], list[str]], bool]:
+) -> tuple[
+    LLMResponse,
+    tuple[AIClassification | None, str, str, list[str], list[str]],
+    bool,
+]:
     """Execute one model with one bounded structured-output repair."""
 
     allowed_reference_ids = {
@@ -1061,7 +1114,13 @@ def interpret_variant(
             fallback_error.fallback_used = True
             fallback_error.diagnostic_model = configured_fallback_model
             raise
-    interpretation, conflict_assessment, warnings, citations = parsed
+    (
+        ai_classification,
+        interpretation,
+        conflict_assessment,
+        warnings,
+        citations,
+    ) = parsed
     if fallback_used:
         recovery_warning = (
             "Operational recovery used the configured fallback "
@@ -1084,6 +1143,7 @@ def interpret_variant(
         "provider": settings.LLM_PROVIDER,
         "configured_model": active_model,
         "response_model": response.model,
+        "ai_classification": ai_classification,
         "interpretation": interpretation,
         "conflict_assessment": conflict_assessment,
         "warnings": warnings,
@@ -1125,6 +1185,7 @@ def _failed_result(
         "provider": settings.LLM_PROVIDER,
         "configured_model": model,
         "response_model": None,
+        "ai_classification": None,
         "interpretation": None,
         "conflict_assessment": None,
         "warnings": [],
@@ -1282,14 +1343,24 @@ def validate_variant_interpretation_result(
 ) -> VariantInterpretationResult:
     """Validate one route-free interpretation result."""
 
-    if not isinstance(value, dict) or set(value) != INTERPRETATION_RESULT_FIELDS:
+    if not isinstance(value, dict):
         raise VariantInterpretationError(
             "Variant interpretation result has invalid fields."
         )
-    if value["schema_version"] != VARIANT_INTERPRETATION_SCHEMA_VERSION:
+    normalized = deepcopy(value)
+    schema_version = normalized.get("schema_version")
+    if schema_version not in SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS:
         raise VariantInterpretationError(
             "Variant interpretation schema version is unsupported."
         )
+    fields = set(normalized)
+    if schema_version == "1.1" and fields == LEGACY_INTERPRETATION_RESULT_FIELDS:
+        normalized["ai_classification"] = None
+    elif fields != INTERPRETATION_RESULT_FIELDS:
+        raise VariantInterpretationError(
+            "Variant interpretation result has invalid fields."
+        )
+    value = normalized
     if value["status"] not in {"success", "failed"}:
         raise VariantInterpretationError(
             "Variant interpretation status is invalid."
@@ -1400,6 +1471,11 @@ def validate_variant_interpretation_result(
         raise VariantInterpretationError(
             "Interpretation cited reference IDs are invalid."
         )
+    ai_classification = value["ai_classification"]
+    if ai_classification is not None and ai_classification not in AI_CLASSIFICATIONS:
+        raise VariantInterpretationError(
+            "AI draft classification is invalid."
+        )
     if value["status"] == "success":
         if (
             not isinstance(value["response_model"], str)
@@ -1441,6 +1517,7 @@ def validate_variant_interpretation_result(
                 )
     elif (
         value["response_model"] is not None
+        or value["ai_classification"] is not None
         or value["interpretation"] is not None
         or value["conflict_assessment"] is not None
         or value["warnings"] != []
@@ -1475,6 +1552,7 @@ def validate_variant_interpretation_result(
     try:
         validate_llm_payload(
             {
+                "ai_classification": value["ai_classification"],
                 "interpretation": value["interpretation"],
                 "conflict_assessment": value["conflict_assessment"],
                 "warnings": value["warnings"],
@@ -1488,12 +1566,15 @@ def validate_variant_interpretation_result(
 
 
 __all__ = [
+    "AI_CLASSIFICATIONS",
+    "AIClassification",
     "INTERPRETATION_FAILURE_TYPES",
     "InterpretationFailureDiagnostic",
     "InterpretationFailureType",
     "PHENOTYPE_CONCLUSIONS",
     "PhenotypeConclusion",
     "SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS",
+    "SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS",
     "MAX_CONFLICT_ASSESSMENT_CHARACTERS",
     "MAX_INTERPRETATION_CHARACTERS",
     "MAX_INTERPRETATION_WARNINGS",

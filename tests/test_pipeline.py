@@ -1685,12 +1685,14 @@ def _variant_interpretation_response(
     model: str = "variant-interpretation-test-model",
     conflict_assessment: str = "No meaningful conflict is present.",
     phenotype_conclusion: str = "partially supported",
+    ai_classification: str = "Insufficient evidence",
 ) -> LLMResponse:
     """Return one valid Stage 50 response for pipeline integration tests."""
 
     return LLMResponse(
         content=json.dumps(
             {
+                "ai_classification": ai_classification,
                 "interpretation": (
                     "The supplied evidence supports cautious human review."
                 ),
@@ -13392,6 +13394,7 @@ class TestStage50SingleModelInterpretation:
         phenotype_conclusion: str = "partially supported",
     ) -> dict[str, object]:
         return {
+            "ai_classification": "Insufficient evidence",
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
@@ -13445,6 +13448,7 @@ class TestStage50SingleModelInterpretation:
             "provider": settings.LLM_PROVIDER,
             "configured_model": settings.VARIANT_INTERPRETATION_MODEL,
             "response_model": "variant-model",
+            "ai_classification": "Insufficient evidence",
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
@@ -13852,6 +13856,7 @@ class TestStage52DraftVariantReportV2:
         assert content["evidence_sections"]
         assert content["variant_interpretation"] == {
             "status": "failed",
+            "ai_classification": None,
             "narrative": None,
             "conflict_assessment": None,
             "warnings": [],

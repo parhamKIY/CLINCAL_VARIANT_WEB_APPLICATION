@@ -229,6 +229,7 @@ def build_report_data_from_draft(
             if phenotype_score <= 100.0
             else None
         )
+    ai_classification = interpretation.get("ai_classification")
     genome_build = {
         "hg19": "GRCh37",
         "hg38": "GRCh38",
@@ -342,9 +343,15 @@ def build_report_data_from_draft(
             "hgvs_c": variant["hgvs_c"],
             "hgvs_p": variant["hgvs_p"],
             "zygosity": None,
-            "classification": None,
-            "classification_source": None,
-            "status": "not_assessed",
+            "classification": ai_classification,
+            "classification_source": (
+                "LLM draft classification"
+                if ai_classification is not None
+                else None
+            ),
+            "status": (
+                "available" if ai_classification is not None else "not_assessed"
+            ),
         },
         "main_findings": {
             "population_frequencies": population_findings,

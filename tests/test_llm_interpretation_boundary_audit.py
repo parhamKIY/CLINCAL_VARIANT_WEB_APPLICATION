@@ -61,6 +61,7 @@ def test_output_schema_is_strict_and_has_no_model_confidence_field() -> None:
 
     assert schema["additionalProperties"] is False
     assert schema["required"] == [
+        "ai_classification",
         "interpretation",
         "conflict_assessment",
         "phenotype_conclusion",
@@ -74,6 +75,14 @@ def test_output_schema_is_strict_and_has_no_model_confidence_field() -> None:
         "partially supported",
         "no supported association found",
         "phenotype evidence unavailable",
+    }
+    assert set(properties["ai_classification"]["enum"]) == {
+        "Pathogenic",
+        "Likely pathogenic",
+        "Uncertain significance",
+        "Likely benign",
+        "Benign",
+        "Insufficient evidence",
     }
     assert "confidence" not in properties
     assert "variant-interpretation-v1.3" in (

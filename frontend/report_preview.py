@@ -233,6 +233,10 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     variant = content["variant_summary"]
     phenotype = content["phenotype_context"]
     interpretation = content["variant_interpretation"]
+    ai_classification = (
+        interpretation.get("ai_classification")
+        or "Not independently determined"
+    )
     source_classification, source_classification_detail = (
         _result_classification(report)
     )
@@ -272,7 +276,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
 <div class="cv-result">
   <div class="cv-result-allele">{_text(gene_hgvs)}</div>
   <div>{_text(allele)}</div>
-  <div class="cv-result-class">System classification: Not independently determined</div>
+  <div class="cv-result-class">System classification: {_text(ai_classification)}</div>
   <div>Source classification context: {_text(source_classification)}</div>
   <div>{_text(source_classification_detail)}</div>
 </div>
@@ -361,7 +365,7 @@ def render_draft_report_preview_pages(value: object) -> tuple[str, str, str]:
     page_three = _page(
         f"""
 <h1>Variant(s) classification</h1>
-<p><b>System classification:</b> Not independently determined</p>
+<p><b>System classification:</b> {_text(ai_classification)}</p>
 <p><b>Source-attributed result:</b> {_text(source_classification)} ({_text(source_classification_detail)})</p>
 <p><b>Conflict status:</b> {_text(conflict['status'].replace('_', ' '))}; severity: {_text(conflict['severity'])}.</p>
 <ul class="cv-list">{_items(conflict['findings'])}</ul>

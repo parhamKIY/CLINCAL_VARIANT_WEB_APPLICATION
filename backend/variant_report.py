@@ -8,7 +8,7 @@ import math
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 from backend.classification_evidence import build_classification_evidence_audit
 from backend.fallback_transparency import build_fallback_notices
@@ -34,12 +34,14 @@ from backend.references import (
 )
 from backend.report import EvidenceObject, validate_evidence_object
 from backend.variant_interpretation import (
+    AI_CLASSIFICATIONS,
     VariantInterpretationResult,
     validate_variant_interpretation_result,
 )
 
 
-DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.2"
+DRAFT_VARIANT_REPORT_SCHEMA_VERSION = "2.3"
+SUPPORTED_DRAFT_VARIANT_REPORT_SCHEMA_VERSIONS = frozenset({"2.2", "2.3"})
 MAX_DRAFT_VARIANT_REPORT_BYTES = 128 * 1024
 MAX_REPORT_TEXT_CHARS = 20_000
 MAX_EVIDENCE_VALUE_CHARS = 4_000
@@ -114,6 +116,7 @@ class InterpretationSection(TypedDict):
     """Validated model result or an explicit unavailable state."""
 
     status: str
+    ai_classification: NotRequired[str | None]
     narrative: str | None
     conflict_assessment: str | None
     warnings: list[str]
@@ -195,7 +198,10 @@ _PHENOTYPE_FIELDS = frozenset(PhenotypeContext.__required_keys__)
 _EVIDENCE_SECTION_FIELDS = frozenset(EvidenceSection.__required_keys__)
 _EVIDENCE_ITEM_FIELDS = frozenset(EvidenceItem.__required_keys__)
 _CONFLICT_FIELDS = frozenset(ConflictSummary.__required_keys__)
-_INTERPRETATION_FIELDS = frozenset(InterpretationSection.__required_keys__)
+_INTERPRETATION_FIELDS = (
+    frozenset(InterpretationSection.__required_keys__) - {"ai_classification"}
+)
+_INTERPRETATION_OPTIONAL_FIELDS = frozenset({"ai_classification"})
 _PROVENANCE_FIELDS = frozenset(ReportProvenance.__required_keys__)
 _EDIT_RECORD_FIELDS = frozenset(ReportEditRecord.__required_keys__)
 _SELECTION_RECORD_FIELDS = frozenset(SelectionRecord.__required_keys__)
@@ -651,6 +657,7 @@ def _content(
         },
         "variant_interpretation": {
             "status": interpretation["status"],
+            "ai_classification": interpretation["ai_classification"],
             "narrative": interpretation["interpretation"],
             "conflict_assessment": interpretation["conflict_assessment"],
             "warnings": list(interpretation["warnings"]),
@@ -1082,7 +1089,12 @@ def _validate_edit_value(
     )
 
 
-def _validate_content(value: object, path: str) -> VariantReportContent:
+def _validate_content(
+    value: object,
+    path: str,
+    *,
+    require_ai_classification: bool,
+) -> VariantReportContent:
     content = _require_fields(value, _CONTENT_FIELDS, path)
     summary = _require_fields(
         content["variant_summary"],
@@ -1176,11 +1188,23 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
     _require_text(conflict["severity"], f"{path}.conflict_summary.severity")
     _require_text_list(conflict["findings"], f"{path}.conflict_summary.findings")
 
-    interpretation = _require_fields(
-        content["variant_interpretation"],
-        _INTERPRETATION_FIELDS,
-        f"{path}.variant_interpretation",
-    )
+    interpretation_value = content["variant_interpretation"]
+    interpretation_path = f"{path}.variant_interpretation"
+    if (
+        not isinstance(interpretation_value, dict)
+        or not _INTERPRETATION_FIELDS.issubset(interpretation_value)
+        or not set(interpretation_value).issubset(
+            _INTERPRETATION_FIELDS | _INTERPRETATION_OPTIONAL_FIELDS
+        )
+        or (
+            require_ai_classification
+            and "ai_classification" not in interpretation_value
+        )
+    ):
+        raise DraftVariantReportError(
+            f"{interpretation_path} has invalid fields."
+        )
+    interpretation = interpretation_value
     for field in ("status", "model", "prompt_version", "generated_at"):
         _require_text(interpretation[field], f"{path}.variant_interpretation.{field}")
     for field in ("narrative", "conflict_assessment", "failure_type"):
@@ -1188,6 +1212,16 @@ def _validate_content(value: object, path: str) -> VariantReportContent:
             interpretation[field],
             f"{path}.variant_interpretation.{field}",
             optional=True,
+        )
+    ai_classification = interpretation.get("ai_classification")
+    if ai_classification is not None and ai_classification not in AI_CLASSIFICATIONS:
+        raise DraftVariantReportError(
+            f"{interpretation_path}.ai_classification is invalid."
+        )
+    if interpretation["status"] == "failed" and ai_classification is not None:
+        raise DraftVariantReportError(
+            f"{interpretation_path}.ai_classification requires a successful "
+            "interpretation."
         )
     _require_text_list(
         interpretation["warnings"],
@@ -1312,8 +1346,13 @@ def validate_draft_variant_report(
     """Validate persisted or UI-bound Draft Variant Report V2 state."""
 
     report = _require_fields(value, _REPORT_FIELDS, "draft_variant_report")
-    if report["schema_version"] != DRAFT_VARIANT_REPORT_SCHEMA_VERSION:
+    if report["schema_version"] not in (
+        SUPPORTED_DRAFT_VARIANT_REPORT_SCHEMA_VERSIONS
+    ):
         raise DraftVariantReportError("Draft report schema version is unsupported.")
+    require_ai_classification = (
+        report["schema_version"] == DRAFT_VARIANT_REPORT_SCHEMA_VERSION
+    )
     _require_text(report["report_id"], "draft_variant_report.report_id")
     index = report["variant_index"]
     if isinstance(index, bool) or not isinstance(index, int) or index < 0:
@@ -1321,10 +1360,12 @@ def validate_draft_variant_report(
     original = _validate_content(
         report["machine_original_report"],
         "draft_variant_report.machine_original_report",
+        require_ai_classification=require_ai_classification,
     )
     reviewed = _validate_content(
         report["reviewed_report"],
         "draft_variant_report.reviewed_report",
+        require_ai_classification=require_ai_classification,
     )
     original_digest = hashlib.sha256(
         json.dumps(
@@ -1546,10 +1587,16 @@ def validate_draft_variant_report(
                 raise DraftVariantReportError(
                     "Draft report interpretation order is invalid."
                 )
-            if original != _content(
+            expected_original = _content(
                 validated_evidence,
                 validated_interpretation,
-            ):
+            )
+            if not require_ai_classification:
+                expected_original["variant_interpretation"].pop(
+                    "ai_classification",
+                    None,
+                )
+            if original != expected_original:
                 raise DraftVariantReportError(
                     "Draft report content does not match its machine inputs."
                 )
@@ -1580,6 +1627,7 @@ def validate_draft_variant_report(
 
 __all__ = [
     "DRAFT_VARIANT_REPORT_SCHEMA_VERSION",
+    "SUPPORTED_DRAFT_VARIANT_REPORT_SCHEMA_VERSIONS",
     "DraftVariantReport",
     "DraftVariantReportError",
     "ReportEditRecord",

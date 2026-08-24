@@ -102,8 +102,16 @@ def test_non_concordance_survives_report_projection_without_reclassification() -
     assert report_data["phenotype_summary"]["concordance"] == (
         "no_supported_association"
     )
-    assert report_data["conclusive_result"]["classification"] is None
-    assert report_data["conclusive_result"]["status"] == "not_assessed"
+    assert report_data["conclusive_result"]["classification"] == (
+        "Insufficient evidence"
+    )
+    assert report_data["conclusive_result"]["classification_source"] == (
+        "LLM draft classification"
+    )
+    assert report_data["conclusive_result"]["status"] == "available"
+    assert report_data["classification_summary"][
+        "independent_acmg_adjudication"
+    ] is False
     assert report_data["classification_summary"]["clinvar_classification"] == (
         "Pathogenic"
     )

@@ -267,14 +267,18 @@ def _placeholder_map(report: ReportData) -> dict[str, str]:
         classification_summary["independent_acmg_adjudication"]
         or classification_summary["reviewer_confirmed_classification"] is not None
     )
+    draft_ai_classification = (
+        conclusive["classification_source"] == "LLM draft classification"
+    )
+    display_classification = independent_classification or draft_ai_classification
     classification = (
         _sentence_case(conclusive["classification"])
-        if independent_classification and conclusive["status"] == "available"
+        if display_classification and conclusive["status"] == "available"
         else "Not independently determined"
     )
     classification_source = (
         conclusive["classification_source"]
-        if independent_classification and conclusive["classification_source"]
+        if display_classification and conclusive["classification_source"]
         else "No independent application classification"
     )
     interpretation = report["interpretation"]["current_reviewer_interpretation"]
