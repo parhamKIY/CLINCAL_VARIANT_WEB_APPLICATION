@@ -161,6 +161,26 @@ def _ordered_collection(
             raise VariantIntegrityError(f"{path} does not preserve input order.")
 
 
+def _indexed_collection(
+    values: Sequence[Mapping[str, object]],
+    *,
+    allowed_indexes: Sequence[int],
+    index_field: str,
+    path: str,
+) -> dict[int, Mapping[str, object]]:
+    observed: list[int] = []
+    mapped: dict[int, Mapping[str, object]] = {}
+    for position, value in enumerate(values):
+        index = _index(value.get(index_field), f"{path}[{position}].{index_field}")
+        observed.append(index)
+        mapped[index] = value
+    if observed != sorted(set(observed)):
+        raise VariantIntegrityError(f"{path} does not preserve input order.")
+    if any(index not in allowed_indexes for index in observed):
+        raise VariantIntegrityError(f"{path} references unavailable evidence.")
+    return mapped
+
+
 def build_variant_integrity_records(
     parser_variants: Sequence[Mapping[str, object]],
     normalized_variants: Sequence[Mapping[str, object]],
@@ -189,18 +209,6 @@ def build_variant_integrity_records(
         expected_count=count,
         index_field="input_index",
         path="normalized_variants",
-    )
-    _ordered_collection(
-        draft_reports,
-        expected_count=count,
-        index_field="variant_index",
-        path="draft_reports",
-    )
-    _ordered_collection(
-        review_records,
-        expected_count=count,
-        index_field="variant_index",
-        path="review_records",
     )
     evidence_indexes_by_input: dict[int, int] = {}
     if evidence_construction_outcomes:
@@ -244,16 +252,26 @@ def build_variant_integrity_records(
             raise VariantIntegrityError(
                 "Evidence Object count does not match successful construction outcomes."
             )
-        if len(successful_indexes) != count and (draft_reports or review_records):
-            raise VariantIntegrityError(
-                "Partial evidence construction cannot produce report records."
-            )
     elif evidence_objects:
         if len(evidence_objects) != count:
             raise VariantIntegrityError(
                 "Evidence Object count does not match accepted input cardinality."
             )
         evidence_indexes_by_input = {index: index for index in range(count)}
+
+    evidence_input_indexes = sorted(evidence_indexes_by_input)
+    draft_by_input = _indexed_collection(
+        draft_reports,
+        allowed_indexes=evidence_input_indexes,
+        index_field="variant_index",
+        path="draft_reports",
+    )
+    review_by_input = _indexed_collection(
+        review_records,
+        allowed_indexes=evidence_input_indexes,
+        index_field="variant_index",
+        path="review_records",
+    )
 
     records: list[VariantIntegrityRecord] = []
     for input_index in range(count):
@@ -295,15 +313,15 @@ def build_variant_integrity_records(
                 )
 
         draft_report_id = None
-        if draft_reports:
+        if input_index in draft_by_input:
             draft_report_id = _optional_text(
-                draft_reports[input_index].get("report_id"),
+                draft_by_input[input_index].get("report_id"),
                 f"draft_reports[{input_index}].report_id",
             )
         review_record_id = None
-        if review_records:
+        if input_index in review_by_input:
             review_record_id = _optional_text(
-                review_records[input_index].get("report_id"),
+                review_by_input[input_index].get("report_id"),
                 f"review_records[{input_index}].report_id",
             )
         record: VariantIntegrityRecord = {

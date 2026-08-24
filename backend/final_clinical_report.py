@@ -182,16 +182,31 @@ def compose_final_clinical_report(
     reports_value = pipeline.get("draft_variant_reports")
     lifecycle_value = pipeline.get("variant_report_records", [])
     packages_value = pipeline.get("reviewed_evidence_packages")
+    outcomes_value = pipeline.get("evidence_construction_outcomes", [])
+    successful_indexes = (
+        [
+            item.get("variant_index")
+            for item in outcomes_value
+            if isinstance(item, Mapping) and item.get("status") == "success"
+        ]
+        if isinstance(outcomes_value, list)
+        else []
+    )
+    expected_report_count = (
+        len(successful_indexes)
+        if outcomes_value
+        else variant_count
+    )
     if (
         isinstance(variant_count, bool)
         or not isinstance(variant_count, int)
         or variant_count < 0
         or not isinstance(reports_value, list)
-        or len(reports_value) != variant_count
+        or len(reports_value) != expected_report_count
         or not isinstance(lifecycle_value, list)
-        or (lifecycle_value and len(lifecycle_value) != variant_count)
+        or (lifecycle_value and len(lifecycle_value) != expected_report_count)
         or not isinstance(packages_value, list)
-        or len(packages_value) != variant_count
+        or len(packages_value) != expected_report_count
     ):
         raise FinalClinicalReportError(
             "Final report composition requires one report and one final "
@@ -204,16 +219,21 @@ def compose_final_clinical_report(
         ]
     except (DraftVariantReportError, ReportLifecycleError) as exc:
         raise FinalClinicalReportError("Draft Variant Reports are invalid.") from exc
-    if [item["variant_index"] for item in reports] != list(range(variant_count)):
+    expected_indexes = (
+        cast(list[int], successful_indexes)
+        if outcomes_value
+        else list(range(variant_count))
+    )
+    if [item["variant_index"] for item in reports] != expected_indexes:
         raise FinalClinicalReportError("Draft Variant Reports are out of order.")
     if lifecycle_records and [
         item["variant_index"] for item in lifecycle_records
-    ] != list(range(variant_count)):
+    ] != expected_indexes:
         raise FinalClinicalReportError("Report lifecycle records are out of order.")
     if any(not isinstance(item, Mapping) for item in packages_value):
         raise FinalClinicalReportError("Final confirmation packages are invalid.")
     packages = cast(list[Mapping[str, object]], packages_value)
-    if [item.get("variant_index") for item in packages] != list(range(variant_count)):
+    if [item.get("variant_index") for item in packages] != expected_indexes:
         raise FinalClinicalReportError(
             "Final confirmation must cover every variant in input order."
         )
@@ -233,7 +253,8 @@ def compose_final_clinical_report(
             if report["include_in_final_report"]
         ]
     )
-    selected = [reports[index] for index in selected_indexes]
+    reports_by_index = {report["variant_index"]: report for report in reports}
+    selected = [reports_by_index[index] for index in selected_indexes]
     source_reports = selected or reports
     accepted_hpo = _unique_text(
         [
@@ -276,6 +297,23 @@ def compose_final_clinical_report(
             for limitation in report["reviewed_report"]["limitations"]
         ]
     )
+    failed_construction_indexes = (
+        [
+            cast(int, item["variant_index"])
+            for item in outcomes_value
+            if isinstance(item, Mapping)
+            and item.get("status") == "failed"
+            and isinstance(item.get("variant_index"), int)
+            and not isinstance(item.get("variant_index"), bool)
+        ]
+        if isinstance(outcomes_value, list)
+        else []
+    )
+    limitations.extend(
+        f"Variant {index + 1} was not included because evidence construction failed."
+        for index in failed_construction_indexes
+    )
+    limitations = _unique_text(limitations)
     if not limitations:
         limitations = [
             "No variants were selected for inclusion; no variant-level "
@@ -492,7 +530,18 @@ def validate_final_clinical_report(value: object) -> FinalClinicalReport:
         raise FinalClinicalReportError("Final report disclaimer is invalid.")
     audit = _require_mapping(report["audit_summary"], _AUDIT_FIELDS, "audit_summary")
     confirmed_indexes = audit["confirmed_variant_indexes"]
-    if confirmed_indexes != list(range(variant_count)):
+    if (
+        not isinstance(confirmed_indexes, list)
+        or confirmed_indexes != sorted(set(confirmed_indexes))
+        or any(
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= variant_count
+            for index in confirmed_indexes
+        )
+        or any(index not in confirmed_indexes for index in selected_indexes)
+    ):
         raise FinalClinicalReportError("Final report confirmation coverage is invalid.")
     audit_reports = audit["selected_reports"]
     if not isinstance(audit_reports, list) or len(audit_reports) != selected_count:

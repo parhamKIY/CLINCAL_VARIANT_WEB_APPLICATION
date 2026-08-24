@@ -13455,7 +13455,16 @@ class TestStage50SingleModelInterpretation:
             ),
             "conflict_assessment": "No meaningful conflict is present.",
             "warnings": ["Human review remains required."],
+            "phenotype_conclusion": "partially supported",
             "cited_reference_ids": [],
+            "field_validation": {
+                "ai_classification": "valid",
+                "interpretation": "valid",
+                "conflict_assessment": "valid",
+                "warnings": "valid",
+                "phenotype_conclusion": "valid",
+                "citations": "valid",
+            },
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 40,
@@ -13609,16 +13618,6 @@ class TestStage50SingleModelInterpretation:
                 },
                 "must not contain URLs",
             ),
-            (
-                {
-                    "ai_classification": "Uncertain significance",
-                    "interpretation": "Text",
-                    "conflict_assessment": "None",
-                    "phenotype_conclusion": "partially supported",
-                    "warnings": ["Repeated", "Repeated"],
-                },
-                "must be unique",
-            ),
         ],
     )
     def test_malformed_response_is_rejected(
@@ -13633,6 +13632,28 @@ class TestStage50SingleModelInterpretation:
                     FakeLLMAdapter(self._response(payload))
                 ),
             )
+
+    def test_duplicate_auxiliary_warnings_preserve_core_fields(self) -> None:
+        payload = {
+            "ai_classification": "Uncertain significance",
+            "interpretation": "Text",
+            "conflict_assessment": "None",
+            "phenotype_conclusion": "partially supported",
+            "warnings": ["Repeated", "Repeated"],
+        }
+        adapter = FakeLLMAdapter(self._response(payload))
+
+        result = interpret_variant(
+            TestEvidenceObject._complete_evidence_object(),
+            client=LLMClient(adapter),
+        )
+
+        assert result["status"] == "success"
+        assert result["ai_classification"] == "Uncertain significance"
+        assert result["interpretation"] == "Text"
+        assert result["warnings"] == ["Repeated"]
+        assert result["field_validation"]["warnings"] == "invalid"
+        assert len(adapter.requests) == 1
 
     def test_incomplete_response_is_rejected(self) -> None:
         with pytest.raises(

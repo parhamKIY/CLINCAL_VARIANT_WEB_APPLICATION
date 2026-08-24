@@ -118,22 +118,28 @@ def test_non_concordance_survives_report_projection_without_reclassification() -
     assert report_data["interpretation"]["interpretation_status"] == "available"
 
 
-def test_hallucinated_supported_conclusion_is_rejected() -> None:
+def test_hallucinated_supported_conclusion_is_excluded_without_losing_core() -> None:
     evidence = _unrelated_abdominal_pain_evidence()
+    adapter = FakeLLMAdapter(
+        _variant_interpretation_response(
+            phenotype_conclusion="supported"
+        )
+    )
     result = interpret_variants(
         [evidence],
-        client=LLMClient(
-            FakeLLMAdapter(
-                _variant_interpretation_response(
-                    phenotype_conclusion="supported"
-                )
-            )
-        ),
+        client=LLMClient(adapter),
         timestamp="2026-08-11T13:00:00Z",
     )[0]
 
-    assert result["status"] == "failed"
-    assert result["error_type"] == "output_schema_failure"
+    assert result["status"] == "success"
+    assert result["ai_classification"] == "Uncertain significance"
+    assert result["interpretation"] is not None
+    assert result["interpretation"].startswith(
+        "Phenotype conclusion: no supported association found."
+    )
+    assert result["phenotype_conclusion"] is None
+    assert result["field_validation"]["phenotype_conclusion"] == "invalid"
+    assert len(adapter.requests) == 1
 
 
 def test_absent_phenotype_is_valid_unavailable_evidence() -> None:

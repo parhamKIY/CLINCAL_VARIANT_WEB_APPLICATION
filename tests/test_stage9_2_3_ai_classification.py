@@ -135,6 +135,8 @@ def test_historical_interpretation_and_report_without_ai_classification_load() -
         timestamp="2026-08-24T10:00:00Z",
     )
     legacy_interpretation.pop("ai_classification", None)
+    legacy_interpretation.pop("phenotype_conclusion", None)
+    legacy_interpretation.pop("field_validation", None)
     legacy_interpretation["schema_version"] = "1.1"
 
     normalized = validate_variant_interpretation_result(

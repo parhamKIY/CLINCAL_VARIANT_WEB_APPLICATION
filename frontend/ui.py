@@ -60,6 +60,7 @@ from frontend.analysis_summary import (
     input_validation_message,
 )
 from frontend.execution import (
+    ANALYSIS_TIMEOUT_MESSAGE,
     AnalysisJob,
     FrontendExecutionError,
     UploadedVCF,
@@ -2214,7 +2215,9 @@ def _finish_analysis_job(job: AnalysisJob) -> None:
         )
     elif view.state == "error":
         st.session_state[ANALYSIS_NOTICE_KEY] = (
-            safe_ui_error_message(
+            ANALYSIS_TIMEOUT_MESSAGE
+            if view.error_message == ANALYSIS_TIMEOUT_MESSAGE
+            else safe_ui_error_message(
                 FrontendExecutionError(
                     view.error_message or "analysis worker failed"
                 ),

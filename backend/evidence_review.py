@@ -461,6 +461,7 @@ def build_evidence_review_reports(
     evidence_objects: Iterable[Mapping[str, object]],
     *,
     timestamp: str | None = None,
+    variant_indices: Sequence[int] | None = None,
 ) -> list[EvidenceReviewReport]:
     """Build one immutable-original editable report per ordered variant."""
 
@@ -474,8 +475,25 @@ def build_evidence_review_reports(
             "Evidence review report count exceeds the limit."
         )
     created_at = _timestamp(timestamp)
+    indexes = (
+        list(variant_indices)
+        if variant_indices is not None
+        else list(range(len(items)))
+    )
+    if (
+        len(indexes) != len(items)
+        or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in indexes
+        )
+        or indexes != sorted(set(indexes))
+    ):
+        raise EvidenceReviewError(
+            "Variant indexes must be unique non-negative integers in ascending order."
+        )
     reports: list[EvidenceReviewReport] = []
-    for index, evidence in enumerate(items):
+    for position, evidence in enumerate(items):
+        index = indexes[position]
         original = validate_evidence_object(deepcopy(evidence))
         report: EvidenceReviewReport = {
             "schema_version": EVIDENCE_REVIEW_SCHEMA_VERSION,

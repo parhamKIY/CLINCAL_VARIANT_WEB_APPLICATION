@@ -20,7 +20,6 @@ from backend.llm import LLMClient, LLMRequest, LLMResponse
 from backend.pipeline import (
     PIPELINE_SCHEMA_VERSION,
     _build_evidence_and_report,
-    _finish_exception,
     create_pipeline_result,
     migrate_pipeline_schema33_to34,
     validate_pipeline_result,
@@ -253,25 +252,27 @@ def test_production_evidence_stage_retains_siblings_in_partial_result(
         return real_builder(candidate)
 
     monkeypatch.setattr("backend.report.build_evidence_object", fail_one)
-
-    with pytest.raises(EvidenceObjectError) as raised:
-        _build_evidence_and_report(
-            result,
-            llm_client=None,
-            llm_model=None,
-            report_dir=None,
-        )
-    finished = _finish_exception(
-        result,
-        stage="evidence",
-        error=raised.value,
-        default_code="evidence_object_failed",
-        default_message="Evidence construction could not be completed.",
-        default_recoverable=False,
+    monkeypatch.setattr(
+        "backend.pipeline.enrich_conditionally",
+        lambda selected, _evidence, **_kwargs: {
+            "variants": [deepcopy(item) for item in selected],
+            "triggered_count": 0,
+            "population_status": "skipped",
+            "litvar_status": "skipped",
+            "europe_pmc_status": "skipped",
+            "pubmed_status": "skipped",
+        },
     )
+    _build_evidence_and_report(
+        result,
+        llm_client=LLMClient(_RecordingAdapter()),
+        llm_model=None,
+        report_dir=None,
+    )
+    finished = validate_pipeline_result(result)
 
     assert finished["status"] == "partial"
-    assert finished["workflow_state"] == "failed"
+    assert finished["workflow_state"] == "awaiting_final_review"
     assert [item["variant"]["pos"] for item in finished["evidence_objects"]] == [
         candidates[0]["variant"]["pos"],
         candidates[2]["variant"]["pos"],
@@ -284,9 +285,16 @@ def test_production_evidence_stage_retains_siblings_in_partial_result(
         "failed",
         "success",
     ]
-    assert finished["evidence_readiness"] == []
-    assert finished["variant_interpretation_results"] == []
-    assert finished["draft_variant_reports"] == []
+    assert [
+        item["variant_index"] for item in finished["evidence_readiness"]
+    ] == [0, 2]
+    assert [
+        item["variant_index"]
+        for item in finished["variant_interpretation_results"]
+    ] == [0, 2]
+    assert [
+        item["variant_index"] for item in finished["draft_variant_reports"]
+    ] == [0, 2]
 
 
 def test_structurally_unsafe_identity_never_creates_fake_evidence() -> None:

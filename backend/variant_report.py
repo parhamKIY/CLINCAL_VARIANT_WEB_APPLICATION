@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Literal, NotRequired, TypedDict, cast
@@ -740,6 +741,8 @@ def build_draft_variant_report(
 def build_draft_variant_reports(
     evidence_objects: list[object],
     interpretation_results: list[object],
+    *,
+    variant_indices: Sequence[int] | None = None,
 ) -> list[DraftVariantReport]:
     """Compose ordered reports with one-to-one evidence interpretation pairing."""
 
@@ -747,11 +750,27 @@ def build_draft_variant_reports(
         raise DraftVariantReportError(
             "Evidence and interpretation counts must match."
         )
+    indexes = (
+        list(variant_indices)
+        if variant_indices is not None
+        else list(range(len(evidence_objects)))
+    )
+    if (
+        len(indexes) != len(evidence_objects)
+        or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in indexes
+        )
+        or indexes != sorted(set(indexes))
+    ):
+        raise DraftVariantReportError(
+            "Variant indexes must be unique non-negative integers in ascending order."
+        )
     return [
         build_draft_variant_report(
             evidence,
             interpretation_results[index],
-            variant_index=index,
+            variant_index=indexes[index],
         )
         for index, evidence in enumerate(evidence_objects)
     ]

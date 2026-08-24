@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from time import perf_counter
@@ -51,8 +51,10 @@ from backend.variant_integrity import stable_allele_identity
 from config import settings
 
 
-VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.2"
-SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset({"1.1", "1.2"})
+VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.3"
+SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset(
+    {"1.1", "1.2", "1.3"}
+)
 VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.7"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
@@ -80,6 +82,7 @@ LOGGER = get_logger("variant_interpretation")
 
 InterpretationStatus = Literal["success", "failed"]
 InterpretationPromptMode = Literal["standard", "conflict_aware"]
+FieldValidationStatus = Literal["valid", "invalid", "not_available"]
 PhenotypeConclusion = Literal[
     "supported",
     "partially supported",
@@ -147,6 +150,19 @@ SAFE_SCHEMA_ERRORS = frozenset(
 )
 STRUCTURED_REPAIR_FAILURE_TYPES = frozenset(
     {"output_schema_failure", "output_parse_failure"}
+)
+REPAIRABLE_SCHEMA_ERRORS = frozenset(
+    {
+        "invalid_ai_classification",
+        "invalid_fields",
+        "invalid_json",
+        "invalid_output_text",
+        "malformed_citation",
+        "response_size_limit",
+    }
+)
+NON_FALLBACK_SCHEMA_ERRORS = frozenset(
+    {"privacy_rejection", "unknown_citation"}
 )
 OPERATIONAL_FALLBACK_FAILURE_TYPES = frozenset(
     {
@@ -216,6 +232,29 @@ class InterpretationVariant(TypedDict):
     alt: str
 
 
+class InterpretationFieldValidation(TypedDict):
+    """Per-field validity retained without exposing raw model output."""
+
+    ai_classification: FieldValidationStatus
+    interpretation: FieldValidationStatus
+    conflict_assessment: FieldValidationStatus
+    warnings: FieldValidationStatus
+    phenotype_conclusion: FieldValidationStatus
+    citations: FieldValidationStatus
+
+
+class ParsedInterpretationResponse(TypedDict):
+    """Validated response fields with auxiliary failures isolated."""
+
+    ai_classification: AIClassification
+    interpretation: str
+    conflict_assessment: str | None
+    warnings: list[str]
+    phenotype_conclusion: PhenotypeConclusion | None
+    cited_reference_ids: list[str]
+    field_validation: InterpretationFieldValidation
+
+
 class VariantInterpretationResult(TypedDict):
     """One route-free interpretation result with bounded provenance."""
 
@@ -234,7 +273,9 @@ class VariantInterpretationResult(TypedDict):
     interpretation: str | None
     conflict_assessment: str | None
     warnings: list[str]
+    phenotype_conclusion: PhenotypeConclusion | None
     cited_reference_ids: list[str]
+    field_validation: InterpretationFieldValidation
     usage: dict[str, int | None] | None
     generated_at: str
     error_type: str | None
@@ -243,8 +284,15 @@ class VariantInterpretationResult(TypedDict):
 INTERPRETATION_RESULT_FIELDS = frozenset(
     VariantInterpretationResult.__required_keys__
 )
-LEGACY_INTERPRETATION_RESULT_FIELDS = (
-    INTERPRETATION_RESULT_FIELDS - {"ai_classification"}
+FIELD_VALIDATION_FIELDS = frozenset(
+    InterpretationFieldValidation.__required_keys__
+)
+V1_2_INTERPRETATION_RESULT_FIELDS = INTERPRETATION_RESULT_FIELDS - {
+    "phenotype_conclusion",
+    "field_validation",
+}
+V1_1_INTERPRETATION_RESULT_FIELDS = (
+    V1_2_INTERPRETATION_RESULT_FIELDS - {"ai_classification"}
 )
 
 VARIANT_INTERPRETATION_RESPONSE_SCHEMA = LLMJSONSchema(
@@ -582,12 +630,49 @@ def _normalize_citation_groups(value: str) -> str:
     return COMBINED_CITATION_PATTERN.sub(expand, value)
 
 
+class _AuxiliaryFieldError(ValueError):
+    """Marks one safely excludable model-generated auxiliary field."""
+
+    def __init__(self, *, citation_invalid: bool = False) -> None:
+        super().__init__("Auxiliary interpretation field is invalid.")
+        self.citation_invalid = citation_invalid
+
+
+def _validate_field_citations(
+    value: str,
+    *,
+    allowed_reference_ids: set[str],
+    auxiliary: bool,
+) -> tuple[str, list[str]]:
+    normalized = _normalize_citation_groups(value)
+    citation_tokens = re.findall(r"\[(R[^\]]*)\]", normalized)
+    if any(
+        re.fullmatch(r"R[1-9][0-9]*", item) is None
+        for item in citation_tokens
+    ):
+        if auxiliary:
+            raise _AuxiliaryFieldError(citation_invalid=True)
+        raise VariantInterpretationError(
+            "Interpretation contains a malformed reference citation.",
+            failure_type="output_schema_failure",
+            schema_error="malformed_citation",
+        )
+    citations = cited_reference_ids(normalized)
+    if any(item not in allowed_reference_ids for item in citations):
+        raise VariantInterpretationError(
+            "Interpretation cites a reference absent from its evidence.",
+            failure_type="output_schema_failure",
+            schema_error="unknown_citation",
+        )
+    return normalized, citations
+
+
 def _parse_response(
     response: LLMResponse,
     *,
     evidence: EvidenceObject,
     allowed_reference_ids: set[str],
-) -> tuple[AIClassification, str, str, list[str], list[str]]:
+) -> ParsedInterpretationResponse:
     if response.finish_reason not in {None, "stop"}:
         raise VariantInterpretationError(
             "The interpretation response did not finish safely.",
@@ -615,42 +700,58 @@ def _parse_response(
             failure_type="output_parse_failure",
             schema_error="invalid_json",
         ) from exc
-    required_fields = {
+    response_fields = {
         "ai_classification",
         "interpretation",
         "conflict_assessment",
         "phenotype_conclusion",
         "warnings",
     }
+    core_fields = {"ai_classification", "interpretation"}
     if (
         not isinstance(payload, Mapping)
-        or not required_fields.issubset(payload)
-        or set(payload) != required_fields
+        or not core_fields.issubset(payload)
+        or not set(payload).issubset(response_fields)
     ):
         raise VariantInterpretationError(
             "The interpretation response has invalid fields.",
             failure_type="output_schema_failure",
             schema_error="invalid_fields",
         )
-    phenotype_conclusion = payload["phenotype_conclusion"]
-    if phenotype_conclusion not in PHENOTYPE_CONCLUSIONS:
+    try:
+        validate_llm_payload(payload)
+    except ClinicalDataPrivacyError as exc:
         raise VariantInterpretationError(
-            "Interpretation phenotype conclusion is invalid.",
+            "The interpretation response contains prohibited clinical data.",
             failure_type="output_schema_failure",
-            schema_error="phenotype_conclusion_mismatch",
-        )
+            schema_error="privacy_rejection",
+        ) from exc
+
+    field_validation: InterpretationFieldValidation = {
+        "ai_classification": "valid",
+        "interpretation": "valid",
+        "conflict_assessment": "valid",
+        "warnings": "valid",
+        "phenotype_conclusion": "valid",
+        "citations": "valid",
+    }
     expected_phenotype_conclusion = _expected_phenotype_conclusion(evidence)
     allowed_phenotype_conclusions = (
         {"supported", "partially supported"}
         if expected_phenotype_conclusion == "supported"
         else {expected_phenotype_conclusion}
     )
-    if phenotype_conclusion not in allowed_phenotype_conclusions:
-        raise VariantInterpretationError(
-            "Interpretation phenotype conclusion conflicts with evidence.",
-            failure_type="output_schema_failure",
-            schema_error="phenotype_conclusion_mismatch",
+    raw_phenotype_conclusion = payload.get("phenotype_conclusion")
+    phenotype_conclusion: PhenotypeConclusion | None
+    if raw_phenotype_conclusion in allowed_phenotype_conclusions:
+        phenotype_conclusion = cast(
+            PhenotypeConclusion,
+            raw_phenotype_conclusion,
         )
+    else:
+        phenotype_conclusion = None
+        field_validation["phenotype_conclusion"] = "invalid"
+
     raw_ai_classification = payload["ai_classification"]
     if raw_ai_classification not in AI_CLASSIFICATIONS:
         raise VariantInterpretationError(
@@ -659,45 +760,21 @@ def _parse_response(
             schema_error="invalid_ai_classification",
         )
     ai_classification = cast(AIClassification, raw_ai_classification)
-    raw_warnings = payload["warnings"]
-    if (
-        not isinstance(raw_warnings, list)
-        or len(raw_warnings) > MAX_INTERPRETATION_WARNINGS
-    ):
-        raise VariantInterpretationError(
-            "Interpretation warnings must be a bounded list.",
-            failure_type="output_schema_failure",
-            schema_error="invalid_warnings",
-        )
-    warnings = [
-        _normalize_citation_groups(
-            _bounded_output_text(
-                warning,
-                field=f"warnings[{index}]",
-                maximum=MAX_INTERPRETATION_WARNING_CHARACTERS,
-            )
-        )
-        for index, warning in enumerate(raw_warnings)
-    ]
-    if len(set(warnings)) != len(warnings):
-        raise VariantInterpretationError(
-            "Interpretation warnings must be unique.",
-            failure_type="output_schema_failure",
-            schema_error="duplicate_warnings",
-        )
-    interpretation = _normalize_citation_groups(
+    interpretation, interpretation_citations = _validate_field_citations(
         _bounded_output_text(
             payload["interpretation"],
             field="interpretation",
             maximum=MAX_INTERPRETATION_CHARACTERS,
-        )
+        ),
+        allowed_reference_ids=allowed_reference_ids,
+        auxiliary=False,
     )
-    if phenotype_conclusion in {
+    if expected_phenotype_conclusion in {
         "no supported association found",
         "phenotype evidence unavailable",
     }:
         interpretation = (
-            f"Phenotype conclusion: {phenotype_conclusion}.\n\n"
+            f"Phenotype conclusion: {expected_phenotype_conclusion}.\n\n"
             f"{interpretation}"
         )
         if len(interpretation) > MAX_INTERPRETATION_CHARACTERS:
@@ -707,34 +784,74 @@ def _parse_response(
                 failure_type="output_schema_failure",
                 schema_error="response_size_limit",
             )
-    conflict_assessment = _normalize_citation_groups(
-        _bounded_output_text(
-            payload["conflict_assessment"],
-            field="conflict_assessment",
-            maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
+
+    conflict_assessment: str | None = None
+    conflict_citations: list[str] = []
+    raw_conflict_assessment = payload.get("conflict_assessment")
+    try:
+        conflict_assessment, conflict_citations = _validate_field_citations(
+            _bounded_output_text(
+                raw_conflict_assessment,
+                field="conflict_assessment",
+                maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
+            ),
+            allowed_reference_ids=allowed_reference_ids,
+            auxiliary=True,
+        )
+    except _AuxiliaryFieldError as exc:
+        field_validation["conflict_assessment"] = "invalid"
+        if exc.citation_invalid:
+            field_validation["citations"] = "invalid"
+    except VariantInterpretationError as exc:
+        if exc.schema_error == "unknown_citation":
+            raise
+        field_validation["conflict_assessment"] = "invalid"
+
+    warnings: list[str] = []
+    warning_citations: list[str] = []
+    raw_warnings = payload.get("warnings")
+    if (
+        not isinstance(raw_warnings, list)
+        or len(raw_warnings) > MAX_INTERPRETATION_WARNINGS
+    ):
+        field_validation["warnings"] = "invalid"
+    else:
+        for index, warning in enumerate(raw_warnings):
+            try:
+                validated_warning, citations = _validate_field_citations(
+                    _bounded_output_text(
+                        warning,
+                        field=f"warnings[{index}]",
+                        maximum=MAX_INTERPRETATION_WARNING_CHARACTERS,
+                    ),
+                    allowed_reference_ids=allowed_reference_ids,
+                    auxiliary=True,
+                )
+            except _AuxiliaryFieldError as exc:
+                field_validation["warnings"] = "invalid"
+                if exc.citation_invalid:
+                    field_validation["citations"] = "invalid"
+                continue
+            except VariantInterpretationError as exc:
+                if exc.schema_error == "unknown_citation":
+                    raise
+                field_validation["warnings"] = "invalid"
+                continue
+            if validated_warning in warnings:
+                field_validation["warnings"] = "invalid"
+                continue
+            warnings.append(validated_warning)
+            warning_citations.extend(citations)
+
+    citations = list(
+        dict.fromkeys(
+            [
+                *interpretation_citations,
+                *conflict_citations,
+                *warning_citations,
+            ]
         )
     )
-    citation_tokens = re.findall(
-        r"\[(R[^\]]*)\]",
-        "\n".join((interpretation, conflict_assessment, *warnings)),
-    )
-    if any(not re.fullmatch(r"R[1-9][0-9]*", item) for item in citation_tokens):
-        raise VariantInterpretationError(
-            "Interpretation contains a malformed reference citation.",
-            failure_type="output_schema_failure",
-            schema_error="malformed_citation",
-        )
-    citations = cited_reference_ids(
-        interpretation,
-        conflict_assessment,
-        *warnings,
-    )
-    if any(item not in allowed_reference_ids for item in citations):
-        raise VariantInterpretationError(
-            "Interpretation cites a reference absent from its evidence.",
-            failure_type="output_schema_failure",
-            schema_error="unknown_citation",
-        )
     try:
         validate_llm_payload(
             {
@@ -750,7 +867,15 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="privacy_rejection",
         ) from exc
-    return ai_classification, interpretation, conflict_assessment, warnings, citations
+    return {
+        "ai_classification": ai_classification,
+        "interpretation": interpretation,
+        "conflict_assessment": conflict_assessment,
+        "warnings": warnings,
+        "phenotype_conclusion": phenotype_conclusion,
+        "cited_reference_ids": citations,
+        "field_validation": field_validation,
+    }
 
 
 def _usage(response: LLMResponse) -> dict[str, int | None] | None:
@@ -895,6 +1020,23 @@ def _recovery_retry_count(
     return settings.VARIANT_INTERPRETATION_MAX_RETRIES
 
 
+def _is_structured_repair_eligible(error: Exception) -> bool:
+    return (
+        classify_interpretation_failure(error)
+        in STRUCTURED_REPAIR_FAILURE_TYPES
+        and getattr(error, "schema_error", None) in REPAIRABLE_SCHEMA_ERRORS
+    )
+
+
+def _is_model_fallback_eligible(error: Exception) -> bool:
+    return (
+        classify_interpretation_failure(error)
+        in OPERATIONAL_FALLBACK_FAILURE_TYPES
+        and getattr(error, "schema_error", None)
+        not in NON_FALLBACK_SCHEMA_ERRORS
+    )
+
+
 def _execute_interpretation_request(
     evidence: EvidenceObject,
     *,
@@ -905,7 +1047,7 @@ def _execute_interpretation_request(
     max_retries: int | None,
 ) -> tuple[
     LLMResponse,
-    tuple[AIClassification, str, str, list[str], list[str]],
+    ParsedInterpretationResponse,
     bool,
 ]:
     """Execute one model with one bounded structured-output repair."""
@@ -949,7 +1091,7 @@ def _execute_interpretation_request(
             failure_type = classify_interpretation_failure(exc)
             if (
                 repair_index == 0
-                and failure_type in STRUCTURED_REPAIR_FAILURE_TYPES
+                and _is_structured_repair_eligible(exc)
             ):
                 repair_used = True
                 if getattr(exc, "schema_error", None) == "malformed_citation":
@@ -1130,7 +1272,7 @@ def interpret_variant(
         failure_type = classify_interpretation_failure(primary_error)
         if (
             configured_fallback_model is None
-            or failure_type not in OPERATIONAL_FALLBACK_FAILURE_TYPES
+            or not _is_model_fallback_eligible(primary_error)
         ):
             raise
         fallback_used = True
@@ -1170,13 +1312,13 @@ def interpret_variant(
             fallback_error.fallback_used = True
             fallback_error.diagnostic_model = configured_fallback_model
             raise
-    (
-        ai_classification,
-        interpretation,
-        conflict_assessment,
-        warnings,
-        citations,
-    ) = parsed
+    ai_classification = parsed["ai_classification"]
+    interpretation = parsed["interpretation"]
+    conflict_assessment = parsed["conflict_assessment"]
+    warnings = parsed["warnings"]
+    phenotype_conclusion = parsed["phenotype_conclusion"]
+    citations = parsed["cited_reference_ids"]
+    field_validation = parsed["field_validation"]
     if fallback_used:
         recovery_warning = (
             "Operational recovery used the configured fallback "
@@ -1203,7 +1345,9 @@ def interpret_variant(
         "interpretation": interpretation,
         "conflict_assessment": conflict_assessment,
         "warnings": warnings,
+        "phenotype_conclusion": phenotype_conclusion,
         "cited_reference_ids": citations,
+        "field_validation": field_validation,
         "usage": _usage(response),
         "generated_at": _timestamp(timestamp),
         "error_type": None,
@@ -1279,7 +1423,16 @@ def _failed_result(
         "interpretation": None,
         "conflict_assessment": None,
         "warnings": [],
+        "phenotype_conclusion": None,
         "cited_reference_ids": [],
+        "field_validation": {
+            "ai_classification": "not_available",
+            "interpretation": "not_available",
+            "conflict_assessment": "not_available",
+            "warnings": "not_available",
+            "phenotype_conclusion": "not_available",
+            "citations": "not_available",
+        },
         "usage": None,
         "generated_at": _timestamp(timestamp),
         "error_type": diagnostic["failure_type"],
@@ -1311,6 +1464,7 @@ def interpret_variants(
     max_retries: int | None = None,
     timestamp: str | None = None,
     readiness_audits: Iterable[Mapping[str, object]] | None = None,
+    variant_indices: Sequence[int] | None = None,
     progress_callback: InterpretationProgressCallback | None = None,
 ) -> list[VariantInterpretationResult]:
     """Interpret evidence independently, preserving order and one model."""
@@ -1350,11 +1504,28 @@ def interpret_variants(
         raise VariantInterpretationError(
             "Readiness-audit and Evidence Object counts must match."
         )
+    indexed_variants = (
+        list(variant_indices)
+        if variant_indices is not None
+        else list(range(len(evidence_list)))
+    )
+    if (
+        len(indexed_variants) != len(evidence_list)
+        or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in indexed_variants
+        )
+        or indexed_variants != sorted(set(indexed_variants))
+    ):
+        raise VariantInterpretationError(
+            "Variant indexes must be unique non-negative integers in ascending order."
+        )
     results: list[VariantInterpretationResult] = []
     total = len(evidence_list)
-    for variant_index, evidence in enumerate(evidence_list):
+    for position, evidence in enumerate(evidence_list):
+        variant_index = indexed_variants[position]
         if progress_callback is not None:
-            progress_callback(variant_index + 1, total, "running")
+            progress_callback(position + 1, total, "running")
         try:
             result = interpret_variant(
                 evidence,
@@ -1365,9 +1536,9 @@ def interpret_variants(
                 fallback_client=fallback_client,
                 max_retries=max_retries,
                 timestamp=timestamp,
-                readiness_audit=readiness_list[variant_index],
+                readiness_audit=readiness_list[position],
             )
-        except (LLMError, VariantInterpretationError) as exc:
+        except Exception as exc:
             result = _failed_result(
                 evidence,
                 variant_index=variant_index,
@@ -1378,7 +1549,7 @@ def interpret_variants(
         results.append(result)
         if progress_callback is not None:
             progress_callback(
-                variant_index + 1,
+                position + 1,
                 total,
                 result["status"],
             )
@@ -1458,8 +1629,35 @@ def validate_variant_interpretation_result(
             "Variant interpretation schema version is unsupported."
         )
     fields = set(normalized)
-    if schema_version == "1.1" and fields == LEGACY_INTERPRETATION_RESULT_FIELDS:
+    if (
+        schema_version == "1.1"
+        and fields == V1_1_INTERPRETATION_RESULT_FIELDS
+    ):
         normalized["ai_classification"] = None
+        normalized["phenotype_conclusion"] = None
+        succeeded = normalized.get("status") == "success"
+        normalized["field_validation"] = {
+            "ai_classification": "not_available",
+            "interpretation": "valid" if succeeded else "not_available",
+            "conflict_assessment": "valid" if succeeded else "not_available",
+            "warnings": "valid" if succeeded else "not_available",
+            "phenotype_conclusion": "not_available",
+            "citations": "valid" if succeeded else "not_available",
+        }
+    elif (
+        schema_version == "1.2"
+        and fields == V1_2_INTERPRETATION_RESULT_FIELDS
+    ):
+        succeeded = normalized.get("status") == "success"
+        normalized["phenotype_conclusion"] = None
+        normalized["field_validation"] = {
+            "ai_classification": "valid" if succeeded else "not_available",
+            "interpretation": "valid" if succeeded else "not_available",
+            "conflict_assessment": "valid" if succeeded else "not_available",
+            "warnings": "valid" if succeeded else "not_available",
+            "phenotype_conclusion": "not_available",
+            "citations": "valid" if succeeded else "not_available",
+        }
     elif fields != INTERPRETATION_RESULT_FIELDS:
         raise VariantInterpretationError(
             "Variant interpretation result has invalid fields."
@@ -1580,6 +1778,26 @@ def validate_variant_interpretation_result(
         raise VariantInterpretationError(
             "AI draft classification is invalid."
         )
+    field_validation = value["field_validation"]
+    if (
+        not isinstance(field_validation, dict)
+        or set(field_validation) != FIELD_VALIDATION_FIELDS
+        or any(
+            status not in {"valid", "invalid", "not_available"}
+            for status in field_validation.values()
+        )
+    ):
+        raise VariantInterpretationError(
+            "Interpretation field validation state is invalid."
+        )
+    phenotype_conclusion = value["phenotype_conclusion"]
+    if (
+        phenotype_conclusion is not None
+        and phenotype_conclusion not in PHENOTYPE_CONCLUSIONS
+    ):
+        raise VariantInterpretationError(
+            "Interpretation phenotype conclusion is invalid."
+        )
     if value["status"] == "success":
         if (
             not isinstance(value["response_model"], str)
@@ -1593,16 +1811,56 @@ def validate_variant_interpretation_result(
             raise VariantInterpretationError(
                 "Successful variant interpretation is incomplete."
             )
+        if (
+            field_validation["interpretation"] != "valid"
+            or (
+                schema_version == VARIANT_INTERPRETATION_SCHEMA_VERSION
+                and field_validation["ai_classification"] != "valid"
+            )
+            or (
+                schema_version == VARIANT_INTERPRETATION_SCHEMA_VERSION
+                and "not_available" in field_validation.values()
+            )
+        ):
+            raise VariantInterpretationError(
+                "Successful core interpretation fields are invalid."
+            )
         _bounded_text(
             value["interpretation"],
             field="interpretation",
             maximum=MAX_INTERPRETATION_CHARACTERS,
         )
-        _bounded_text(
-            value["conflict_assessment"],
-            field="conflict_assessment",
-            maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
-        )
+        if field_validation["conflict_assessment"] == "valid":
+            _bounded_text(
+                value["conflict_assessment"],
+                field="conflict_assessment",
+                maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
+            )
+        elif value["conflict_assessment"] is not None:
+            raise VariantInterpretationError(
+                "Invalid conflict assessment must be excluded."
+            )
+        if field_validation["phenotype_conclusion"] == "valid":
+            if evidence is None:
+                if phenotype_conclusion not in PHENOTYPE_CONCLUSIONS:
+                    raise VariantInterpretationError(
+                        "Valid phenotype conclusion is missing."
+                    )
+            else:
+                expected_phenotype = _expected_phenotype_conclusion(source)
+                allowed_phenotype = (
+                    {"supported", "partially supported"}
+                    if expected_phenotype == "supported"
+                    else {expected_phenotype}
+                )
+                if phenotype_conclusion not in allowed_phenotype:
+                    raise VariantInterpretationError(
+                        "Phenotype conclusion does not match its evidence."
+                    )
+        elif phenotype_conclusion is not None:
+            raise VariantInterpretationError(
+                "Invalid phenotype conclusion must be excluded."
+            )
         expected_citations = cited_reference_ids(
             value["interpretation"],
             value["conflict_assessment"],
@@ -1629,7 +1887,12 @@ def validate_variant_interpretation_result(
         or value["interpretation"] is not None
         or value["conflict_assessment"] is not None
         or value["warnings"] != []
+        or value["phenotype_conclusion"] is not None
         or value["cited_reference_ids"] != []
+        or any(
+            status != "not_available"
+            for status in field_validation.values()
+        )
         or value["usage"] is not None
         or not isinstance(value["error_type"], str)
         or not value["error_type"].strip()
@@ -1664,6 +1927,7 @@ def validate_variant_interpretation_result(
                 "interpretation": value["interpretation"],
                 "conflict_assessment": value["conflict_assessment"],
                 "warnings": value["warnings"],
+                "phenotype_conclusion": value["phenotype_conclusion"],
             }
         )
     except ClinicalDataPrivacyError as exc:

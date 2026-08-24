@@ -178,14 +178,19 @@ def build_variant_report_records(
         build_variant_report_record(
             draft,
             analysis_id=analysis_id,
-            confirmed_at=confirmed_by_index.get(index),
+            confirmed_at=confirmed_by_index.get(
+                cast(int, draft.get("variant_index"))
+            ),
             finalized_at=(
-                finalized_at if index in confirmed_by_index else None
+                finalized_at
+                if draft.get("variant_index") in confirmed_by_index
+                else None
             ),
         )
-        for index, draft in enumerate(drafts)
+        for draft in drafts
     ]
-    if [record["variant_index"] for record in records] != list(range(len(records))):
+    record_indexes = [record["variant_index"] for record in records]
+    if record_indexes != sorted(set(record_indexes)):
         raise ReportLifecycleError(
             "Per-variant report records must preserve original input order."
         )

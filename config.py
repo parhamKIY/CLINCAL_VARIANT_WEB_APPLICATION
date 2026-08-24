@@ -219,6 +219,11 @@ class Settings:
         30,
     )
 
+    ANALYSIS_MAX_RUNTIME_SECONDS: int = _get_positive_int(
+        "ANALYSIS_MAX_RUNTIME_SECONDS",
+        1_800,
+    )
+
     # Default for provider-specific HTTP deadlines below.
     REQUEST_TIMEOUT: int = _get_positive_int(
         "REQUEST_TIMEOUT",
@@ -800,6 +805,11 @@ class Settings:
         if cls.VARIANT_INTERPRETATION_MAX_RETRIES > 1:
             raise RuntimeError(
                 "VARIANT_INTERPRETATION_MAX_RETRIES cannot exceed 1."
+            )
+
+        if cls.ANALYSIS_MAX_RUNTIME_SECONDS > 7_200:
+            raise RuntimeError(
+                "ANALYSIS_MAX_RUNTIME_SECONDS cannot exceed 7200."
             )
 
         if cls.PHENOTYPE_EXTRACTION_MAX_TOKENS > 4_000:

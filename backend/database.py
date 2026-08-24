@@ -1830,43 +1830,63 @@ def _v3_projection(
         updated_at,
     )
 
+    evidence_by_variant: dict[int, object] = {}
+    successful_indexes: list[int] = []
+    for outcome in value["evidence_construction_outcomes"]:
+        if outcome["status"] != "success":
+            continue
+        variant_index = outcome["variant_index"]
+        evidence_index = outcome["evidence_object_index"]
+        assert isinstance(evidence_index, int)
+        successful_indexes.append(variant_index)
+        evidence_by_variant[variant_index] = value["evidence_objects"][
+            evidence_index
+        ]
+    interpretations_by_variant = {
+        item["variant_index"]: item
+        for item in value["variant_interpretation_results"]
+    }
+
     variant_rows: list[tuple[object, ...]] = []
-    if len(value["draft_variant_reports"]) == value["variant_count"]:
-        for index, report in enumerate(value["draft_variant_reports"]):
-            interpretation = value["variant_interpretation_results"][index]
-            reviewed = report["reviewed_report"]
-            failure = (
-                {
-                    "status": interpretation["status"],
-                    "error_type": interpretation["error_type"],
-                    "warnings": interpretation["warnings"],
-                }
-                if interpretation["status"] == "failed"
-                else None
+    for report in value["draft_variant_reports"]:
+        index = report["variant_index"]
+        interpretation = interpretations_by_variant[index]
+        evidence = evidence_by_variant[index]
+        assert isinstance(evidence, dict)
+        reviewed = report["reviewed_report"]
+        failure = (
+            {
+                "status": interpretation["status"],
+                "error_type": interpretation["error_type"],
+                "warnings": interpretation["warnings"],
+            }
+            if interpretation["status"] == "failed"
+            else None
+        )
+        variant_rows.append(
+            (
+                analysis_id,
+                index,
+                _json_text(evidence),
+                _json_text(reviewed["conflict_summary"]),
+                _json_text(interpretation),
+                _json_text(report["machine_original_report"]),
+                _json_text(reviewed),
+                _json_text(report["edit_history"]),
+                int(report["include_in_final_report"]),
+                _json_text(report["selection_history"]),
+                _json_text(failure) if failure is not None else None,
+                _json_text(reviewed["literature_references"]),
+                updated_at,
             )
-            variant_rows.append(
-                (
-                    analysis_id,
-                    index,
-                    _json_text(value["evidence_objects"][index]),
-                    _json_text(reviewed["conflict_summary"]),
-                    _json_text(interpretation),
-                    _json_text(report["machine_original_report"]),
-                    _json_text(reviewed),
-                    _json_text(report["edit_history"]),
-                    int(report["include_in_final_report"]),
-                    _json_text(report["selection_history"]),
-                    _json_text(failure) if failure is not None else None,
-                    _json_text(reviewed["literature_references"]),
-                    updated_at,
-                )
-            )
+        )
 
     packages = value["reviewed_evidence_packages"]
     fully_confirmed = (
         value["variant_count"] > 0
+        and bool(successful_indexes)
         and [package["variant_index"] for package in packages]
-        == list(range(value["variant_count"]))
+        == successful_indexes
     )
     final_report = value["final_clinical_report"]
     confirmation_state = (
@@ -1884,7 +1904,8 @@ def _v3_projection(
         if not report["include_in_final_report"]:
             continue
         variant_index = report["variant_index"]
-        evidence = value["evidence_objects"][variant_index]
+        evidence = evidence_by_variant[variant_index]
+        assert isinstance(evidence, dict)
         variant = evidence["variant"]
         selected_variant_ids.append(
             f"{evidence['assembly']}:{variant['chrom']}:"

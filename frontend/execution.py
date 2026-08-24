@@ -57,6 +57,7 @@ from backend.execution_trace import (
     ExecutionTraceSnapshot,
 )
 from backend.input_preprocessing import classify_source_representation
+from backend.logging_config import get_logger
 from backend.provider_readiness import ProviderReadinessSnapshot
 from backend.vcf_processing import (
     VCFProcessingError,
@@ -76,6 +77,14 @@ class FrontendExecutionError(RuntimeError):
 
 class AnalysisCancelled(BaseException):
     """Stop one cooperative background analysis without error output."""
+
+
+LOGGER = get_logger("frontend_execution")
+ANALYSIS_TIMEOUT_MESSAGE = (
+    "The analysis exceeded its configured runtime limit. Review provider "
+    "availability and try again."
+)
+MAX_ANALYSIS_RUNTIME_SECONDS = 7_200
 
 
 class UploadedVCF(Protocol):
@@ -283,6 +292,7 @@ class AnalysisJob:
         *,
         report_dir: str | Path | None = None,
         execution_trace: AnalysisExecutionTrace | None = None,
+        max_runtime_seconds: float | None = None,
     ) -> None:
         if execution_trace is not None and not isinstance(
             execution_trace,
@@ -293,6 +303,20 @@ class AnalysisJob:
             )
         self._runner = runner
         self._execution_trace = execution_trace
+        resolved_runtime = (
+            settings.ANALYSIS_MAX_RUNTIME_SECONDS
+            if max_runtime_seconds is None
+            else max_runtime_seconds
+        )
+        if (
+            isinstance(resolved_runtime, bool)
+            or not isinstance(resolved_runtime, (int, float))
+            or not 0 < float(resolved_runtime) <= MAX_ANALYSIS_RUNTIME_SECONDS
+        ):
+            raise FrontendExecutionError(
+                "Analysis runtime configuration is invalid."
+            )
+        self._max_runtime_seconds = float(resolved_runtime)
         self._report_directory = Path(
             settings.REPORT_DIR if report_dir is None else report_dir
         ).expanduser()
@@ -307,6 +331,9 @@ class AnalysisJob:
         self._error_message: str | None = None
         self._cleanup_warning: str | None = None
         self._recovery_token: str | None = None
+        self._timed_out = False
+        self._started = False
+        self._deadline_timer: threading.Timer | None = None
         self._thread = threading.Thread(
             target=self._run,
             name="clinical-variant-analysis",
@@ -316,7 +343,45 @@ class AnalysisJob:
     def start(self) -> None:
         """Start the background worker exactly once."""
 
-        self._thread.start()
+        with self._lock:
+            if self._started:
+                raise RuntimeError("Analysis job has already been started.")
+            self._started = True
+            deadline_timer = threading.Timer(
+                self._max_runtime_seconds,
+                self._mark_timed_out,
+            )
+            deadline_timer.daemon = True
+            self._deadline_timer = deadline_timer
+        deadline_timer.start()
+        try:
+            self._thread.start()
+        except BaseException:
+            deadline_timer.cancel()
+            with self._lock:
+                self._deadline_timer = None
+            raise
+
+    def _cancel_deadline(self) -> None:
+        with self._lock:
+            deadline_timer = self._deadline_timer
+            self._deadline_timer = None
+        if deadline_timer is not None:
+            deadline_timer.cancel()
+
+    def _mark_timed_out(self) -> None:
+        with self._lock:
+            if self._state in {"completed", "cancelled", "error"}:
+                return
+            self._timed_out = True
+            self._state = "error"
+            self._error_message = ANALYSIS_TIMEOUT_MESSAGE
+            self._deadline_timer = None
+            self._cancel_event.set()
+        LOGGER.warning(
+            "event=analysis_worker_timeout max_runtime_seconds=%d",
+            round(self._max_runtime_seconds),
+        )
 
     def bind_recovery_token(self, token: str) -> None:
         """Attach the registry token used to checkpoint a persisted result."""
@@ -426,10 +491,14 @@ class AnalysisJob:
     ) -> None:
         cleanup_warning = self._remove_cancelled_report(result)
         with self._lock:
+            if self._timed_out:
+                self._cleanup_warning = cleanup_warning
+                return
             self._state = "cancelled"
             self._latest_result = None
             self._result = None
             self._cleanup_warning = cleanup_warning
+        self._cancel_deadline()
 
     def _run(self) -> None:
         try:
@@ -444,15 +513,21 @@ class AnalysisJob:
             return
         except FrontendExecutionError as exc:
             with self._lock:
+                if self._timed_out:
+                    return
                 self._state = "error"
                 self._error_message = str(exc)
+            self._cancel_deadline()
             return
         except Exception:
             with self._lock:
+                if self._timed_out:
+                    return
                 self._state = "error"
                 self._error_message = (
                     "An unexpected internal error stopped the analysis."
                 )
+            self._cancel_deadline()
             return
 
         with self._lock:
@@ -464,9 +539,12 @@ class AnalysisJob:
                 analysis_id,
             )
         with self._lock:
+            if self._timed_out:
+                return
             self._state = "completed"
             self._latest_result = deepcopy(result)
             self._result = deepcopy(result)
+        self._cancel_deadline()
 
 
 @dataclass(slots=True)

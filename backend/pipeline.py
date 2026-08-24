@@ -683,6 +683,65 @@ def _successful_evidence_construction_outcomes(
     return outcomes
 
 
+def _successful_variant_indexes(
+    outcomes: Sequence[Mapping[str, object]],
+) -> list[int]:
+    """Return original input indexes for successful Evidence Objects."""
+
+    return [
+        cast(int, outcome["variant_index"])
+        for outcome in outcomes
+        if outcome.get("status") == "success"
+    ]
+
+
+def _evidence_by_variant_index(
+    evidence_objects: Sequence[Mapping[str, object]],
+    outcomes: Sequence[Mapping[str, object]],
+) -> dict[int, Mapping[str, object]]:
+    """Map original input index to its compact validated Evidence Object."""
+
+    mapped: dict[int, Mapping[str, object]] = {}
+    for outcome in outcomes:
+        evidence_index = outcome.get("evidence_object_index")
+        variant_index = outcome.get("variant_index")
+        if (
+            outcome.get("status") == "success"
+            and isinstance(variant_index, int)
+            and not isinstance(variant_index, bool)
+            and isinstance(evidence_index, int)
+            and not isinstance(evidence_index, bool)
+            and 0 <= evidence_index < len(evidence_objects)
+        ):
+            mapped[variant_index] = evidence_objects[evidence_index]
+    return mapped
+
+
+def _records_by_variant_index(
+    records: Sequence[Mapping[str, object]],
+) -> dict[int, Mapping[str, object]]:
+    """Index sparse variant artifacts without relying on list position."""
+
+    return {
+        cast(int, record["variant_index"]): record
+        for record in records
+        if isinstance(record.get("variant_index"), int)
+        and not isinstance(record.get("variant_index"), bool)
+    }
+
+
+def _record_position(
+    records: Sequence[Mapping[str, object]],
+    variant_index: int,
+) -> int:
+    """Resolve a sparse artifact position from its original variant index."""
+
+    for position, record in enumerate(records):
+        if record.get("variant_index") == variant_index:
+            return position
+    raise PipelineError("No downstream record exists for this variant.")
+
+
 def migrate_pipeline_schema33_to34(raw: object) -> PipelineResult | None:
     """Add bounded construction outcomes to a valid-shape 3.3 snapshot."""
 
@@ -1396,28 +1455,17 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 raise PipelineResultError(
                     "Evidence construction outcome and Evidence Object identities differ."
                 )
-        if len(successful_outcomes) != variant_count:
-            if value["workflow_state"] != "failed":
-                raise PipelineResultError(
-                    "Partial evidence construction must remain a failed workflow."
-                )
-            for field in (
-                "evidence_readiness",
-                "variant_interpretation_results",
-                "draft_variant_reports",
-                "variant_report_records",
-                "evidence_review_reports",
-                "reviewed_evidence_packages",
-                "llm_routing_results",
-            ):
-                if value[field]:
-                    raise PipelineResultError(
-                        "Partial evidence construction cannot produce downstream records."
-                    )
     elif evidence_objects:
         raise PipelineResultError(
             "Evidence Objects require construction outcomes."
         )
+    successful_variant_indexes = _successful_variant_indexes(
+        validated_construction_outcomes
+    )
+    evidence_by_variant = _evidence_by_variant_index(
+        cast(list[Mapping[str, object]], evidence_objects),
+        cast(list[Mapping[str, object]], validated_construction_outcomes),
+    )
     if (
         not value["input_preprocessing_results"]
         and value["variants"]
@@ -1496,9 +1544,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             ) from exc
         if [
             audit["variant_index"] for audit in validated_readiness
-        ] != list(range(len(validated_readiness))):
+        ] != successful_variant_indexes:
             raise PipelineResultError(
-                "pipeline.evidence_readiness must preserve variant order."
+                "pipeline.evidence_readiness must cover successful variants in input order."
             )
     if review_reports:
         if len(review_reports) != len(value["evidence_objects"]):
@@ -1515,11 +1563,17 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             raise PipelineResultError(
                 "pipeline.evidence_review_reports is invalid."
             ) from exc
-        for index, report in enumerate(validated_reports):
+        if [report["variant_index"] for report in validated_reports] != (
+            successful_variant_indexes
+        ):
+            raise PipelineResultError(
+                "pipeline.evidence_review_reports must preserve Evidence Object order and originals."
+            )
+        for report in validated_reports:
+            index = report["variant_index"]
             if (
-                report["variant_index"] != index
-                or report["original_machine_report"]
-                != value["evidence_objects"][index]
+                report["original_machine_report"]
+                != evidence_by_variant[index]
             ):
                 raise PipelineResultError(
                     "pipeline.evidence_review_reports must preserve "
@@ -1544,29 +1598,26 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 "pipeline.variant_interpretation_results must match the "
                 "Evidence Object count."
             )
-        previous_index = -1
+        interpretation_indexes = [
+            cast(int, item.get("variant_index"))
+            for item in interpretation_results
+        ]
+        if interpretation_indexes != successful_variant_indexes:
+            raise PipelineResultError(
+                "pipeline.variant_interpretation_results must cover successful variants in input order."
+            )
         for item in interpretation_results:
             index = item.get("variant_index")
-            if (
-                isinstance(index, bool)
-                or not isinstance(index, int)
-                or index <= previous_index
-                or index >= len(value["evidence_objects"])
-            ):
-                raise PipelineResultError(
-                    "pipeline.variant_interpretation_results must preserve "
-                    "ascending variant order without duplicates."
-                )
+            assert isinstance(index, int)
             try:
                 validate_variant_interpretation_result(
                     item,
-                    evidence=value["evidence_objects"][index],
+                    evidence=evidence_by_variant[index],
                 )
             except VariantInterpretationError as exc:
                 raise PipelineResultError(
                     "pipeline.variant_interpretation_results is invalid."
                 ) from exc
-            previous_index = index
         if value["status"] == "success" and any(
             item["status"] == "failed" for item in interpretation_results
         ):
@@ -1580,17 +1631,24 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                 "pipeline.draft_variant_reports must match the Evidence "
                 "Object count."
             )
-        for expected_index, report in enumerate(draft_variant_reports):
-            if report.get("variant_index") != expected_index:
-                raise PipelineResultError(
-                    "pipeline.draft_variant_reports must preserve variant "
-                    "order."
-                )
+        draft_indexes = [
+            cast(int, report.get("variant_index"))
+            for report in draft_variant_reports
+        ]
+        if draft_indexes != successful_variant_indexes:
+            raise PipelineResultError(
+                "pipeline.draft_variant_reports must cover successful variants in input order."
+            )
+        interpretations_by_variant = _records_by_variant_index(
+            cast(list[Mapping[str, object]], interpretation_results)
+        )
+        for report in draft_variant_reports:
+            expected_index = cast(int, report.get("variant_index"))
             try:
                 validate_draft_variant_report(
                     report,
-                    evidence=value["evidence_objects"][expected_index],
-                    interpretation=interpretation_results[expected_index],
+                    evidence=evidence_by_variant[expected_index],
+                    interpretation=interpretations_by_variant[expected_index],
                 )
             except DraftVariantReportError as exc:
                 raise PipelineResultError(
@@ -1614,7 +1672,10 @@ def validate_pipeline_result(value: object) -> PipelineResult:
             ) from exc
         if [
             record["variant_index"] for record in validated_lifecycle_records
-        ] != list(range(len(validated_lifecycle_records))):
+        ] != [
+            cast(int, report["variant_index"])
+            for report in draft_variant_reports
+        ]:
             raise PipelineResultError(
                 "pipeline.variant_report_records must preserve original "
                 "input order."
@@ -1681,9 +1742,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
                     "ascending variant order without duplicates."
                 )
             if (
-                index >= len(value["evidence_objects"])
+                index not in evidence_by_variant
                 or package["original_machine_report"]
-                != value["evidence_objects"][index]
+                != evidence_by_variant[index]
             ):
                 raise PipelineResultError(
                     "pipeline.reviewed_evidence_packages must reference "
@@ -1779,8 +1840,8 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         )
     if workflow_state == "awaiting_final_review" and (
         not review_reports
-        or len(interpretation_results) != variant_count
-        or len(draft_variant_reports) != variant_count
+        or len(interpretation_results) != len(successful_variant_indexes)
+        or len(draft_variant_reports) != len(successful_variant_indexes)
     ):
         raise PipelineResultError(
             "pipeline.awaiting_final_review requires evidence, "
@@ -1790,9 +1851,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         workflow_state == "completed"
         and final_report is None
         and (
-            len(interpretation_results) != variant_count
-            or len(draft_variant_reports) != variant_count
-            or len(validated_packages) != variant_count
+            len(interpretation_results) != len(successful_variant_indexes)
+            or len(draft_variant_reports) != len(successful_variant_indexes)
+            or len(validated_packages) != len(successful_variant_indexes)
         )
     ):
         raise PipelineResultError(
@@ -1830,9 +1891,9 @@ def validate_pipeline_result(value: object) -> PipelineResult:
         interpretation_results or draft_variant_reports
     )
     if workflow_state == "completed" and active_final_review and (
-        len(interpretation_results) != variant_count
-        or len(draft_variant_reports) != variant_count
-        or len(validated_packages) != variant_count
+        len(interpretation_results) != len(successful_variant_indexes)
+        or len(draft_variant_reports) != len(successful_variant_indexes)
+        or len(validated_packages) != len(successful_variant_indexes)
         or final_clinical_report is None
     ):
         raise PipelineResultError(
@@ -3257,23 +3318,23 @@ def _build_evidence_and_report(
         result["phenotype_results"]
     )
     preliminary_evidence = preliminary_batch["evidence_objects"]
-    preliminary_failure = next(
-        (
-            outcome
-            for outcome in preliminary_batch["outcomes"]
-            if outcome["status"] == "failed"
-        ),
-        None,
+    preliminary_indexes = _successful_variant_indexes(
+        preliminary_batch["outcomes"]
     )
-    if preliminary_failure is not None:
+    if not preliminary_evidence:
         result["evidence_objects"] = [
             dict(evidence) for evidence in preliminary_evidence
         ]
         result["evidence_construction_outcomes"] = [
             dict(outcome) for outcome in preliminary_batch["outcomes"]
         ]
+        preliminary_failure = next(
+            outcome
+            for outcome in preliminary_batch["outcomes"]
+            if outcome["status"] == "failed"
+        )
         raise EvidenceObjectError(
-            "One or more canonical variants failed preliminary Evidence Object construction.",
+            "No canonical variant produced a safe preliminary Evidence Object.",
             evidence_step=preliminary_failure["evidence_step"],
             evidence_field=preliminary_failure["evidence_field"],
             failure_code=preliminary_failure["failure_code"],
@@ -3282,9 +3343,9 @@ def _build_evidence_and_report(
     preliminary_readiness = [
         build_evidence_readiness_audit(
             evidence,
-            variant_index=index,
+            variant_index=preliminary_indexes[position],
         )
-        for index, evidence in enumerate(preliminary_evidence)
+        for position, evidence in enumerate(preliminary_evidence)
     ]
 
     def notify_enrichment_progress(
@@ -3308,14 +3369,20 @@ def _build_evidence_and_report(
         _notify_progress(result, progress_callback)
 
     conditional_result = enrich_conditionally(
-        result["phenotype_results"],
+        [
+            result["phenotype_results"][index]
+            for index in preliminary_indexes
+        ],
         preliminary_evidence,
         population_session=population_session,
         literature_session=literature_session,
         readiness_audits=preliminary_readiness,
         progress_callback=notify_enrichment_progress,
     )
-    result["phenotype_results"] = conditional_result["variants"]
+    for position, variant_index in enumerate(preliminary_indexes):
+        result["phenotype_results"][variant_index] = conditional_result[
+            "variants"
+        ][position]
     for candidate in result["phenotype_results"]:
         conditional = candidate.get("conditional_enrichment")
         if isinstance(conditional, Mapping):
@@ -3330,7 +3397,8 @@ def _build_evidence_and_report(
     result["evidence_construction_outcomes"] = [
         dict(outcome) for outcome in final_batch["outcomes"]
     ]
-    for variant_index, outcome in enumerate(final_batch["outcomes"]):
+    for outcome in final_batch["outcomes"]:
+        variant_index = cast(int, outcome["variant_index"])
         outcome_status = outcome.get("status")
         failure_code = outcome.get("failure_code")
         record_execution_event(
@@ -3352,33 +3420,34 @@ def _build_evidence_and_report(
                 failure_code if isinstance(failure_code, str) else None
             ),
         )
-    final_failure = next(
-        (
-            outcome
-            for outcome in final_batch["outcomes"]
-            if outcome["status"] == "failed"
-        ),
-        None,
-    )
-    if final_failure is not None:
-        raise EvidenceObjectError(
-            "One or more canonical variants failed final Evidence Object construction.",
-            evidence_step=final_failure["evidence_step"],
-            evidence_field=final_failure["evidence_field"],
-            failure_code=final_failure["failure_code"],
-            failure_scope="per_variant",
-        )
     if not evidence_objects:
         raise PipelineError(
             "Evidence Object construction produced no variants."
         )
+    successful_variant_indexes = _successful_variant_indexes(
+        final_batch["outcomes"]
+    )
+    failed_evidence_count = len(final_batch["outcomes"]) - len(
+        successful_variant_indexes
+    )
+    if failed_evidence_count:
+        _append_warning(
+            result,
+            f"Evidence construction completed with {failed_evidence_count} "
+            "explicit variant failure(s); successful sibling variants continued.",
+        )
+    preliminary_by_variant = {
+        audit["variant_index"]: audit for audit in preliminary_readiness
+    }
     readiness_audits = [
         build_evidence_readiness_audit(
             evidence,
-            variant_index=index,
-            before_rescue=preliminary_readiness[index],
+            variant_index=successful_variant_indexes[position],
+            before_rescue=preliminary_by_variant[
+                successful_variant_indexes[position]
+            ],
         )
-        for index, evidence in enumerate(evidence_objects)
+        for position, evidence in enumerate(evidence_objects)
     ]
     if any(
         audit["readiness_after_rescue"]
@@ -3458,6 +3527,7 @@ def _build_evidence_and_report(
         model=llm_model,
         client=llm_client,
         readiness_audits=readiness_audits,
+        variant_indices=successful_variant_indexes,
         progress_callback=notify_interpretation_progress,
     )
     result["variant_interpretation_results"] = [
@@ -3539,6 +3609,7 @@ def _build_evidence_and_report(
     draft_variant_reports = build_draft_variant_reports(
         list(evidence_objects),
         list(interpretation_results),
+        variant_indices=successful_variant_indexes,
     )
     result["draft_variant_reports"] = [
         dict(report)
@@ -3549,7 +3620,10 @@ def _build_evidence_and_report(
     integrity_counts = cardinality_counts(
         result["variant_integrity_records"]
     )
-    review_reports = build_evidence_review_reports(evidence_objects)
+    review_reports = build_evidence_review_reports(
+        evidence_objects,
+        variant_indices=successful_variant_indexes,
+    )
     result["evidence_review_reports"] = [
         dict(report)
         for report in review_reports
@@ -4244,6 +4318,13 @@ def confirm_reviewed_evidence(
         cast(int, package["variant_index"]): dict(package)
         for package in working["reviewed_evidence_packages"]
     }
+    evidence_by_variant = _evidence_by_variant_index(
+        cast(list[Mapping[str, object]], working["evidence_objects"]),
+        cast(
+            list[Mapping[str, object]],
+            working["evidence_construction_outcomes"],
+        ),
+    )
     updated_indexes: set[int] = set()
     for report in reports:
         try:
@@ -4252,9 +4333,9 @@ def confirm_reviewed_evidence(
             raise PipelineError(str(exc)) from exc
         index = package["variant_index"]
         if (
-            index >= len(working["evidence_objects"])
+            index not in evidence_by_variant
             or package["original_machine_report"]
-            != working["evidence_objects"][index]
+            != evidence_by_variant[index]
         ):
             raise PipelineError(
                 "Confirmed evidence does not match this analysis."
@@ -4309,7 +4390,9 @@ def finalize_reviewed_analysis(
             reports,
             timestamp=timestamp,
         )
-    expected_indexes = list(range(working["variant_count"]))
+    expected_indexes = _successful_variant_indexes(
+        working["evidence_construction_outcomes"]
+    )
     confirmed_indexes = [
         package["variant_index"]
         for package in working["reviewed_evidence_packages"]
@@ -4318,9 +4401,7 @@ def finalize_reviewed_analysis(
         raise PipelineError(
             "Finalization requires confirmed review state for every variant."
         )
-    if len(working["variant_interpretation_results"]) != working[
-        "variant_count"
-    ]:
+    if len(working["variant_interpretation_results"]) != len(expected_indexes):
         raise PipelineError(
             "Finalization requires one pre-review interpretation result "
             "for every variant."
@@ -4418,17 +4499,31 @@ def update_draft_variant_report(
         or index >= working["variant_count"]
     ):
         raise PipelineError("Draft Variant Report index is invalid.")
+    draft_position = _record_position(working["draft_variant_reports"], index)
+    evidence_by_variant = _evidence_by_variant_index(
+        cast(list[Mapping[str, object]], working["evidence_objects"]),
+        cast(
+            list[Mapping[str, object]],
+            working["evidence_construction_outcomes"],
+        ),
+    )
+    interpretations_by_variant = _records_by_variant_index(
+        cast(
+            list[Mapping[str, object]],
+            working["variant_interpretation_results"],
+        )
+    )
+    if index not in evidence_by_variant or index not in interpretations_by_variant:
+        raise PipelineError("Draft Variant Report has no successful evidence record.")
     try:
         validated_report = validate_draft_variant_report(
             dict(report),
-            evidence=working["evidence_objects"][index],
-            interpretation=working["variant_interpretation_results"][
-                index
-            ],
+            evidence=evidence_by_variant[index],
+            interpretation=interpretations_by_variant[index],
         )
     except DraftVariantReportError as exc:
         raise PipelineError(str(exc)) from exc
-    previous_report = working["draft_variant_reports"][index]
+    previous_report = working["draft_variant_reports"][draft_position]
     previous_edits = previous_report["edit_history"]
     previous_selections = previous_report["selection_history"]
     if (
@@ -4455,7 +4550,7 @@ def update_draft_variant_report(
         validated_report["include_in_final_report"]
         and reviewed_content_changed
     )
-    working["draft_variant_reports"][index] = dict(validated_report)
+    working["draft_variant_reports"][draft_position] = dict(validated_report)
     if confirmation_invalidated:
         working["reviewed_evidence_packages"] = [
             package
@@ -4505,10 +4600,28 @@ def retry_failed_variant_interpretation(
         or variant_index >= working["variant_count"]
     ):
         raise PipelineError("Interpretation retry variant index is invalid.")
-    prior = working["variant_interpretation_results"][variant_index]
+    interpretation_position = _record_position(
+        working["variant_interpretation_results"], variant_index
+    )
+    draft_position = _record_position(
+        working["draft_variant_reports"], variant_index
+    )
+    readiness_position = _record_position(
+        working["evidence_readiness"], variant_index
+    )
+    evidence_by_variant = _evidence_by_variant_index(
+        cast(list[Mapping[str, object]], working["evidence_objects"]),
+        cast(
+            list[Mapping[str, object]],
+            working["evidence_construction_outcomes"],
+        ),
+    )
+    if variant_index not in evidence_by_variant:
+        raise PipelineError("Interpretation retry requires retained evidence.")
+    prior = working["variant_interpretation_results"][interpretation_position]
     if prior["status"] != "failed":
         raise PipelineError("Only failed interpretations can be retried.")
-    report = working["draft_variant_reports"][variant_index]
+    report = working["draft_variant_reports"][draft_position]
     if (
         report["edit_history"]
         or report["selection_history"]
@@ -4523,7 +4636,7 @@ def retry_failed_variant_interpretation(
         )
     try:
         retried = retry_variant_interpretation(
-            working["evidence_objects"][variant_index],
+            evidence_by_variant[variant_index],
             prior,
             model=model,
             client=client,
@@ -4531,18 +4644,18 @@ def retry_failed_variant_interpretation(
             fallback_client=fallback_client,
             max_retries=max_retries,
             timestamp=timestamp,
-            readiness_audit=working["evidence_readiness"][variant_index],
+            readiness_audit=working["evidence_readiness"][readiness_position],
         )
         rebuilt = build_draft_variant_report(
-            working["evidence_objects"][variant_index],
+            evidence_by_variant[variant_index],
             retried,
             variant_index=variant_index,
         )
     except (VariantInterpretationError, DraftVariantReportError) as exc:
         raise PipelineError("Interpretation retry could not be completed.") from exc
 
-    working["variant_interpretation_results"][variant_index] = dict(retried)
-    working["draft_variant_reports"][variant_index] = dict(rebuilt)
+    working["variant_interpretation_results"][interpretation_position] = dict(retried)
+    working["draft_variant_reports"][draft_position] = dict(rebuilt)
     working["reviewed_evidence_packages"] = [
         package
         for package in working["reviewed_evidence_packages"]
@@ -4619,10 +4732,10 @@ def get_selected_draft_variant_reports(
         for record in working["variant_report_records"]
         if record["report_data"]["review_state"]["include_in_final_report"]
     ]
-    return [
-        dict(working["draft_variant_reports"][index])
-        for index in selected_indexes
-    ]
+    reports_by_index = _records_by_variant_index(
+        cast(list[Mapping[str, object]], working["draft_variant_reports"])
+    )
+    return [dict(reports_by_index[index]) for index in selected_indexes]
 
 
 def generate_confirmed_interpretations(
@@ -4882,7 +4995,9 @@ def resume_confirmed_analysis(
             reports,
             timestamp=timestamp,
         )
-    expected_indexes = list(range(working["variant_count"]))
+    expected_indexes = _successful_variant_indexes(
+        working["evidence_construction_outcomes"]
+    )
     confirmed_indexes = [
         package["variant_index"]
         for package in working["reviewed_evidence_packages"]

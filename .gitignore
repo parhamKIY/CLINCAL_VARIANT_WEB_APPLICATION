@@ -31,4 +31,6 @@ data/cache/*
 !/docs/stage_80_progress.md
 !/docs/stage_82_template_contract.md
 !/docs/stage_83_fidelity_gate.md
+!/docs/stage_11_2_analysis_lifecycle_audit.md
+!/docs/stage_11_3_variant_failure_isolation_audit.md
 AGENTS.md
