@@ -234,7 +234,7 @@ def test_frontend_execution_forwards_trace_without_pipeline_result_change(
     assert "execution_trace" not in result
 
 
-def test_existing_progress_ui_remains_with_additive_trace_panel() -> None:
+def test_runtime_progress_remains_with_authoritative_trace_panel() -> None:
     def app_body() -> None:
         from backend.pipeline import create_pipeline_result
         from frontend.ui import (
@@ -278,7 +278,7 @@ def test_existing_progress_ui_remains_with_additive_trace_panel() -> None:
         item.label == "Analysis in progress"
         for item in app.get("status")
     )
-    assert any(
-        item.label == "Technical provider details"
+    assert all(
+        item.label != "Technical provider details"
         for item in app.get("status")
     )

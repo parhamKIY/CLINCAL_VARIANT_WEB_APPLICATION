@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 import streamlit as st
@@ -98,7 +96,7 @@ def test_untriggered_optional_capability_is_not_partial_coverage() -> None:
     assert build_analysis_summary(result)["partial_source_coverage"] == 0
 
 
-def test_completed_ui_leads_with_summary_and_collapses_provider_details(
+def test_completed_ui_leads_with_summary_without_legacy_provider_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = create_pipeline_result()
@@ -141,34 +139,6 @@ def test_completed_ui_leads_with_summary_and_collapses_provider_details(
     assert "**1** variant has partial source coverage" in rendered
     assert "**1** interpretation requires attention" in rendered
     assert "External API status" not in rendered
-
-
-def test_provider_details_are_collapsed_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observed: dict[str, object] = {}
-
-    @contextmanager
-    def fake_expander(
-        label: str,
-        *,
-        expanded: bool,
-        icon: str,
-    ) -> Iterator[None]:
-        observed.update(label=label, expanded=expanded, icon=icon)
-        yield
-
-    monkeypatch.setattr(frontend_ui.st, "expander", fake_expander)
-    monkeypatch.setattr(frontend_ui.st, "caption", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(frontend_ui.st, "write", lambda *_args, **_kwargs: None)
-
-    frontend_ui._render_api_statuses(create_pipeline_result())
-
-    assert observed == {
-        "label": "Technical provider details",
-        "expanded": False,
-        "icon": ":material/api:",
-    }
 
 
 def test_excel_stage_records_do_not_claim_vcf_or_manual_input() -> None:

@@ -396,13 +396,13 @@ def _render_items(items: Sequence[TraceDisplayItem]) -> None:
 
 
 def render_execution_trace(snapshot: object) -> None:
-    """Render the additive trace panel using responsive native containers."""
+    """Render the authoritative runtime trace using native containers."""
 
     view = build_execution_trace_view(snapshot)
     st.subheader("Analysis execution trace")
     st.caption(
-        "This view summarizes the analysis route. Existing progress and "
-        "technical provider details remain available above."
+        "This view summarizes the analysis route, provider journey, and "
+        "high-level AI interpretation activity."
     )
     if not view["available"]:
         st.info(

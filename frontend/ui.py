@@ -33,7 +33,6 @@ from backend.phenotype_llm import (
 from backend.pipeline import (
     PipelineProgressCallback,
     PipelineResult,
-    create_pipeline_result,
 )
 from backend.phenotype import (
     HPODataError,
@@ -157,28 +156,6 @@ PIPELINE_STATUS_ICONS = {
     "error": ":material/error:",
     "skipped": ":material/skip_next:",
 }
-API_SOURCE_LABELS = {
-    "vep": "Ensembl VEP",
-    "genebe": "GeneBe",
-    "myvariant": "MyVariant.info",
-    "clinvar": "NCBI ClinVar",
-    "clingen": "ClinGen/GenCC (UCSC)",
-    "cspec": "ClinGen CSpec Registry",
-    "phen2gene": "Phen2Gene",
-    "mydisease": "MyDisease.info",
-    "llm": "LLM API",
-}
-API_STATUS_LABELS = {
-    "pending": "Waiting",
-    "running": "In progress",
-    "success": "Success",
-    "no_association": "No association",
-    "warning": "Completed with warnings",
-    "error": "Failed",
-    "skipped": "Not called",
-}
-
-
 class AnalysisSubmission(TypedDict):
     """One validated frontend request ready for pipeline execution."""
 
@@ -2004,30 +1981,6 @@ def _write_stage_records(target: object, result: PipelineResult) -> None:
         target.write(f"{icon} **{label}:** {message}")
 
 
-def _render_api_statuses(result: PipelineResult) -> None:
-    """Keep technical provider states available but collapsed by default."""
-
-    with st.expander(
-        "Technical provider details",
-        expanded=False,
-        icon=":material/api:",
-    ):
-        st.caption(
-            "This section updates during analysis. Failed API attempts "
-            "are retried automatically; successful requests with "
-            "missing evidence are not treated as failures."
-        )
-        for record in result["api_statuses"]:
-            status = record["status"]
-            icon = PIPELINE_STATUS_ICONS[status]
-            source = API_SOURCE_LABELS[record["source"]]
-            status_label = API_STATUS_LABELS[status]
-            message = record["message"] or status_label
-            st.write(
-                f"{icon} **{source} — {status_label}:** {message}"
-            )
-
-
 def _render_pipeline_issues(result: PipelineResult) -> None:
     """Render frontend-safe pipeline issues without tracebacks."""
 
@@ -2060,12 +2013,11 @@ def _render_pipeline_status(result: PipelineResult) -> None:
         expanded=expanded,
     )
     _write_stage_records(status, result)
-    _render_api_statuses(result)
     _render_pipeline_issues(result)
 
 
 def _render_trace_snapshot(snapshot: object) -> None:
-    """Render the additive runtime execution journey when available."""
+    """Render the authoritative runtime execution journey when available."""
 
     render_execution_trace(snapshot)
 
@@ -2274,9 +2226,6 @@ def _render_analysis_job(job: AnalysisJob) -> None:
     )
     if result is not None:
         _write_stage_records(status, result)
-        _render_api_statuses(result)
-    else:
-        _render_api_statuses(create_pipeline_result())
     if view.state == "cancelling":
         status.info(
             "The current bounded operation will stop at the next safe "
