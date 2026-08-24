@@ -311,7 +311,10 @@ from frontend.execution import (
     register_analysis_job,
     release_registered_analysis_job,
 )
-from frontend.evidence_review import _invalidate_confirmation
+from frontend.evidence_review import (
+    _build_finalization_summary,
+    _invalidate_confirmation,
+)
 from frontend.results import (
     build_annotation_rows,
     build_mydisease_rows,
@@ -16212,7 +16215,7 @@ class TestStage40FrontendReviewWorkflow:
             "reviewed_user_report"
         ] == original
 
-    def test_confirmation_finalizes_without_another_llm_call(
+    def test_confirmation_dialog_finalizes_without_another_llm_call(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -16229,48 +16232,46 @@ class TestStage40FrontendReviewWorkflow:
         finalize = next(
             button
             for button in app.button
-            if button.label == "Finalize review"
+            if button.label == "Finalize report"
         )
-        assert finalize.disabled
+        assert not finalize.disabled
         assert not any(
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
         )
+        interpretations = deepcopy(
+            app.session_state["pipeline_result"][
+                "variant_interpretation_results"
+            ]
+        )
 
-        confirm = next(
+        finalize.click().run(timeout=10)
+        confirm_finalization = next(
             button
             for button in app.button
-            if button.label == "Confirm evidence"
+            if button.label == "Yes, finalize report"
         )
-        assert confirm.disabled
+        assert confirm_finalization.disabled
+        assert any(
+            "1 reviewable" in markdown.value
+            and "1 awaiting confirmation" in markdown.value
+            for markdown in app.markdown
+        )
         next(
             checkbox
             for checkbox in app.checkbox
             if checkbox.label.startswith(
-                "I confirm that this reviewed evidence contains no names"
+                "I confirm that I reviewed the current evidence"
             )
         ).set_value(True).run(timeout=10)
 
         next(
             button
             for button in app.button
-            if button.label == "Confirm evidence"
+            if button.label == "Yes, finalize report"
         ).click().run(timeout=10)
 
         assert saved[-1]["reviewed_evidence_packages"]
-        finalize = next(
-            button
-            for button in app.button
-            if button.label == "Finalize review"
-        )
-        assert not finalize.disabled
-        interpretations = deepcopy(
-            app.session_state["pipeline_result"][
-                "variant_interpretation_results"
-            ]
-        )
-        finalize.click().run(timeout=10)
-
         assert app.session_state["pipeline_result"]["workflow_state"] == (
             "completed"
         )
@@ -16281,6 +16282,56 @@ class TestStage40FrontendReviewWorkflow:
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
         )
+
+    def test_finalization_dialog_cancel_preserves_review_state(self) -> None:
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = self._draft_result()
+        app.run(timeout=10)
+
+        next(
+            button
+            for button in app.button
+            if button.label == "Finalize report"
+        ).click().run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.key == "evidence_review_cancel_finalization"
+        ).click().run(timeout=10)
+
+        assert app.session_state["pipeline_result"]["workflow_state"] == (
+            "awaiting_final_review"
+        )
+        assert not app.session_state["pipeline_result"][
+            "reviewed_evidence_packages"
+        ]
+        assert any(
+            button.label == "Finalize report" for button in app.button
+        )
+        assert not any(
+            button.label == "Yes, finalize report" for button in app.button
+        )
+
+    def test_finalization_summary_does_not_require_failed_input_variant(
+        self,
+    ) -> None:
+        result = self._draft_result()
+        result["variant_count"] = 2
+        result["evidence_construction_outcomes"].append(
+            {
+                "variant_index": 1,
+                "status": "failed",
+            }
+        )
+
+        summary = _build_finalization_summary(
+            result,
+            result["evidence_review_reports"],
+        )
+
+        assert summary["reviewable_indexes"] == (0,)
+        assert summary["unconfirmed_indexes"] == (0,)
+        assert summary["construction_failed_indexes"] == (1,)
 
     def test_failed_interpretation_remains_reviewable(
         self,

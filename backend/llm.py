@@ -23,6 +23,7 @@ LLMRole = Literal["system", "user", "assistant"]
 LOGGER = get_logger("llm")
 LLM_RESPONSE_SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_LLM_RESPONSE_SCHEMA_BYTES = 64 * 1024
+MAX_LLM_RETRY_DELAY_SECONDS = 30.0
 
 
 class LLMError(RuntimeError):
@@ -37,6 +38,7 @@ class LLMError(RuntimeError):
         finish_reason: str | None = None,
         schema_error: str | None = None,
         failure_type: str | None = None,
+        retry_after_seconds: float | None = None,
     ) -> None:
         super().__init__(message)
         self.http_status = http_status
@@ -44,6 +46,7 @@ class LLMError(RuntimeError):
         self.finish_reason = finish_reason
         self.schema_error = schema_error
         self.failure_type = failure_type
+        self.retry_after_seconds = retry_after_seconds
 
 
 class LLMConfigurationError(LLMError):
@@ -634,12 +637,30 @@ class OpenAICompatibleAdapter:
             raise LLMRateLimitError(
                 "The LLM provider rate limit was exceeded (HTTP 429).",
                 http_status=status_code,
+                retry_after_seconds=(
+                    OpenAICompatibleAdapter._retry_after_seconds(response)
+                ),
             )
 
         raise LLMRequestError(
             f"The LLM provider returned HTTP {status_code}.",
             http_status=status_code,
         )
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response) -> float | None:
+        """Return a bounded provider-directed delay without retaining headers."""
+
+        headers = getattr(response, "headers", None)
+        if not isinstance(headers, Mapping):
+            return None
+        value = headers.get("Retry-After")
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if not normalized.isdigit():
+            return None
+        return min(float(int(normalized)), MAX_LLM_RETRY_DELAY_SECONDS)
 
     @staticmethod
     def _provider_error_code(response: requests.Response) -> str | None:
@@ -970,7 +991,15 @@ def call_llm(
             if attempt >= resolved_retries:
                 exc.attempt = attempt + 1
                 raise
-            delay_seconds = min(float(2**attempt), 5.0)
+            provider_delay = getattr(exc, "retry_after_seconds", None)
+            delay_seconds = (
+                provider_delay
+                if isinstance(provider_delay, (int, float))
+                and not isinstance(provider_delay, bool)
+                and isfinite(provider_delay)
+                and provider_delay >= 0
+                else min(float(2**attempt), 5.0)
+            )
             LOGGER.warning(
                 "event=llm_retry_scheduled next_attempt=%d "
                 "reason=%s delay_ms=%d",

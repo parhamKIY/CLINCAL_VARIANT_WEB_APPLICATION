@@ -55,7 +55,7 @@ VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.3"
 SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset(
     {"1.1", "1.2", "1.3"}
 )
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.7"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.9"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
         "variant-interpretation-v1.1",
@@ -64,6 +64,8 @@ SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
         "variant-interpretation-v1.4",
         "variant-interpretation-v1.5",
         "variant-interpretation-v1.6",
+        "variant-interpretation-v1.7",
+        "variant-interpretation-v1.8",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
     }
 )
@@ -159,6 +161,7 @@ REPAIRABLE_SCHEMA_ERRORS = frozenset(
         "invalid_output_text",
         "malformed_citation",
         "response_size_limit",
+        "unknown_citation",
     }
 )
 NON_FALLBACK_SCHEMA_ERRORS = frozenset(
@@ -185,6 +188,25 @@ STRUCTURED_REPAIR_INSTRUCTION = (
 MALFORMED_CITATION_REPAIR_INSTRUCTION = (
     " Cite one reference per bracket using only an allowed token such as [R1]. "
     "Do not combine multiple references inside one bracket."
+)
+UNKNOWN_CITATION_REPAIR_INSTRUCTION = (
+    " The previous response contained an unknown citation. Remove every "
+    "citation token that is absent from BEGIN_ALLOWED_REFERENCE_CATALOG. "
+    "If that catalog is empty, return no bracketed reference citations."
+)
+AI_CLASSIFICATION_REPAIR_INSTRUCTION = (
+    " Correct ai_classification to exactly one of Pathogenic, Likely "
+    "pathogenic, Uncertain significance, Likely benign, or Benign. When "
+    "evidence is conflicting or insufficient, use Uncertain significance; "
+    "do not return a refusal or a classification outside the five allowed "
+    "values."
+)
+CORE_FIELDS_REPAIR_INSTRUCTION = (
+    " Return both required core fields: a five-grade ai_classification and "
+    "a non-empty evidence-grounded interpretation narrative."
+)
+INVALID_JSON_REPAIR_INSTRUCTION = (
+    " Return one valid JSON object only, without prose or code fences."
 )
 InterpretationProgressCallback = Callable[
     [int, int, InterpretationStatus | Literal["running"]],
@@ -368,22 +390,26 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "the controlled vocabulary. When evidence is conflicting or "
         "insufficient, return Uncertain significance and explain the "
         "uncertainty in the interpretation and conflict assessment.",
-        "8. Keep provider classifications as source assertions. Do not "
+        "8. A successful response must contain both the draft classification "
+        "and a substantive interpretation even when source classifications "
+        "are missing, no_match, unavailable, or incomplete.",
+        "9. Keep provider classifications as source assertions. Do not "
         "overwrite, relabel, or present them as the draft AI classification.",
-        "9. Cite only supplied reference IDs using [R1], [R2], and so on. "
-        "Never invent a reference ID or supply a URL.",
-        "10. Return only the required structured response. Do not add URLs.",
-        "11. Use exactly one allowed phenotype conclusion: supported, "
+        "10. Cite only reference IDs present in the supplied allowed reference "
+        "catalog. If that catalog is empty, do not include any bracketed "
+        "reference citation. Never invent a reference ID or supply a URL.",
+        "11. Return only the required structured response. Do not add URLs.",
+        "12. Use exactly one allowed phenotype conclusion: supported, "
         "partially supported, no supported association found, or phenotype "
         "evidence unavailable.",
-        "12. If phenotype is unsupported, explicitly state that no supported "
+        "13. If phenotype is unsupported, explicitly state that no supported "
         "association was identified, continue from the remaining evidence, "
         "and do not treat mismatch as benign or negative pathogenicity "
         "evidence.",
-        "13. Patient- or user-supplied phenotype context is case context, not "
+        "14. Patient- or user-supplied phenotype context is case context, not "
         "independent scientific evidence. It cannot prove a disease, variant "
         "effect, or pathogenicity assertion.",
-        "14. Preserve provider observation states exactly. Operational "
+        "15. Preserve provider observation states exactly. Operational "
         "unavailability is not biological absence, no_match is not negative "
         "evidence, and an unavailable result must never be described as "
         "available.",
@@ -556,6 +582,16 @@ def _build_prompt(
         sort_keys=True,
         separators=(",", ":"),
     )
+    citation_instruction = (
+        "Citation instruction: Use only these allowed reference IDs: "
+        + ", ".join(
+            reference["reference_id"] for reference in reference_catalog
+        )
+        + "."
+        if reference_catalog
+        else "Citation instruction: The allowed reference catalog is empty. "
+        "Return no bracketed reference citations."
+    )
     if (
         len(serialized.encode("utf-8"))
         + len(serialized_readiness.encode("utf-8"))
@@ -575,6 +611,7 @@ def _build_prompt(
         "found', state that explicitly and continue interpreting the "
         "variant from all remaining evidence. Phenotype mismatch is not "
         "negative pathogenicity evidence.\n"
+        f"{citation_instruction}\n"
         "BEGIN_VALIDATED_EVIDENCE_OBJECT\n"
         f"{serialized}\n"
         "END_VALIDATED_EVIDENCE_OBJECT\n"
@@ -628,6 +665,21 @@ def _normalize_citation_groups(value: str) -> str:
         )
 
     return COMBINED_CITATION_PATTERN.sub(expand, value)
+
+
+def _canonical_ai_classification(value: object) -> AIClassification:
+    """Canonicalize only case/whitespace variants of the five-grade contract."""
+
+    if isinstance(value, str):
+        normalized = " ".join(value.split()).casefold()
+        for classification in AI_CLASSIFICATIONS:
+            if normalized == classification.casefold():
+                return cast(AIClassification, classification)
+    raise VariantInterpretationError(
+        "AI draft classification is invalid.",
+        failure_type="output_schema_failure",
+        schema_error="invalid_ai_classification",
+    )
 
 
 class _AuxiliaryFieldError(ValueError):
@@ -752,14 +804,9 @@ def _parse_response(
         phenotype_conclusion = None
         field_validation["phenotype_conclusion"] = "invalid"
 
-    raw_ai_classification = payload["ai_classification"]
-    if raw_ai_classification not in AI_CLASSIFICATIONS:
-        raise VariantInterpretationError(
-            "AI draft classification is invalid.",
-            failure_type="output_schema_failure",
-            schema_error="invalid_ai_classification",
-        )
-    ai_classification = cast(AIClassification, raw_ai_classification)
+    ai_classification = _canonical_ai_classification(
+        payload["ai_classification"]
+    )
     interpretation, interpretation_citations = _validate_field_citations(
         _bounded_output_text(
             payload["interpretation"],
@@ -1037,6 +1084,22 @@ def _is_model_fallback_eligible(error: Exception) -> bool:
     )
 
 
+def _structured_repair_instruction(error: Exception) -> str:
+    schema_error = getattr(error, "schema_error", None)
+    detail = {
+        "invalid_ai_classification": AI_CLASSIFICATION_REPAIR_INSTRUCTION,
+        "invalid_fields": CORE_FIELDS_REPAIR_INSTRUCTION,
+        "invalid_json": INVALID_JSON_REPAIR_INSTRUCTION,
+        "invalid_output_text": CORE_FIELDS_REPAIR_INSTRUCTION,
+        "malformed_citation": MALFORMED_CITATION_REPAIR_INSTRUCTION,
+        "unknown_citation": UNKNOWN_CITATION_REPAIR_INSTRUCTION,
+        "response_size_limit": (
+            " Return a concise response within the required field limits."
+        ),
+    }.get(schema_error, "")
+    return STRUCTURED_REPAIR_INSTRUCTION + detail
+
+
 def _execute_interpretation_request(
     evidence: EvidenceObject,
     *,
@@ -1094,11 +1157,7 @@ def _execute_interpretation_request(
                 and _is_structured_repair_eligible(exc)
             ):
                 repair_used = True
-                if getattr(exc, "schema_error", None) == "malformed_citation":
-                    repair_instruction = (
-                        STRUCTURED_REPAIR_INSTRUCTION
-                        + MALFORMED_CITATION_REPAIR_INSTRUCTION
-                    )
+                repair_instruction = _structured_repair_instruction(exc)
                 LOGGER.warning(
                     "event=variant_interpretation_recovery action=repair "
                     "variant_id=%s model=%s failure_type=%s schema_error=%s "

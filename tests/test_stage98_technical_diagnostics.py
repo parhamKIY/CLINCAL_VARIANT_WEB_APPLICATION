@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
+import pandas as pd
 import pytest
 
 import frontend.evidence_review as evidence_review
@@ -322,7 +323,12 @@ def test_drawer_is_collapsed_and_uses_all_required_columns(
         {"expanded": False, "icon": ":material/monitoring:"},
     )
     rendered_rows, options = observed["dataframe"]  # type: ignore[misc]
-    assert rendered_rows == rows
+    assert isinstance(rendered_rows, pd.DataFrame)
+    assert rendered_rows.loc[0, "provider"] == "ClinVar"
+    assert rendered_rows.loc[0, "attempt_count"] == 1
+    assert rendered_rows.loc[0, "latency_ms"] == 10.0
+    assert str(rendered_rows["attempt_count"].dtype) == "Int64"
+    assert str(rendered_rows["latency_ms"].dtype) == "Float64"
     assert options["column_order"] == (
         "provider",
         "capability",
@@ -367,11 +373,19 @@ def test_drawer_marks_unavailable_telemetry_as_not_recorded(
         observed["data"] = data
 
     monkeypatch.setattr(evidence_review.st, "expander", fake_expander)
+    monkeypatch.setattr(
+        evidence_review.st,
+        "caption",
+        lambda message: observed.setdefault("caption", message),
+    )
     monkeypatch.setattr(evidence_review.st, "dataframe", fake_dataframe)
 
     evidence_review._render_technical_diagnostics(0, rows)
 
     rendered = observed["data"]
-    assert isinstance(rendered, list)
-    assert rendered[0]["attempt_count"] == "Not recorded"
-    assert rendered[0]["latency_ms"] == "Not recorded"
+    assert isinstance(rendered, pd.DataFrame)
+    assert pd.isna(rendered.loc[0, "attempt_count"])
+    assert pd.isna(rendered.loc[0, "latency_ms"])
+    assert observed["caption"] == (
+        "Blank attempt or latency values mean not recorded."
+    )

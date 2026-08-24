@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TypedDict
 
+import pandas as pd
+
 
 class ProviderDiagnostic(TypedDict):
     """One bounded developer diagnostic row for a specific variant."""
@@ -42,6 +44,27 @@ _OPERATIONAL_FAILURES = frozenset(
 )
 _MAX_DEPTH = 6
 _MAX_ITEMS = 100
+PROVIDER_DIAGNOSTIC_COLUMNS = (
+    "provider",
+    "capability",
+    "variant_identity",
+    "status",
+    "retrieval_state",
+    "attempt_count",
+    "latency_ms",
+    "fallback_used",
+    "failure_category",
+    "provider_note",
+)
+_TEXT_DIAGNOSTIC_COLUMNS = (
+    "provider",
+    "capability",
+    "variant_identity",
+    "status",
+    "retrieval_state",
+    "failure_category",
+    "provider_note",
+)
 
 
 def _mapping(value: object) -> Mapping[str, object] | None:
@@ -99,6 +122,85 @@ def _non_negative_number(value: object) -> float | None:
     ):
         return None
     return round(float(value), 2)
+
+
+def _display_integer(value: object) -> int | None:
+    parsed = _non_negative_int(value)
+    if parsed is not None:
+        return parsed
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.isdecimal():
+            return int(normalized)
+    return None
+
+
+def _display_number(value: object) -> float | None:
+    parsed = _non_negative_number(value)
+    if parsed is not None:
+        return parsed
+    if isinstance(value, str):
+        try:
+            parsed_text = float(value.strip())
+        except ValueError:
+            return None
+        return _non_negative_number(parsed_text)
+    return None
+
+
+def _display_boolean(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _display_text(value: object) -> str | None:
+    if value is None or value is pd.NA or (
+        isinstance(value, float) and pd.isna(value)
+    ):
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
+def build_provider_diagnostics_dataframe(
+    diagnostics: Sequence[Mapping[str, object]],
+) -> pd.DataFrame:
+    """Build an explicitly typed, PyArrow-safe diagnostics table."""
+
+    frame = pd.DataFrame(
+        [
+            {
+                column: diagnostic.get(column)
+                for column in PROVIDER_DIAGNOSTIC_COLUMNS
+            }
+            for diagnostic in diagnostics
+        ],
+        columns=PROVIDER_DIAGNOSTIC_COLUMNS,
+    )
+    for column in _TEXT_DIAGNOSTIC_COLUMNS:
+        frame[column] = pd.array(
+            [_display_text(value) for value in frame[column]],
+            dtype="string",
+        )
+    frame["attempt_count"] = pd.array(
+        [_display_integer(value) for value in frame["attempt_count"]],
+        dtype="Int64",
+    )
+    frame["latency_ms"] = pd.array(
+        [_display_number(value) for value in frame["latency_ms"]],
+        dtype="Float64",
+    )
+    frame["fallback_used"] = pd.array(
+        [_display_boolean(value) for value in frame["fallback_used"]],
+        dtype="boolean",
+    )
+    return frame
 
 
 def _telemetry(
@@ -399,4 +501,9 @@ def build_provider_diagnostics(
     return diagnostics
 
 
-__all__ = ["ProviderDiagnostic", "build_provider_diagnostics"]
+__all__ = [
+    "PROVIDER_DIAGNOSTIC_COLUMNS",
+    "ProviderDiagnostic",
+    "build_provider_diagnostics",
+    "build_provider_diagnostics_dataframe",
+]

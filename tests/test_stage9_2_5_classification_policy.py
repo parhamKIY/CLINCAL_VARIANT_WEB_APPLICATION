@@ -123,3 +123,39 @@ def test_missing_classification_requires_structured_repair() -> None:
     assert result["status"] == "success"
     assert result["ai_classification"] == "Uncertain significance"
     assert result["interpretation"] is not None
+
+
+def test_semantically_exact_classification_casing_is_canonicalized_locally() -> None:
+    adapter = SequenceLLMAdapter([_response("Likely Pathogenic")])
+
+    result = interpret_variant(
+        EvidenceFactory._complete_evidence_object(),
+        client=LLMClient(adapter),
+        timestamp="2026-08-24T12:00:00Z",
+    )
+
+    assert result["status"] == "success"
+    assert result["ai_classification"] == "Likely pathogenic"
+    assert result["interpretation"] is not None
+    assert len(adapter.requests) == 1
+
+
+def test_classification_repair_is_targeted_to_the_failed_core_field() -> None:
+    adapter = SequenceLLMAdapter(
+        [
+            _response("cannot independently classify"),
+            _response("Uncertain significance"),
+        ]
+    )
+
+    result = interpret_variant(
+        EvidenceFactory._complete_evidence_object(),
+        client=LLMClient(adapter),
+        timestamp="2026-08-24T12:00:00Z",
+    )
+
+    repaired_prompt = adapter.requests[1].messages[1].content
+    assert result["status"] == "success"
+    assert "ai_classification" in repaired_prompt
+    assert "Uncertain significance" in repaired_prompt
+    assert "classification outside the five allowed values" in repaired_prompt

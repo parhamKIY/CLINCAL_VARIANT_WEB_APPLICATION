@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import cast
+from typing import TypedDict, cast
 
 import streamlit as st
 
@@ -41,6 +41,7 @@ from frontend.report_preview import (
     render_draft_report_preview_pages,
     stable_allele_identity,
 )
+from frontend.reference_access import render_reference_access_panel
 from frontend.report_viewer import render_final_clinical_report_viewer
 from frontend.interpretation_failure_semantics import (
     interpretation_failure_message,
@@ -50,8 +51,10 @@ from frontend.source_status import (
     build_reviewer_source_status,
 )
 from frontend.technical_diagnostics import (
+    PROVIDER_DIAGNOSTIC_COLUMNS,
     ProviderDiagnostic,
     build_provider_diagnostics,
+    build_provider_diagnostics_dataframe,
 )
 from frontend.variant_status import build_variant_status_cards
 from frontend.warning_semantics import WarningNotice
@@ -63,6 +66,7 @@ REVIEW_VARIANT_KEY = "selected_evidence_review_variant"
 REVIEW_PACKAGES_KEY = "evidence_review_packages"
 REVIEW_NOTICE_KEY = "evidence_review_notice"
 _REVIEW_WIDGET_PREFIX = "evidence_review_"
+_FINALIZATION_DIALOG_KEY = f"{_REVIEW_WIDGET_PREFIX}finalization_dialog_open"
 
 _NOTICE_STYLES = {
     "INFO": ("Info", "blue", ":material/info:"),
@@ -70,6 +74,19 @@ _NOTICE_STYLES = {
     "ACTION REQUIRED": ("Action required", "red", ":material/error:"),
     "BLOCKING": ("Blocking", "red", ":material/block:"),
 }
+
+
+class _FinalizationSummary(TypedDict):
+    """Bounded review state shown before irreversible finalization."""
+
+    variant_count: int
+    reviewable_indexes: tuple[int, ...]
+    confirmed_indexes: tuple[int, ...]
+    unconfirmed_indexes: tuple[int, ...]
+    included_indexes: tuple[int, ...]
+    excluded_indexes: tuple[int, ...]
+    construction_failed_indexes: tuple[int, ...]
+    interpretation_failed_indexes: tuple[int, ...]
 
 
 def _render_variant_notice(
@@ -98,36 +115,11 @@ def _render_technical_diagnostics(
         if not diagnostics:
             st.caption("No provider diagnostic records are available.")
             return
-        display_rows: list[dict[str, object]] = [
-            {
-                **diagnostic,
-                "attempt_count": (
-                    diagnostic["attempt_count"]
-                    if diagnostic["attempt_count"] is not None
-                    else "Not recorded"
-                ),
-                "latency_ms": (
-                    diagnostic["latency_ms"]
-                    if diagnostic["latency_ms"] is not None
-                    else "Not recorded"
-                ),
-            }
-            for diagnostic in diagnostics
-        ]
+        display_rows = build_provider_diagnostics_dataframe(diagnostics)
+        st.caption("Blank attempt or latency values mean not recorded.")
         st.dataframe(
             display_rows,
-            column_order=(
-                "provider",
-                "capability",
-                "variant_identity",
-                "status",
-                "retrieval_state",
-                "attempt_count",
-                "latency_ms",
-                "fallback_used",
-                "failure_category",
-                "provider_note",
-            ),
+            column_order=PROVIDER_DIAGNOSTIC_COLUMNS,
             column_config={
                 "provider": "Provider",
                 "capability": "Analysis capability",
@@ -348,6 +340,13 @@ def _render_report_preview(
     )
     st.caption(f"Report page {page_number} of {len(pages)}")
     st.html(pages[page_number - 1], width="stretch")
+    if page_number == len(pages):
+        content = report["reviewed_report"]
+        render_reference_access_panel(
+            content["literature_references"],
+            content["data_sources"],
+            report_id=report["report_id"],
+        )
     with st.container(horizontal=True):
         st.button(
             "Previous",
@@ -1355,66 +1354,221 @@ def _render_confirmation(
         _render_package_summary(package)
 
 
-def _render_finalization_action(result: PipelineResult) -> None:
-    variant_count = result["variant_count"]
-    confirmed_indexes = {
-        package["variant_index"]
-        for package in result.get("reviewed_evidence_packages", [])
+def _build_finalization_summary(
+    result: PipelineResult,
+    drafts: list[EvidenceReviewReport],
+) -> _FinalizationSummary:
+    """Summarize exactly what finalization will confirm and retain."""
+
+    reviewable_indexes = {
+        int(report["variant_index"])
+        for report in drafts
     }
-    fully_confirmed = (
-        variant_count > 0
-        and confirmed_indexes == set(range(variant_count))
-    )
-    completed = result.get("workflow_state") == "completed"
-    failed_count = sum(
-        item.get("status") == "failed"
-        for item in result.get("variant_interpretation_results", [])
-    )
-    included_count = sum(
-        bool(report.get("include_in_final_report"))
+    confirmed_indexes = {
+        int(package["variant_index"])
+        for package in result.get("reviewed_evidence_packages", [])
+    } & reviewable_indexes
+    included_indexes = {
+        int(report["variant_index"])
         for report in result.get("draft_variant_reports", [])
+        if bool(report.get("include_in_final_report"))
+    } & reviewable_indexes
+    construction_failed_indexes = {
+        int(outcome["variant_index"])
+        for outcome in result.get("evidence_construction_outcomes", [])
+        if outcome.get("status") == "failed"
+    }
+    interpretation_failed_indexes = {
+        int(outcome["variant_index"])
+        for outcome in result.get("variant_interpretation_results", [])
+        if outcome.get("status") == "failed"
+    }
+
+    return _FinalizationSummary(
+        variant_count=int(result["variant_count"]),
+        reviewable_indexes=tuple(sorted(reviewable_indexes)),
+        confirmed_indexes=tuple(sorted(confirmed_indexes)),
+        unconfirmed_indexes=tuple(
+            sorted(reviewable_indexes - confirmed_indexes)
+        ),
+        included_indexes=tuple(sorted(included_indexes)),
+        excluded_indexes=tuple(
+            sorted(reviewable_indexes - included_indexes)
+        ),
+        construction_failed_indexes=tuple(
+            sorted(construction_failed_indexes)
+        ),
+        interpretation_failed_indexes=tuple(
+            sorted(interpretation_failed_indexes)
+        ),
     )
 
-    with st.container(border=True):
-        st.markdown("**Finalize reviewed analysis**")
-        st.caption(
-            f"Confirmed variants: {len(confirmed_indexes)} of "
-            f"{variant_count}. Finalization validates the persisted review "
-            "state and does not make another LLM call. Final Report "
-            f"selection: {included_count} of {variant_count}, in original "
-            "input order."
+
+def _sync_confirmed_packages(
+    result: PipelineResult,
+    drafts: list[EvidenceReviewReport],
+) -> None:
+    packages_by_index = {
+        package["variant_index"]: package
+        for package in result.get("reviewed_evidence_packages", [])
+    }
+    st.session_state[REVIEW_PACKAGES_KEY] = {
+        report["report_id"]: packages_by_index[report["variant_index"]]
+        for report in drafts
+        if report["variant_index"] in packages_by_index
+    }
+
+
+@st.dialog(
+    "Confirm final report",
+    width="medium",
+    dismissible=False,
+    icon=":material/fact_check:",
+)
+def _render_finalization_dialog(
+    result: PipelineResult,
+    drafts: list[EvidenceReviewReport],
+) -> None:
+    summary = _build_finalization_summary(result, drafts)
+    reviewable_count = len(summary["reviewable_indexes"])
+    confirmed_count = len(summary["confirmed_indexes"])
+    unconfirmed_count = len(summary["unconfirmed_indexes"])
+    included_count = len(summary["included_indexes"])
+    excluded_count = len(summary["excluded_indexes"])
+
+    st.write(
+        "This action will confirm the current reviewed evidence for any "
+        "remaining reviewable variants and finalize the current report "
+        "selection. It will not make another LLM call."
+    )
+    st.markdown(
+        f"**{summary['variant_count']} input variant(s)** · "
+        f"**{reviewable_count} reviewable** · "
+        f"**{confirmed_count} already confirmed** · "
+        f"**{unconfirmed_count} awaiting confirmation**"
+    )
+    st.markdown(
+        f"**Final report selection:** {included_count} included · "
+        f"{excluded_count} excluded"
+    )
+    if summary["construction_failed_indexes"]:
+        st.warning(
+            f"{len(summary['construction_failed_indexes'])} variant(s) "
+            "failed before evidence review. They will remain explicit as "
+            "limitations and will not be marked successful."
         )
-        if not fully_confirmed:
-            st.info(
-                "Confirm the reviewed state for every variant before "
-                "finalization."
-            )
+    if summary["interpretation_failed_indexes"]:
+        st.warning(
+            f"{len(summary['interpretation_failed_indexes'])} reviewable "
+            "variant(s) retain an explicit AI interpretation failure."
+        )
+    if excluded_count:
+        st.info(
+            f"{excluded_count} reviewed variant(s) are excluded from the "
+            "final report by the current reviewer selection."
+        )
+
+    analysis_id = str(result.get("analysis_id") or "unpersisted")
+    attested = st.checkbox(
+        (
+            "I confirm that I reviewed the current evidence and report "
+            "selection for every reviewable variant, and that the reviewed "
+            "content contains no protected health information."
+        ),
+        key=(
+            f"{_REVIEW_WIDGET_PREFIX}finalize_attestation_"
+            f"{analysis_id}"
+        ),
+    )
+    with st.container(horizontal=True, horizontal_alignment="right"):
         if st.button(
-            "Finalize review",
+            "Cancel",
+            key=f"{_REVIEW_WIDGET_PREFIX}cancel_finalization",
+        ):
+            st.session_state[_FINALIZATION_DIALOG_KEY] = False
+            st.rerun(scope="app")
+        if st.button(
+            "Yes, finalize report",
             type="primary",
             icon=":material/task_alt:",
-            disabled=not fully_confirmed or completed,
-            key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
+            disabled=not attested,
+            key=f"{_REVIEW_WIDGET_PREFIX}confirm_finalization",
         ):
+            unconfirmed_indexes = set(summary["unconfirmed_indexes"])
+            reports_to_confirm = [
+                report
+                for report in drafts
+                if report["variant_index"] in unconfirmed_indexes
+            ]
             try:
                 with st.spinner("Finalizing reviewed analysis..."):
-                    generated = finalize_reviewed_analysis(result)
-            except PipelineError as exc:
-                st.error(f"Review could not be finalized: {exc}")
+                    generated = finalize_reviewed_analysis(
+                        result,
+                        reports=reports_to_confirm or None,
+                    )
+            except PipelineError:
+                st.error(
+                    "The report could not be finalized. The current review "
+                    "state was preserved."
+                )
                 return
             result.clear()
             result.update(generated)
             st.session_state["pipeline_result"] = result
+            st.session_state[_FINALIZATION_DIALOG_KEY] = False
+            _sync_confirmed_packages(result, drafts)
             persisted = _persist_review_state(result)
             if persisted:
-                _set_notice("success", "Final review confirmed.")
+                _set_notice("success", "Final report confirmed.")
             else:
                 _set_notice(
                     "warning",
-                    "Review finalized, but database persistence failed.",
+                    "Report finalized, but database persistence failed.",
                 )
-            st.rerun()
+            st.rerun(scope="app")
+
+
+def _render_finalization_action(
+    result: PipelineResult,
+    drafts: list[EvidenceReviewReport],
+) -> None:
+    summary = _build_finalization_summary(result, drafts)
+    reviewable_count = len(summary["reviewable_indexes"])
+    confirmed_count = len(summary["confirmed_indexes"])
+    unconfirmed_count = len(summary["unconfirmed_indexes"])
+    included_count = len(summary["included_indexes"])
+    completed = result.get("workflow_state") == "completed"
+
+    with st.container(border=True):
+        st.markdown("**Finalize reviewed analysis**")
+        st.caption(
+            f"Input variants: {summary['variant_count']}. Reviewable: "
+            f"{reviewable_count}. Confirmed: "
+            f"{confirmed_count}. Awaiting confirmation: {unconfirmed_count}. "
+            f"Final Report selection: {included_count} of "
+            f"{reviewable_count}."
+        )
+        if unconfirmed_count and not completed:
+            st.info(
+                "The confirmation dialog can confirm the current reviewed "
+                "state for all remaining reviewable variants before "
+                "finalization."
+            )
+        if st.button(
+            "Report finalized" if completed else "Finalize report",
+            type="primary",
+            icon=":material/task_alt:",
+            disabled=completed or reviewable_count == 0,
+            key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
+        ):
+            st.session_state[_FINALIZATION_DIALOG_KEY] = True
+            st.rerun(scope="app")
         if completed:
+            st.session_state[_FINALIZATION_DIALOG_KEY] = False
+        elif st.session_state.get(_FINALIZATION_DIALOG_KEY, False):
+            _render_finalization_dialog(result, drafts)
+        if completed:
+            failed_count = len(summary["interpretation_failed_indexes"])
             if failed_count:
                 st.warning(
                     f"Final review retains {failed_count} explicit "
@@ -1549,7 +1703,7 @@ def render_evidence_review(
         _render_history(report)
     with confirm_tab:
         _render_confirmation(drafts[selected], result)
-    _render_finalization_action(result)
+    _render_finalization_action(result, drafts)
     if result.get("workflow_state") == "completed":
         render_final_clinical_report_viewer(result)
 

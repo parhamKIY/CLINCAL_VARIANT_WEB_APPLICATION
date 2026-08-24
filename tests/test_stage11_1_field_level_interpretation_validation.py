@@ -92,11 +92,32 @@ def test_malformed_auxiliary_citation_excludes_only_affected_field() -> None:
     assert len(adapter.requests) == 1
 
 
-def test_unknown_auxiliary_citation_still_fails_closed_without_repair() -> None:
-    response = _response(
+def test_unknown_citation_gets_one_strict_repair_without_losing_core() -> None:
+    invalid = _response(
         conflict_assessment="Unsupported evidence reference [R99]."
     )
-    adapter = FakeLLMAdapter(response)
+    adapter = SequenceLLMAdapter([invalid, _response()])
+
+    result = interpret_variant(
+        EvidenceFactory._complete_evidence_object(),
+        client=LLMClient(adapter),
+        timestamp=_TIMESTAMP,
+    )
+
+    assert result["status"] == "success"
+    assert result["ai_classification"] == "Likely pathogenic"
+    assert result["interpretation"] == (
+        "Strong evidence supports this draft assessment."
+    )
+    assert len(adapter.requests) == 2
+    assert "unknown citation" in adapter.requests[1].messages[1].content
+
+
+def test_repeated_unknown_citation_still_fails_closed() -> None:
+    invalid = _response(
+        interpretation="Unsupported evidence reference [R99]."
+    )
+    adapter = SequenceLLMAdapter([invalid, invalid])
 
     result = interpret_variants(
         [EvidenceFactory._complete_evidence_object()],
@@ -108,7 +129,7 @@ def test_unknown_auxiliary_citation_still_fails_closed_without_repair() -> None:
     assert result["error_type"] == "output_schema_failure"
     assert result["ai_classification"] is None
     assert result["interpretation"] is None
-    assert len(adapter.requests) == 1
+    assert len(adapter.requests) == 2
 
 
 @pytest.mark.parametrize(
