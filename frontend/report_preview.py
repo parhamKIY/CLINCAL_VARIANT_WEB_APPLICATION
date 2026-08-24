@@ -6,6 +6,7 @@ from html import escape
 from typing import Iterable
 
 from backend.conflict_auditor import normalize_classification_label
+from backend.report_narrative import substantive_interpretation_narrative
 from backend.variant_report import (
     DraftVariantReport,
     validate_draft_variant_report,
@@ -212,7 +213,9 @@ def _brief_interpretation(report: DraftVariantReport) -> str:
     narrative = content["variant_interpretation"]["narrative"]
     if not narrative:
         return "Interpretation is not available and requires human review."
-    first_paragraph = narrative.strip().split("\n\n", 1)[0]
+    first_paragraph = substantive_interpretation_narrative(narrative).split(
+        "\n\n", 1
+    )[0]
     return first_paragraph[:1200]
 
 

@@ -18,6 +18,7 @@ from docx.text.paragraph import Paragraph
 
 from backend.references import validated_reference_url
 from backend.report_data import ReportData, ReportDataError, validate_report_data
+from backend.report_narrative import substantive_interpretation_narrative
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,6 +132,7 @@ def _brief_interpretation(report: ReportData) -> str:
     interpretation = report["interpretation"]["current_reviewer_interpretation"]
     if not interpretation:
         return "Interpretation is not available and requires human review."
+    interpretation = substantive_interpretation_narrative(interpretation)
     sentences = re.split(r"(?<=[.!?])\s+", interpretation.strip())
     selected: list[str] = []
     for sentence in sentences[:3]:
