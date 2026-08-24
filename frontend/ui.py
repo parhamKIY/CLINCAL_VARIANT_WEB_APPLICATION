@@ -23,6 +23,7 @@ from backend.excel_processing import (
     parse_excel_input_records,
 )
 from backend.error_handling import safe_ui_error_message
+from backend.execution_trace import AnalysisExecutionTrace
 from backend.llm import LLMError, get_available_llm_models
 from backend.llm_preflight import LLMPreflightResult, check_llm_connectivity
 from backend.phenotype_llm import (
@@ -76,6 +77,7 @@ from frontend.evidence_review import (
     render_evidence_review,
 )
 from frontend.evidence_graph import render_evidence_graph
+from frontend.execution_trace import render_execution_trace
 from frontend.provider_readiness import (
     current_provider_readiness_snapshot,
     initialize_provider_readiness_state,
@@ -126,6 +128,7 @@ ANALYSIS_JOB_KEY = "analysis_job"
 ANALYSIS_JOB_TOKEN_KEY = "analysis_job_token"
 ANALYSIS_NOTICE_KEY = "analysis_notice"
 ANALYSIS_NOTICE_LEVEL_KEY = "analysis_notice_level"
+ANALYSIS_EXECUTION_TRACE_KEY = "analysis_execution_trace"
 PHENOTYPE_MODEL_KEY = "selected_phenotype_extraction_model"
 VARIANT_MODEL_KEY = "selected_variant_interpretation_model"
 LLM_PROVIDER_MODELS_KEY = "llm_provider_models"
@@ -344,6 +347,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(ANALYSIS_JOB_TOKEN_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_KEY, None)
     st.session_state.setdefault(ANALYSIS_NOTICE_LEVEL_KEY, "info")
+    st.session_state.setdefault(ANALYSIS_EXECUTION_TRACE_KEY, None)
     st.session_state.setdefault(LLM_PROVIDER_MODELS_KEY, ())
     st.session_state.setdefault(LLM_PROVIDER_MODELS_ERROR_KEY, False)
     st.session_state.setdefault(LLM_PREFLIGHT_PHENOTYPE_KEY, None)
@@ -435,6 +439,7 @@ def _discard_analysis_result() -> None:
     """
 
     st.session_state[PIPELINE_RESULT_KEY] = None
+    st.session_state[ANALYSIS_EXECUTION_TRACE_KEY] = None
     _clear_query_param(ANALYSIS_RESULT_QUERY_PARAM)
     if _analysis_job() is None:
         token = _query_param_value(ANALYSIS_JOB_QUERY_PARAM)
@@ -2058,6 +2063,12 @@ def _render_pipeline_status(result: PipelineResult) -> None:
     _render_pipeline_issues(result)
 
 
+def _render_trace_snapshot(snapshot: object) -> None:
+    """Render the additive runtime execution journey when available."""
+
+    render_execution_trace(snapshot)
+
+
 def _render_analysis_summary(result: PipelineResult) -> None:
     """Render the concise product outcome before report/provider details."""
 
@@ -2106,6 +2117,7 @@ def _start_submission(
     if _analysis_job() is not None:
         return
     readiness_snapshot = current_provider_readiness_snapshot()
+    execution_trace = AnalysisExecutionTrace()
 
     def runner(
         progress_callback: PipelineProgressCallback,
@@ -2116,11 +2128,16 @@ def _start_submission(
             "phenotypes": submission["phenotypes"],
             "clinical_entities": submission["clinical_entities"],
             "input_type": submission["input_type"],
-            "phenotype_extraction_model": submission["phenotype_extraction_model"],
-            "phenotype_extraction_provenance": submission["phenotype_extraction_provenance"],
+            "phenotype_extraction_model": submission[
+                "phenotype_extraction_model"
+            ],
+            "phenotype_extraction_provenance": submission[
+                "phenotype_extraction_provenance"
+            ],
             "llm_model": submission["llm_model"],
             "readiness_snapshot": readiness_snapshot,
             "progress_callback": progress_callback,
+            "execution_trace": execution_trace,
         }
         if submission["excel_input_records"] is not None:
             kwargs["excel_input_records"] = submission["excel_input_records"]
@@ -2128,7 +2145,7 @@ def _start_submission(
 
     _discard_analysis_result()
     st.session_state[ANALYSIS_NOTICE_KEY] = None
-    job = AnalysisJob(runner)
+    job = AnalysisJob(runner, execution_trace=execution_trace)
     try:
         recovery_request = prepare_analysis_recovery_request(
             uploaded_vcf=submission["uploaded_vcf"],
@@ -2176,6 +2193,9 @@ def _finish_analysis_job(job: AnalysisJob) -> None:
     """Transfer one terminal job outcome into session state."""
 
     view = job.view()
+    st.session_state[ANALYSIS_EXECUTION_TRACE_KEY] = deepcopy(
+        view.execution_trace
+    )
     if view.state == "completed":
         st.session_state[PIPELINE_RESULT_KEY] = view.result
     else:
@@ -2259,6 +2279,7 @@ def _render_analysis_job(job: AnalysisJob) -> None:
             "The current bounded operation will stop at the next safe "
             "cancellation point."
         )
+    _render_trace_snapshot(view.execution_trace)
 
 
 def _render_analysis_notice() -> None:
@@ -2350,4 +2371,7 @@ def render_app() -> None:
             )
         with technical_tab:
             _render_pipeline_status(pipeline_result)
+            _render_trace_snapshot(
+                st.session_state.get(ANALYSIS_EXECUTION_TRACE_KEY)
+            )
             render_analysis_results(pipeline_result)

@@ -52,6 +52,10 @@ from backend.excel_processing import (
     parse_excel_input_records,
     parse_excel_variants,
 )
+from backend.execution_trace import (
+    AnalysisExecutionTrace,
+    ExecutionTraceSnapshot,
+)
 from backend.input_preprocessing import classify_source_representation
 from backend.provider_readiness import ProviderReadinessSnapshot
 from backend.vcf_processing import (
@@ -239,6 +243,7 @@ class AnalysisJobView:
     result: PipelineResult | None
     error_message: str | None
     cleanup_warning: str | None
+    execution_trace: ExecutionTraceSnapshot | None
 
 
 def _existing_report_paths(
@@ -277,8 +282,17 @@ class AnalysisJob:
         runner: AnalysisRunner,
         *,
         report_dir: str | Path | None = None,
+        execution_trace: AnalysisExecutionTrace | None = None,
     ) -> None:
+        if execution_trace is not None and not isinstance(
+            execution_trace,
+            AnalysisExecutionTrace,
+        ):
+            raise FrontendExecutionError(
+                "Analysis execution trace configuration is invalid."
+            )
         self._runner = runner
+        self._execution_trace = execution_trace
         self._report_directory = Path(
             settings.REPORT_DIR if report_dir is None else report_dir
         ).expanduser()
@@ -332,6 +346,11 @@ class AnalysisJob:
     def view(self) -> AnalysisJobView:
         """Return an isolated snapshot safe for Streamlit rendering."""
 
+        execution_trace = (
+            self._execution_trace.snapshot()
+            if self._execution_trace is not None
+            else None
+        )
         with self._lock:
             return AnalysisJobView(
                 state=self._state,
@@ -339,6 +358,7 @@ class AnalysisJob:
                 result=deepcopy(self._result),
                 error_message=self._error_message,
                 cleanup_warning=self._cleanup_warning,
+                execution_trace=execution_trace,
             )
 
     def join(self, timeout: float | None = None) -> None:
@@ -1224,8 +1244,15 @@ def execute_analysis(
     excel_input_records: Sequence[Mapping[str, object]] | None = None,
     readiness_snapshot: ProviderReadinessSnapshot | None = None,
     progress_callback: PipelineProgressCallback | None = None,
+    execution_trace: AnalysisExecutionTrace | None = None,
 ) -> PipelineResult:
     """Execute one manual or temporary-upload analysis request."""
+
+    trace_argument = (
+        {"execution_trace": execution_trace}
+        if execution_trace is not None
+        else {}
+    )
 
     if uploaded_vcf is not None and (
         manual_variants is not None or excel_input_records is not None
@@ -1265,6 +1292,7 @@ def execute_analysis(
             phenotype_extraction_provenance=phenotype_extraction_provenance,
             readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
+            **trace_argument,
         )
         if (
             len(result["variants"]) != len(prepared["variants"])
@@ -1293,6 +1321,7 @@ def execute_analysis(
             ),
             readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
+            **trace_argument,
         )
 
     suffix = _validate_upload_filename(
@@ -1316,6 +1345,7 @@ def execute_analysis(
             excel_input_records=input_records,
             readiness_snapshot=readiness_snapshot,
             progress_callback=progress_callback,
+            execution_trace=execution_trace,
         )
     _validate_upload_content(payload, suffix)
     upload_directory = _prepare_upload_directory()
@@ -1354,6 +1384,7 @@ def execute_analysis(
                 ),
                 readiness_snapshot=readiness_snapshot,
                 progress_callback=progress_callback,
+                **trace_argument,
             )
     except FrontendExecutionError:
         raise
@@ -1403,6 +1434,8 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
             return None
         return job
 
+    execution_trace = AnalysisExecutionTrace()
+
     def runner(
         progress_callback: PipelineProgressCallback,
     ) -> PipelineResult:
@@ -1425,9 +1458,10 @@ def recover_analysis_job(token: object) -> AnalysisJob | None:
             ],
             excel_input_records=request.get("excel_input_records"),
             progress_callback=progress_callback,
+            execution_trace=execution_trace,
         )
 
-    job = AnalysisJob(runner)
+    job = AnalysisJob(runner, execution_trace=execution_trace)
     try:
         register_analysis_job(job, token=token)
         job.start()

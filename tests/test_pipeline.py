@@ -83,6 +83,7 @@ from backend.error_handling import (
     map_pipeline_exception,
     safe_ui_error_message,
 )
+from backend.execution_trace import AnalysisExecutionTrace
 from backend.excel_processing import (
     ExcelProcessingError,
     parse_excel_variants,
@@ -24181,6 +24182,7 @@ class TestFrontendFoundation:
             llm_model: str,
             readiness_snapshot: object,
             progress_callback: PipelineProgressCallback,
+            execution_trace: AnalysisExecutionTrace,
         ) -> PipelineResult:
             received.update(
                 {
@@ -24198,6 +24200,10 @@ class TestFrontendFoundation:
                     "llm_model": llm_model,
                     "readiness_result_count": len(
                         getattr(readiness_snapshot, "results")
+                    ),
+                    "execution_trace_enabled": isinstance(
+                        execution_trace,
+                        AnalysisExecutionTrace,
                     ),
                 }
             )
@@ -24325,6 +24331,7 @@ class TestFrontendFoundation:
             "phenotype_extraction_provenance": None,
             "llm_model": "variant-test-model",
             "readiness_result_count": 0,
+            "execution_trace_enabled": True,
         }
         assert app.session_state["pipeline_result"]["status"] == (
             "success"
