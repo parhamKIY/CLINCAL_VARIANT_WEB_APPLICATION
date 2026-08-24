@@ -35,6 +35,7 @@ def _response(
     return LLMResponse(
         content=json.dumps(
             {
+                "ai_classification": "Uncertain significance",
                 "interpretation": interpretation,
                 "conflict_assessment": "No meaningful conflict is present.",
                 "phenotype_conclusion": "partially supported",
@@ -82,7 +83,6 @@ def test_output_schema_is_strict_and_has_no_model_confidence_field() -> None:
         "Uncertain significance",
         "Likely benign",
         "Benign",
-        "Insufficient evidence",
     }
     assert "confidence" not in properties
     assert "variant-interpretation-v1.3" in (

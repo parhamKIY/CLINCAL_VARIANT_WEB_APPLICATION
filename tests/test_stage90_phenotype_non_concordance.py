@@ -103,7 +103,7 @@ def test_non_concordance_survives_report_projection_without_reclassification() -
         "no_supported_association"
     )
     assert report_data["conclusive_result"]["classification"] == (
-        "Insufficient evidence"
+        "Uncertain significance"
     )
     assert report_data["conclusive_result"]["classification_source"] == (
         "LLM draft classification"

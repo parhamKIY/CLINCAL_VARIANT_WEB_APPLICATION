@@ -53,7 +53,7 @@ from config import settings
 
 VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.2"
 SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset({"1.1", "1.2"})
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.6"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.7"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
         "variant-interpretation-v1.1",
@@ -61,6 +61,7 @@ SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
         "variant-interpretation-v1.3",
         "variant-interpretation-v1.4",
         "variant-interpretation-v1.5",
+        "variant-interpretation-v1.6",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
     }
 )
@@ -88,7 +89,6 @@ AIClassification = Literal[
     "Uncertain significance",
     "Likely benign",
     "Benign",
-    "Insufficient evidence",
 ]
 AI_CLASSIFICATIONS = frozenset(cast(tuple[str, ...], AIClassification.__args__))
 PHENOTYPE_CONCLUSIONS = frozenset(
@@ -120,6 +120,7 @@ SAFE_SCHEMA_ERRORS = frozenset(
         "connection_failed",
         "duplicate_warnings",
         "invalid_adapter_response",
+        "invalid_ai_classification",
         "invalid_fields",
         "invalid_finish_reason",
         "invalid_json",
@@ -305,24 +306,33 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "5. If meaningful conflict is present, explain the disagreement and "
         "state when it remains unresolved. Otherwise synthesize "
         "conservatively without claiming certainty.",
-        "6. Return one controlled-vocabulary draft AI classification based "
-        "only on the supplied evidence. It is not a final application "
-        "classification, independent ACMG/AMP adjudication, or substitute "
-        "for human review.",
-        "7. Cite only supplied reference IDs using [R1], [R2], and so on. "
+        "6. For every otherwise successful response, you must return exactly "
+        "one ai_classification from: Pathogenic, Likely pathogenic, "
+        "Uncertain significance, Likely benign, or Benign. Base this draft "
+        "synthesis only on the supplied evidence. It is not a final "
+        "application classification, independent ACMG/AMP adjudication, or "
+        "substitute for human review.",
+        "7. You must not return 'cannot independently classify', "
+        "'Insufficient evidence', a refusal, or any classification outside "
+        "the controlled vocabulary. When evidence is conflicting or "
+        "insufficient, return Uncertain significance and explain the "
+        "uncertainty in the interpretation and conflict assessment.",
+        "8. Keep provider classifications as source assertions. Do not "
+        "overwrite, relabel, or present them as the draft AI classification.",
+        "9. Cite only supplied reference IDs using [R1], [R2], and so on. "
         "Never invent a reference ID or supply a URL.",
-        "8. Return only the required structured response. Do not add URLs.",
-        "9. Use exactly one allowed phenotype conclusion: supported, "
+        "10. Return only the required structured response. Do not add URLs.",
+        "11. Use exactly one allowed phenotype conclusion: supported, "
         "partially supported, no supported association found, or phenotype "
         "evidence unavailable.",
-        "10. If phenotype is unsupported, explicitly state that no supported "
+        "12. If phenotype is unsupported, explicitly state that no supported "
         "association was identified, continue from the remaining evidence, "
         "and do not treat mismatch as benign or negative pathogenicity "
         "evidence.",
-        "11. Patient- or user-supplied phenotype context is case context, not "
+        "13. Patient- or user-supplied phenotype context is case context, not "
         "independent scientific evidence. It cannot prove a disease, variant "
         "effect, or pathogenicity assertion.",
-        "12. Preserve provider observation states exactly. Operational "
+        "14. Preserve provider observation states exactly. Operational "
         "unavailability is not biological absence, no_match is not negative "
         "evidence, and an unavailable result must never be described as "
         "available.",
@@ -562,7 +572,7 @@ def _parse_response(
     *,
     evidence: EvidenceObject,
     allowed_reference_ids: set[str],
-) -> tuple[AIClassification | None, str, str, list[str], list[str]]:
+) -> tuple[AIClassification, str, str, list[str], list[str]]:
     if response.finish_reason not in {None, "stop"}:
         raise VariantInterpretationError(
             "The interpretation response did not finish safely.",
@@ -591,16 +601,16 @@ def _parse_response(
             schema_error="invalid_json",
         ) from exc
     required_fields = {
+        "ai_classification",
         "interpretation",
         "conflict_assessment",
         "phenotype_conclusion",
         "warnings",
     }
-    allowed_fields = required_fields | {"ai_classification"}
     if (
         not isinstance(payload, Mapping)
         or not required_fields.issubset(payload)
-        or not set(payload).issubset(allowed_fields)
+        or set(payload) != required_fields
     ):
         raise VariantInterpretationError(
             "The interpretation response has invalid fields.",
@@ -626,22 +636,14 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="phenotype_conclusion_mismatch",
         )
-    raw_ai_classification = payload.get("ai_classification")
-    classification_warning: str | None = None
-    if "ai_classification" not in payload:
-        ai_classification: AIClassification | None = None
-        classification_warning = (
-            "AI draft classification was unavailable because the model "
-            "response did not include it."
+    raw_ai_classification = payload["ai_classification"]
+    if raw_ai_classification not in AI_CLASSIFICATIONS:
+        raise VariantInterpretationError(
+            "AI draft classification is invalid.",
+            failure_type="output_schema_failure",
+            schema_error="invalid_ai_classification",
         )
-    elif raw_ai_classification not in AI_CLASSIFICATIONS:
-        ai_classification = None
-        classification_warning = (
-            "AI draft classification was unavailable because the model "
-            "returned an unsupported value."
-        )
-    else:
-        ai_classification = cast(AIClassification, raw_ai_classification)
+    ai_classification = cast(AIClassification, raw_ai_classification)
     raw_warnings = payload["warnings"]
     if (
         not isinstance(raw_warnings, list)
@@ -666,11 +668,6 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="duplicate_warnings",
         )
-    if classification_warning is not None and classification_warning not in warnings:
-        warnings = [
-            *warnings[: MAX_INTERPRETATION_WARNINGS - 1],
-            classification_warning,
-        ]
     interpretation = _bounded_output_text(
         payload["interpretation"],
         field="interpretation",
@@ -887,7 +884,7 @@ def _execute_interpretation_request(
     max_retries: int | None,
 ) -> tuple[
     LLMResponse,
-    tuple[AIClassification | None, str, str, list[str], list[str]],
+    tuple[AIClassification, str, str, list[str], list[str]],
     bool,
 ]:
     """Execute one model with one bounded structured-output repair."""
@@ -1566,6 +1563,10 @@ def validate_variant_interpretation_result(
         if (
             not isinstance(value["response_model"], str)
             or not value["response_model"].strip()
+            or (
+                schema_version == VARIANT_INTERPRETATION_SCHEMA_VERSION
+                and ai_classification is None
+            )
             or value["error_type"] is not None
         ):
             raise VariantInterpretationError(

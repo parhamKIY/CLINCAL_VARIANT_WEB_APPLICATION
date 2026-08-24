@@ -55,6 +55,7 @@ class _RecordingAdapter:
         return LLMResponse(
             content=json.dumps(
                 {
+                    "ai_classification": "Uncertain significance",
                     "interpretation": "The supplied evidence supports cautious review.",
                     "conflict_assessment": "No meaningful conflict is present.",
                     "phenotype_conclusion": "partially supported",

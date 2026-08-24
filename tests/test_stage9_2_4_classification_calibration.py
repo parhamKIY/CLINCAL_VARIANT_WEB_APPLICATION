@@ -57,6 +57,12 @@ def _scenario(kind: str) -> dict[str, object]:
         candidate["protein_change"] = None
         clinvar["clinical_significance"] = "Benign"
         sources["genebe"] = _genebe_source("Benign", ["BA1", "BS1"])
+    elif kind == "insufficient":
+        candidate["population_frequency"] = None
+        candidate["consequence"] = None
+        candidate["impact"] = None
+        candidate["protein_change"] = None
+        sources["clinvar"] = {"status": "not_found"}
     else:
         raise AssertionError(f"Unknown calibration scenario: {kind}")
 
@@ -117,13 +123,21 @@ def _response(classification: str) -> LLMResponse:
             "none",
             "standard",
         ),
+        (
+            "insufficient",
+            "Uncertain significance",
+            None,
+            None,
+            "none",
+            "standard",
+        ),
     ],
 )
 def test_controlled_classification_scenarios_preserve_source_context(
     kind: str,
     ai_classification: str,
-    clinvar_classification: str,
-    automated_classification: str,
+    clinvar_classification: str | None,
+    automated_classification: str | None,
     conflict_status: str,
     prompt_mode: str,
 ) -> None:

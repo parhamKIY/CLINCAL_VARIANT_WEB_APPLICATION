@@ -35,6 +35,7 @@ def _response(
     return LLMResponse(
         content=json.dumps(
             {
+                "ai_classification": "Uncertain significance",
                 "interpretation": interpretation,
                 "conflict_assessment": conflict_assessment,
                 "phenotype_conclusion": phenotype_conclusion,

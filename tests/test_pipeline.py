@@ -1686,7 +1686,7 @@ def _variant_interpretation_response(
     model: str = "variant-interpretation-test-model",
     conflict_assessment: str = "No meaningful conflict is present.",
     phenotype_conclusion: str = "partially supported",
-    ai_classification: str = "Insufficient evidence",
+    ai_classification: str = "Uncertain significance",
 ) -> LLMResponse:
     """Return one valid Stage 50 response for pipeline integration tests."""
 
@@ -13395,7 +13395,7 @@ class TestStage50SingleModelInterpretation:
         phenotype_conclusion: str = "partially supported",
     ) -> dict[str, object]:
         return {
-            "ai_classification": "Insufficient evidence",
+            "ai_classification": "Uncertain significance",
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
@@ -13449,7 +13449,7 @@ class TestStage50SingleModelInterpretation:
             "provider": settings.LLM_PROVIDER,
             "configured_model": settings.VARIANT_INTERPRETATION_MODEL,
             "response_model": "variant-model",
-            "ai_classification": "Insufficient evidence",
+            "ai_classification": "Uncertain significance",
             "interpretation": (
                 "The supplied source evidence supports cautious review."
             ),
@@ -13590,6 +13590,7 @@ class TestStage50SingleModelInterpretation:
             ),
             (
                 {
+                    "ai_classification": "Uncertain significance",
                     "interpretation": "x"
                     * (MAX_INTERPRETATION_CHARACTERS + 1),
                     "conflict_assessment": "None",
@@ -13600,6 +13601,7 @@ class TestStage50SingleModelInterpretation:
             ),
             (
                 {
+                    "ai_classification": "Uncertain significance",
                     "interpretation": "See https://invented.example",
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",
@@ -13609,6 +13611,7 @@ class TestStage50SingleModelInterpretation:
             ),
             (
                 {
+                    "ai_classification": "Uncertain significance",
                     "interpretation": "Text",
                     "conflict_assessment": "None",
                     "phenotype_conclusion": "partially supported",

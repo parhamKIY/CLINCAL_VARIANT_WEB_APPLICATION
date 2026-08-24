@@ -18,7 +18,11 @@ from backend.variant_report import (
     validate_draft_variant_report,
 )
 from frontend.report_preview import render_draft_report_preview_pages
-from test_pipeline import FakeLLMAdapter, TestEvidenceObject as EvidenceFactory
+from test_pipeline import (
+    FakeLLMAdapter,
+    SequenceLLMAdapter,
+    TestEvidenceObject as EvidenceFactory,
+)
 
 
 def _response(*, ai_classification: object = "Likely pathogenic") -> LLMResponse:
@@ -81,49 +85,53 @@ def test_valid_ai_classification_reaches_existing_report_surfaces() -> None:
     assert "LLM draft classification" in document_xml
 
 
-def test_invalid_ai_classification_fails_only_the_classification_field() -> None:
+def test_invalid_current_ai_classification_is_repaired() -> None:
+    adapter = SequenceLLMAdapter(
+        [
+            _response(ai_classification="Probably pathogenic"),
+            _response(ai_classification="Uncertain significance"),
+        ]
+    )
     result = interpret_variant(
         EvidenceFactory._complete_evidence_object(),
-        client=LLMClient(
-            FakeLLMAdapter(_response(ai_classification="Probably pathogenic"))
-        ),
+        client=LLMClient(adapter),
         timestamp="2026-08-24T10:00:00Z",
     )
 
     assert result["status"] == "success"
-    assert result["ai_classification"] is None
+    assert result["ai_classification"] == "Uncertain significance"
     assert result["interpretation"] == (
         "The collected evidence supports a cautious draft synthesis."
     )
-    assert result["warnings"] == [
-        "AI draft classification was unavailable because the model returned "
-        "an unsupported value."
-    ]
+    assert len(adapter.requests) == 2
 
 
-def test_missing_ai_classification_preserves_valid_interpretation() -> None:
+def test_missing_current_ai_classification_is_repaired() -> None:
+    adapter = SequenceLLMAdapter(
+        [
+            _response(ai_classification=_MISSING),
+            _response(ai_classification="Uncertain significance"),
+        ]
+    )
     result = interpret_variant(
         EvidenceFactory._complete_evidence_object(),
-        client=LLMClient(FakeLLMAdapter(_response(ai_classification=_MISSING))),
+        client=LLMClient(adapter),
         timestamp="2026-08-24T10:00:00Z",
     )
 
     assert result["status"] == "success"
-    assert result["ai_classification"] is None
+    assert result["ai_classification"] == "Uncertain significance"
     assert result["interpretation"] == (
         "The collected evidence supports a cautious draft synthesis."
     )
-    assert result["warnings"] == [
-        "AI draft classification was unavailable because the model response "
-        "did not include it."
-    ]
+    assert len(adapter.requests) == 2
 
 
 def test_historical_interpretation_and_report_without_ai_classification_load() -> None:
     evidence = EvidenceFactory._complete_evidence_object()
     legacy_interpretation = interpret_variant(
         evidence,
-        client=LLMClient(FakeLLMAdapter(_response(ai_classification=_MISSING))),
+        client=LLMClient(FakeLLMAdapter(_response())),
         timestamp="2026-08-24T10:00:00Z",
     )
     legacy_interpretation.pop("ai_classification", None)
