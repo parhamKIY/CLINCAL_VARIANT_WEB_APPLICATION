@@ -139,6 +139,36 @@ def test_provider_isolation(tmp_path: Path) -> None:
     ) == [myvariant]
 
 
+def test_query_identity_isolation(tmp_path: Path) -> None:
+    repository = EvidenceRepository(tmp_path / "repository.sqlite3")
+    first = _store(repository)
+    repository.store_provider_observation(
+        canonical_variant=CANONICAL_VARIANT,
+        assembly="GRCh38",
+        semantic_node="clinvar_clinical_evidence",
+        provider="clinvar",
+        provider_role="primary",
+        source="ncbi_clinvar",
+        query_identity={
+            "assembly": "GRCh38",
+            "variation_id": "67890",
+        },
+        normalized_payload={"variation_id": "67890"},
+        observation_status="success",
+        retrieved_at=RETRIEVED_AT,
+    )
+
+    assert repository.find_by_canonical_identity(
+        canonical_variant=CANONICAL_VARIANT,
+        assembly="GRCh38",
+        provider="clinvar",
+        query_identity={
+            "assembly": "GRCh38",
+            "variation_id": "12345",
+        },
+    ) == [first]
+
+
 def test_payload_sha256_covers_deterministic_normalized_json(
     tmp_path: Path,
 ) -> None:

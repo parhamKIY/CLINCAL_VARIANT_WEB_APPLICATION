@@ -808,6 +808,7 @@ class EvidenceRepository:
         assembly: object,
         semantic_node: object | None = None,
         provider: object | None = None,
+        query_identity: Mapping[str, object] | None = None,
     ) -> list[EvidenceRepositoryRecord]:
         """Return verified snapshots for one exact canonical identity."""
 
@@ -825,6 +826,19 @@ class EvidenceRepository:
         if provider is not None:
             clauses.append("provider = ?")
             parameters.append(_identifier(provider, field="provider"))
+        if query_identity is not None:
+            if not isinstance(query_identity, Mapping):
+                raise EvidenceRepositoryValidationError(
+                    "Repository query identity must be a mapping."
+                )
+            safe_query_identity = _validate_global_provider_data(
+                query_identity,
+                context="Evidence repository query identity",
+            )
+            clauses.append("query_identity_hash = ?")
+            parameters.append(
+                _sha256(_canonical_json_bytes(safe_query_identity))
+            )
         self.initialize()
         connection = self._connect()
         try:

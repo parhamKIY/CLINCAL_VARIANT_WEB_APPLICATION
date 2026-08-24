@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 from urllib.parse import quote, urlencode
 
 import requests
@@ -21,10 +21,20 @@ from backend.evidence_readiness import (
     EvidenceReadinessError,
     validate_evidence_readiness_audit,
 )
+from backend.evidence_repository import (
+    EvidenceRepository,
+    EvidenceRepositoryError,
+)
 from backend.logging_config import get_logger
+from backend.provider_repository import (
+    ProviderRepositoryContext,
+    ProviderRepositoryResultError,
+    execute_provider_with_repository,
+)
 from backend.provider_resilience import (
     ProviderCircuitState,
     ProviderInvalidResponseError,
+    ProviderRole,
     ProviderRetryPolicy,
     ProviderStatus,
     ProviderTimeouts,
@@ -737,7 +747,7 @@ def _has_exact_ensembl_mapping(
     return False
 
 
-def fetch_ensembl_population_evidence(
+def _fetch_ensembl_population_evidence_live(
     candidate: Mapping[str, object],
     *,
     session: requests.Session | None = None,
@@ -907,7 +917,179 @@ def fetch_ensembl_population_evidence(
     return evidence
 
 
-def fetch_gnomad_evidence(
+def _validate_repository_population_result(
+    value: object,
+    *,
+    candidate: Mapping[str, object],
+    provider: str,
+    source: str,
+    query_identifier: str,
+) -> dict[str, Any]:
+    """Revalidate a normalized population result before reuse or storage."""
+
+    if not isinstance(value, Mapping):
+        raise ProviderRepositoryResultError(
+            "Normalized population result must be a mapping."
+        )
+    result = deepcopy(dict(value))
+    identity = _candidate_identity(candidate)
+    allowed_statuses = {"available", "partial", "no_match"}
+    if (
+        identity is None
+        or result.get("status") not in allowed_statuses
+        or result.get("response_status") != result.get("status")
+        or result.get("provider") != provider
+        or result.get("source") != source
+        or result.get("assembly") != identity[4]
+        or result.get("query_identifier") != query_identifier
+        or not isinstance(result.get("retrieved_at"), str)
+    ):
+        raise ProviderRepositoryResultError(
+            "Normalized population result violates provider provenance."
+        )
+    populations = result.get("populations")
+    if not isinstance(populations, list):
+        raise ProviderRepositoryResultError(
+            "Normalized population result has invalid populations."
+        )
+    for row in populations:
+        if not isinstance(row, Mapping):
+            raise ProviderRepositoryResultError(
+                "Normalized population result has invalid populations."
+            )
+        frequency = row.get("frequency")
+        if (
+            _text(row.get("allele"), 10_000) != identity[3]
+            or isinstance(frequency, bool)
+            or not isinstance(frequency, (int, float))
+            or not math.isfinite(float(frequency))
+            or not 0 <= float(frequency) <= 1
+        ):
+            raise ProviderRepositoryResultError(
+                "Normalized population result has invalid populations."
+            )
+    if result["status"] == "no_match" and populations:
+        raise ProviderRepositoryResultError(
+            "Normalized no_match result cannot retain population evidence."
+        )
+    for field in ("global_maf", "population_frequency"):
+        frequency = result.get(field)
+        if frequency is not None and (
+            isinstance(frequency, bool)
+            or not isinstance(frequency, (int, float))
+            or not math.isfinite(float(frequency))
+            or not 0 <= float(frequency) <= 1
+        ):
+            raise ProviderRepositoryResultError(
+                "Normalized population result has invalid frequency data."
+            )
+    if source == "gnomad":
+        if result.get("variant_id") != query_identifier:
+            raise ProviderRepositoryResultError(
+                "Normalized gnomAD result violates exact variant identity."
+            )
+        if result["status"] in {"available", "partial"} and not any(
+            isinstance(result.get(field), Mapping)
+            for field in ("joint", "exome", "genome")
+        ):
+            raise ProviderRepositoryResultError(
+                "Normalized gnomAD result has no usable frequency block."
+            )
+    elif result["status"] in {"available", "partial"} and not populations:
+        raise ProviderRepositoryResultError(
+            "Normalized population result has no usable exact-match rows."
+        )
+    return result
+
+
+def _resolve_repository_use(
+    *,
+    session: requests.Session | None,
+    evidence_repository: EvidenceRepository | None,
+    use_repository: bool | None,
+) -> tuple[EvidenceRepository | None, bool]:
+    if use_repository is not None and not isinstance(use_repository, bool):
+        raise ConditionalEnrichmentError("use_repository must be a boolean.")
+    enabled = (
+        session is None or evidence_repository is not None
+    ) if use_repository is None else use_repository
+    if not enabled:
+        return None, False
+    if evidence_repository is not None and not isinstance(
+        evidence_repository,
+        EvidenceRepository,
+    ):
+        raise ConditionalEnrichmentError(
+            "evidence_repository must be an EvidenceRepository."
+        )
+    if evidence_repository is not None:
+        return evidence_repository, True
+    try:
+        return EvidenceRepository(), True
+    except EvidenceRepositoryError:
+        LOGGER.warning("event=evidence_repository_configuration_failed")
+        return None, False
+
+
+def fetch_ensembl_population_evidence(
+    candidate: Mapping[str, object],
+    *,
+    session: requests.Session | None = None,
+    evidence_repository: EvidenceRepository | None = None,
+    use_repository: bool | None = None,
+    repository_provider_role: ProviderRole = "primary",
+    repository_fallback_for: str | None = None,
+    repository_primary_failure: ProviderStatus | None = None,
+) -> dict[str, Any]:
+    """Fetch or reuse exact validated Ensembl population evidence."""
+
+    if not isinstance(candidate, Mapping):
+        raise ConditionalEnrichmentError("Candidate must be a mapping.")
+    identity = _candidate_identity(candidate)
+    rsid = _candidate_rsid(candidate)
+    repository, enabled = _resolve_repository_use(
+        session=session,
+        evidence_repository=evidence_repository,
+        use_repository=use_repository,
+    )
+    if not enabled or repository is None or identity is None or rsid is None:
+        return _fetch_ensembl_population_evidence_live(
+            candidate,
+            session=session,
+        )
+    context = ProviderRepositoryContext(
+        canonical_variant=cast(Mapping[str, object], candidate["variant"]),
+        assembly=identity[4],
+        semantic_node="population_evidence",
+        provider="ensembl_variation",
+        provider_role=repository_provider_role,
+        source="ensembl_variation",
+        query_identity={
+            "operation": "lookup_population_by_rsid",
+            "rsid": rsid,
+            "assembly": identity[4],
+        },
+        fallback_for=repository_fallback_for,
+        primary_failure=repository_primary_failure,
+    )
+    return execute_provider_with_repository(
+        repository=repository,
+        context=context,
+        live_call=lambda: _fetch_ensembl_population_evidence_live(
+            candidate,
+            session=session,
+        ),
+        validate_result=lambda value: _validate_repository_population_result(
+            value,
+            candidate=candidate,
+            provider="Ensembl REST Variation",
+            source="ensembl_variation",
+            query_identifier=rsid,
+        ),
+    )
+
+
+def _fetch_gnomad_evidence_live(
     candidate: Mapping[str, object],
     *,
     session: requests.Session | None = None,
@@ -1136,6 +1318,73 @@ def fetch_gnomad_evidence(
         evidence["status"] = "available"
         evidence["response_status"] = "available"
     return evidence
+
+
+def fetch_gnomad_evidence(
+    candidate: Mapping[str, object],
+    *,
+    session: requests.Session | None = None,
+    circuit_state: ProviderCircuitState | None = None,
+    evidence_repository: EvidenceRepository | None = None,
+    use_repository: bool | None = None,
+) -> dict[str, Any]:
+    """Fetch or reuse exact validated gnomAD population evidence."""
+
+    if not isinstance(candidate, Mapping):
+        raise ConditionalEnrichmentError("Candidate must be a mapping.")
+    identity = _candidate_identity(candidate)
+    repository, enabled = _resolve_repository_use(
+        session=session,
+        evidence_repository=evidence_repository,
+        use_repository=use_repository,
+    )
+    if not enabled or repository is None or identity is None:
+        return _fetch_gnomad_evidence_live(
+            candidate,
+            session=session,
+            circuit_state=circuit_state,
+        )
+    dataset = {
+        "GRCh37": settings.GNOMAD_DATASET_GRCH37,
+        "GRCh38": settings.GNOMAD_DATASET_GRCH38,
+    }.get(identity[4])
+    if dataset is None:
+        return _fetch_gnomad_evidence_live(
+            candidate,
+            session=session,
+            circuit_state=circuit_state,
+        )
+    variant_id = f"{identity[0]}-{identity[1]}-{identity[2]}-{identity[3]}"
+    context = ProviderRepositoryContext(
+        canonical_variant=cast(Mapping[str, object], candidate["variant"]),
+        assembly=identity[4],
+        semantic_node="population_evidence",
+        provider="gnomad",
+        provider_role="primary",
+        source="gnomad",
+        query_identity={
+            "operation": "lookup_variant",
+            "variant_id": variant_id,
+            "dataset": dataset,
+        },
+        upstream_version=dataset,
+    )
+    return execute_provider_with_repository(
+        repository=repository,
+        context=context,
+        live_call=lambda: _fetch_gnomad_evidence_live(
+            candidate,
+            session=session,
+            circuit_state=circuit_state,
+        ),
+        validate_result=lambda value: _validate_repository_population_result(
+            value,
+            candidate=candidate,
+            provider="gnomAD",
+            source="gnomad",
+            query_identifier=variant_id,
+        ),
+    )
 
 
 def fetch_ucsc_gnomad_evidence(
@@ -1441,6 +1690,8 @@ def fetch_population_evidence_with_fallback(
     *,
     session: requests.Session | None = None,
     circuit_state: ProviderCircuitState | None = None,
+    evidence_repository: EvidenceRepository | None = None,
+    use_repository: bool | None = None,
 ) -> dict[str, Any]:
     """Use UCSC then Ensembl after an operational gnomAD failure."""
 
@@ -1448,6 +1699,8 @@ def fetch_population_evidence_with_fallback(
         candidate,
         session=session,
         circuit_state=circuit_state,
+        evidence_repository=evidence_repository,
+        use_repository=use_repository,
     )
     primary_failure = primary.get("primary_failure")
     continued_after_no_match = primary.get("status") == "no_match"
@@ -1480,6 +1733,19 @@ def fetch_population_evidence_with_fallback(
     fallback = fetch_ensembl_population_evidence(
         candidate,
         session=session,
+        evidence_repository=evidence_repository,
+        use_repository=use_repository,
+        repository_provider_role=(
+            "primary" if continued_after_no_match else "fallback"
+        ),
+        repository_fallback_for=(
+            None if continued_after_no_match else "gnomad"
+        ),
+        repository_primary_failure=(
+            None
+            if continued_after_no_match
+            else cast(ProviderStatus, primary_failure)
+        ),
     )
     if fallback.get("status") == "missing_identifier":
         primary.update(
