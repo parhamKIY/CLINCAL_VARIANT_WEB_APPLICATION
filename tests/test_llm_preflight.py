@@ -193,6 +193,29 @@ def test_preflight_quota_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.failure_category == "Quota exhausted"
 
 
+def test_preflight_provider_specific_quota_403_is_not_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_session = _FakeHTTPSession(
+        _FakeHTTPResponse(
+            403,
+            {
+                "error": {
+                    "code": "insufficient_user_quota",
+                    "type": "gap_api_error",
+                    "message": "private account balance",
+                }
+            },
+        )
+    )
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("gpt-5.4-mini")
+
+    assert result.ok is False
+    assert result.failure_category == "Quota exhausted"
+
+
 def test_preflight_rate_limit_429(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 429 rate-limit maps to failure_category='Quota exhausted'."""
 
@@ -434,4 +457,3 @@ def test_preflight_structured_output_non_object_json(
 
     assert result.ok is False
     assert result.failure_category == "Structured output unsupported"
-

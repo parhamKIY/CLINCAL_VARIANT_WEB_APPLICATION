@@ -12375,6 +12375,43 @@ class TestLLMContract:
 
         assert len(session.post_calls) == 1
 
+    def test_provider_specific_quota_403_is_not_misreported_as_authentication(
+        self,
+    ) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(
+                    403,
+                    {
+                        "error": {
+                            "message": "private account balance",
+                            "type": "gap_api_error",
+                            "code": "insufficient_user_quota",
+                        }
+                    },
+                )
+            ]
+        )
+        client = LLMClient(
+            OpenAICompatibleAdapter(
+                base_url="https://llm.example/v1",
+                api_key="test-secret",
+                model="test-model",
+                timeout=10,
+                session=session,
+            )
+        )
+
+        with pytest.raises(LLMQuotaError, match="quota or credit"):
+            call_llm(
+                "System",
+                "Evidence",
+                client=client,
+                max_retries=2,
+            )
+
+        assert len(session.post_calls) == 1
+
     @pytest.mark.parametrize(
         ("failure", "error_type", "message"),
         [

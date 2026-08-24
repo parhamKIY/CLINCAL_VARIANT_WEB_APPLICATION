@@ -616,6 +616,7 @@ class OpenAICompatibleAdapter:
             "billing_not_active",
             "credit_balance_too_low",
             "insufficient_quota",
+            "insufficient_user_quota",
         }:
             raise LLMQuotaError(
                 "The LLM provider quota or credit is insufficient.",
