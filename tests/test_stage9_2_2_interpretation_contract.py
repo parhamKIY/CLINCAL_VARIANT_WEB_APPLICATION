@@ -22,7 +22,7 @@ def _malformed_citation_response() -> LLMResponse:
         content=json.dumps(
             {
                 "ai_classification": "Uncertain significance",
-                "interpretation": "The supplied evidence is cited as [R1, R2].",
+                "interpretation": "The supplied evidence is cited as [R1; R2].",
                 "conflict_assessment": "The source assertions remain distinct.",
                 "phenotype_conclusion": "partially supported",
                 "warnings": [],

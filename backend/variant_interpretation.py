@@ -73,6 +73,9 @@ MAX_INTERPRETATION_WARNINGS = 20
 MAX_INTERPRETATION_WARNING_CHARACTERS = 2_000
 MEANINGFUL_CONFLICT_SEVERITIES = {"moderate", "major", "critical"}
 URL_PATTERN = re.compile(r"(?i)(?:https?://|www\.)")
+COMBINED_CITATION_PATTERN = re.compile(
+    r"\[(R[1-9][0-9]*(?:\s*,\s*R[1-9][0-9]*)+)\]"
+)
 LOGGER = get_logger("variant_interpretation")
 
 InterpretationStatus = Literal["success", "failed"]
@@ -567,6 +570,18 @@ def _bounded_output_text(value: object, *, field: str, maximum: int) -> str:
         ) from exc
 
 
+def _normalize_citation_groups(value: str) -> str:
+    """Canonicalize valid comma-separated reference groups."""
+
+    def expand(match: re.Match[str]) -> str:
+        return "".join(
+            f"[{reference_id.strip()}]"
+            for reference_id in match.group(1).split(",")
+        )
+
+    return COMBINED_CITATION_PATTERN.sub(expand, value)
+
+
 def _parse_response(
     response: LLMResponse,
     *,
@@ -655,10 +670,12 @@ def _parse_response(
             schema_error="invalid_warnings",
         )
     warnings = [
-        _bounded_output_text(
-            warning,
-            field=f"warnings[{index}]",
-            maximum=MAX_INTERPRETATION_WARNING_CHARACTERS,
+        _normalize_citation_groups(
+            _bounded_output_text(
+                warning,
+                field=f"warnings[{index}]",
+                maximum=MAX_INTERPRETATION_WARNING_CHARACTERS,
+            )
         )
         for index, warning in enumerate(raw_warnings)
     ]
@@ -668,10 +685,12 @@ def _parse_response(
             failure_type="output_schema_failure",
             schema_error="duplicate_warnings",
         )
-    interpretation = _bounded_output_text(
-        payload["interpretation"],
-        field="interpretation",
-        maximum=MAX_INTERPRETATION_CHARACTERS,
+    interpretation = _normalize_citation_groups(
+        _bounded_output_text(
+            payload["interpretation"],
+            field="interpretation",
+            maximum=MAX_INTERPRETATION_CHARACTERS,
+        )
     )
     if phenotype_conclusion in {
         "no supported association found",
@@ -688,10 +707,12 @@ def _parse_response(
                 failure_type="output_schema_failure",
                 schema_error="response_size_limit",
             )
-    conflict_assessment = _bounded_output_text(
-        payload["conflict_assessment"],
-        field="conflict_assessment",
-        maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
+    conflict_assessment = _normalize_citation_groups(
+        _bounded_output_text(
+            payload["conflict_assessment"],
+            field="conflict_assessment",
+            maximum=MAX_CONFLICT_ASSESSMENT_CHARACTERS,
+        )
     )
     citation_tokens = re.findall(
         r"\[(R[^\]]*)\]",
