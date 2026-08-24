@@ -294,7 +294,8 @@ def test_102_7_total_failure_keeps_variant_and_requires_action(
     assert card["notices"][0] == {
         "severity": "ACTION REQUIRED",
         "message": (
-            "Interpretation could not be produced after recovery attempts. "
+            "The interpretation service remained temporarily unavailable "
+            "after bounded recovery. "
             "Review the collected evidence and retry interpretation."
         ),
     }

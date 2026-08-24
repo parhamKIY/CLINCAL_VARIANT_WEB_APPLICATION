@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal, TypedDict
 
+from frontend.interpretation_failure_semantics import (
+    EXPLAINABLE_INTERPRETATION_FAILURE_TYPES,
+    interpretation_failure_message,
+)
 from frontend.source_status import build_reviewer_source_status
 
 WarningSeverity = Literal["INFO", "PARTIAL", "ACTION REQUIRED", "BLOCKING"]
@@ -192,11 +196,21 @@ def build_warning_notices(report: object) -> list[WarningNotice]:
 
     interpretation = _mapping(content.get("variant_interpretation"))
     if interpretation is None or _normalized(interpretation.get("status")) != "success":
+        failure_type = (
+            interpretation.get("failure_type")
+            if interpretation is not None
+            else None
+        )
+        failure_message = (
+            interpretation_failure_message(failure_type)
+            if failure_type in EXPLAINABLE_INTERPRETATION_FAILURE_TYPES
+            else "Interpretation could not be produced after recovery attempts."
+        )
         notices.append(
             _notice(
                 "ACTION REQUIRED",
-                "Interpretation could not be produced after recovery attempts. "
-                "Review the collected evidence and retry interpretation.",
+                f"{failure_message} Review the collected evidence and retry "
+                "interpretation.",
             )
         )
     else:

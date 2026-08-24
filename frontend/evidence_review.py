@@ -42,6 +42,9 @@ from frontend.report_preview import (
     stable_allele_identity,
 )
 from frontend.report_viewer import render_final_clinical_report_viewer
+from frontend.interpretation_failure_semantics import (
+    interpretation_failure_message,
+)
 from frontend.source_status import (
     build_reviewer_section_status,
     build_reviewer_source_status,
@@ -67,38 +70,6 @@ _NOTICE_STYLES = {
     "ACTION REQUIRED": ("Action required", "red", ":material/error:"),
     "BLOCKING": ("Blocking", "red", ":material/block:"),
 }
-
-
-def interpretation_failure_message(failure_type: object) -> str:
-    """Return reviewer-safe wording for a persisted model failure category."""
-
-    if failure_type in {
-        "request_timeout",
-        "connection_error",
-        "http_429",
-        "http_5xx",
-        "empty_response",
-    }:
-        return (
-            "The interpretation service remained temporarily unavailable "
-            "after bounded recovery."
-        )
-    if failure_type in {"output_schema_failure", "output_parse_failure"}:
-        return (
-            "The model returned a response, but no valid structured response "
-            "remained after the repair attempt."
-        )
-    if failure_type in {"authentication_error", "configuration_error"}:
-        return (
-            "Interpretation could not run because the model provider "
-            "configuration requires attention."
-        )
-    if failure_type == "safety_or_finish_failure":
-        return "The model stopped before a usable interpretation was produced."
-    return (
-        "Interpretation could not be produced because the model workflow "
-        "requires attention."
-    )
 
 
 def _render_variant_notice(

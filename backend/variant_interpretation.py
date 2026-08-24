@@ -50,12 +50,13 @@ from config import settings
 
 
 VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.1"
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.4"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.5"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
         "variant-interpretation-v1.1",
         "variant-interpretation-v1.2",
         "variant-interpretation-v1.3",
+        "variant-interpretation-v1.4",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
     }
 )
@@ -147,6 +148,10 @@ STRUCTURED_REPAIR_INSTRUCTION = (
     "The previous response did not satisfy the strict output contract. "
     "Re-evaluate the same validated evidence and return only one JSON object "
     "that exactly matches the required schema. Do not add URLs or new evidence."
+)
+MALFORMED_CITATION_REPAIR_INSTRUCTION = (
+    " Cite one reference per bracket using only an allowed token such as [R1]. "
+    "Do not combine multiple references inside one bracket."
 )
 InterpretationProgressCallback = Callable[
     [int, int, InterpretationStatus | Literal["running"]],
@@ -838,11 +843,12 @@ def _execute_interpretation_request(
         ]
     }
     repair_used = False
+    repair_instruction = STRUCTURED_REPAIR_INSTRUCTION
     for repair_index in range(2):
         prompt = (
             user_prompt
             if repair_index == 0
-            else user_prompt + STRUCTURED_REPAIR_INSTRUCTION
+            else user_prompt + repair_instruction
         )
         try:
             response = call_llm(
@@ -871,15 +877,25 @@ def _execute_interpretation_request(
                 and failure_type in STRUCTURED_REPAIR_FAILURE_TYPES
             ):
                 repair_used = True
+                if getattr(exc, "schema_error", None) == "malformed_citation":
+                    repair_instruction = (
+                        STRUCTURED_REPAIR_INSTRUCTION
+                        + MALFORMED_CITATION_REPAIR_INSTRUCTION
+                    )
                 LOGGER.warning(
                     "event=variant_interpretation_recovery action=repair "
-                    "variant_id=%s model=%s failure_type=%s attempt=1",
+                    "variant_id=%s model=%s failure_type=%s schema_error=%s "
+                    "attempt=1",
                     stable_allele_identity(
                         evidence["variant"],
                         assembly=evidence["assembly"],
                     ),
                     model,
                     failure_type,
+                    _safe_diagnostic_token(
+                        getattr(exc, "schema_error", None),
+                        allowed=SAFE_SCHEMA_ERRORS,
+                    ),
                 )
                 continue
             raise
