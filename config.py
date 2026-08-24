@@ -620,6 +620,11 @@ class Settings:
         "storage/database/clinical_variant.sqlite3",
     )
 
+    EVIDENCE_REPOSITORY_PATH: Path = _resolve_path(
+        "EVIDENCE_REPOSITORY_PATH",
+        "storage/evidence_repository/evidence_repository.sqlite3",
+    )
+
     ANALYSIS_RETENTION_ENABLED: bool = _get_bool(
         "ANALYSIS_RETENTION_ENABLED",
         True,
