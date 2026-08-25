@@ -1,2201 +1,722 @@
-# Clinical Variant Interpretation Project Declaration
+# Clinical Variant Interpretation Platform — Project Declaration & Agent Handoff
 
-**Project:** Clinical Variant Interpretation  
-**Implementation status:** Stages 0-114 implemented as recorded below
-**Current release gate:** Stage 60 V3, Stage 61 live, Stage 78 resilience, and the
-final selected-variant input smoke gates passed.
-**Next checkpoint:** Stage 83 manual DOCX visual fidelity check; Stage 115 final visual sign-off
-**Document date:** 2026-08-13
-**Primary interface:** Streamlit  
-**Primary language:** Python
+**Project:** Clinical Variant Interpretation
+**Document role:** Single authoritative handoff record for any agent or contributor
+**Last verified against code:** 2026-08-25 (master @ `f741ca8`)
+**Primary interface:** Streamlit · **Primary language:** Python 3.13
+**Status:** Educational/research decision-support software — NOT a diagnostic device
 
-> **Evidence-resilience closeout (2026-08-17):** Stages 1–11 are COMPLETE /
-> APPROVED. This workstream preserves the
-> existing product boundary: 1–10 already-selected variants, evidence aggregation
-> and normalization, one selected interpretation LLM, and mandatory human review;
-> it does not add raw-VCF filtering, prioritization/ranking/Top-N selection,
-> autonomous diagnosis/ACMG classification, treatment recommendations, or automatic
-> CSpec-rule execution. Current evidence contracts and validation are maintained in
-> `AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md`,
-> `EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md`,
-> `stage_6a_counterfactual_audit.md`, `stage_9_resilience_validation.md`, and
-> `stage_10_failure_driven_trace.md`.
+---
 
-## 1. Executive declaration
+## 0. How to use this document (agent orientation)
 
-This repository implements an evidence-centered clinical variant interpretation
-workflow for one to ten already-filtered germline Mendelian variants. It accepts a
-filtered VCF/VCF.GZ file, user-selected rows from a user-selected worksheet of an
-Excel `.xlsx` workbook, or a manual VCF-style table, validates and standardizes each
-allele, collects independent
-annotation and phenotype evidence, interprets every variant with one selected model,
-then presents ordered evidence and interpretation state for human review and final
-confirmation. Per-variant model failures remain explicit without removing collected
-evidence or successful interpretations.
+This is the unified handoff record for the whole project. Read it top to bottom once;
+after that, use it as a reference map.
 
-The application is clinical decision-support software for educational and research
-use. It does not diagnose disease, prescribe treatment, replace ACMG/AMP expert
-judgment, or replace review by a qualified genetics professional.
+- Sections **1–2** tell you what the product is and what it must never do.
+- Sections **3–8** describe the implemented system as it exists in code today.
+- Section **9** is the consolidated history of every workstream and stage register,
+  including workstreams that were never recorded in any other committed document.
+- Sections **10–13** cover verification, configuration, open defects, and which
+  other documents in `docs/` remain load-bearing.
 
-The professor review on 2026-08-08 changed the accepted target architecture. Stage
-45 froze that architecture, and Stages 46-62 implement and document its input,
-phenotype,
-model-selection, interpretation-before-review, reviewed-report, selection, reference,
-Final Clinical Report, persistence, recovery, privacy, testing, V3 release gate, and
-bounded live validation. Stages 63-78 implement the separate provider-resilience
-roadmap through central operational-status, retry, timeout, circuit, fallback-provenance,
-free/public degraded paths, failure injection, reachability checks, and operations
-contracts. Stages 66-72 apply those contracts to population, ClinVar, literature,
-MyDisease, VEP-dependent annotation evidence, MyVariant degraded operation, and
-CSpec last-known-good metadata.
-Stage 79 begins the separate acceptance-driven report-first roadmap by freezing the
-seven acceptance defects, documenting the professor PDF as a confidential local
-design reference, and adding a tested synthetic non-PHI report asset. It changes no
-production report architecture; that work begins at Stage 80.
-Stage 80 translates the actual four-page professor PDF into an implementation-ready
-per-variant report anatomy, visual-token, evidence-table, narrative, missingness, and
-reference/provenance specification without creating a schema, DOCX template, renderer,
-preview, or UI behavior.
-Stage 81 adds a strict renderer-neutral `ReportData V4` contract for the future DOCX
-and preview paths. It models typed allele identity, valid phenotype non-concordance,
-structured table evidence, replayable interpretation/review state, literature-only
-references, source-preserving provider provenance, warnings, and legitimate
-missingness without integrating a renderer or changing the active workflow.
-Stage 82 adds the authoritative editable Word-native per-allele template. It owns the
-Stage 80 page, typography, result-block, table, pagination, reference, and provenance
-presentation system while retaining placeholders for the future renderer and no
-patient identifiers or unsupported clinical directives.
-Stage 83 adds the deterministic ReportData V4-to-DOCX production path and a rich
-synthetic golden artifact. Its automated structural fidelity checks pass, while the
-required Word/LibreOffice visual comparison remains explicitly pending.
-Stage 84 makes the report the default completed-analysis review surface with a
-deterministic three-page professor-family HTML preview, explicit page/variant
-navigation, stable assembly-qualified allele identity, existing audited inclusion and
-editing access, and provider/API detail demoted to a secondary tab.
-Stage 85 replaces generic form-first report editing with an explicit document-region
-editor for brief interpretation, variant interpretation, classification summary, and
-reviewer notes. Saves retain field-level audit history, invalidate confirmation, and
-regenerate the editable professor-template Word report through a validated transient
-ReportData V4 projection.
-Stage 86 makes that report projection a persisted, ordered per-variant lifecycle
-record. Each accepted variant retains one ReportData-backed DOCX draft record through
-editing, reporting-only selection, confirmation, and finalization; excluded variants
-remain analyzed, stored, and auditable in original input order.
-Stage 87 adds an input-indexed, allele-level integrity ledger that proves parser,
-normalized, pipeline, evidence, draft-report, and review-record cardinality and
-identity without collapsing same-gene variants.
-Stage 88 replaces opaque interpretation exception names with a stable twelve-category
-failure taxonomy and secret-free per-variant structured diagnostics while retaining a
-concise reviewer message.
-Stage 89 adds one transient retry, one constrained structured-output repair, and an
-optional operational-only fallback model. The user-selected model remains primary for
-every conflict and no-conflict variant, and fallback receives the same normalized
-evidence.
-Stage 90 makes phenotype non-concordance a valid interpretation outcome. Unrelated or
-unavailable phenotype evidence is stated explicitly while variant interpretation
-continues from remaining evidence without forced disease association or pathogenicity
-down-weighting.
-Stage 91 adds a fixed seven-case Variant Interpretation Model benchmark and a strict
-evidence gate covering groundedness, hallucination, clinical coherence, conflict
-handling, phenotype restraint, structured reliability, latency, and cost. Offline
-fixtures cannot promote a model, and the configured default remains unchanged until
-at least two live, human-reviewed candidates have complete evidence.
-Stage 92 adds Reference Model V2 so PubMed, PMC, and DOI literature remains in a
-numbered bibliography while ClinVar, Ensembl, GeneBe, MyVariant.info, ClinGen/GenCC,
-CSpec, phenotype tools, MyDisease, and population providers remain unnumbered data
-source provenance.
-Stage 93 adds one canonical human-link resolver so stable PubMed, PMC, DOI, ClinVar,
-GeneBe, and Ensembl identities open human-readable records, while raw provider APIs
-remain explicit provenance and MyVariant.info is labelled as a programmatic source.
-Stage 94 adds deterministic regression coverage for every required reference-mapping,
-missing-identifier, unsupported-provider, and raw-machine-link boundary, plus a
-separately gated optional live human-page reachability check.
-Stage 95 replaces the provider-status-first completion view with an input-aware,
-per-variant analysis summary while keeping technical provider details collapsed and
-available on demand.
-Stage 96 adds one stable product-facing status card per input variant, keeps warnings
-within their owning variant, and places provider details in collapsed expanders.
-Stage 97 classifies those notices as informational, partial, action required, or
-blocking using consequence-oriented reviewer copy.
-Stage 98 adds collapsed, variant-scoped provider diagnostics while keeping the primary
-reviewer workflow clean.
-Stage 99 adds normalized report-first persistence and fail-closed restart recovery in
-SQLite schema V4 without regenerating interpretation.
-Stage 100 makes the professor-template DOCX the authoritative editable artifact and
-packages only selected finalized reports in stable input order.
-Stage 101 adds six deterministic DOCX layout snapshots and an environment-gated real
-raster matrix for page-count, blank-page, and edge-overflow checks.
-Stage 102 adds a seven-scenario deterministic acceptance suite for normal, phenotype
-non-concordant, partial-provider, conflicting, transient-failure, structured-repair,
-and total-failure interpretation paths. It verifies retained per-variant report state
-and an action-required reviewer outcome when interpretation is exhausted.
-Stage 103 adds a deterministic acceptance gate for exact literature targets, strict
-literature/provenance separation, rejection of raw JSON and fabricated links,
-human-readable provider records, and clean missing-link behavior across HTML and DOCX.
-Stage 104 adds an explicit ready-report count and verifies that primary summaries,
-variant cards, and consequence notices answer all required status questions while
-technical provider details remain collapsed.
-Stage 105 executes the deterministic offline acceptance suite verifying 7-variant
-cardinality, preservation of input order, same-gene separation, phenotype non-concordance
-handling, and provider degradation scenarios.
-Stages 106-114 implement the nine post-acceptance corrective defects in dependency
-order: Persian multi-concept phenotype extraction, valid no-match evidence rescue,
-cross-provider identifier intelligence, exact ClinVar retrieval, scoped CSpec
-applicability, deterministic evidence readiness, secondary classification recovery,
-classified interpretation retry, and reviewer-facing source-status semantics.
-This declaration is the unified implementation record for Stages 0-114. The former
-Stage 45-62 and Stage 63-78 roadmap documents were removed after their implemented
-facts were reconciled here. Sections describing Output A, Output B, or two-layer
-routing are historical Stage 44 facts; they are not part of the active workflow for
-new analyses.
+Historical companion documents (`AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md`,
+`EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md`,
+`COMPLETE_CODEX_EXECUTION_ROADMAP.md`) still exist and are referenced by
+`AGENTS.md`; where this document and those documents disagree about *current*
+state, this document wins because it was verified against code last. Their
+semantic contracts (evidence semantics, provider roles, correlation rules) remain
+authoritative for meaning; this document records implementation reality.
 
-## 2. Current project boundaries
+---
 
-### Stage 45 professor-review incorporation and architecture freeze
+## 1. TL;DR
 
-Stage 45 recorded the professor-approved V3 scope, replaced the active Stage 44
-Output A/Output B and dual-routing interaction model, established the terminology used
-throughout the current UI and schemas, and preserved legacy records only behind explicit
-compatibility boundaries. The implemented scope and non-goals below are the resulting
-frozen contract for Stages 46-78.
+The application accepts **one to ten already-filtered germline Mendelian variants**
+(from VCF, VCF.GZ, explicitly selected Excel `.xlsx` worksheet rows, or a manual
+VCF-style table), collects independent annotation / clinical / phenotype /
+population / literature evidence for each variant through bounded external
+providers, normalizes everything into provenance-aware Evidence Objects, sends only
+sanitized normalized evidence to one selected LLM per variant, and presents ordered
+evidence + interpretation state for mandatory human review, editing, confirmation,
+and composition of a Final Clinical Report (text/PDF/Word/DOCX) — with no further
+model calls at finalization.
 
-### In scope
+It deliberately does **not** rank, filter, prioritize, or diagnose. Candidate
+selection is an upstream responsibility of the caller (professor/reviewer).
 
-- One to ten professor-filtered variants in VCF, VCF.GZ, a user-selected Excel
-  `.xlsx` worksheet/source-row set, or manual-table form.
-- Explicit GRCh37 or GRCh38 assembly handling.
-- Germline Mendelian evidence collection and interpretation support.
-- SNV/indel allele validation, multiallelic splitting, and input-order preservation.
-- Independent evidence collection from variant, clinical, population, disease,
-  phenotype, specification, and literature sources.
-- Human-editable evidence, immutable machine originals, confirmation invalidation
-  after edits, and append-only review history.
-- One selected Variant Interpretation Model applied before final review.
-- Local SQLite persistence, secure report exports, audit metadata, failure
-  isolation, and browser-refresh recovery.
+One sentence: *an evidence aggregation and interpretation-support system with
+mandatory human review, strict provenance, and hard safety boundaries.*
 
-### Explicitly out of scope
+---
 
-- Raw-VCF filtering, clinical prioritization, ranking, or Top-N selection.
-- Autonomous pathogenicity classification or diagnosis.
-- Automatic application of ClinGen CSpec rules.
-- Treatment recommendations or independent medical decisions.
-- Sending raw VCF records, sample names, genotypes, or patient columns to an LLM.
-- Production identity management, role-based access control, cloud deployment,
-  multi-institution workflows, or regulatory certification.
+## 2. Non-negotiable safety contract
 
-### Stage 46 input contract
+These boundaries are frozen by professor review (Stage 45) and every roadmap since.
+No agent may weaken them.
 
-`MAX_VARIANTS_PER_ANALYSIS = 10` in `config.py` is the single active limit for
-VCF, manual, Excel, frontend, and recovery validation. The limit applies after
-multiallelic splitting, so no supported input route can produce more than ten
-normalized variants.
+### 2.1 Frozen product scope
 
-The historical Stage 46 Excel adapter read worksheet index 0 only. It is superseded
-for new XLSX analyses by the selected-input stabilization contract below. Required
-headers are `CHROM`, `POS`, `REF`, and `ALT`; `QUAL` and `FILTER` are optional.
-Matching is case-insensitive with deterministic aliases: `#CHROM`/`Chromosome`,
-`Position`, `Reference`, `Alternate`/`Alternative`, `Quality`, and `Filter status`.
-Unknown columns are discarded before pipeline entry.
+The application receives `1–10 user-preselected variants`. It must never:
 
-Excel rows are projected onto the established manual-table structure and pass
-through the same assembly, coordinate, allele, ordering, and multiallelic
-validation. Excel therefore adds an input adapter, not a separate interpretation
-pipeline.
-
-### Selected-variant XLSX stabilization (Stages 1–3)
-
-For current XLSX analyses, the UI exposes actual worksheet names and requires the
-user to choose one worksheet and one to ten source rows. No worksheet or rows are
-selected from order, FILTER, quality, phenotype score, pathogenicity, or a Top-N
-rule. Changing worksheets clears row selection. Source FILTER, QUAL, DP, AD, and GQ
-remain provenance only.
-
-Only after explicit submission do selected source rows enter the existing Stage-2
-adapter. It emits `ACCEPTED_DIRECT`, `NORMALIZED_AND_ACCEPTED`, or
-`IDENTITY_UNRESOLVED`; no frontend normalization or reference API call occurs while
-browsing. Selected, canonical/analyzable, and unresolved counts remain distinct.
-Unresolved inputs remain explicit but never enter annotations, Evidence Objects,
-provider requests, interpretations, or LLM evidence. Recovery stores only selected
-source records. The final smoke passed with PipelineResult `3.3`, SQLite `4`,
-recovery request `3`, and EvidenceObject `2.5` unchanged.
-
-### Stage 47 phenotype-extraction LLM contract
-
-`backend/phenotype_llm.py` defines one dedicated extraction task:
-`extract_clinical_entities`. Before any model request, the Persian clinical description
-must be non-empty, no longer than 4,000 characters, free of invalid control
-characters, and redacted by the shared privacy layer. The outbound user payload is
-limited to `clinical_text_fa` and `task`; raw VCF data, genotypes, sample data, and
-identifiers are prohibited.
-
-The model response uses a strict JSON-schema contract containing bounded
-`clinical_entities` and `unmapped_clinical_phrases` arrays. Every entity preserves
-grounded source text, an explicit `PHENOTYPE` or `DISEASE` type, and one of
-`PRESENT`, `SUSPECTED`, `NEGATED`, or `HISTORICAL`. HPO identifiers remain allowed
-only for present phenotype entities and continue through the separate local ontology
-acceptance gate; disease entities are not converted to HPO.
-
-The system prompt restricts this model to explicit clinical-entity extraction and prohibits
-diagnosis, unsupported disease inference, invented HPO identifiers, variant
-interpretation, and treatment recommendations. Insufficient evidence produces an
-empty candidate list. `PHENOTYPE_EXTRACTION_MODEL` and
-`VARIANT_INTERPRETATION_MODEL` are separate validated settings. Provider failures
-remain explicit and do not disable the existing manual HPO path.
-
-Explicit `DISEASE` entities now enter a separate deterministic resolver boundary.
-The resolver performs formatting normalization and unique exact-name lookup against
-the installed, versioned HPO disease-annotation release. A unique match retains its
-source identifier and label; no match, ambiguity, or unavailable resolver data remains
-explicit. Results are stored only as case-context `disease_resolutions`; they do not
-enter accepted HPO terms, Phen2Gene, EvidenceObjects, ACMG logic, interpretation
-prompts, or reports. MyDisease and MedGen remain in their approved gene-first evidence
-roles and are not relabeled as user-term resolvers.
-
-### Stage 48 local validation and explicit acceptance
-
-`backend/phenotype_selection.py` validates every model suggestion against the
-installed `hp.obo` ontology. Alternate identifiers are resolved to their canonical
-active terms, model-provided labels are replaced with local ontology labels, and
-invalid, absent, duplicate, malformed, or unsafe candidates are excluded. A missing
-or unreadable ontology remains an explicit data failure rather than being misreported
-as model invalidity.
-
-The Streamlit phenotype panel accepts an optional de-identified Persian description,
-runs the Stage 47 extraction task, and displays only locally validated suggestions in
-an editable table. Editing or extraction alone does not alter the analysis phenotype
-set. The **Accept HPO candidates** action revalidates the complete edited selection,
-then atomically merges it with manually selected HPO terms while preserving stable
-order and the established 50-term cap. Failed extraction, validation, or acceptance
-does not disable the existing local manual-search path.
-
-### Stage 49 task-specific model UI
-
-The active Streamlit input flow is ordered as **Task-specific models**,
-**Phenotypes**, then **Variant input**. It replaces the visible low-cost/no-conflict
-and strong/conflict selectors with one **Phenotype Extraction Model** and one
-**Variant Interpretation Model** selector. Both selectors support configured defaults,
-provider-advertised models, and bounded custom model IDs; choices remain independent
-across reruns and are disabled while an analysis job is active.
-
-The selected phenotype model is passed only to the Stage 47 extraction task. The
-selected variant model is forwarded to every analysis-phase interpretation call, so
-conflict status cannot select a different model. Changing either task model
-invalidates stale analysis output and unaccepted phenotype suggestions.
-
-### Stage 50 single-model interpretation contract
-
-`backend/variant_interpretation.py` defines the new route-free interpretation
-boundary. Each validated and sanitized Evidence Object is sent to exactly one
-selected `VARIANT_INTERPRETATION_MODEL`. Conflict-free and conflict-containing
-variants therefore use the same model. The deterministic pre-review conflict audit
-is retained as bounded context and provenance; meaningful conflict changes only the
-prompt instruction mode, not model selection.
-
-The strict structured response contains only `interpretation`,
-`conflict_assessment`, and bounded `warnings`. The validated result carries stable
-variant identity and order, prompt version/mode, conflict status/severity, configured
-and returned models, token usage, timestamp, and explicit failure state. Obsolete
-`LLM-1`, `LLM-2`, and route fields are rejected. Unsafe evidence, incomplete or
-malformed model output, response URLs, invalid controls, and oversized content fail
-closed. Batch calls isolate provider/model failures without changing the selected
-model for later variants.
-
-`VARIANT_INTERPRETATION_MAX_TOKENS` is independently bounded in centralized
-configuration.
-
-### Stage 51 interpretation-before-final-review pipeline
-
-`backend/pipeline.py` now treats evidence collection, conflict audit, conditional
-enrichment, and one interpretation call per variant as a single analysis phase.
-Ordered `variant_interpretation_results` are persisted beside the existing evidence
-review reports. The active review UI shows both records together and explicitly marks
-interpretation as unavailable when an isolated provider or validation failure occurs.
-
-Review edits and confirmation do not invoke a model. Finalization requires one
-confirmed package and one interpretation result per input variant, clears obsolete
-routing/final-interpretation fields, and completes without another LLM call. Pipeline
-schema `2.4` and recovery-request schema `2` carry the new state; legacy pipeline
-payloads receive a clear unsupported-resume error rather than being reinterpreted.
-### Stage 52 Draft Variant Report V2
-
-`backend/variant_report.py` defines schema `2.0` and deterministically composes one
-professional reviewer-facing report for every evidence/interpretation pair. The
-report contains normalized allele and transcript identity, accepted HPO and supported
-disease context, source-aware evidence sections with missingness, deterministic
-conflict status, interpretation or explicit model failure, trusted current references,
-compact provenance, and safety limitations.
-
-Every report stores an immutable `machine_original_report` and a separate
-`reviewed_report` that begins as an identical deep copy. The
-pipeline preserves report order and validates each report by reconstructing it from
-its Evidence Object and Variant Interpretation Result. Pipeline schema is now `2.5`.
-
-### Stage 53 human report editing and audit history
-
-`backend/variant_report.py` restricts edits to four reviewer-owned fields: reviewer
-summary, interpretation narrative, conflict-assessment wording, and reviewer notes.
-Machine-backed identity, provider evidence, conflict facts, references, provenance,
-model metadata, and the machine original cannot be edited through this contract.
-
-Each changed field appends a sequence-numbered record with field path, old/new values,
-UTC timestamp, and optional bounded reviewer/session context. Validation replays the
-entire history from the integrity-checked original and requires an exact match with
-the reviewed report. Reset actions append reverse edits; they never erase history.
-Human-review privacy validation runs before persistence. `backend/pipeline.py`
-invalidates any prior confirmation for the edited variant, and the Streamlit review
-provides bounded field editors plus machine/current comparison and history views.
-
-### Stage 54 per-variant Final Report selection
-
-Every Draft Variant Report now carries an `include_in_final_report` boolean and a
-bounded append-only `selection_history`. The choice defaults to included and is a
-human reporting decision only; it does not rank, prioritize, or delete variants.
-Each change records sequence, old/new values, UTC timestamp, and optional bounded
-reviewer/session context, and validation replays the decision history from the
-default state.
-
-Excluded reports retain their complete evidence, interpretation, edits, provenance,
-conflict state, and exclusion decision. The selected-report projection filters only
-at reporting time and preserves original input order. Any selection change
-invalidates final confirmation. Editing an included report also invalidates it;
-editing an already excluded report does not alter the confirmed selected content.
-At the Stage 54 checkpoint, pipeline schema was `2.6`; Stage 55 then hardened
-canonical references, and Stage 56 composed the selected-only Final Clinical Report.
-
-### Stage 55 canonical reference and link hardening
-
-`backend/references.py` defines one normalized canonical-reference contract with a
-stable report ID, source, identifier type/value, optional title, canonical URL, and
-explicit validated/unavailable link status. Deterministic builders support PMID,
-PMCID, DOI, ClinVar accession, Europe PMC, ClinGen, and CSpec records. Provider URLs
-must use HTTPS and approved domains without credentials or fragments; CSpec URLs must
-also agree with the retained record identifier. Unsafe or unverifiable URLs become
-explicit non-clickable fallbacks instead of fabricated links.
-
-The Variant Interpretation Model receives only a bounded reference catalog without
-URLs and may cite supplied IDs such as `[R1]`. Backend validation rejects malformed,
-invented, or evidence-absent IDs in model output and reviewer-edited report text.
-Draft Variant Report schema `2.2` maps citations to canonical objects. Streamlit and
-legacy Markdown expose exact links, and generic Word/PDF exports preserve allowlisted
-hyperlinks. Variant Interpretation Result schema is `1.1`; Stage 55 used pipeline
-schema `2.7`.
-
-### Stage 56 Final Clinical Report composer
-
-`backend/final_clinical_report.py` defines Final Clinical Report schema `2.0` and
-composes it only from fully confirmed Draft Variant Reports whose audited
-`include_in_final_report` value is true. Selected reports retain original variant
-order and the exact reviewer-edited state; excluded reports remain persisted in the
-analysis but are absent from final findings and references.
-
-The artifact includes metadata, de-identified HPO context, main findings, one detailed
-section per selected report, grouped canonical references, method/data-source notes,
-limitations, a non-diagnostic disclaimer, and bounded confirmation/edit provenance.
-Finalization makes no new LLM call. Streamlit provides text, PDF, and Word downloads,
-and canonical reference URLs remain numbered and clickable. Pipeline schema `2.8`
-recomposes and integrity-checks the artifact against current reviewed state.
-
-## 3. Progress schematic
-
-```mermaid
-flowchart LR
-    A["Stages 0-4: scope, environment, input foundation"] --> B["Stages 5-16: annotation-to-report MVP"]
-    B --> C["Stage 17: professor review checkpoint"]
-    C --> D["Stage 19: repository reality audit"]
-    D --> E["Stages 22-25: annotation hardening"]
-    E --> F["Stages 27-34: Evidence V2 and human review"]
-    F --> G["Stages 35-40: two-layer LLM and full UI workflow"]
-    G --> H["Stages 41-44: resilience, privacy, testing, acceptance"]
-    H --> I["Stage 45: post-review architecture freeze"]
-    I --> J["Stage 46: XLSX and 10-variant input"]
-    J --> K["Stage 47: phenotype-extraction contract"]
-    K --> L["Stage 48: local HPO acceptance"]
-    L --> M["Stage 49: task-specific model UI"]
-    M --> N["Stage 50: single-model interpretation contract"]
-    N --> O["Stage 51: interpretation-before-review pipeline"]
-    O --> P["Stage 52: Draft Variant Report V2"]
-    P --> Q["Stage 53: audited human report editing"]
-    Q --> R["Stage 54: audited Final Report selection"]
-    R --> S["Stage 55: canonical reference hardening"]
-    S --> T["Stage 56: Final Clinical Report composer"]
-    T --> U["Stage 57: persistence schema V3 and recovery migration"]
-    U --> V["Stage 58: privacy and safety reverification"]
-    V --> W["Stage 59: Testing V3"]
-    W --> X["Stage 60: End-to-End Acceptance Gate V3"]
-    X --> Y["Stage 61: live provider and link validation"]
-    Y --> Z["Stage 62: documentation and demo handoff"]
-    Z --> AA["Stage 63: provider-resilience contract"]
-    AA --> AB["Stage 64: shared request policy"]
-    AB --> AC["Stage 65: local HPO-gene fallback"]
-    AC --> AD["Stage 66: population fallback"]
-    AD --> AE["Stage 67: ClinVar resilience"]
-    AE --> AF["Stage 68: literature resilience"]
-    AF --> AG["Stage 69: MyDisease degraded mode"]
-    AG --> AH["Stage 70: VEP fallback hardening"]
-    AH --> AI["Stage 71: MyVariant fallback hardening"]
-    AI --> AJ["Stage 72: CSpec LKG cache"]
-    AJ --> AK["Stage 73: unified capability schema"]
-    AK --> AL["Stage 74: UI/report transparency"]
-    AL --> AM["Stage 75: failure injection"]
-    AM --> AN["Stage 76: reachability regression"]
-    AN --> AO["Stage 77: documentation/configuration"]
-    AO --> AP["Stage 78: resilience acceptance gate"]
-    AP --> AQ["Stage 79: acceptance defect freeze"]
-    AQ --> AR["Stage 80: professor report specification"]
-    AR --> AS["Stage 81: ReportData V4 contract"]
-    AS --> AT["Stage 82: authoritative DOCX template"]
-    AT --> AU["Stage 83: golden DOCX fidelity gate"]
-    AU --> AV["Stage 84: in-app report preview"]
-    AV --> AW["Stage 85: document-like editing"]
-    AW --> AX["Stage 86: per-variant report lifecycle"]
-    AX --> AY["Stage 87: variant cardinality and identity gate"]
-    AY --> AZ["Stage 88: interpretation failure diagnostics"]
-    AZ --> BA["Stage 89: interpretation recovery policy"]
-    BA --> BB["Stage 90: phenotype non-concordance contract"]
-    BB --> BC["Stage 91: interpretation quality gate"]
-    BC --> BD["Stage 92: Reference Model V2"]
-    BD --> BE["Stage 93: canonical human-link resolver"]
-    BE --> BF["Stage 94: reference validation tests"]
-    BF --> BG["Stage 95: user-facing analysis summary"]
-    BG --> BH["Stage 96: variant-first status cards"]
-    BH --> BI["Stage 97: warning semantics V2"]
-    BI --> BJ["Stage 98: technical diagnostics drawer"]
-    BJ --> BK["Stage 99: persistence and recovery V4"]
-    BK --> BL["Stage 100: DOCX export and final package"]
-    BL --> BM["Stage 101: visual regression harness"]
-    BM --> BN["Stage 102: interpretation acceptance suite"]
-    BN --> BO["Stage 103: reference acceptance suite"]
-    BO --> BP["Stage 104: status and warning UX acceptance"]
-    BP --> BQ["Stage 105: professor testcase E2E"]
-    BQ --> BR["Stage 106: Persian phenotype extraction hardening"]
-    BR --> BS["Stage 107: valid no-match evidence rescue"]
-    BS --> BT["Stage 108: cross-provider retrieval intelligence"]
-    BT --> BU["Stage 109: exact ClinVar retrieval hardening"]
-    BU --> BV["Stage 110: scoped CSpec applicability"]
-    BV --> BW["Stage 111: deterministic evidence readiness"]
-    BW --> BX["Stage 112: secondary classification recovery"]
-    BX --> BY["Stage 113: classified interpretation retry"]
-    BY --> BZ["Stage 114: reviewer source-status semantics"]
-    BZ --> CA["Stage 115: final visual sign-off"]
-
-    classDef done fill:#e8f5e9,stroke:#2e7d32,color:#17324d
-    classDef review fill:#fff8e1,stroke:#f9a825,color:#17324d
-    class A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD,AE,AF,AG,AH,AI,AJ,AK,AL,AM,AN,AO,AP,AQ,AR,AS,AT done
-    class AU review
-    class AV,AW,AX,AY,AZ,BA,BB,BC,BD,BE,BF,BG,BH,BI,BJ,BK,BL,BM,BN,BO,BP,BQ,BR,BS,BT,BU,BV,BW,BX,BY,BZ done
-    class CA review
+```text
+rank or prioritize variants
+choose Top-N / "best" variants
+re-filter selected variants by FILTER/QUAL/DP/GQ
+perform autonomous diagnosis
+perform autonomous final ACMG classification
+execute ClinGen CSpec rules automatically
+treat correlated fallback transports as independent biological evidence
+fabricate evidence
 ```
 
-Stage numbers 18, 20, 21, and 26 were not assigned implementation work in the
-adopted roadmap. They are intentional numbering gaps, not missing code. Stage 4's
-initial internal prioritization experiment was later superseded by the current
-filtered-input contract; the application now preserves all supplied variants in
-their original order.
+Source quality fields (FILTER/QUAL/DP/GQ) may be displayed as provenance but never
+become post-selection filtering rules.
 
-## 4. Stage register
+### 2.2 Variant identity contract
 
-| Stage | Delivered outcome | Current status |
-|---:|---|---|
-| 0 | Defined inputs, outputs, safety boundary, data sources, and MVP acceptance contract. | Complete |
-| 1 | Created the Python environment, repository structure, dependencies, and Git hygiene. | Complete |
-| 2 | Centralized environment and application configuration in `config.py` and `.env`. | Complete |
-| 3 | Implemented streaming VCF/VCF.GZ validation, parsing, multiallelic splitting, and safe normalization boundaries. | Complete |
-| 4 | Implemented an initial prioritization prototype. The later professor-filtered input decision removed it from the active workflow. | Complete, superseded |
-| 5 | Integrated independent VEP, MyVariant, ClinVar, and ClinGen-related annotation contracts with explicit source status. | Complete |
-| 6 | Added HPO validation, ontology management, text search, gene/disease associations, normalization, and phenotype similarity. | Complete |
-| 7 | Added a versioned, bounded, sanitized Evidence Object contract. | Complete |
-| 8 | Added a provider-neutral LLM client, evidence-bound prompts, response validation, and safe failures. | Complete |
-| 9 | Added deterministic clinical-report composition, sanitization, storage, and text/PDF/Word exports. | Complete |
-| 10 | Connected input, annotation, phenotype, evidence, LLM, reporting, and frontend-safe errors into one pipeline. | Complete |
-| 11 | Built the Streamlit input, progress, cancellation, results, report, and download experience. | Complete |
-| 12 | Added versioned SQLite persistence for analyses, candidates, Evidence Objects, and report references. | Complete |
-| 13 | Added offline unit/integration/regression gates and separate manual live-provider validation tools. | Complete |
-| 14 | Added redacted structured logging, correlation IDs, API timing/retry telemetry, and safe user errors. | Complete |
-| 15 | Added secret scanning, upload validation, secure temporary storage, data minimization, and transport/runtime hardening. | Complete |
-| 16 | Finalized and accepted the original MVP, demo input, presentation runbook, and release gate. | Complete |
-| 17 | Established the professor-review checkpoint for evidence weights, filtering policy, LLM role, report format, evaluation data, security, and deployment. | Governance checkpoint complete |
-| 18 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
-| 19 | Audited the real repository, classified keep/modify/new/bypass/defer boundaries, and confirmed that ranking is not active. | Complete |
-| 20 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
-| 21 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
-| 22 | Hardened Ensembl VEP with exact assembly-aware allele matching, bounded batches, provenance, missingness, and retries. | Complete |
-| 23 | Added GeneBe as an independent source for automated ACMG evidence and provider metadata without overriding other sources. | Complete |
-| 24 | Added direct NCBI ClinVar query, exact-record validation, germline classification/review evidence, provenance, and missingness. | Complete |
-| 25 | Added exact ClinGen-submitted GenCC context and ClinGen CSpec Registry availability metadata. CSpec is context-only. | Complete |
-| 26 | No stage was assigned in the adopted roadmap. | Intentionally skipped |
-| 27 | Added one Phen2Gene request per analysis and attached bounded gene score/rank context without reordering variants. | Complete |
-| 28 | Added MyDisease.info disease/HPO context with exact MONDO material-basis HGNC validation and bounded provenance. | Complete |
-| 29 | Introduced Evidence Object V2 with bounded source-specific evidence and explicit missingness. | Complete |
-| 30 | Added evidence lineage, upstream-source identity, derivation metadata, and shared-vote collapsing. | Complete |
-| 31 | Added deterministic conflict auditing before and after review, severity assignment, and meaningful-conflict routing. | Complete |
-| 32 | Added conflict-triggered gnomAD and literature enrichment with exact-allele checks, limits, feature flags, and isolated failures. | Complete and reverified |
-| 33 | Added one editable detailed Evidence Review Report per variant, immutable originals, reviewer notes, and edit history. | Complete |
-| 34 | Added explicit human confirmation, Reviewed Evidence Packages, confirmation invalidation after edits, and post-review conflict audit. | Complete and reverified |
-| 35 | Added two-layer routing: a low-cost no-conflict LLM and a stronger conflict-resolution LLM, with separate model selection and provenance. | Complete |
-| 36 | Added final-interpretation-only Output B with ordered results, unresolved-conflict disclosure, and explicit failures but no raw evidence. | Complete |
-| 37 | Split the workflow into pausable Phase A evidence collection and confirmation-gated Phase B interpretation. | Complete |
-| 38 | Centralized new provider limits, timeouts, feature flags, model settings, and secret-redaction validation. | Complete |
-| 39 | Migrated SQLite to schema version 2 for validated Pipeline V2 snapshots, draft review state, confirmation state, and resumption. | Complete |
-| 40 | Added the complete Streamlit human-review workflow, separate LLM selectors, confirmation gate, and Output B generation. | Complete |
-| 41 | Added independent provider resilience, bounded retry/backoff, annotation caching, explicit missingness, and targeted failed-interpretation retry. | Complete |
-| 42 | Extended privacy, minimum-data enforcement, PHI/raw-VCF log redaction, audit metadata, and confirmation-gated LLM payload checks. | Complete |
-| 43 | Registered the complete offline Testing V2 suite and a cross-stage human-edit-to-Output-B acceptance scenario. | Complete |
-| 44 | Added the deterministic five-variant, multi-HPO end-to-end gate covering both routes, unresolved conflict, failures, provenance, and ordering. | Complete |
-| 45 | Incorporated professor-review decisions, froze the V3 product contract and terminology, deprecated Stage 44 interaction concepts for new analyses, and defined legacy compatibility boundaries. | Complete, documentation/architecture only |
-| 46 | Centralized the 10-variant limit, expanded VCF/manual input, added first-worksheet-only Excel normalization, and preserved the shared normalized variant contract and ordering. | Complete |
-| 47 | Added a dedicated de-identified Persian text to structured HPO-candidate LLM contract, separate phenotype/interpretation model settings, strict response validation, and isolated failures. | Complete |
-| 48 | Added local ontology validation for every model suggestion, canonical ID/label resolution, editable candidate review, atomic explicit acceptance, and manual-path failure isolation. | Complete |
-| 49 | Reordered the Streamlit input flow, added separate task-specific model selectors, connected phenotype extraction to its selected model, and removed conflict-based model choice from the UI. | Complete |
-| 50 | Added a strict single-model variant interpretation contract with conflict-aware prompt context, route-free provenance, bounded response validation, and per-variant failure isolation. | Complete |
-| 51 | Moved interpretation into the analysis phase before final review, exposed evidence and interpretation together, isolated per-variant failures, retired active Output A/B routing, and made finalization model-free. | Complete |
-| 52 | Added Draft Variant Report V2 with coherent identity, phenotype, evidence, conflict, interpretation, reference, provenance, and limitation sections plus immutable machine-original validation and professional Streamlit rendering. | Complete |
-| 53 | Added whitelisted report editing, PHI-safe reviewer text, append-only field history with deterministic replay, comparison/reset controls, and confirmation invalidation after edits. | Complete |
-| 54 | Added audited `include_in_final_report` decisions, full excluded-report retention, ordered selected-report projection, UI controls, and confirmation invalidation after selection changes. | Complete |
-| 55 | Added normalized canonical references, provider-specific exact-record URL builders, domain/identifier validation, bounded LLM citation IDs, explicit link fallbacks, and clickable Streamlit/Word/PDF rendering. | Complete |
-| 56 | Added deterministic selected-only Final Clinical Report composition, exact reviewed-state integrity validation, grouped canonical references, audit/provenance summary, and text/PDF/Word delivery without another LLM call. | Complete |
-| 57 | Added SQLite schema V3 normalized lifecycle projections, pipeline schema `2.9` analysis context, bounded Stage 56 migration, explicit legacy Output A/B rejection, and persisted-draft refresh/restart recovery without repeated interpretation. | Complete |
-| 58 | Added exact task-specific LLM minimum-data validators, Persian identifier/mobile redaction, ignored-worksheet downstream leakage proof, and report-content privacy enforcement with explicit detection limitations. | Complete |
-| 59 | Registered the deterministic offline Testing V3 suite, eight required test-group markers with collection checks, suite-wide live-HTTP blocking, and an 80%-coverage runner. | Complete |
-| 60 | Added the deterministic ten-variant redesigned acceptance scenario, release runner, and GitHub Actions V3 gate covering all professor-review assertions plus Testing V3. | Complete |
-| 61 | Revalidated every configured biomedical provider and both task-specific LLM contracts, live-probed representative report links, and removed non-navigable provider POST endpoints from canonical hyperlinks. | Complete |
-| 62 | Reconciled V3 documentation, added a reproducible multi-sheet Excel demo, corrected stale UI wording, and prepared the exact demonstration and professor-feedback checklist. | Complete; external professor feedback pending |
-| 63 | Added one strict provider operational-status taxonomy, centralized retry/fallback decisions, request/HTTP classification, and validated primary/fallback provenance while preserving `no_match` as a non-failure. | Complete |
-| 64 | Added one bounded provider-call wrapper with separate connect/read deadlines, centralized retry/backoff and practical `Retry-After` handling, analysis-scoped circuits, safe transition logging, and initial MyDisease adoption. | Complete |
-| 65 | Added a deterministic direct HPO-to-gene overlap fallback for operational Phen2Gene failures, with exact source/method/dataset provenance and distinct report/UI wording. | Complete |
-| 66 | Kept gnomAD as the exact-allele primary population source and added Ensembl Variation fallback only for operational failures, with retry-once behavior, analysis-scoped circuit suppression, exact mapping checks, and distinct report provenance. | Complete |
-| 67 | Added a non-independent MyVariant.info path for ClinVar-derived fields after operational direct NCBI ClinVar failure, while preserving direct success/no-match behavior, exact allele identity, fallback provenance, and single-vote lineage. | Complete |
-| 68 | Hardened literature retrieval with operational-only LitVar2-to-Europe PMC-to-PubMed fallback, Europe-PMC-first general searches, persisted search/fallback provenance, identifier-priority deduplication, bounded article results, and exact canonical links. | Complete |
-| 69 | Bounded MyDisease connect/read latency, limited retries to one transient connection retry, retained exact primary-failure provenance, and added a bounded local HPO disease-annotation context that never claims a gene-disease association. | Complete |
-| 70 | Kept Ensembl VEP primary and added one-call VariantValidator validation/HGVS fallback after operational failure, preserving exact normalized identity and provenance while leaving unavailable VEP consequence/plugin fields explicitly missing. | Complete |
-| 71 | Kept MyVariant.info primary and added a one-call Ensembl Variation overlap fallback after operational failure, accepting only exact assembly/coordinate/allele records and retaining provider-specific context without fabricating MyVariant aggregation fields. | Complete |
-| 72 | Added an atomic, bounded, schema-validated local cache for released CSpec metadata and operational-only live-to-cache fallback with exact gene/disease keys, explicit age provenance, and unchanged context-only semantics. | Complete |
-| 73 | Added one unified capability-result contract so primary and fallback results retain exact source, method, failure, data, and provenance semantics downstream. | Complete |
-| 74 | Added concise Evidence Object, review, Draft Report, and Final Report notices identifying every degraded capability and actual fallback source. | Complete |
-| 75 | Added deterministic failure injection for all required provider/fallback chains and verified final-report degraded-source provenance. | Complete |
-| 76 | Added a bounded manual DNS/HTTP reachability checker with normalized failure categories and optional JSON/CSV output outside deterministic CI. | Complete |
-| 77 | Consolidated the fallback matrix, architecture, actual configuration controls, pre-demo operations, and troubleshooting in this unified declaration and synchronized public documentation. | Complete |
-| 78 | Added and passed a deterministic persisted two-variant degraded-mode gate covering Phen2Gene timeout, gnomAD 403 circuit reuse, LitVar2 5xx fallback, successful ClinVar/CSpec primaries, Draft Reports, and exact provenance. | Complete |
-| 79 | Froze post-acceptance defects AF-01 through AF-07, documented the confidential professor report as the authoritative visual/structural reference, and added a tested synthetic non-PHI report fixture without implementing later report architecture. | Complete |
-| 80 | Inspected all four pages of the repository professor PDF and produced an implementation-ready per-variant anatomy, visual/layout token, content mapping, main-table, narrative, missingness, and literature/data-source specification with resumable checkpoints. | Complete, specification only |
-| 81 | Added strict `ReportData V4` typed/validated state for one allele-level report, including nullable display annotations, typed main findings, valid phenotype non-concordance, interpretation/review audit replay, literature/data-source separation, privacy checks, and bounded JSON-safe persistence. | Complete, contract only |
-| 82 | Added the authoritative editable per-allele DOCX template with Stage 80 visual tokens, fixed Word-native table geometry, variable-length placeholders, separate literature/provenance regions, privacy-safe metadata, reproducible offline construction, and per-variant artifact naming. | Implemented; manual Word/LibreOffice visual check pending |
-| 83 | Added the deterministic ReportData V4-to-template DOCX production path, rich synthetic golden allele, committed per-variant artifact, template-drift rejection, and structural fidelity gate for the professor report family. | Implemented; manual Word/LibreOffice visual fidelity comparison pending |
-| 84 | Made the report the default completed-analysis surface with a deterministic three-page professor-family HTML preview, explicit page and variant navigation, stable assembly-qualified allele labels, existing audited inclusion/edit access, and provider/API detail in a secondary tab. | Complete |
-| 85 | Added explicit document-region editing for brief interpretation, variant interpretation, classification summary, and reviewer notes; retained immutable generated evidence and append-only audit history; invalidated prior confirmation after material edits; and regenerated the professor-template Word artifact from a validated transient ReportData V4 projection. | Complete |
-| 86 | Persisted one ordered ReportData-backed lifecycle record and regenerable DOCX identity for every accepted allele through editing, selection, confirmation, and finalization. | Complete |
-| 87 | Added immutable input indexes, assembly-qualified allele digests, cross-stage cardinality validation, and persisted report-lineage integrity records. | Complete |
-| 88 | Replaced internal interpretation exception names with a bounded twelve-category failure taxonomy, secret-free structured diagnostics, and concise reviewer messages. | Complete |
-| 89 | Added one transient interpretation retry, one constrained structured-output repair, and optional operational-only fallback using the unchanged normalized evidence. | Complete |
-| 90 | Added four explicit phenotype conclusions, prompt-level non-concordance instructions, evidence-consistency validation, and an unrelated abdominal-pain acceptance fixture that remains successfully interpretable. | Complete |
-| 91 | Added the fixed seven-case interpretation-model benchmark, strict live/human-review eligibility thresholds, deterministic comparison, and a no-promotion outcome when evidence is incomplete. | Complete; live comparison pending |
-| 92 | Added Reference Model V2 with numbered literature-only citations, unnumbered database/tool provenance, deterministic persistence, and separated reviewer/report rendering. | Complete |
-| 93 | Added deterministic provider-specific human-page resolution, blocked raw machine endpoints from normal reviewer links, and labelled MyVariant.info as programmatic provenance. | Complete |
-| 94 | Added the exhaustive deterministic human-link regression matrix and a separately gated optional live reachability/content-type check. | Complete |
-| 95 | Added an input-aware product-level completion summary with exact per-variant counts and collapsed technical provider details. | Complete |
-| 96 | Added one bordered status card per input variant with stable report labels, variant-local warnings, concise evidence outcomes, and collapsed provider details. | Complete |
-| 97 | Added four consequence-oriented notice severities, preserved no-match as expected absence, and removed implementation trivia from primary reviewer warnings. | Complete |
-| 98 | Added a collapsed per-variant provider diagnostics drawer with retained attempts, latency, fallback, failure-category, and safe provider-note fields. | Complete |
-| 99 | Added SQLite schema V4 normalized report recovery rows, content-derived artifact identity, schema-3 migration/backfill, and fail-closed restart validation without interpretation regeneration. | Complete |
-| 100 | Added authoritative per-variant DOCX downloads and a deterministic selected-report ZIP package with artifact-integrity verification and no interpretation regeneration. | Complete |
-| 101 | Added six deterministic ReportData layout scenarios, exact DOCX/style snapshots, structural page/table/heading/overflow guards, and an optional real raster matrix. | Complete |
-| 102 | Added seven deterministic interpretation acceptance scenarios covering normal, phenotype non-concordant, partial-provider, conflicting, transient-recovery, structured-repair, and total-failure behavior with retained variant state. | Complete |
-| 103 | Added end-to-end reference acceptance checks for exact literature targets, category separation, raw/machine-link rejection, human provider pages, and clean missing stable links in HTML and DOCX. | Complete |
-| 104 | Added an exact ready-report summary count and verified that primary status cards identify attention variants, missing sources, and the distinction between partial evidence and action-required interpretation failure. | Complete |
-| 105 | Added the deterministic offline acceptance suite verifying 7-variant cardinality, preservation of input order, same-gene separation, phenotype non-concordance handling, and provider degradation scenarios. | Complete |
-| 106 | Hardened Persian multi-concept phenotype extraction with bounded candidate recovery, locally validated selections, stable deduplication, and preserved manual-entry behavior. | Complete |
-| 107 | Added controlled ClinVar evidence rescue after a valid primary no-match while preserving valid missingness, exact provenance, and non-independent secondary evidence semantics. | Complete |
-| 108 | Added cross-provider identifier intelligence, retrieval-cause classification, alternate identifier attempts, candidate rejection diagnostics, and explicit stop reasons. | Complete |
-| 109 | Hardened ClinVar allele retrieval across SPDI, HGVS, variation identifiers, and exact candidate validation without accepting near or semantically mismatched records. | Complete |
-| 110 | Made ClinGen CSpec results gene/disease scoped, distinguished no applicable specification from provider failure, and preserved CSpec as context-only evidence. | Complete |
-| 111 | Added a deterministic evidence-readiness gate that distinguishes ready, ready with limitations, and blocked variants before interpretation while retaining sparse-evidence interpretation. | Complete |
-| 112 | Added source-attributed classification recovery and audit state for direct ClinVar, GeneBe automated, and MyVariant ClinVar-derived evidence without autonomous ACMG adjudication. | Complete |
-| 113 | Added configuration-error classification and reviewer-triggered retry of one failed interpretation from persisted evidence without rerunning upstream providers or overwriting reviewer decisions. | Complete |
-| 114 | Replaced raw reviewer-facing `no_match` labels with source-specific expected-absence, primary-no-match, rescue, provider-failure, and not-queried wording while retaining technical statuses internally. | Complete |
-| 115 | Perform the final Word/LibreOffice side-by-side visual fidelity review and obtain external sign-off. | Pending |
+Canonical identity = `(assembly, chromosome, position, REF, ALT)`.
+rsID, gene, transcript, HGVS strings, worksheet rows, or source representations are
+never primary identity. Unresolved identity stays explicit:
+`IDENTITY_UNRESOLVED` inputs remain input-level records and never become
+annotations, Evidence Objects, or LLM input. Do not provider-shop to overturn a
+valid biological/reference mismatch. ANNOVAR-like `REF=0`/`ALT=0` indels are
+adapted to non-empty GRCh38 canonical alleles before API handoff; source zero
+tokens remain provenance only.
 
-## 5. Current implemented architecture
+### 2.3 Evidence semantics golden rules
+
+```text
+missing != zero
+valid no_match != unavailable
+operational failure != biological absence
+provider outage != negative evidence
+no fake evidence
+no silent double counting (mirrors/aggregators share upstream sources)
+no automatic final classification
+no uncontrolled fallback (fallback only after normalized operational failure)
+no retry storms (bounded retries, analysis-scoped circuit breakers)
+no patient-specific context promoted into global evidence
+no raw provider data sent to the interpretation LLM
+human review remains mandatory
+```
+
+### 2.4 LLM boundary
+
+Exactly two approved LLM roles exist (see §5). Raw API payloads, raw VCF content,
+genotypes, sample identifiers, PHI, shadow-composition candidates, wholesale
+coverage diagnostics, and rejected `candidate_diagnostics` must never reach either
+LLM boundary. The interpretation LLM cannot fetch evidence, invent evidence,
+override structured evidence, perform final ACMG classification, or make clinical
+decisions.
+
+---
+
+## 3. System architecture
+
+### 3.1 Pipeline flow
 
 ```mermaid
 flowchart TD
-    U["Filtered VCF/VCF.GZ/manual table or selected XLSX rows"] --> V["Validation and allele standardization<br/>1-10 variants"]
-    V --> A["Primary annotation providers"]
-    A --> AO{"Operational failure?"}
-    AO -- No --> P["Local HPO + Phen2Gene/MyDisease context"]
-    AO -- Yes --> AF["Bounded annotation fallback with exact provenance"]
-    AF --> P
-    P --> E["Evidence Object V2 + lineage"]
-    E --> C1["Deterministic pre-review conflict audit"]
-    C1 --> CE{"Conditional enrichment needed?"}
-    CE -- Yes --> X["gnomAD to Ensembl and LitVar2 to Europe PMC to PubMed"]
+    I["Filtered VCF/VCF.GZ/manual table<br/>or selected XLSX rows (1-10 variants)"] --> P["Input preprocessing<br/>ACCEPTED / NORMALIZED_AND_ACCEPTED / IDENTITY_UNRESOLVED"]
+    P --> V["Canonical variant identity<br/>(assembly, chrom, pos, REF, ALT)"]
+    V --> A["Annotation providers<br/>VEP → VariantValidator fallback; GeneBe; MyVariant; ClinVar; GenCC; CSpec; ERepo"]
+    A --> PH["Phenotype/disease context<br/>local HPO + Phen2Gene + MyDisease + MedGen"]
+    PH --> E["EvidenceObject v2.5 construction<br/>+ lineage + conflict audit"]
+    E --> R{"Readiness gate"}
+    R -- "READY / READY_WITH_LIMITATIONS" --> CE{"Conditional enrichment justified?"}
+    CE -- Yes --> X["gnomAD→UCSC→Ensembl Variation population;<br/>LitVar2→Europe PMC→PubMed literature"]
     CE -- No --> VI
-    X --> VI["Selected primary interpretation model per variant"]
-    VI --> VR{"Operational or output failure?"}
-    VR -- No --> D["Evidence and interpretation review state"]
-    VR -- Yes --> VX["One retry, one repair, optional operational fallback"]
-    VX --> D
-    D --> H["Human edit, compare, include/exclude, and final confirmation"]
-    H --> F["Model-free selected-only Final Clinical Report"]
-    E --> DB["SQLite draft snapshot"]
-    D --> DB
+    X --> VI["One Variant Interpretation Model per variant<br/>prompt variant-interpretation-v1.9"]
+    VI --> D["Draft Variant Reports + review state<br/>workflow_state = awaiting_final_review"]
+    D --> H["Human review: edit / compare /<br/>include-exclude / confirm (audited, append-only)"]
+    H --> F["Model-free Final Clinical Report<br/>from confirmed selected reports"]
+    D --> DB[("SQLite schema 4")]
     F --> DB
+    A -.-> ER[("Evidence repository SQLite<br/>provenance-first observation cache")]
 ```
 
-### Active pipeline provider order
-
-The normal progress stream reports `vep`, `genebe`, `myvariant`, `clinvar`,
-`clingen`, `cspec`, `phen2gene`, `mydisease`, and `llm`. Annotation progress is
-updated on each provider start/completion event instead of remaining fixed at 35%.
-Conditional population/literature work and the analysis-phase interpretation step
-report each variant independently.
-
-## 6. External API and data-source catalog
-
-| Provider or resource | Default interface | Request purpose | Evidence returned and implementation responsibility |
-|---|---|---|---|
-| Ensembl VEP REST | `https://rest.ensembl.org/vep/homo_sapiens/region` | Submit bounded, assembly-explicit alleles. | Consequence, transcript, gene, identifiers, and available colocated evidence. Exact allele/coordinate validation is enforced in `backend/annotation.py`. |
-| VariantValidator REST | `https://rest.variantvalidator.org/VariantValidator/variantvalidator` | Validate one normalized pseudo-VCF allele only after operational VEP failure. | Exact assembly/allele validation and bounded HGVS/gene/transcript mapping with explicit fallback provenance; it never supplies or guesses VEP consequence/plugin fields. |
-| GeneBe API | `https://api.genebe.net/cloud/api-public/v1/variants` | Batch-query normalized variants; optional account credentials are supported. | Independent automated ACMG criteria, classifications, scores, identifiers, and provenance. It is evidence, not the application's final classification. |
-| MyVariant.info | `https://myvariant.info/v1/variant/{id}` | Query an exact assembly-aware HGVS variant identifier once for normal annotations and any later ClinVar fallback candidate. | Aggregated identifiers and population frequencies plus a bounded ClinVar-derived subset. Exact identity is required; an operational outage may activate only the separate Ensembl Variation overlap-context fallback, while a valid no-match remains terminal. |
-| NCBI ClinVar E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Locate and summarize the primary direct ClinVar record. | Germline clinical significance, review status, accessions, conditions, and provenance. A valid no-record result is missingness, not negative evidence and not a fallback trigger. |
-| UCSC Genome Browser API, GenCC track | `https://genome-euro.ucsc.edu/cgi-bin/hubApi/getData/track` | Query the assembly-specific locus and retain exact gene claims submitted by ClinGen. | Gene-disease validity context, submitter, classification, disease identifiers, and report links. It does not classify the variant. |
-| ClinGen CSpec Registry | `https://cspec.clinicalgenome.org/cspec/{entity}/id/{identifier}` | Resolve matching VCEP/disease/specification entities; after operational live failure only, look for the exact gene/disease key in the local LKG cache. | Released specification names, versions, VCEP metadata, URLs, and explicit live/cache freshness provenance. Cached metadata remains context only and is never presented as current live data or executed as CSpec rules. |
-| Phen2Gene | `https://phen2gene.wglab.org/api` | Send the canonical HPO set once per analysis with the `sk` weighting model. | Gene score and provider rank metadata attached to matching annotated genes. It supports phenotype correlation and never reorders input variants. |
-| MyDisease.info | `https://mydisease.info/v1/query` | Search bounded disease records by normalized gene symbol. | MONDO/DOID/OMIM/MedGen context, names, synonyms, HPO terms, pathways, and references. Primary records require an exact MONDO material-basis HGNC relation. |
-| Monarch API | `https://api-v3.monarchinitiative.org/v3/api` | Retained as centralized configuration/compatibility metadata. | It is not called by the active Stage 28 path; MyDisease.info supplies the bounded Monarch-derived disease context. |
-| gnomAD GraphQL | `https://gnomad.broadinstitute.org/api` | Conflict-triggered exact-allele lookup using an assembly-specific dataset (`gnomad_r2_1` or `gnomad_r4`). | Global and population allele-frequency evidence, release/dataset provenance, and explicit no-match/unavailable states. |
-| Ensembl Variation REST | `https://rest.ensembl.org` | Conditional population fallback after operational gnomAD failure, or one exact-region overlap lookup after operational MyVariant failure. | Provider-specific population or overlap context with exact assembly/coordinate/allele validation and separate provenance; it never masquerades as gnomAD or MyVariant evidence. |
-| NCBI LitVar2 | `https://www.ncbi.nlm.nih.gov/research/litvar2-api` | Resolve a variant and collect related publication identifiers. | Variant-linked PMID/PMCID references used only in bounded conditional literature enrichment. |
-| Europe PMC | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | Search bounded variant/gene literature and normalize metadata. | Titles, identifiers, dates, journals, and source metadata; article count is capped. |
-| PubMed E-utilities | `https://eutils.ncbi.nlm.nih.gov/entrez/eutils` using `esearch.fcgi` and `esummary.fcgi` | Search and summarize bounded variant/gene literature. | PMID-linked article metadata. PubMed is independent of the direct ClinVar use of the same NCBI interface. |
-| OpenAI-compatible LLM API | Configured by `LLM_BASE_URL`, `LLM_API_KEY`, and task-specific model settings. | Send each bounded, sanitized Evidence Object during analysis. | One selected Variant Interpretation Model handles every variant. Conflict changes bounded prompt context, not model selection; prompt/model/failure provenance remains explicit. |
-| Human Phenotype Ontology files | `hp.obo`, `phenotype_to_genes.txt`, and `phenotype.hpoa` release URLs | Download/update coordinated local ontology, gene, and disease association datasets. | Local HPO validation, search, normalization, association lookup, and explainable similarity scoring without a per-analysis ontology API call. |
-
-### Provider request and failure rules
-
-- Genome assembly remains explicit wherever coordinates leave the application.
-- Only the minimum fields needed for a provider query are transmitted.
-- Providers are isolated: one failure cannot delete another provider's evidence.
-- `not_found`/`no_match` means the source had no matching record; `unavailable`,
-  timeout, HTTP failure, and invalid response are operational failures. None of
-  these states are converted into negative clinical evidence.
-- Retries are bounded and limited to transient failures. Timeouts and maximum
-  result sizes are provider-specific.
-- Conditional enrichment is capped at ten variants and ten articles by default.
-- `ENABLE_GNOMAD_DEEP_LOOKUP` and `ENABLE_LITERATURE_ENRICHMENT` can disable
-  those optional calls without code changes.
-
-## 7. Evidence, conflict, and human-review contracts
-
-### Evidence Object V2
-
-The active Evidence Object schema is `2.5`. Each object contains a normalized
-variant identity, assembly, source-specific evidence, phenotype context,
-provider statuses, warnings, provenance, and bounded lineage. Raw provider payloads,
-sample fields, and genotype data are excluded.
-
-The `65,536`-byte EvidenceObject envelope remains mandatory. When normalized
-MyDisease context alone exceeds its `16,384`-byte section budget, only optional
-disease synonyms and excess cross-reference aliases are compacted by a fixed
-provider-order policy. Disease identity, gene relationship, phenotype matches, HPO
-evidence, and provider provenance are retained. The object records the omission
-count, a deterministic SHA-256 commitment to omitted content, and an explicit
-limitation warning; scientifically required content is not silently removed, and an
-object that still exceeds the global envelope fails normally.
-
-EvidenceObject construction is isolated per canonical variant. A bounded outcome
-record maps each original variant index to either its validated EvidenceObject index
-or safe failure step/field/code/scope fields. No placeholder EvidenceObject is
-created. If any construction failure remains, successful siblings are preserved and
-persisted, while readiness, interpretation, and report generation remain unstarted
-for that partial batch.
-
-Lineage records provider, upstream dataset/source, retrieval time, derivation, and
-version where available. Shared upstream sources are collapsed before conflict
-assessment so the same database cannot create artificial voting weight through
-multiple aggregators.
-
-### Deterministic conflict audit
-
-The auditor runs before human review and after confirmation. It detects conflicting
-clinical assertions, meaningful pathogenicity disagreements, and source failures
-without making a final classification. Severity and routing are deterministic.
-Conditional enrichment is invoked only when the audit says additional population or
-literature context is justified.
-
-### Pre-interpreted review state and confirmation
-
-Analysis produces one editable Evidence Review Report and one interpretation result
-per variant in the same order. The machine evidence original remains immutable.
-Reviewers inspect interpretation, conflict assessment, warnings, and model provenance;
-they may edit/add/delete nested evidence, add notes, save/reset a draft, and compare
-the draft with the original. Changes are recorded in bounded append-only history.
-Confirmation creates a validated Reviewed Evidence Package; any later draft change
-invalidates that confirmation.
-
-### Single-model interpretation and failure isolation
-
-- One selected Variant Interpretation Model handles every supplied variant before
-  final review.
-- Meaningful conflict changes prompt instructions and recorded context, never the
-  selected model.
-- One model failure becomes an explicit unavailable interpretation and does not
-  remove evidence or successful results for other variants.
-- Prompts and responses are versioned, validated, bounded, and stored with model
-  provenance.
-
-### Draft Variant Report V2
-
-Draft Variant Report schema `2.2` combines evidence, interpretation, conflict summary,
-references, provenance, and limitations in one coherent per-variant object. Machine
-original and reviewed copies begin identical. Only reviewer-owned narrative fields
-can differ, and every difference must be reproduced by the append-only edit history.
-Stage 55 provides deterministic canonical reference mapping.
-
-Each report also retains an audited `include_in_final_report` decision. Excluded
-reports remain fully recoverable, while the selected projection preserves original
-input order and contains only included reports.
-
-### Final Clinical Report
-
-Final Clinical Report schema `2.0` contains only confirmed reports selected by the
-reviewer. Each detailed section is the exact persisted `reviewed_report`; finalization
-does not regenerate interpretation. Variant-local reference IDs remain scoped to
-their report and resolve to grouped canonical HTTPS links or explicit unavailable-link
-fallbacks. The artifact also carries de-identified phenotype context, method/source
-notes, limitations, the fixed decision-support disclaimer, and bounded audit data.
-
-### Stage 57 persistence schema V3 and recovery migration
-
-SQLite schema `3` stores normalized projections for analysis context, every
-variant's evidence/interpretation/review lifecycle, and finalization state while
-retaining the canonical validated pipeline snapshot. Pipeline schema `2.9` records
-input type, accepted HPO terms, phenotype and interpretation model selections, and
-bounded phenotype-extraction provenance. Per-variant rows retain immutable machine
-originals, editable reviewed reports, edit/selection histories, failure state,
-canonical references, and inclusion decisions. Finalization rows retain confirmation,
-selected canonical variant IDs, the final report, and in-memory delivery metadata.
-
-Migration is deliberately bounded: valid schema-2 Stage 56 report-lifecycle
-snapshots can be upgraded, while older Stage 44 Output A/Output B snapshots receive
-an explicit unsupported-legacy error and are never reinterpreted as current reports.
-Persisted drafts are recovered by analysis ID after refresh or restart without
-rerunning successful interpretation.
-
-### Stage 58 privacy and safety reverification
-
-`backend/privacy.py` now validates the two LLM entry points independently. The
-phenotype task permits exactly `task` and sanitized `clinical_text_fa`. The variant
-interpretation task permits exactly its task, prompt mode, validated Evidence Object,
-and bounded URL-free reference catalog; phenotype clinical text cannot cross into
-that payload. Existing Evidence Object size and schema validation remains mandatory.
-
-Persian-labelled patient names, national/record numbers, contact details, birth
-dates, addresses, and Iranian mobile-number forms are redacted before phenotype
-extraction and rejected from review/report state. The Excel first-worksheet boundary
-is verified through downstream pipeline arguments, logging, SQLite, model-facing
-state, and text/PDF/Word exports. Provider-derived labelled identifiers are rejected
-before a Draft or Final Clinical Report can retain them.
-
-These checks are defense in depth, not automatic de-identification. Unlabelled names,
-indirect identifiers, unusual spelling, and linguistically ambiguous phrases may not
-be detected; only deliberately de-identified clinical text is permitted.
-
-### Stage 59 Testing V3
-
-The complete deterministic suite now carries the `stage59_testing_v3` marker and is
-organized into eight explicit requirement groups: Input, Phenotype LLM/HPO,
-Interpretation, Draft Report, Selection, Canonical References, Final Report, and
-Recovery/Retry. `tests/run_stage59_testing_v3.py` first proves every group collects
-tests, then runs the entire V3 suite with coverage enforcement. A shared autouse
-fixture blocks unmocked HTTP across every offline test module. The retained Stage 44
-runner is now historical compatibility coverage; Stage 60 activates the V3
-end-to-end acceptance scenario.
-
-### Stage 60 End-to-End Acceptance Gate V3
-
-`tests/run_stage60_acceptance.py` is the active offline release gate. It performs
-compilation, installed-dependency consistency, repository/Git-history secret audit,
-the dedicated Stage 60 scenario, and the complete coverage-enforced Testing V3 gate.
-`.github/workflows/verify.yml` runs it on every push and pull request.
-
-The scenario begins with ten ordered variants on worksheet 1 and sensitive-looking
-decoy content on a later worksheet. It exercises Persian phenotype extraction,
-invalid-suggestion correction, multiple accepted HPO terms, separate phenotype and
-interpretation models, conflict and no-conflict interpretation through the same
-selected model, unresolved conflict, isolated model/provider failure, Draft Report
-editing, four-of-ten inclusion, confirmation, SQLite recovery, deterministic Final
-Clinical Report generation, canonical references, and text/PDF/Word exports. It
-asserts that ignored-sheet content is absent from model requests, pipeline/database
-state, reports, and exports.
-
-### Stage 61 live provider and canonical-link validation
-
-`tests/run_live_provider_validation.py` now exercises the current production clients
-for VEP, GeneBe, MyVariant, ClinVar, ClinGen/GenCC, CSpec, Phen2Gene, MyDisease,
-gnomAD, Ensembl Variation, LitVar2, Europe PMC, PubMed, phenotype extraction, and
-variant interpretation. It distinguishes usable evidence, valid no-match states,
-and safely classified transient unavailability while failing malformed or unsafe
-provider/model states.
-
-The same bounded run constructs canonical references and probes representative exact
-report links. Live validation showed that the Ensembl VEP and GeneBe batch POST
-endpoints are source endpoints rather than browser-navigable records; Stage 61 now
-maps them to the explicit unavailable-link fallback. Representative ClinVar and
-MyVariant exact links returned reachable responses.
-
-### Stage 62 documentation and professor-review handoff
-
-The project declaration, README, architecture contract, verification baseline, and
-active UI language now consistently describe the implemented V3 workflow. Historical
-Stage 44 terminology remains only in explicitly labelled compatibility and stage-
-history sections.
-
-`data/samples/stage62_demo_variants.xlsx` is a reproducible two-worksheet GRCh38
-demo input. Worksheet 1 contains five ordered public variants; worksheet 2 contains
-conspicuous demo-only markers that must not appear downstream. The workbook is covered
-by the offline Input test group.
-
-The demonstration sequence in Section 13 covers independent model selection and
-Persian phenotype extraction through HPO correction, report editing,
-inclusion/exclusion, confirmation, selected-only export, and canonical-link review.
-It also records the final professor questions and leaves review date, outcome,
-required changes, and sign-off explicitly pending until the external review occurs.
-
-### Stage 63 resilience contract and provider failure taxonomy
-
-`backend/provider_resilience.py` defines the normalized operational statuses
-`success`, `no_match`, `unavailable`, `timeout`, `forbidden`, `rate_limited`,
-`server_error`, `invalid_response`, and `configuration_error`. This operational
-taxonomy remains separate from provider-specific clinical evidence statuses.
-
-The contract classifies HTTP/request failures without retaining exception text,
-centralizes retryability and fallback eligibility, and validates exact primary or
-fallback provenance. A valid `no_match` is neither retryable nor a fallback trigger.
-Stage 63 does not modify provider clients or implement retries, circuits, or fallback
-calls; those integrations begin in Stage 64.
-
-### Stage 64 shared retry, timeout, and circuit-breaker layer
-
-`backend/provider_resilience.py` now provides one reusable provider-call wrapper with
-validated connect/read timeout tuples, a default two-attempt policy, bounded
-exponential backoff, small practical `Retry-After` support, and a hard three-attempt
-upper bound. `403` is not retried; timeout, connection, `408`, `429`, `5xx`, and
-temporarily invalid responses follow the centralized retry taxonomy. Capability-
-specific HTTP no-match states remain terminal and never open a circuit.
-
-`ProviderCircuitState` is created per analysis operation and preserves only a bounded
-provider failure category plus optional HTTP status. Once a persistent failure opens
-a circuit, later calls for that provider in the same analysis are skipped. Separate
-analysis instances do not share circuit state. Logs contain provider, operation,
-attempt, normalized failure, circuit state, retry decision, and fallback eligibility,
-without exception text or clinical payloads.
-
-MyDisease metadata and gene-query operations now use the shared policy. Repeated
-MyDisease calls in one analysis therefore reuse strict deadlines, retry decisions,
-and one analysis-scoped circuit without implementing Stage 65 fallback behavior.
-
-### Stage 65 simple local HPO-gene fallback
-
-`backend/local_hpo_gene_fallback.py` implements only direct accepted-HPO-to-gene
-association overlap. A gene score is the number of distinct matched accepted HPO
-terms divided by the total distinct accepted HPO count. Results sort by score
-descending and gene symbol ascending. Duplicate HPO terms and associations collapse
-deterministically. No ontology traversal, ancestor propagation, semantic similarity,
-information-content weighting, graph database, machine learning, or disease
-propagation is used.
-
-The fallback reuses the validated official `data/hpo/phenotype_to_genes.txt` loader
-and records provider `local_hpo_gene_fallback`, method
-`direct_hpo_gene_overlap`, method version, accepted HPO set, companion HPO release,
-release date, primary provider, and normalized primary failure. It activates only
-after a retry-bounded operational Phen2Gene failure. A successful Phen2Gene response
-with no matching gene remains a valid primary no-match state and does not trigger the
-fallback.
-
-Evidence lineage identifies HPO as the fallback upstream source rather than
-Phen2Gene. The pipeline, reviewer report, and phenotype table explicitly label local
-fallback scores and methods; they never call them Phen2Gene scores. Fallback use is a
-recoverable degraded-mode warning and does not reorder variants or affect
-pathogenicity.
-
-### Stage 66 gnomAD to Ensembl Variation population fallback
-
-`backend/conditional_enrichment.py` keeps gnomAD GraphQL as the primary direct
-population-frequency source and queries its assembly-specific dataset with the exact
-chromosome, position, reference, and alternate allele. A successful response or a
-valid `no_match` is terminal and never calls Ensembl. Timeout, connection, `403`,
-`408`, `429`, `5xx`, and centrally classified invalid-response failures can activate
-the fallback after at most one gnomAD retry.
-
-The fallback queries Ensembl Variation only by a stable rsID and accepts population
-rows only after the returned rsID, assembly, coordinate, reference, alternate, and
-row allele match the candidate. It records `Ensembl REST Variation` as the evidence
-provider, `ensembl_variation` as the operational source, the original normalized
-gnomAD failure, and explicit fallback role. Reports and evidence lineage preserve
-that source instead of relabeling Ensembl frequencies as gnomAD.
-
-One `ProviderCircuitState` is shared by population lookups within an analysis. A
-persistent gnomAD operational failure opens that circuit, so later triggered
-variants skip repeated gnomAD calls and proceed to the separately labelled Ensembl
-fallback. If Ensembl also fails, the final state remains explicitly unavailable;
-neither provider failure is converted into negative clinical evidence.
-
-### Stage 67 ClinVar resilience
-
-`backend/annotation.py` keeps exact direct NCBI ClinVar ESearch/ESummary evidence as
-the primary path. A direct success remains authoritative, and a valid empty exact
-search remains terminal `not_found`; neither state promotes MyVariant ClinVar fields.
-The existing exact assembly-aware MyVariant query now requests a bounded subset of
-ClinVar-derived fields alongside its independent population annotations.
-
-After retry-bounded operational direct ClinVar failure, the application may promote
-those already-retrieved MyVariant fields as a fallback. The promoted source records
-provider `MyVariant.info`, upstream source `ClinVar`, role `fallback`, target
-`ncbi_clinvar`, the normalized primary failure, source type `derived_fallback`, and
-`independent_evidence = false`. Germline RCV significance, review status, conditions,
-evaluation date, Variation ID, and bounded RCV accessions are retained only after the
-MyVariant record has passed its exact assembly/chromosome/coordinate/allele identity
-check.
-
-Evidence lineage represents the fallback as one derived ClinVar path supplied by
-MyVariant, never as direct NCBI evidence and never as an independent second ClinVar
-vote. Draft and text reports label it as MyVariant ClinVar-derived fallback evidence.
-If direct ClinVar and the MyVariant-derived path are both unavailable, the direct
-source remains explicitly unavailable with the failed fallback attempt recorded.
-
-### Stage 68 literature resilience chain
-
-`backend/conditional_enrichment.py` now formalizes the existing variant-focused
-literature chain as LitVar2, then Europe PMC after an operational LitVar2 failure,
-then PubMed after an operational Europe PMC failure. General gene-and-disease
-searches without a variant identifier use Europe PMC as the primary source and may
-fall back to PubMed. Valid successful searches with no articles remain terminal
-`no_match` states and never trigger fallback.
-
-Every provider record persists the search provider, exact query and query
-identifier, primary or fallback role, fallback target, normalized primary failure,
-fallback reason, and the canonical identifiers of its retained articles. Articles
-are merged and deduplicated in PMID, then PMCID, then DOI priority, while preserving
-all contributing source providers. The configured article cap applies after the
-fallback merge.
-
-`backend/references.py` derives article links only from those canonical identifiers:
-PMIDs map to exact PubMed records, PMCIDs to PubMed Central, and DOIs to DOI records.
-No model-generated article URL is accepted. Compact evidence/report persistence
-retains the complete fallback provenance needed to distinguish primary and degraded
-literature retrieval.
-
-### Stage 69 MyDisease latency guard and local degraded mode
-
-`backend/mydisease.py` now applies a practical default MyDisease read deadline of
-eight seconds and a three-second connect deadline. Configuration rejects MyDisease
-deadlines above fifteen seconds and more than one retry. The shared provider policy
-supports a provider-specific retry-status allowlist, so MyDisease may retry once only
-after a connection-level `unavailable` result; timeouts, HTTP failures, and malformed
-responses do not receive another potentially long attempt.
-
-After an operational MyDisease failure, accepted patient HPO terms may activate a
-bounded local degraded mode backed by the installed official `phenotype.hpoa`
-dataset. It retains at most ten locally validated HPO terms and five disease examples
-per term. This patient-level phenotype context is stored separately from the empty
-direct gene-disease association list, explicitly labels Human Phenotype Ontology as
-the fallback provider, and preserves the MyDisease primary failure. It never asserts
-that a locally listed disease is associated with the variant gene.
-
-If accepted HPO terms or the installed local disease annotations are unavailable,
-MyDisease remains explicitly unavailable and the analysis continues with annotation,
-local HPO, Phen2Gene, and all other collected evidence. Pipeline warnings, compact
-evidence persistence, and lineage retain the distinction between direct MyDisease
-evidence and the local context-only degraded path.
-
-### Stage 70 VEP and annotation fallback hardening
-
-`backend/annotation.py` keeps Ensembl VEP as the primary annotation provider and now
-normalizes its terminal timeout, network, HTTP, assembly-mismatch, and malformed
-response failures. Only an operational primary failure activates the bounded
-VariantValidator path; a valid VEP success or valid no-result remains terminal. One
-analysis-scoped fallback circuit prevents a VariantValidator outage from causing
-repeated calls for later variants.
-
-The fallback submits the already-normalized assembly, chromosome, position,
-reference, and alternate allele to the public VariantValidator API and accepts a
-mapping only after the returned assembly-specific VCF identity matches all four
-allele coordinates exactly. It may retain a validated genomic HGVS, transcript HGVS,
-protein HGVS, gene, and transcript. The original normalized variant remains stored
-unchanged whether the fallback succeeds, has no exact match, or fails.
-
-Fallback evidence is explicitly labelled provider `VariantValidator`, role
-`fallback`, source type `validation_mapping_fallback`, and target `ensembl_vep`, with
-the normalized VEP primary failure retained. It does not invent a consequence,
-impact, transcript-consequence list, predictor result, or VEP plugin annotation;
-those fields remain empty with `consequence_available = false`. Evidence persistence,
-provider summaries, and lineage retain the fallback provider instead of relabelling
-it as VEP. Ensembl Variation remains an independent exact-record source and is not
-used here to imitate VEP semantics.
-
-### Stage 71 MyVariant fallback hardening
-
-`backend/annotation.py` keeps MyVariant.info as the primary aggregation provider and
-normalizes its terminal network, timeout, HTTP, malformed-response, and identity-
-mismatch failures. Only an operational failure remaining after the existing bounded
-retry path activates Ensembl Variation. A valid MyVariant success, valid no-result,
-or unsupported allele remains terminal. An analysis-scoped circuit suppresses later
-fallback calls when Ensembl Variation itself is operationally unavailable.
-
-The fallback performs one assembly-specific Ensembl overlap lookup at the normalized
-variant position and accepts a record only when assembly, chromosome, start, end,
-strand, reference, and alternate allele match exactly. It retains only bounded
-provider-native overlap context: stable variation identifier, source, exact mapping,
-alleles, consequence type, and clinical-significance labels. GRCh37 requests use the
-Ensembl GRCh37 REST host when the default service configuration is active.
-
-Successful degraded evidence is labelled provider `Ensembl REST Variation`, role
-`fallback`, source type `overlapping_variant_context_fallback`, and target
-`myvariant`, while retaining the normalized MyVariant primary failure. MyVariant
-`variant_id`, `rsid`, gene, aggregated population frequencies, maximum frequency, and
-ClinVar-derived fields remain empty rather than being fabricated or relabelled.
-Compact evidence, provider summaries, direct-source lineage, and references preserve
-the Ensembl identity. A fallback no-match or outage leaves MyVariant explicitly failed
-and does not stop the rest of the annotation pipeline.
-
-### Stage 72 CSpec last-known-good cache
-
-`backend/cspec_cache.py` provides a private local last-known-good store for released
-CSpec context. The cache accepts only the bounded standardized metadata already
-retained by the application: specification identifier, title/version, VCEP and date
-fields, trusted canonical/source URLs, exact gene/disease scope, and retrieval dates.
-It rejects unknown fields, unsafe URLs, malformed identifiers, invalid timestamps,
-oversized files, and non-released records. Writes use a private temporary file plus
-atomic replacement; the schema is versioned, capped at 500 exact query entries and
-two megabytes, and contains no criteria/rule payloads.
-
-Live CSpec remains primary. A live success refreshes the exact gene and ordered MONDO
-query key; a valid live no-result remains terminal and never activates cached data.
-Only a normalized operational live failure remaining after bounded retries checks the
-cache. Missing, non-matching, or invalid cache state remains explicit and leaves CSpec
-unavailable. `CSPEC_LKG_CACHE_PATH` defaults to the ignored private
-`data/cache/cspec_lkg.json` location and may be configured independently.
-
-When an exact cache entry is available, the result is labelled provider
-`Local CSpec last-known-good cache`, role `fallback`, source `cached_cspec`, and source
-type `last_known_good_cache`, while retaining the live primary failure. The original
-live retrieval time, cache-storage time, fallback-use time, and
-`last_known_good_age_unbounded` freshness state are persisted in compact evidence and
-lineage. Cached specifications remain `context_only`, never apply rule logic, and are
-not silently treated as current live registry data.
-
-### Stage 73 unified capability result schema
-
-`backend/provider_resilience.py` defines one strict, bounded capability result
-contract for primary and fallback outputs. Every result retains the capability,
-normalized status, exact provider identifier, provider role, fallback target,
-operational primary failure, retrieval method, compact data pointer, and bounded
-provenance. Valid no-match and non-triggered states remain distinct from operational
-failure, and fallback provenance is accepted only after an operational failure.
-
-Evidence Object schema `2.5` adds exact results for variant annotation, variant
-context, ClinVar evidence, CSpec context, phenotype-gene evidence, disease context,
-population frequency, and literature. Normalization occurs once at the Evidence
-Object boundary, so downstream consumers receive the same shape without relabelling
-fallback evidence as its primary source. Draft report status composition now uses one
-generic availability function and renders successful degraded evidence as
-`available via fallback`; exact provider and method remain in the capability result.
-
-### Stage 74 UI and report transparency
-
-`backend/fallback_transparency.py` derives one bounded reviewer-facing notice for
-every capability whose Stage 73 result records `fallback_used=true`. Notices use
-controlled capability, provider, and method labels; retain the exact provider IDs,
-fallback target, normalized primary failure, and method; and never expose raw HTTP
-exceptions or provider response text.
-
-The Evidence Object view now shows a single concise fallback panel plus an optional
-provenance table, and its overview counts affected capabilities. Draft report review
-shows the same source-specific notices before evidence sections and automatically
-expands sections available through fallback. Evidence-section titles name both the
-primary capability source and actual fallback source. Draft and final report
-provenance carries every fallback notice, including the exact retrieval method, so a
-reviewer can determine which source supplied every degraded-mode result without
-mistaking it for primary-provider evidence.
-
-### Stage 75 deterministic failure injection
-
-`tests/test_failure_injection.py` injects provider failures without external network
-traffic and verifies the complete degraded-mode path through capability results,
-reviewer notices, and final-report provenance. The seven acceptance cases cover
-Phen2Gene timeout and retry to local HPO-gene overlap; gnomAD 403 circuit opening and
-Ensembl fallback for subsequent variants; ClinVar connection failure to derived
-MyVariant evidence; LitVar2 5xx retry to Europe PMC; Europe PMC timeout to PubMed;
-CSpec network failure to an exact local last-known-good cache entry; and VEP 503 to
-the limited VariantValidator validation/HGVS mapping path.
-
-Each case asserts the preserved primary failure and exact fallback provenance,
-successful fallback status rather than false `no_match`, single-counted evidence,
-absence of fabricated unsupported fields, continued report composition, and an
-explicit degraded-source entry in the final report.
-
-### Stage 76 reachability regression utility
-
-`tools/provider_reachability.py` provides a bounded manual checker for every
-configured bioinformatics provider used by the application. Each check performs DNS
-resolution followed by one non-mutating HTTP `HEAD` request and reports the provider,
-DNS status, HTTP status, latency, and a safe normalized failure category. Operators
-may select individual providers and optionally save the results as JSON and CSV.
-
-```powershell
-.\.venv\Scripts\python.exe tools\provider_reachability.py
-.\.venv\Scripts\python.exe tools\provider_reachability.py --provider gnomad --json output\provider-reachability.json
+Three lifecycle phases:
+
+1. **Analysis** — validate input, collect evidence, audit conflicts, conditionally
+   enrich, interpret each variant, prepare review state.
+2. **Review** — inspect evidence + interpretation, edit four reviewer-owned report
+   fields with append-only replayable history, make audited include/exclude choices,
+   confirm every variant (with no-PHI attestation).
+3. **Finalization** — validate confirmed state, compose selected-only Final Clinical
+   Report deterministically, export text/PDF/Word/DOCX. No model call.
+
+Orchestration entry points live in `backend/pipeline.py` (`run_analysis`,
+`run_variant_processing`, `resume_saved_analysis`, `confirm_reviewed_evidence`,
+`finalize_reviewed_analysis`, `retry_failed_variant_interpretation`).
+Per-variant failure isolation is enforced throughout: one failed variant produces an
+explicit outcome record and never erases successful siblings.
+
+### 3.2 Module map
+
+Backend (`backend/`, 62 modules):
+
+| Module | Responsibility |
+|---|---|
+| `pipeline.py` | Orchestrator; validated `PipelineResult` (schema 3.6); stage/API status tracking; persistence hooks |
+| `input_preprocessing.py` | Selected-input outcome contract; ANNOVAR-like adaptation; unresolved-input containment |
+| `variant_identity.py` | Deterministic canonical identity |
+| `vcf_processing.py`, `excel_processing.py` | Input adapters (VCF/vcf.gz via vcfpy; safe XLSX) |
+| `annotation.py` | All core annotation providers (VEP, VariantValidator fallback, GeneBe, MyVariant, ClinVar, GenCC/UCSC, CSpec, ERepo) with batching, retries, caches, fallback chains |
+| `phenotype.py` | Local HPO matching/similarity + Phen2Gene client (+ local HPO-gene fallback) |
+| `mydisease.py`, `medgen.py` | MyDisease gene-disease-HPO context; MedGen three separate support/context roles |
+| `erepo.py` | ClinGen ERepo expert-curated variant context |
+| `report.py` | EvidenceObject TypedDict + validation/sanitization + isolated construction + prompt composition |
+| `conflict_auditor.py` | Deterministic pre/post-review conflict audits (routing-only) |
+| `conditional_enrichment.py` | Bounded gnomAD/UCSC/Ensembl-Variation population + LitVar2/Europe PMC/PubMed literature enrichment |
+| `provider_resilience.py` | Shared retry policy, timeouts/backoff, analysis-scoped circuit breakers, `CapabilityResult` contracts |
+| `provider_repository.py`, `evidence_repository*.py` | Provenance-first persistent provider-observation cache (SQLite, schema 2) with TTL freshness/maintenance |
+| `variant_interpretation.py` | Single-model interpretation boundary; prompt `variant-interpretation-v1.9`; retry/repair/fallback policy; draft AI classification |
+| `llm.py` | OpenAI-compatible client; typed error taxonomy; bounded retries; execution-trace hooks |
+| `llm_preflight.py` | Pre-analysis model reachability check (isolated) |
+| `phenotype_llm.py` | Persian narrative → clinical entities/HPO candidates; prompt `phenotype-extraction-v3.0` |
+| `phenotype_selection.py` | Local ontology validation/canonicalization of model suggestions |
+| `disease_resolution.py`, `clinical_entities.py` | Explicit disease-entity resolution; case-context sidecar only |
+| `privacy.py` | Prohibited-field/pattern gates; exact task-specific LLM payload validators; PHI redaction |
+| `evidence_readiness.py`, `final_disposition.py`, `evidence_coverage.py` | READY/BLOCKED readiness, semantic capability disposition, runtime coverage |
+| `shadow_composition.py`, `active_annotation_promotion.py` | Observational VEP-outage candidates; gated field-level promotion (gene/transcript/HGVS.c/HGVS.p only) |
+| `variant_report.py` | Draft Variant Reports (schema 2.3); audited editing; selection |
+| `report_data.py`, `report_data_projection.py`, `report_docx.py`, `report_exports.py`, `report_lifecycle.py`, `final_clinical_report.py`, `final_docx_package.py` | ReportData V4 family, DOCX rendering/export, Final Clinical Report, ZIP package |
+| `references.py`, `reference_model.py`, `reference_content.py`, `human_links.py` | Canonical references, literature/data-source separation, human-link resolution |
+| `database.py` | SQLite persistence (schema 4); migrations; recovery projections; retention |
+| `execution_trace.py` | Bounded backend execution trace observability |
+| `classification_evidence.py`, `evidence_rescue.py`, `retrieval_intelligence.py`, `cspec_cache.py`, `fallback_transparency.py`, `provider_readiness.py`, `logging_config.py`, `error_handling.py` | Supporting contracts |
+
+Frontend (`frontend/`): presentation-only projections over backend contracts —
+`ui.py` (main workflow), `execution.py` (background job bridge, ≤7200 s timeout,
+cancellation, recovery tokens), `analysis_summary.py`, `variant_status.py`,
+`warning_semantics.py`, `technical_diagnostics.py`, `source_status.py`,
+`evidence_graph.py`, `evidence_review.py`, `report_preview.py`, `report_viewer.py`,
+`final_interpretation_view.py` (legacy), `interpretation_failure_semantics.py`,
+`provider_readiness.py`, `reference_access.py`, `execution_trace.py`,
+`xlsx_selection.py`. UI display semantics never alter backend/source semantics.
+
+Entry: `app.py` → `config.py` settings validation → redacted structured logging →
+`frontend/ui.render_app()`.
+
+---
+
+## 4. Provider matrix and fallback chains
+
+| Provider | Semantic node(s) | Role / fallback position |
+|---|---|---|
+| Ensembl VEP REST | `annotation` | Primary consequence/transcript/gene source |
+| VariantValidator REST | `annotation` (composition) | Operational-only VEP fallback: validation + HGVS/gene/transcript mapping; never supplies VEP consequence/impact/MANE fields |
+| GeneBe | `automated_acmg_context` | Independent automated ACMG context; outage ⇒ UNAVAILABLE, no fallback (ERepo is never relabeled as GeneBe fallback); evidence, not final verdict |
+| MyVariant.info | aggregation + correlated ClinVar rescue | Exact assembly-aware aggregation; ClinVar-derived rescue after direct-ClinVar operational failure (single-vote lineage preserved); Ensembl-Variation exact-overlap fallback on its own outage |
+| NCBI ClinVar E-utils | `clinvar_clinical_evidence` | Primary direct clinical significance/review status/accessions; valid no-record = missingness |
+| UCSC GenCC track | `gene_disease_validity` | Only source of ClinGen-submitted validity claims |
+| ClinGen CSpec Registry | `cspec_context` | Registry metadata only; local last-known-good cache after operational failure; rules never executed |
+| ClinGen ERepo | `expert_curated_variant_context` | Expert-curated variant context; exact CPRA/build identity |
+| Phen2Gene | `phenotype_gene_ranking` | One call per analysis; never reorders variants; local HPO-gene overlap fallback on operational failure |
+| MyDisease.info | `disease_hpo_context` | Bounded MONDO-validated gene-first disease context |
+| NCBI MedGen E-utils | `gene_disease_support`, `phenotype_gene_support`, `disease_hpo_context` | Source-labelled support only — never GenCC validity, never rank/score |
+| gnomAD GraphQL | `population_evidence` | Conditional-enrichment primary (exact allele, assembly dataset r2_1/r4) |
+| UCSC gnomAD mirror | `population_evidence` | Verification-only mirror continuation (shared upstream provenance, not an independent vote) |
+| Ensembl Variation REST | `population_evidence` / overlap | Operational fallback for gnomAD or MyVariant |
+| LitVar2 → Europe PMC → PubMed | `literature_evidence` | Bounded conditional literature chain with deduplication |
+| UCSC sequence API | identity infrastructure | hg38 reference-sequence access after Ensembl sequence operational failure; not biological evidence |
+| Monarch API | — | Config metadata only; never called |
+
+Fallback activation rule: only after a **normalized operational failure**, never
+after valid `no_match`/`not_found`. Every degraded result retains actual provider,
+method, primary failure, and lineage in Evidence Object and reports. Overlapping
+routes are transport paths, not independent biological votes.
+
+---
+
+## 5. LLM boundaries (exactly two roles)
+
+### Role A — Persian clinical entity extraction
+
+`backend/phenotype_llm.py`, prompt version **`phenotype-extraction-v3.0`**.
+
+- Input: only `task=extract_clinical_entities` + bounded, de-identified,
+  privacy-redacted `clinical_text_fa` (≤4000 chars).
+- Output: strict JSON with bounded `clinical_entities` +
+  `unmapped_clinical_phrases`. Every entity has grounded source text, explicit type
+  `PHENOTYPE` or `DISEASE`, and assertion state `PRESENT`/`SUSPECTED`/`NEGATED`/
+  `HISTORICAL`. HPO IDs allowed only for present phenotypes.
+- Prohibited: diagnosis, unsupported disease inference from symptom clusters,
+  invented identifiers, variant interpretation, treatment advice. Empty list =
+  insufficient evidence.
+- Candidates then pass local ontology validation (`phenotype_selection.py`) and
+  require **explicit user acceptance** before entering the analysis HPO set.
+  Extraction failure leaves manual HPO search fully available.
+- Explicit DISEASE entities go through a deterministic resolver
+  (`disease_resolution.py`); results are case-context `disease_resolutions`
+  sidecar metadata only — they never enter accepted HPO terms, Phen2Gene,
+  EvidenceObjects, ACMG logic, interpretation prompts, or reports.
+- Clinical narrative circularity guard: user-entered disease names are case
+  context, never proof of disease or pathogenicity. Negated/suspected/historical
+  assertions never silently become positive evidence.
+
+### Role B — Variant interpretation
+
+`backend/variant_interpretation.py`, prompt version **`variant-interpretation-v1.9`**,
+result schema **1.3** (1.1/1.2 accepted for persisted compatibility).
+
+- Input: exactly one validated, sanitized EvidenceObject per variant
+  (`shadow_free_evidence_for_llm()` strips shadow/prohibited fields;
+  `privacy.validate_llm_payload()` enforces minimum data), plus readiness audit and
+  a URL-free canonical-reference catalog (literature citation IDs like `[R1]` only).
+- One `VARIANT_INTERPRETATION_MODEL` for every variant regardless of conflict
+  state; meaningful conflict changes only the bounded instruction mode.
+- Recovery policy: one transient retry, one constrained structured-output repair,
+  optional operational-only `VARIANT_INTERPRETATION_FALLBACK_MODEL` — never
+  difficulty/conflict routing.
+- Output contract: interpretation, conflict assessment, four-valued phenotype
+  conclusion (supported / partially supported / no supported association found /
+  phenotype evidence unavailable — unsupported phenotype never becomes negative
+  pathogenicity evidence), warnings, draft AI classification with calibrated policy,
+  normalized grouped citations `[Rn]`. Fabricated citations, response URLs,
+  oversized/unbounded text fail closed.
+- Failure taxonomy: twelve stable categories with secret-free structured
+  diagnostics; per-variant isolation with reviewer-triggered retry from persisted
+  evidence.
+
+Provider protocol is exclusively `openai_compatible` (`LLM_BASE_URL`,
+`LLM_API_KEY`, task-specific model names). Default-model promotion requires the
+Stage 91 seven-case live benchmark gate; offline fixtures can never promote a model.
+
+---
+
+## 6. Evidence semantics
+
+- **EvidenceObject schema 2.5**: normalized variant identity, assembly,
+  source-specific evidence, phenotype context, provider statuses, warnings,
+  provenance, bounded lineage (65,536-byte envelope; fixed compaction policy when
+  MyDisease context exceeds budget). Raw payloads/sample/genotype fields excluded.
+- **Semantic nodes**: `annotation`, `automated_acmg_context` (GeneBe only),
+  `expert_curated_variant_context` (ERepo only), `clinvar_clinical_evidence`
+  (direct NCBI; MyVariant-derived rescue is correlated, single-vote),
+  `cspec_context` (metadata only), `gene_disease_validity` (GenCC only),
+  `gene_disease_support` (MedGen only), `phenotype_gene_ranking` (Phen2Gene only),
+  `phenotype_gene_support` (MedGen/local only), `disease_hpo_context`
+  (source-separated MyDisease/MedGen), `population_evidence`, `literature_evidence`.
+- **Coverage (runtime-only, schema 1.0)**: classifies paths as critical/important/
+  optional; states `FULL`, `DEGRADED`, `UNAVAILABLE`, `NOT_TRIGGERED`,
+  `NOT_APPLICABLE`; retrieval states kept separate; not persisted, not a score.
+- **Internal readiness**: `READY`, `READY_WITH_LIMITATIONS`, `RESCUE_REQUIRED`
+  (reassessed after enrichment; never survives as final),
+  `MINIMUM_IDENTITY_FAILURE`.
+- **Final disposition (runtime schema 1.0)**: `READY`,
+  `READY_WITH_LIMITATIONS`, `BLOCKED`. BLOCKED is reserved for structural/
+  minimum-safety (identity) failures; safe sparse evidence or a provider outage
+  alone never blocks.
+- Reviewer-facing axes stay separate: provider operational status vs query
+  retrieval result vs per-variant semantic capability (e.g., unavailable GenCC +
+  accepted MedGen support = validity UNAVAILABLE, support FULL — never converted).
+- **Conflict auditing**: deterministic pre-review audit embedded in EvidenceObject
+  construction; post-review audit at confirmation. Routing-only — it changes prompt
+  mode/enrichment decisions, never classifications.
+- **VEP-outage composition (gated promotion)**: under proven VEP operational
+  failure, only `gene`, `transcript`, `HGVS.c`, `HGVS.p` may be promoted after
+  exact build/versioned same-transcript proof; consequence/impact/MANE/canonical
+  are never promoted; non-VEP values are never attributed to VEP.
+
+Full semantic rationale lives in `AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md`.
+
+---
+
+## 7. Persistence, schemas, and recovery
+
+Active pipeline schema: `3.6`. Active schema versions verified in code on
+2026-08-25:
+
+| Artifact | Constant | Value |
+|---|---|---|
+| Pipeline result | `PIPELINE_SCHEMA_VERSION` (`pipeline.py`) | **3.6** |
+| SQLite database | `DATABASE_SCHEMA_VERSION` (`database.py`) | **4** |
+| EvidenceObject | `EVIDENCE_SCHEMA_VERSION` (`report.py`) | **2.5** |
+| Evidence construction outcome | `EVIDENCE_CONSTRUCTION_OUTCOME_SCHEMA_VERSION` | 1.0 |
+| Variant Interpretation Result | `VARIANT_INTERPRETATION_SCHEMA_VERSION` | **1.3** (1.1–1.2 read-compatible) |
+| Draft Variant Report | `DRAFT_VARIANT_REPORT_SCHEMA_VERSION` (`variant_report.py`) | **2.3** (2.2 read-compatible) |
+| Reference Model | `reference_model.py` | 2.x (literature vs data-source separation) |
+| ReportData | `REPORT_DATA_SCHEMA_VERSION` (`report_data.py`) | **4.0** |
+| Final Clinical Report | `FINAL_CLINICAL_REPORT_SCHEMA_VERSION` | **2.0** |
+| Report Lifecycle / Integrity / Review / Confirmation | various | 1.0 |
+| Evidence repository DB / record | `evidence_repository.py` | **2** / **"1.0"** |
+| Prompt versions | — | `phenotype-extraction-v3.0`, `variant-interpretation-v1.9` |
+
+Notes:
+
+- Pipeline 3.4+ persists per-selected-input preprocessing outcomes (source
+  provenance, status, warnings) and per-canonical-variant construction outcomes;
+  failed entries retain only canonical identity plus safe step/field/code/scope
+  diagnostics. 3.3 snapshots migrate without provider/model reruns.
+- 3.5 added case-specific `clinical_entities`; 3.6 added nullable
+  `disease_resolutions` sidecar. SQLite stays 4; recovery request schema 4 carries
+  bounded clinical entities.
+- Analysis DB: `storage/database/clinical_variant.sqlite3`. Tables include
+  analyses, candidate variants, evidence objects, reports, pipeline states, V3
+  lifecycle projection, and V4 report-recovery projection (atomic delete+insert,
+  validated against the canonical snapshot on load; restart recovery never reruns
+  interpretation).
+- Refresh/restart recovery: browser holds only an opaque token; a private one-hour
+  checkpoint stores normalized variants, HPO terms, reviewed clinical entities,
+  task model choices, extraction provenance — never raw VCF. Persisted drafts
+  reload by random analysis ID; interrupted unpersisted work reruns from sanitized
+  input; legacy Output A/B payloads return an explicit unsupported-resume error.
+- **Evidence repository** (`storage/evidence_repository/evidence_repository.sqlite3`)
+  is a provenance-first global provider-observation cache keyed by canonical
+  identity: preserves provider/upstream source/semantic node/query identity/
+  exact-match proof/retrieved_at/release/freshness/normalization version/correlation
+  group. Fresh hits may skip provider calls (TTLs: default 24 h; gnomAD 7 days);
+  stale entries re-query; operational failures are never cached as biological
+  absence; changing evidence is versioned, not destructively overwritten; global
+  knowledge stays strictly separated from case-specific patient context.
+- Retention: count-based cleanup (`ANALYSIS_RETENTION_*`) protects active analyses
+  and failed-audit records by default.
+
+---
+
+## 8. Human review workflow
+
+1. Reviewer sees per-variant Draft Variant Reports (immutable machine original +
+   editable reviewed copy beginning identical).
+2. Editable fields (whitelist): reviewer summary, interpretation narrative,
+   conflict-assessment wording, reviewer notes. Everything else is immutable.
+3. Each edit appends a sequence-numbered record (path, old/new, UTC timestamp,
+   bounded reviewer context). Validation replays history from the integrity-checked
+   original and must reproduce the current report exactly. Resets append reverse
+   edits.
+4. Per-variant `include_in_final_report` boolean with append-only selection
+   history — a reporting choice only, never a rank. Excluded reports remain fully
+   persisted/recoverable.
+5. Confirmation requires an explicit no-PHI attestation per variant; any edit or
+   selection change invalidates prior confirmation.
+6. Finalization validates complete confirmed state and composes the selected-only
+   Final Clinical Report without another model call; exports preserve allowlisted
+   canonical hyperlinks (numbered literature references; unnumbered data-source
+   provenance; raw machine endpoints can never become ordinary links).
+
+UI surfaces reflect pipeline semantics (`Selected inputs`, `Canonical variants`,
+`Annotated variants`, `EvidenceObjects`, `Interpreted variants`) — never stale
+"filtered variants" wording. Primary-provider failure and fallback success are
+displayed separately; technical provider detail lives in collapsed drawers.
+
+---
+
+## 9. Workstream & stage history (unified register)
+
+Four sequential workstreams produced the current system. This section is the
+single consolidated record; details of superseded roadmap documents were folded
+here intentionally.
+
+### Workstream A — Declaration Stages 0–115 (original roadmap)
+
+Stages **0–114 Complete**; stages 18, 20, 21, 26 intentionally unnumbered.
+Highlights by arc:
+
+- **0–16 MVP**: scope/config/input foundations; VEP/MyVariant/ClinVar/ClinGen
+  annotation; HPO management; EvidenceObject V1; LLM client; clinical report;
+  pipeline; Streamlit; SQLite persistence; offline gates; redacted logging;
+  security hardening; MVP acceptance.
+- **17**: professor-review governance checkpoint.
+- **19–44**: repository reality audit; annotation hardening (exact assembly-aware
+  VEP matching, GeneBe, direct ClinVar, GenCC/CSpec, Phen2Gene, MyDisease);
+  EvidenceObject V2 + lineage + conflict audit + conditional enrichment; evidence
+  review/editing; two-layer routing era (Stage 35/36/40 — now historical only);
+  Phase A/B split (superseded); resilience/privacy/Testing V2; Stage 44 five-variant
+  acceptance gate (now legacy).
+- **45**: professor-review incorporation; V3 architecture freeze; retired Output
+  A/B and dual-routing for new analyses.
+- **46–62 (V3 product)**: centralized 10-variant limit + expanded input; Persian
+  phenotype-extraction LLM contract; local HPO validation/acceptance; task-specific
+  model UI; single-model interpretation contract; interpretation-before-review
+  pipeline; Draft Variant Report V2; audited editing/history; per-variant final
+  selection; canonical references; Final Clinical Report composer; persistence V3 +
+  migration; privacy reverification; Testing V3; Stage 60 release gate (active in
+  GitHub Actions); Stage 61 live provider/link validation; Stage 62 documentation +
+  demo workbook (`data/samples/stage62_demo_variants.xlsx`; worksheet 2 contains a
+  marker that must never be processed).
+- **63–78 (provider resilience)**: operational-status taxonomy; shared request
+  wrapper (connect/read deadlines, Retry-After, analysis-scoped circuits); local
+  HPO-gene fallback; population fallback chain; ClinVar-derived rescue; literature
+  resilience chain; MyDisease degraded mode; VEP→VariantValidator and
+  MyVariant→Ensembl-Variation fallbacks; CSpec LKG cache; unified capability
+  results; transparency notices; deterministic failure injection; reachability
+  checker; documentation consolidation; Stage 78 resilience acceptance gate.
+- **79–105 (report-first)**: acceptance-defect freeze; professor-PDF-derived
+  specification; ReportData V4 contract; authoritative DOCX template; fidelity gate;
+  in-app HTML preview; document-region editing; per-variant report lifecycle;
+  cardinality/integrity ledger; interpretation failure taxonomy; recovery policy;
+  phenotype non-concordance; Stage 91 model-quality benchmark; Reference Model V2;
+  human-link resolver + regression matrix; analysis summary; status cards; warning
+  semantics V2; diagnostics drawer; persistence V4; DOCX export/ZIP package; visual
+  regression harness; interpretation acceptance suite; reference acceptance suite;
+  status/warning UX suite; professor-testcase E2E.
+- **106–114 (post-acceptance defect fixes)**: Persian multi-concept extraction;
+  valid no-match rescue; cross-provider identifier intelligence; exact ClinVar
+  retrieval; scoped CSpec applicability; deterministic evidence readiness;
+  secondary classification recovery; classified interpretation retry; reviewer
+  source-status semantics.
+- **115**: final Word/LibreOffice visual sign-off + external professor sign-off —
+  **Pending** (as is the Stage 83 manual DOCX visual comparison).
+
+### Workstream B — Evidence-resilience Stages 1–11 (COMPLETE / APPROVED; closed 2026-08-17)
+
+Approved historical implementation workstream integrating ClinGen ERepo and NCBI
+MedGen after network probes killed Monarch/Open Targets/PanelApp alternatives.
+Recorded in `EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md` and
+`AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md`.
+
+| Stage | Outcome |
+|---|---|
+| 1 | Frozen ERepo response shape + exact CPRA/assembly identity contract + fixtures |
+| 2 | Production ERepo integration (`backend/erepo.py`) as `expert_curated_variant_context`; not a GeneBe replacement |
+| 3 | Shared bounded MedGen E-utils client + disease/HPO context role |
+| 4 | MedGen phenotype-gene supporting evidence (never rank/score) |
+| 5 | MedGen gene-disease supporting evidence (never GenCC validity) |
+| 6 | Gated field-level VEP-outage annotation composition/promotion (shadow schema 1.0) |
+| 7 | Runtime-only per-variant coverage calculator (schema 1.0) |
+| 8 | Capability states + derived final disposition mapping |
+| 9 | Deterministic resilience tests + bounded live validation |
+| 10 | Failure-driven input-to-LLM trace audit; fixed `candidate_diagnostics` leak via `shadow_free_evidence_for_llm()` |
+| 11 | Documentation closeout reconciling declaration/handoff/README/.env.example |
+
+Closed; **no Stage 12 authorized**.
+
+### Workstream C — Live-run stabilization + extensions (ACTIVE Codex roadmap)
+
+Defined in `COMPLETE_CODEX_EXECUTION_ROADMAP.md` (created 2026-08-17 after a real
+professor-workbook run exposed runtime defects; execution model: one stage at a
+time, STOP for external review after each).
+
+| Stage | Content | Status (verified via git history) |
+|---|---|---|
+| 1 | Evidence-construction root-cause audit | Complete (`LIVE_STAGE_1_AUDIT_COMPLETE`) |
+| 2 | Evidence-construction resilience + per-variant isolation | Complete |
+| 3 | Provider failover/retry orchestration + readiness-aware fast fail | Complete (approved commit baseline) |
+| 4 | Observability + UI semantic cleanup + Arrow-safe display | Complete |
+| 5 | Final deterministic + live acceptance closeout | Complete (commit `0a48517` "stage 5 finalized") |
+| 6 | Persian clinical-narrative dual-entity extraction + disease-aware routing | Complete (commits `a7bb13c`…`a283673`) |
+| 7 | Persistent provenance-first evidence cache/repository | Complete (commits `e75ef92`, `b951948`, `8a25afb`; freshness/maintenance follow-ups) |
+| 8 | Franklin free external-validation / benchmark layer | **NOT implemented — registered as Pending/on hold awaiting supervisor decision** |
+
+Note: this roadmap's own "Current Roadmap Status" section still reads "NOT
+STARTED" for all stages — that section is stale and superseded by this register.
+Its frozen scope/baseline sections remain binding.
+
+Franklin constraint (binding whenever Stage 8 resumes): manual Community
+Variant/Gene search + free-case allowance only as an External Manual Validation /
+Benchmark layer; no scraping, undocumented endpoints, headless ingestion,
+credential automation, rate-limit circumvention, or paid dependency; Franklin is
+never ground truth — disagreement creates reviewer attention only; manual
+observations preserve source/date/canonical variant checked/exposed upstream.
+
+### Workstream D — Stage 9.2 / 10 / 11 series (implemented 2026-08-24)
+
+**This series has NO committed defining roadmap document.** It was implemented in
+the commit range following Workstream C Stage 7 and is registered here as the
+authoritative record until a defining document is provided. Its only companion
+audit outputs (`stage_11_2_analysis_lifecycle_audit.md`,
+`stage_11_3_variant_failure_isolation_audit.md`) were folded into this register
+and deleted in the 2026-08-25 documentation cleanup (§13).
+
+| Sub-stage | Content | Commits / tests |
+|---|---|---|
+| 9.2.x | Draft AI classification added to interpretation output; classification calibration tests; calibration policy fix; grouped reference-citation normalization | `41f1246`, `eb34dbf`, `dcb72e2`, `bbc8904`; `tests/test_stage9_2_*` (contract, calibration, policy, citations) |
+| 10.1 | Bounded backend execution trace across pipeline/LLM/provider layers | `0165864`; `tests/test_stage10_1_execution_trace.py` |
+| 10.2 | UI rendering of the analysis execution trace | `010a70c`; `tests/test_stage10_2_execution_trace_ui.py` |
+| 11.1 | Field-level interpretation validation | inside `600876c`; `tests/test_stage11_1_field_level_interpretation_validation.py` |
+| 11.2 | Analysis-lifecycle stability (incl. whole-analysis deadline `ANALYSIS_MAX_RUNTIME_SECONDS`, watchdog, registry pruning) | `600876c`; `docs/stage_11_2_analysis_lifecycle_audit.md`; `tests/test_stage11_2_analysis_lifecycle.py` |
+| 11.3 | Variant failure-isolation hardening | `600876c`; `docs/stage_11_3_variant_failure_isolation_audit.md`; `tests/test_stage11_3_variant_failure_isolation.py` |
+| 11.4 | Legacy provider-status UI removal | `b3b25bf`; `tests/test_stage11_4_legacy_provider_ui_removal.py` |
+| misc | Report narrative audit fix; reference-content access + rate-limit retry hardening ("finalized 90%") | `ad6d481`, `f741ca8` |
+
+The working tree at registration time contains one dirty tracked file
+(`storage/evidence_repository/evidence_repository.sqlite3` — see Open Item O-1).
+
+---
+
+## 10. Verification & gates
+
+The automated suite is **offline by design** (suite-wide HTTP blocking unless a
+live diagnostic is explicitly enabled) — deterministic, no quota consumption.
+
+Measured full-suite baseline on **2026-08-25** (master `f741ca8`):
+
+```text
+1747 passed, 3 failed, 6 skipped   (duration ≈ 108 s)
 ```
 
-The checker is intentionally network-dependent and remains outside deterministic CI;
-its classification and export behavior are covered by offline unit tests.
-
-### Stage 77 documentation and configuration
-
-This declaration consolidates the implemented fallback matrix, operational-failure
-versus valid-missingness contract, analysis-scoped circuits, architecture, actual
-`.env` controls, pre-demo checks, result interpretation, troubleshooting, and reviewer
-provenance verification.
-
-The README now links the resilience contract and distinguishes the lightweight
-DNS/HTTP reachability utility from the quota-consuming production-client live gate.
-`.env.example` documents the fixed operational-only fallback policy beside the
-existing provider URLs, provider-specific timeouts, retry bounds, enrichment flags,
-local HPO sources, and CSpec cache path. No unused per-fallback feature flags were
-introduced: safe fallback behavior remains the default, and source identity is never
-configurably relabelled.
-
-| Capability | Primary | Operational fallback | Implemented boundary |
-|---|---|---|---|
-| Variant annotation | Ensembl VEP | VariantValidator | Validation and HGVS/gene/transcript mapping only; VEP consequence/plugin fields remain missing. |
-| Aggregated variant context | MyVariant.info | Ensembl Variation | Exact assembly, coordinate, REF, and ALT overlap only; no MyVariant field relabelling. |
-| ClinVar evidence | NCBI ClinVar | MyVariant ClinVar-derived fields | One shared ClinVar lineage, never two independent evidence votes. |
-| CSpec context | ClinGen CSpec | Exact local last-known-good entry | Metadata and freshness only; CSpec remains context-only. |
-| Phenotype-gene context | Phen2Gene | Local direct HPO-gene overlap | Direct accepted-HPO associations only; not a Phen2Gene-equivalent score. |
-| Disease/HPO context | MyDisease.info | Local HPO disease annotations | Patient phenotype context only; no gene-disease assertion. |
-| Population frequency | gnomAD | Ensembl Variation | Exact mapped allele and separate source identity. |
-| Variant literature | LitVar2 | Europe PMC, then PubMed | Bounded search, identifier-priority deduplication, and canonical links. |
-
-Before a demonstration, run `tests/run_stage78_resilience_acceptance.py`, then use
-`tools/provider_reachability.py` for point-in-time DNS/HTTP checks. Use
-`tests/run_live_provider_validation.py --skip-llm` only when quota-consuming production
-client validation is explicitly required. DNS, TLS, timeout, `403`, `429`, and `5xx`
-results must remain operational failures; primary-plus-fallback failure remains
-explicit missingness and never becomes negative clinical evidence.
-
-### Stage 78 resilience acceptance gate
-
-`tests/test_resilience_acceptance.py` runs two ordered variants through the production
-pipeline under one deterministic mocked outage scenario. Phen2Gene times out and
-activates local direct HPO-gene context; the first gnomAD request returns `403`, opens
-the analysis circuit, and both variants use exact Ensembl Variation fallback; LitVar2
-returns retry-exhausting `5xx` responses and both variants use Europe PMC. Direct
-ClinVar and live CSpec fixture evidence remain successful primary sources.
-
-The gate proves that analysis continues with explicit partial/degraded status, the
-gnomAD primary is called only once, sources are not relabelled, two Draft Variant
-Reports remain buildable, and capability/fallback provenance survives SQLite
-persistence and reload. It also exposed and fixed mapping-order-sensitive fallback
-notice composition so JSON key sorting cannot invalidate a persisted Draft Report.
-
-`tests/run_stage78_resilience_acceptance.py` compiles the project, runs the repository
-secrets audit, executes the focused scenario, runs the complete offline suite, and
-enforces the Stage 59 Testing V3 coverage gate.
-
-### Stage 79 acceptance defect freeze and golden asset
-
-`docs/acceptance_failures_v1.md` freezes AF-01 through AF-07 as the baseline for the
-separate report-first corrective roadmap. The registry distinguishes six confirmed
-acceptance gaps from the conditional variant-count/input-label investigation item,
-records the expected outcome and later verification stage for each defect, and keeps
-the existing evidence, privacy, missingness, ordering, and provenance constraints
-explicit.
-
-The professor-supplied four-page Word-origin PDF is documented as the authoritative
-visual and structural reference for the future per-variant report. Because it contains
-sensitive identifiers, it remains local and uncommitted; only its report hierarchy and
-visual family may be reused. `tests/fixtures/stage79_synthetic_report_fixture.json`
-provides a separate synthetic non-PHI design asset with stable allele identity,
-professor-style section order, explicit missingness, phenotype non-concordance, and
-separate literature/data-source collections. It is not the future production
-`ReportData V4` schema.
-
-`tests/test_stage79_acceptance_assets.py` prevents loss of the defect IDs, report
-section order, allele identity, source-category separation, privacy boundary, and
-valid phenotype non-concordance state. Stage 79 changes no production workflow and
-does not implement Stage 80 or later architecture.
-
-### Stage 80 professor report template specification
-
-`docs/professor_report_template_spec.md` treats the actual repository copy of
-`docs/TS-Final Report.pdf` as authoritative and records the observed anatomy of all
-four pages before defining the privacy-safe per-variant target. It distinguishes
-direct PDF observations from target approximations and project adaptations, retains
-the prominent result block and dual-band Main Finding(s) table, and defines stable
-overview, detailed interpretation, classification/method/comments, literature, and
-data-source sections.
-
-The specification maps existing allele, phenotype, population, disease, predictor,
-ClinVar, CSpec, conflict, interpretation, missingness, fallback, and provenance
-semantics into visible report fields without defining `ReportData V4`. It explicitly
-keeps same-gene alleles separate, permits phenotype non-concordance and sparse
-evidence, distinguishes literature from provider provenance, and excludes patient
-identifiers, diagnosis, treatment/testing/counseling recommendations, prenatal/PGD
-content, signatures, carrier aggregation, and unsupported laboratory claims.
-
-`docs/report_style_spec.yaml` freezes Letter geometry, observed Times New Roman sizes,
-color treatments, result-block dimensions, table proportions, paragraph behavior,
-and pagination rules with a basis label for each observation or approximation.
-`docs/stage_80_progress.md` records all nine completed checkpoints and the exact
-handoff. `tests/test_stage80_specification.py` verifies authority, per-variant
-independence, required anatomy/content rules, key visual tokens, and resumability.
-No production schema, DOCX template, generator, preview, editing workflow, UI change,
-interpretation fix, or link resolver is part of Stage 80.
-
-### Stage 81 ReportData V4 schema
-
-`backend/report_data.py` defines schema `4.0` as the renderer-neutral source contract
-for one accepted allele. Its exact top-level fields match the Stage 81 conceptual
-model and retain zero-based input order, stable assembly/chromosome/position/REF/ALT
-identity, nullable gene/transcript/HGVS/zygosity annotations, typed HPO context and
-concordance, an attributed conclusive result, typed main-table findings, original and
-current interpretation text, classification context, literature references, data
-sources, warnings, provenance, review/selection state, and template version.
-
-The main findings contain source-aware population, disease/inheritance,
-computational, stable-identifier, and classification records rather than preformatted
-LLM text. The phenotype enum includes `supported`, `partially_supported`,
-`no_supported_association`, `unavailable`, and `not_assessed`; positive concordance is
-not required. Literature accepts canonical PMID, PMCID, or DOI records only, while
-database/tool provenance retains capability, actual provider role, method,
-availability, operational status, fallback use, primary failure, dataset/record,
-retrieval time, and human-link status.
-
-Validation enforces exact fields, nullable missing display values, source/fallback
-consistency, finite bounded numeric values, timezone-aware timestamps, HPO identity,
-replayable interpretation edits and inclusion history, unique literature IDs,
-privacy checks, JSON safety, and a 256 KiB serialized limit. Independent ACMG
-adjudication remains explicitly unsupported. `docs/report_data_v4_contract.md`
-documents the contract, and `tests/test_report_data.py` verifies rich and sparse
-records plus rejection of presentation text, audit tampering, non-literature
-references, inconsistent fallback provenance, prohibited identity content, unmatched
-HPO terms, and out-of-scope adjudication.
-
-Stage 81 does not replace Draft Variant Report V2, change persistence or pipeline
-state, create the DOCX template, render/preview a report, or modify the active UI.
-
-### Stage 82 authoritative DOCX template
-
-`templates/clinical_variant_report_v1.docx` is the authoritative editable Word-native
-template for one accepted allele. `tools/build_stage82_template.py` reproduces it
-offline from the Stage 80 presentation tokens. The template owns US Letter geometry,
-one-inch margins, Times New Roman styles, title and heading hierarchy, the bordered
-conclusive-result block, the two-band detailed-evidence table, fixed DXA widths and
-cell padding, repeating table headers, row-split protection, controlled page breaks,
-compact reference styling, and separate data-source provenance presentation.
-
-The placeholder contract covers report identity, clinical features, allele and HGVS
-display, zygosity, classification, brief and detailed interpretation, main findings,
-classification summary, literature references, and provider data sources. Result and
-table content grows or wraps rather than using fixed row heights. Missing optional
-evidence remains explicit through truth-preserving labels rather than fabricated data
-or ambiguous blanks.
-
-`docs/stage_82_template_contract.md` fixes the independent artifact convention
-`variant_{input_index+1:03d}_report.docx`; `tests/test_stage82_docx_template.py`
-verifies editable OOXML, required placeholders, page/style ownership, fixed table
-geometry, repeatable headers, privacy boundaries, and the per-variant naming contract.
-Stage 82 does not render ReportData V4, create golden generated reports, add preview or
-editing behavior, change lifecycle state, or modify the active UI; those remain Stage
-83 and later work.
-
-### Stage 83 golden DOCX fidelity gate
-
-`backend/report_docx.py` is the deterministic production path from one validated
-`ReportData V4` record to the authoritative Stage 82 template. It produces one
-`variant_{input_index+1:03d}_report.docx`, preserves the template styles, theme, page
-geometry, result emphasis, fixed evidence-table grids, page breaks, reference style,
-and blank page furniture, and adds only validated provider/literature hyperlinks. It
-expands bibliography paragraphs and Data Sources rows, writes explicit missingness,
-uses reviewer-approved interpretation without a model call, and rejects template
-version or required-slot drift.
-
-`tests/fixtures/stage83_golden_report_data_v4.json` provides a rich non-PHI synthetic
-allele with all major report fields. The production path generates the committed
-`tests/golden/stage83/variant_001_report.docx`. The Stage 83 tests verify deterministic
-byte equality, section order, heading hierarchy, Times New Roman typography, bordered
-result emphasis, fixed DXA tables, dynamic source/reference density, controlled page
-breaks, hyperlink separation, editability, and absence of unresolved placeholders or
-image-only report pages.
-
-`docs/stage_83_fidelity_gate.md` records the fidelity checklist and rejection criteria.
-Automated package, table geometry, privacy, and accessibility checks pass within their
-documented boundaries. LibreOffice is unavailable and bounded Microsoft Word
-automation timed out, so the required side-by-side visual comparison with the
-professor PDF remains pending and no visual PASS is claimed. Stage 84 preview and all
-later DOCX-dependent visual claims remain outside that pending Stage 83 gate.
-
-### Stage 84 in-app report preview
-
-`frontend/report_preview.py` validates the current `DraftVariantReport V2` and renders
-three deterministic, privacy-safe HTML document pages without executable content. The
-preview follows the professor-report family through Letter-like white pages, Times New
-Roman typography, restrained blue hierarchy, a red result frame, gold classification
-emphasis, gray evidence cells, and distinct references/data-source regions. All dynamic
-content is escaped and only previously validated canonical URLs become links.
-
-`frontend/evidence_review.py` presents `Variant X of N`, an assembly-qualified
-`build chr:position REF>ALT` identity, explicit page count, Previous/Next navigation,
-the existing audited Final Report inclusion choice, editing access, and the established
-technical review controls after the document. `frontend/ui.py` makes Clinical report
-review the first completed-analysis tab and moves pipeline/API/provider dashboards to
-the secondary Analysis and provider details tab.
-
-Stage 84 intentionally does not create a new persisted report record. The active UI
-uses the validated Draft Variant Report until Stage 86 performs the planned ReportData
-lifecycle refactor.
-
-### Stage 85 document-like editing workflow
-
-`frontend/evidence_review.py` keeps the high-fidelity report preview as the default and
-opens editing only after the reviewer selects Edit or explicitly expands Edit clinical
-report. The single batched form follows the rendered document: page-one Brief
-Interpretation(s), page-two Variant interpretation, page-three classification-summary
-wording, and page-three reviewer notes. Cancel discards unsaved widget state; reset
-restores the machine-original editable values. The former generic Edit report technical
-tab is removed.
-
-The established Draft Variant Report mutation boundary remains authoritative. Only the
-four reviewer-owned regions can change. Every material edit records old/new values,
-timestamp, and reviewer context, while identity, generated evidence, citations,
-provenance, and the machine original remain immutable. Saving a material edit clears
-prior evidence confirmation and returns the workflow to awaiting final review.
-
-`backend/report_data_projection.py` creates a validated transient ReportData V4 view of
-the current reviewed Draft Variant Report. The Stage 83 renderer then regenerates the
-editable professor-template DOCX exposed by Download editable Word report. This gives
-Stage 85 document-to-artifact continuity without prematurely creating the Stage 86
-persisted ReportData lifecycle.
-
-### Stage 86 per-variant report lifecycle
-
-`backend/report_lifecycle.py` defines the strict `VariantReportRecord V1` contract.
-Every accepted variant receives one record in original input order containing the
-validated `ReportData V4`, stable analysis/report/index identity, deterministic DOCX
-filename/hash/size/template metadata, and draft/confirmed/finalized timestamps. DOCX
-bytes remain regenerable and are not embedded in persisted JSON.
-
-`backend/pipeline.py` creates these records with the Draft Variant Reports, rebuilds
-them after audited edits and selection changes, advances them from draft through
-confirmation and finalization, and persists them in pipeline schema `3.0`.
-`backend/database.py` performs a bounded `2.8`/`2.9` migration without rerunning
-evidence collection or interpretation. `frontend/evidence_review.py` downloads the
-editable Word artifact from the primary record's ReportData.
-
-Exclusion changes only `include_in_final_report`. It never removes evidence,
-interpretation, report content, audit history, confirmation, or the lifecycle record.
-`backend/final_clinical_report.py` derives the selected subset from ordered lifecycle
-records, preserving original input order.
-
-### Stage 87 variant cardinality and identity integrity gate
-
-`backend/variant_integrity.py` defines `VariantIntegrityRecord V1`. The parser assigns
-one immutable zero-based `input_index` per accepted allele before annotation. The
-record binds that index to parser, normalized, pipeline, Evidence Object, Draft
-Variant Report, and Stage 86 review-record identity.
-
-The gate uses an assembly-qualified digest of chromosome, position, reference, and
-alternate allele. Gene is deliberately excluded, so multiple alleles in one gene
-remain separate. Pipeline schema `3.4` retains a separate ordered
-`input_preprocessing_results` ledger for every selected input, while its accepted
-canonical variants retain the existing downstream cardinality and identity gates.
-It also persists one bounded `evidence_construction_outcomes` record per canonical
-variant, allowing successful EvidenceObjects to remain linked to their original
-input indexes when a sibling has a per-variant construction failure.
-An `IDENTITY_UNRESOLVED` input has no canonical link and never becomes an annotation,
-Evidence Object, or LLM input. Schemas `2.8` through `3.2` receive bounded,
-order-preserving migrations without provider or model reruns.
-
-`tests/test_stage87_variant_integrity.py` supplies seven variants, including repeated
-`SCN1A` annotations, and proves parser, normalized, pipeline, evidence, draft, and
-review counts remain seven after finalization, persistence, and reload. It separately
-proves a six-item normalized result cannot silently replace seven parser alleles.
-
-### Stage 88 interpretation error taxonomy and observability
-
-`backend/variant_interpretation.py` maps interpretation failures to twelve bounded
-categories covering request, HTTP, authentication, response, schema, parse, finish,
-conversion, and unknown failures. The persisted compatibility field now carries the
-stable category rather than a Python exception class name.
-
-Each failed variant emits a secret-free diagnostic with its allele digest, model,
-prompt version, attempt, category, bounded HTTP/finish/schema metadata, and fallback
-state. Reviewer-facing UI keeps these internal details hidden by default.
-
-### Stage 89 interpretation recovery policy
-
-The selected Variant Interpretation Model receives every first attempt. Transient
-timeouts, connections, HTTP 429, and HTTP 5xx responses receive at most one retry.
-Successful requests that fail output parsing or schema validation receive one
-constrained repair request to the same model using the same sanitized evidence.
-
-An optional `VARIANT_INTERPRETATION_FALLBACK_MODEL` activates only after an eligible
-operational failure. It never activates for conflict, difficulty, authentication,
-invalid requests, non-retryable HTTP 4xx, or internal conversion failures. The actual
-fallback model and a concise operational warning remain in result provenance, and
-structured logs identify the recovery without storing prompts, responses, or secrets.
-
-### Stage 90 phenotype non-concordance contract
-
-Variant Interpretation prompt `variant-interpretation-v1.2`, retained by current
-`variant-interpretation-v1.3`, requires one of four explicit phenotype conclusions:
-supported, partially supported, no supported
-association found, or phenotype evidence unavailable. The response conclusion is
-validated against the deterministic phenotype status in the sanitized Evidence
-Object. Persisted historical `v1.1` prompt results remain valid.
-
-For valid unrelated phenotype, the interpretation remains successful, prepends an
-explicit no-supported-association statement, and continues from remaining evidence.
-It does not invent a disease match, remove the allele, or reinterpret mismatch as
-benign/negative pathogenicity evidence. `ReportData V4` retains the canonical
-`no_supported_association` concordance independently of classification evidence.
-
-### Stage 91 interpretation quality gate
-
-The Variant Interpretation Model benchmark requires strong, partial, and irrelevant
-phenotype cases; conflicting ClinVar evidence; sparse evidence; rich literature; and
-no literature. Review records measure groundedness, hallucinations, clinical-style
-coherence, conflict handling, phenotype restraint, structured-output reliability,
-latency, token use, and cost.
-
-Only complete live-provider, human-reviewed evidence from at least two unique models,
-including the current default, can produce a recommendation. Offline fixtures test
-the gate but cannot promote a model. The evaluator is restricted to
-`variant_interpretation`, does not modify runtime configuration, and leaves Phenotype
-Extraction Model selection independent. The provider catalog check timed out on
-2026-08-11, so no live comparison is claimed and the configured default remains
-unchanged.
-
-### Stage 92 Reference Model V2
-
-The active report path now stores scientific literature and database/tool provenance
-as distinct validated collections. PubMed PMID, PubMed Central PMCID, and DOI
-records are the only numbered literature references.
-ClinVar, Ensembl, VariantValidator, GeneBe, MyVariant.info, ClinGen/GenCC, CSpec,
-Phen2Gene/local HPO-Gene, MyDisease/local context, and population providers remain
-unnumbered Data Sources with capability, status, method, dataset/record identity,
-fallback, failure, retrieval, and link provenance.
-
-Draft Variant Report schema `2.2`, interpretation prompt
-`variant-interpretation-v1.3`, ReportData projection, preview/DOCX surfaces,
-Streamlit review, SQLite projection, and Final Clinical Report Markdown preserve the
-separation. Historical interpretation prompt `v1.1` and `v1.2` records remain valid.
-
-### Stage 93 canonical human-link resolver
-
-`backend/human_links.py` now owns the deterministic distinction between stable
-human-readable records and provider machine endpoints. PMID, PMCID, DOI, and ClinVar
-accessions resolve to canonical human pages. Exact GRCh37/GRCh38 allele identity may
-resolve to a GeneBe variant page, and a validated rsID may resolve to the corresponding
-assembly-specific Ensembl variation page.
-
-MyVariant.info raw JSON, Ensembl REST/VEP, GeneBe API, and NCBI E-utilities endpoints
-cannot become ordinary reviewer links. MyVariant.info remains visible as a
-`Programmatic annotation source`, with its exact identifier retained when available.
-If no stable human page can be validated, the report keeps provenance and an explicit
-unavailable link state without fabricating a URL. Streamlit review, HTML preview,
-Final Clinical Report Markdown, and DOCX rendering apply the same policy.
-
-### Stage 94 reference validation tests
-
-The canonical human-link policy now has a dedicated deterministic regression matrix.
-It covers PMID, PMCID, DOI, ClinVar VCV/RCV/SCV accessions, supported GRCh37/GRCh38
-GeneBe alleles, MyVariant.info raw-JSON suppression, absent Ensembl identifiers,
-unsupported-provider provenance, and a whole-model assertion that no retained human
-link is machine-readable.
-
-The offline gate is registered as `stage94_reference_validation` and makes no network
-calls. A separate `live_provider` test may probe a bounded PubMed, PMC, DOI, ClinVar,
-and GeneBe sample only when `RUN_LIVE_PROVIDER_TESTS=1`; it checks reachability and
-rejects JSON content types. This optional diagnostic is excluded from deterministic
-CI.
-
-### Stage 95 user-facing analysis summary redesign
-
-The completed-analysis view now begins with a bordered `Analysis complete` summary
-before the clinical-report and technical tabs. It shows exact counts from retained
-per-variant state: Evidence Objects analyzed, Draft Variant Reports prepared, variants
-with partial attempted core-source coverage, and failed interpretations requiring
-attention. Provider-status record counts are never substituted for variant totals,
-and untriggered or not-assessed optional capabilities do not inflate partial coverage.
-
-Input wording follows the persisted `analysis_context.input_type`, so Excel, manual,
-VCF, and compressed-VCF results use accurate validation and stage labels. Technical
-provider statuses remain available under a collapsed `Technical provider details`
-expander instead of appearing as the default completion surface. The implementation
-uses native responsive Streamlit containers and text elements without new custom CSS.
-Stage 96 subsequently adds the per-variant presentation described below.
-
-### Stage 96 variant-first status cards
-
-The completed-analysis review now presents one bordered status card for every input
-variant before the selected report preview. Each card combines stable allele identity
-with one of four bounded labels: `Report ready`, `Report ready with partial evidence`,
-`Interpretation requires attention`, or `Input requires attention`. Internal exception
-names are not used as primary labels.
-
-Each card states annotation, population, ClinVar, phenotype-relationship, and
-interpretation outcomes. Legitimate missingness remains readable as partial evidence,
-while optional unassessed capabilities do not create a false warning state. Warnings
-are rendered inside their owning card with an explicit variant number. Provider,
-capability, source status, and method remain available under a collapsed
-`Technical provider details` expander. Stage 97 subsequently adds the severity
-semantics described below.
-
-### Stage 97 warning semantics V2
-
-Reviewer-facing variant notices now use four bounded consequence levels. `INFO`
-represents expected absence such as no exact record, no literature, or no supported
-phenotype association. `PARTIAL` means the report succeeded with optional evidence
-unavailable, unsupported, or otherwise limited. `ACTION REQUIRED` means interpretation
-remains unavailable after recovery attempts. `BLOCKING` means a minimum normalized
-input or report invariant is unavailable.
-
-No-match remains valid missingness rather than an operational provider failure, and a
-successful fallback suppresses the corresponding source-availability notice. Primary
-messages describe the reviewer consequence without raw exceptions, endpoints, or
-implementation categories. Native compact severity badges keep informational states
-visually lighter than partial, action-required, or blocking states. Technical provider
-details remain collapsed. Stage 98 subsequently adds the diagnostic drawer described
-below.
-
-### Stage 98 technical diagnostics drawer
-
-Each variant status card now retains developer observability under a collapsed
-`Show technical details` expander. One bounded row per retained provider/capability
-record shows provider, assembly-qualified variant identity, operational status,
-attempt count, latency, fallback use, failure category, and a safe provider-specific
-note.
-
-Attempt and latency values are matched from retained evidence telemetry when present;
-unpersisted values are shown as `Not recorded` instead of being guessed. No-match has
-failure category `none`, while fallback records preserve the primary operational
-failure. The projection excludes raw responses, endpoint payloads, exception text,
-credentials, and patient data. It performs no provider calls and uses native Streamlit
-layout without custom CSS. Stage 99 subsequently adds the recovery model below.
-
-### Stage 99 persistence and recovery V4
-
-SQLite schema `4` adds `report_recovery_states`, one normalized row per variant that
-persists complete ReportData, deterministic DOCX metadata, template and interpretation
-versions, resolved literature/data-source references, report edits, reviewer notes,
-selection history, include/exclude state, confirmation state, and report warnings.
-
-Artifact identity is the persisted analysis ID, assembly-qualified allele ID, and a
-content-derived report version. Saving replaces the ordered recovery projection in the
-same transaction as the canonical pipeline snapshot. Loading revalidates both the
-Stage 57 and Stage 99 projections and fails closed on missing or altered state. Schema
-`3` databases migrate to schema `4` with bounded backfill of valid report records.
-
-Refresh/restart recovery restores report preview data, edits, selection, confirmation,
-references, warnings, and artifact metadata from persisted state. It does not call the
-LLM or regenerate interpretation. DOCX bytes remain deterministically regenerable from
-the approved ReportData and are not stored in SQLite. Stage 100 adds the export model
-below.
-
-### Stage 100 DOCX export and final package
-
-Each report exposes `Download editable DOCX`, rendered from the current validated
-ReportData through the authoritative professor-template path. After confirmation and
-finalization, `Download selected Word report package` creates a deterministic ZIP of
-only the included per-variant DOCX files in original input order. Same-gene alleles
-remain independent artifacts and excluded reports remain persisted but are not
-packaged.
-
-The ZIP includes an integrity manifest with analysis, report, allele, content-version,
-SHA-256, byte-size, template, confirmation, and finalization identity. Package creation
-requires completed state, finalized lifecycle records, exact Final Clinical Report
-selection agreement, and a regenerated DOCX matching its persisted artifact metadata.
-It uses reviewer-approved ReportData and performs no annotation, interpretation, or
-LLM request. The existing combined text, PDF, and Word summary exports remain
-auxiliary. Stage 101 adds the format-regression model below.
-
-### Stage 101 visual regression harness
-
-Six synthetic ReportData scenarios cover fully populated evidence, sparse evidence,
-long interpretation, many references, no phenotype match, and a complex indel. Each
-scenario renders through the production professor-template path and must match its
-committed deterministic DOCX hash, style hash, table geometry summary, hyperlink
-density, and structural layout signature.
-
-The always-on gate also fixes clinical heading order, required labels, US Letter
-geometry, one-inch margins, five-table structure, two controlled page breaks, nonempty
-controlled page segments, absence of exact-height rows, and absence of unresolved
-placeholders. Raster analysis checks page-count ranges, blank pages, content touching
-page edges, and bounded-tolerance image hashes. Real DOCX raster execution is optional
-and truthfully skipped when LibreOffice or Poppler is unavailable; the current
-environment has no LibreOffice, so no new visual-render pass is claimed.
-
-### Stage 102 interpretation acceptance suite
-
-Seven deterministic scenarios validate the corrected interpretation architecture at
-its production boundaries. Normal and partial-provider evidence remain conservatively
-interpretable; irrelevant phenotype evidence produces explicit non-concordance without
-becoming negative pathogenicity evidence; and meaningful classification disagreement
-is acknowledged without forced resolution.
-
-The gate also verifies the bounded recovery sequence: one transient retry and one
-constrained structured-output repair. When interpretation is completely exhausted,
-the allele and Draft Variant Report remain available, the primary status becomes
-`Interpretation requires attention`, and warning semantics provide an `ACTION REQUIRED`
-notice telling the reviewer to inspect retained evidence and retry. The gate is fully
-offline and does not change production behavior.
-
-### Stage 103 reference acceptance suite
-
-The deterministic reference gate carries canonical literature and source provenance
-from Evidence Object construction through Draft Variant Report, ReportData V4, HTML
-preview, and authoritative DOCX output. Every retained PMID, PMCID, and DOI is checked
-against its exact canonical human target and verified as a clickable artifact link.
-Numbered literature remains disjoint from unnumbered database and tool provenance.
-
-MyVariant.info raw JSON cannot masquerade as a normal reference and remains labelled
-as a programmatic annotation source. Invalid identifiers never generate URLs;
-available ClinVar, Ensembl, and GeneBe identities use validated human-readable pages;
-and a missing stable identifier produces clean unlinked provenance without an invented
-target. The gate is offline; Stage 94 remains the optional bounded live-reachability
-check. No new live-provider result is claimed.
-
-### Stage 104 status and warning UX acceptance suite
-
-The completion summary now states exact counts for analyzed variants, prepared drafts,
-ready reports, partial source coverage, and interpretations requiring attention. A
-report counts as ready only when its stable variant card is `Report ready` or `Report
-ready with partial evidence`; retaining a draft alone does not imply readiness.
-
-Variant cards identify the affected input position and allele, name missing sources in
-the primary evidence lines, and distinguish retained-evidence limitations (`PARTIAL`)
-from exhausted interpretation (`ACTION REQUIRED`). The four-scenario deterministic
-gate exercises the rendered Streamlit surface and proves these answers appear before
-the collapsed technical drawers without internal exception names.
-
-### Stage 105 professor testcase end-to-end acceptance
-
-The deterministic offline acceptance suite runs the complete report-first workflow using a 7-variant synthetic fixture that mirrors the structure of the professor-provided Excel testcase. It validates that the overall variant count is exactly 7, that the original input order is preserved at all pipeline and reporting stages, and that same-gene variants remain separate distinct report records.
-
-An irrelevant phenotype (abdominal pain) successfully completes interpretation while stating phenotype non-concordance explicitly without fabricating a disease relation or causing an application failure. A degraded provider scenario where ClinVar is unavailable still produces all 7 reports, maps the ClinVar card status to `"ClinVar: no exact record"`, hides the technical failure from the primary UX (not blocking), and generates all Word documents successfully.
-
-### Stage 106 Persian multi-concept phenotype extraction hardening
-
-The phenotype extraction boundary now retains multiple clinically supported concepts
-from Persian free text instead of allowing one broad or duplicated concept to dominate
-the result. Candidate recovery is bounded, deterministic, locally ontology-validated,
-and merged in stable order. Invalid model identifiers remain excluded, manual HPO entry
-remains available after extraction failure, and no diagnosis is inferred.
-
-### Stage 107 valid no-match evidence rescue
-
-A valid primary ClinVar no-match remains valid missingness, but it no longer prevents a
-separately attributed secondary evidence search. The rescue contract records its
-trigger, alternate identifiers, ordered attempts, recovered provider, stop reason, and
-whether usable evidence was recovered. Secondary ClinVar-derived evidence is explicitly
-non-independent and never relabelled as a direct ClinVar exact record.
-
-### Stage 108 cross-provider retrieval intelligence
-
-Retrieval now classifies why evidence is absent, including identifier gaps, query
-weakness, normalization mismatch, semantic mismatch, confirmed source absence,
-operational failure, and cases requiring live verification. Validated identifiers are
-shared across bounded provider strategies, rejected candidates retain safe reasons,
-and every exhausted path records an explicit stop condition.
-
-### Stage 109 exact ClinVar retrieval hardening
-
-ClinVar retrieval now uses ordered SPDI, HGVS, and stable variation strategies with
-exact assembly, coordinate, reference, and alternate validation. Candidate responses
-that represent a nearby allele, wrong assembly, symbolic mismatch, or semantically
-different record are rejected and recorded diagnostically. A no-match is accepted only
-after the configured exact strategies complete without usable evidence.
-
-### Stage 110 scoped CSpec applicability
-
-CSpec lookup now distinguishes provider operation from specification applicability.
-The report states when no released specification applies to the current gene/disease
-scope, when scope cannot be assessed because identity is incomplete, and when cached
-context was used after operational failure. CSpec remains contextual metadata and is
-not treated as negative pathogenicity evidence or an implemented rule engine.
-
-### Stage 111 deterministic evidence readiness
-
-Before interpretation, each Evidence Object receives a deterministic readiness audit.
-`READY` and `READY_WITH_LIMITATIONS` proceed to evidence-bounded interpretation;
-`BLOCKED` is reserved for unsafe or structurally invalid minimum evidence. Capability
-coverage, recovery state, limitations, and blocking reasons remain persisted and
-replayable without inventing unavailable evidence.
-
-### Stage 112 secondary classification recovery
-
-The classification audit now explains which sources were queried, which identifiers
-were used, whether rescue ran, candidate counts, rejection counts, retrieval exhaustion,
-and why no classification remained. Direct ClinVar, GeneBe automated, and MyVariant
-ClinVar-derived classifications remain source-attributed and their independence is
-explicit. The application still does not independently adjudicate ACMG/AMP criteria.
-
-### Stage 113 classified interpretation retry
-
-Interpretation configuration failures now have their own persisted failure category,
-and reviewer messages distinguish request, structured-output, provider/configuration,
-safety/finish, and internal workflow failures. A reviewer may retry one failed draft
-from its persisted Evidence Object; annotation, ClinVar, population, phenotype, and
-literature providers are not rerun. Existing edits, selections, or confirmations
-prevent destructive overwrite.
-
-### Stage 114 reviewer source-status semantics
-
-Primary review surfaces no longer expose raw `no_match` as the explanation. ClinVar,
-CSpec, literature, phenotype, and other capabilities use source-specific wording that
-distinguishes expected absence, a completed primary no-match, successful source-named
-rescue, an operational provider failure, and an unexecuted query. Technical status,
-method, attempts, fallback path, provider result, and stop reason remain available in
-collapsed diagnostics.
-
-### Post-Stage 78 corrective maintenance
-
-Review after Stage 78 isolated optional MyDisease metadata failures from gene-query
-circuits, prevented failed population fallbacks from being reported as used, and made
-the reachability utility treat HTTP `404`/`405` as successful host responses while
-retaining their exact status codes. These are maintenance corrections to Stages 64,
-66, 69, 73, 74, and 76; they are not a new stage.
-
-## 8. Pipeline, persistence, and refresh recovery
-
-- Active pipeline schema: `3.6`.
-- SQLite schema: `4`.
-- Evidence Review Report schema: `1.0`.
-- Reviewed Evidence Package schema: `1.0`.
-- Variant Interpretation Result schema: `1.1`.
-- Draft Variant Report schema: `2.2`.
-- Variant Report Lifecycle schema: `1.0`.
-- Variant Integrity Record schema: `1.0`.
-- Final Clinical Report schema: `2.0`.
-- Recovery request schema: `4`.
-
-Pipeline schema `3.4` persists an input-preprocessing result for each selected input:
-source provenance, deterministic status, warnings/failure reason, and an explicit
-canonical-variant/integrity link when identity is established. The selected-input
-count is independent of analyzable downstream cardinality; unresolved inputs are
-retained only at this input boundary.
-
-Schema `3.4` additionally persists bounded construction outcome schema `1.0` for
-each canonical variant. Successful entries map original variant order to the compact
-EvidenceObject list; failed entries retain only canonical identity and safe bounded
-step/field/code/scope diagnostics. Supported schema `3.3` snapshots receive explicit
-success outcomes during migration without provider or model reruns. EvidenceObject
-schema `2.5` and SQLite schema `4` remain unchanged by that migration; recovery
-request schema `4` carries bounded clinical entities.
-
-Pipeline schema `3.5` added the bounded case-specific `clinical_entities` collection.
-Schema `3.6` adds nullable `disease_resolutions` sidecar metadata to the analysis
-context. New analyses record a deterministic ordered result for every explicit disease
-entity; schema `3.5` snapshots migrate to `null` without fabricating historical
-resolution. SQLite remains `4`, recovery remains `4`, and EvidenceObject remains
-`2.5`.
-
-The Stage 6 reviewer workflow now separates phenotype/finding mentions from
-disease/context mentions, preserves assertion state, and requires explicit acceptance
-before analysis. Reviewers may edit bounded text/assertion values or reject rows;
-linked HPO suggestions remain subject to the existing independent local validation and
-acceptance path. The canonical pipeline snapshot and recovery request preserve only
-reviewed entities, so no SQLite migration is required. Results display this data in a
-clinical-context panel explicitly labeled as not variant evidence, diagnosis, or ACMG
-classification. The full boundary is documented in
-`docs/persian_clinical_entity_extraction.md`.
-
-Analysis collects evidence, performs pre-review audit and optional enrichment,
-interprets each variant, and persists the ordered review state. Review may edit and
-confirm evidence while retaining the pre-review interpretation provenance.
-Finalization validates every confirmed package and interpretation result, composes
-the selected-only Final Clinical Report, then persists completed state without
-another model call or changing the analysis ID.
-
-Long analyses execute in cancellable background jobs. The browser stores only an
-opaque, unguessable recovery token. A page refresh reconnects to an active in-process
-job; when the job has completed and the result was persisted, the UI reloads it from
-SQLite by random analysis ID. Clinical data and evidence are never placed in the URL.
-A private one-hour checkpoint stores normalized variants, HPO terms, reviewed
-clinical entities, task model choices, and bounded extraction provenance, never raw
-VCF content. For an XLSX
-zero-allele source form it also stores only the bounded user-selected source records
-needed to repeat GRCh38 identity verification; unselected worksheets and rows never
-enter the checkpoint.
-After a
-process/server restart, a checkpoint linked to a durably persisted draft reloads that
-state without another interpretation call. Only interrupted, unpersisted work reruns
-from sanitized input. Older Output A/B payloads return an explicit unsupported-legacy
-resume error.
-
-## 9. Privacy, security, and audit position
-
-- Secrets are loaded from `.env`; `.env` is excluded from Git.
-- LLM and GeneBe credentials are never written into result objects or normal logs.
-- Upload type, size, row count, and content are validated before processing.
-- Temporary uploads and generated artifacts use bounded application-controlled paths.
-- Generated reports, validation output, coverage files, and effective Streamlit
-  configuration dumps are excluded from version control.
-- Sample columns, patient identifiers, genotypes, and raw VCF rows are stripped at the
-  input boundary and excluded from public pipeline and LLM payloads.
-- Logs use safe correlation IDs, provider names, timing, retry/outcome metadata, and
-  defensive redaction instead of clinical payloads.
-- Human-review notes reject detected phone numbers, government identifiers, email
-  addresses, contextual person names, labelled identifiers, and raw VCF text before
-  storage or LLM use. The same high-risk patterns are redacted from logs.
-- Persian-labelled identifiers and Iranian mobile-number forms are covered by the
-  same redaction/rejection boundary.
-- Exact task-specific payload validation prevents phenotype clinical text and
-  interpretation evidence from being mixed across model entry points.
-- Unselected Excel worksheets and rows are eliminated before provider/model,
-  logging, database, report, and export boundaries.
-- Evidence confirmation requires an explicit no-PHI attestation in the Streamlit UI;
-  saving or resetting a Draft clears the attestation and invalidates confirmation.
-- Human-review state and audit history are bounded and validated before persistence.
-- The application uses verified HTTPS requests and explicit deadlines.
-- Reports are generated locally; PDF/Word export does not make additional provider
-  calls.
-- Reviewers must not enter protected health information in free-text notes.
-
-Free-text detection is defense in depth and cannot guarantee de-identification of
-linguistically ambiguous, unlabelled names. Only de-identified evidence may be used.
-
-This is an application-level security baseline, not a claim of production clinical
-compliance. Deployment would require institutional authentication, authorization,
-encryption/key management, retention policy, backups, monitoring, threat modeling,
-and formal privacy/regulatory review.
-
-## 10. Failure handling and operational behavior
-
-- Provider calls use independent timeouts, bounded retry/backoff, and safe status
-  normalization.
-- Normalized annotation caching reduces repeated external calls and has a bounded TTL.
-- Expired restart checkpoints and abandoned atomic temporary files are pruned without
-  touching unrelated files in the recovery directory.
-- Failures are shown as explicit source/model states rather than fabricated evidence.
-- Successful variant/model results remain available when another variant fails.
-- Failed interpretations remain explicit and reviewable beside retained evidence;
-  rerunning an interrupted analysis regenerates the complete ordered interpretation
-  set from its sanitized recovery request.
-- User cancellation removes partial session output, temporary uploads, and newly
-  generated drafts owned by the cancelled job.
-- Progress updates occur for each normal annotation API, conditional population and
-  literature provider, Phen2Gene/MyDisease request, and individual LLM request.
-
-## 11. Verification status
-
-The automated suite is offline by design: provider HTTP traffic is blocked suite-wide
-unless a live diagnostic is explicitly enabled, so it is deterministic and does not
-consume external API quotas. The current recorded baseline is **1133 passed, 6 skipped**,
-with **85.83% Stage 59 coverage**. `tests/run_stage59_testing_v3.py` verifies non-empty Input,
-Phenotype, Interpretation, Draft Report, Selection, Reference, Final Report, and
-Recovery/Retry groups before running the complete V3 marker and enforcing at least
-80% coverage.
+The three failures are pre-existing open defects (§12, O-1..O-3), not caused by
+documentation work; the last all-green recorded baselines were
+**1476 passed / 6 skipped** (selected-input smoke era) and **1133 passed / 6
+skipped, 85.83% coverage** (resilience closeout era).
+
+Commands:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe tests\run_stage59_testing_v3.py
-.\.venv\Scripts\python.exe tests\run_stage60_acceptance.py
+.\.venv\Scripts\python.exe -m pytest -q                          # full offline suite
+.\.venv\Scripts\python.exe tests\run_stage59_testing_v3.py       # Testing V3 (≥80% coverage gate)
+.\.venv\Scripts\python.exe tests\run_stage60_acceptance.py       # V3 release gate (CI-active)
+.\.venv\Scripts\python.exe tests\run_stage78_resilience_acceptance.py
+.\.venv\Scripts\python.exe tests\run_live_provider_validation.py # bounded LIVE gate (manual; consumes quota; --skip-llm optional)
+.\.venv\Scripts\python.exe tools\provider_reachability.py        # quick DNS/HTTP check (network-dependent, excluded from CI)
 ```
 
-`requirements.txt` contains runtime dependencies only. `requirements-dev.txt` adds
-the pinned test toolchain. The Stage 60 gate executes for every push and pull request
-without live-provider traffic. The Stage 44 runner remains available only for legacy
-regression compatibility.
+Testing V3 verifies eight requirement groups (Input, Phenotype, Interpretation,
+Draft Report, Selection, Reference, Final Report, Recovery/Retry), blocks
+unmocked HTTP suite-wide, and enforces ≥80% coverage. The Stage 60 gate runs on
+every push/PR (`.github/workflows/verify.yml`). Last full Stage 61 live gate
+passed **2026-08-09** (point-in-time result, not an availability guarantee).
 
-Live-provider connectivity is intentionally a separate manual activity. A passing
-offline suite proves application contracts and failure handling; it does not prove
-that every external provider is currently available or that external schemas have
-not changed.
+A passing offline gate proves application contracts and failure handling — never
+current provider availability or schema stability.
 
-The bounded production-client gate validates every active annotation, phenotype,
-population, literature, and configured LLM endpoint:
+---
 
-```powershell
-.\.venv\Scripts\python.exe tests\run_live_provider_validation.py
-```
+## 11. Configuration & runbook
 
-The complete Stage 61 gate passed on **2026-08-09**. GenCC, CSpec, LitVar2, Europe
-PMC, and PubMed returned valid no-match responses for the public probe. Every other
-biomedical client and both configured task-specific model contracts returned usable
-responses. Representative ClinVar and MyVariant links were reachable. The ignored
-JSON summary is written to `output/live-provider-validation.json`. This remains a
-point-in-time connectivity/schema result, not a future availability guarantee.
-
-## 12. Configuration and execution
-
-Required configuration includes `GENOME_ASSEMBLY`, `LLM_PROVIDER`, `LLM_BASE_URL`,
-`LLM_API_KEY`, and default LLM model settings. Stage 47 adds the independent
-`PHENOTYPE_EXTRACTION_MODEL`, `VARIANT_INTERPRETATION_MODEL`, and bounded
-`PHENOTYPE_EXTRACTION_MAX_TOKENS` settings. Stage 49 exposes the two task settings
-as independent UI selectors and removes the legacy route selectors from the input
-flow. Stage 50 adds the independently bounded
-`VARIANT_INTERPRETATION_MAX_TOKENS` setting. Provider base URLs, timeouts, retry limits,
-cache limits, enrichment limits, HPO release locations, database location, upload and
-report paths, and feature flags are centralized in `config.py` and documented by
-`.env.example`.
+Windows is the primary verified environment; Python 3.13; dependencies exactly
+pinned (`requirements.txt` runtime, `requirements-dev.txt` test tooling).
 
 ```powershell
+git clone <repository-url>; cd clinical_variant_app
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m streamlit run app.py
+Copy-Item .env.example .env     # then edit — never commit .env
+.\run_app.bat                   # or: python app.py / streamlit run app.py
 ```
 
-On Windows, `run_app.bat` is also available. Running `python app.py` delegates to
-Streamlit automatically.
+Minimum `.env` values: `GENOME_ASSEMBLY` (GRCh37|GRCh38), `LLM_PROVIDER=openai_compatible`,
+`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `PHENOTYPE_EXTRACTION_MODEL`,
+`VARIANT_INTERPRETATION_MODEL` (+ optional `VARIANT_INTERPRETATION_FALLBACK_MODEL`,
+bounded retries/max-tokens for both tasks, `ANALYSIS_MAX_RUNTIME_SECONDS` 1–7200).
 
-## 13. Demonstration and professor-review runbook
+Key control groups (all documented in `.env.example`, validated in `config.py`):
+per-provider base URLs/timeouts/retry caps; UCSC sequence fallback controls;
+enrichment flags/limits (`ENABLE_GNOMAD_DEEP_LOOKUP`,
+`ENABLE_LITERATURE_ENRICHMENT`, caps of 10 variants/articles); annotation cache;
+CSpec LKG cache path; MedGen/ERepo enable switches; evidence-repository path/TTLs;
+analysis retention; upload/log/storage paths; HPO release URLs and coordinated
+local datasets (`data/hpo/hp.obo`, `phenotype_to_genes.txt`, `phenotype.hpoa` —
+update all three together via the in-app action).
 
-Before the demonstration, follow the provider checks in Sections 10-13, run Stage 60
-offline acceptance, optionally refresh the Stage 61 point-in-time live result, confirm
-`GRCh38` plus both task-model settings, and start Streamlit.
+Demo runbook: use `data/samples/stage62_demo_variants.xlsx` (show worksheet 2's
+`THIS_SHEET_MUST_NOT_BE_PROCESSED` marker first, then process the real sheet);
+demonstrate model selection, Persian extraction, HPO acceptance, ordered analyses,
+one audited edit, one exclusion, attestations/confirmations, model-free
+finalization, exports, and one validated link. If a live source fails during demo,
+explain the explicit no-match/unavailable state — never rewrite it as negative
+clinical evidence.
 
-Use `data/samples/stage62_demo_variants.xlsx`. First show its second worksheet and
-the `THIS_SHEET_MUST_NOT_BE_PROCESSED` marker, then upload the workbook. Demonstrate
-independent model selection, de-identified Persian phenotype extraction, local HPO
-correction and explicit acceptance, five ordered analyses and Draft Variant Reports,
-one audited reviewer edit, at least one reporting-only exclusion, per-variant privacy
-attestation and confirmation, model-free finalization, selected-only text/PDF/Word
-downloads, and one validated canonical or literature link.
+Storage layout:
 
-If a live source fails, retain and explain the explicit no-match/unavailable state;
-never rewrite it as negative clinical evidence. Use the deterministic Stage 60 gate
-to demonstrate application behavior when external connectivity is unreliable.
-
-Professor feedback should address report usefulness and visual organization,
-evidence-bound interpretation wording, phenotype/HPO correction usability, selection
-semantics, reference quality, and any additional bounded clinical fields. Feedback
-and sign-off remain external and must not be recorded as complete before review.
-
-## 14. Implementation map
-
-| Area | Primary files |
+| Path | Purpose |
 |---|---|
-| Application entry and configuration | `app.py`, `config.py`, `.env.example` |
-| VCF/manual input processing | `backend/vcf_processing.py`, `backend/pipeline.py`, `frontend/ui.py` |
-| Selected XLSX worksheet/row workflow | `backend/excel_processing.py`, `frontend/xlsx_selection.py`, `frontend/execution.py`, `frontend/ui.py` |
-| Core annotation providers | `backend/annotation.py` |
-| VEP-to-VariantValidator validation/mapping fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
-| MyVariant-to-Ensembl overlapping-context fallback | `backend/annotation.py`, `backend/provider_resilience.py`, `backend/report.py`, `config.py`, `tests/test_pipeline.py` |
-| CSpec last-known-good metadata cache | `backend/cspec_cache.py`, `backend/annotation.py`, `backend/report.py`, `config.py`, `.env.example`, `tests/test_pipeline.py` |
-| HPO and Phen2Gene | `backend/phenotype.py` |
-| Persian phenotype extraction and acceptance | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `backend/llm.py`, `backend/privacy.py`, `frontend/ui.py` |
-| Task-specific model UI | `frontend/ui.py`, `frontend/evidence_review.py`, `config.py` |
-| Single-model interpretation contract | `backend/variant_interpretation.py`, `backend/llm.py`, `backend/conflict_auditor.py`, `backend/privacy.py`, `config.py` |
-| Interpretation-before-review orchestration | `backend/pipeline.py`, `frontend/evidence_review.py`, `frontend/execution.py`, `backend/database.py` |
-| Draft Variant Report V2 | `backend/variant_report.py`, `backend/pipeline.py`, `frontend/evidence_review.py` |
-| Audited report editing | `backend/variant_report.py`, `backend/pipeline.py`, `frontend/evidence_review.py` |
-| Canonical references and citation IDs | `backend/references.py`, `backend/variant_interpretation.py`, `backend/variant_report.py` |
-| MyDisease context | `backend/mydisease.py` |
-| MyDisease latency guard and local HPO degraded mode | `backend/mydisease.py`, `backend/phenotype.py`, `backend/provider_resilience.py`, `backend/pipeline.py`, `backend/report.py`, `tests/test_mydisease.py` |
-| Evidence schemas and original reports | `backend/report.py` |
-| Conflict audit | `backend/conflict_auditor.py` |
-| Conditional enrichment | `backend/conditional_enrichment.py` |
-| Provider resilience contract and shared call policy | `backend/provider_resilience.py`, `backend/mydisease.py`, `tests/test_provider_resilience.py`, `tests/test_mydisease.py` |
-| Unified primary/fallback capability results | `backend/provider_resilience.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_provider_resilience.py`, `tests/test_pipeline.py` |
-| Fallback UI and report transparency | `backend/fallback_transparency.py`, `backend/variant_report.py`, `frontend/results.py`, `frontend/evidence_review.py`, `tests/test_fallback_transparency.py` |
-| Deterministic provider failure injection | `tests/test_failure_injection.py` |
-| Manual provider reachability regression | `tools/provider_reachability.py`, `tests/test_provider_reachability.py` |
-| Provider resilience configuration and operations | `.env.example`, `docs/PROJECT_DECLARATION.md`, `README.md` |
-| Provider resilience acceptance gate | `tests/test_resilience_acceptance.py`, `tests/run_stage78_resilience_acceptance.py` |
-| Stage 79 acceptance defect freeze and synthetic asset | `docs/acceptance_failures_v1.md`, `tests/fixtures/stage79_synthetic_report_fixture.json`, `tests/test_stage79_acceptance_assets.py` |
-| Stage 80 professor report specification | `docs/professor_report_template_spec.md`, `docs/report_style_spec.yaml`, `docs/stage_80_progress.md`, `tests/test_stage80_specification.py` |
-| Stage 81 ReportData V4 contract | `backend/report_data.py`, `docs/report_data_v4_contract.md`, `tests/test_report_data.py` |
-| Stage 82 authoritative DOCX template | `templates/clinical_variant_report_v1.docx`, `tools/build_stage82_template.py`, `docs/stage_82_template_contract.md`, `tests/test_stage82_docx_template.py` |
-| Stage 83 golden DOCX fidelity gate | `backend/report_docx.py`, `tests/fixtures/stage83_golden_report_data_v4.json`, `tests/golden/stage83/variant_001_report.docx`, `docs/stage_83_fidelity_gate.md`, `tests/test_stage83_docx_fidelity.py` |
-| Stage 84 in-app report preview | `frontend/report_preview.py`, `frontend/evidence_review.py`, `frontend/ui.py`, `docs/stage_84_report_preview.md`, `tests/test_stage84_report_preview.py` |
-| Stage 85 document-like editing and DOCX regeneration | `backend/report_data_projection.py`, `frontend/evidence_review.py`, `docs/stage_85_document_editing.md`, `tests/test_stage85_document_editor.py` |
-| Stage 86 per-variant report lifecycle | `backend/report_lifecycle.py`, `backend/pipeline.py`, `backend/database.py`, `backend/final_clinical_report.py`, `frontend/evidence_review.py`, `docs/stage_86_report_lifecycle.md`, `tests/test_stage86_report_lifecycle.py` |
-| Stage 87 variant cardinality and identity gate | `backend/variant_integrity.py`, `backend/pipeline.py`, `backend/privacy.py`, `backend/database.py`, `docs/stage_87_variant_integrity.md`, `tests/test_stage87_variant_integrity.py` |
-| Stage 88 interpretation failure diagnostics | `backend/llm.py`, `backend/variant_interpretation.py`, `frontend/evidence_review.py`, `docs/stage_88_interpretation_diagnostics.md`, `tests/test_stage88_interpretation_diagnostics.py` |
-| Stage 89 interpretation recovery policy | `backend/llm.py`, `backend/variant_interpretation.py`, `config.py`, `.env.example`, `docs/stage_89_interpretation_recovery.md`, `tests/test_stage89_interpretation_recovery.py` |
-| Stage 90 phenotype non-concordance contract | `backend/variant_interpretation.py`, `backend/report_data.py`, `backend/report_data_projection.py`, `docs/stage_90_phenotype_non_concordance.md`, `tests/test_stage90_phenotype_non_concordance.py` |
-| Stage 91 interpretation quality gate | `backend/interpretation_quality.py`, `data/benchmarks/stage91_cases.json`, `tools/evaluate_stage91_models.py`, `docs/stage_91_interpretation_quality.md`, `tests/test_stage91_interpretation_quality.py` |
-| Stage 92 Reference Model V2 | `backend/reference_model.py`, `backend/variant_interpretation.py`, `backend/variant_report.py`, `backend/report_data_projection.py`, `backend/final_clinical_report.py`, `frontend/report_preview.py`, `frontend/evidence_review.py`, `docs/stage_92_reference_model_v2.md`, `tests/test_stage92_reference_model.py` |
-| Stage 93 canonical human-link resolver | `backend/human_links.py`, `backend/references.py`, `backend/reference_model.py`, `backend/report_data.py`, `backend/final_clinical_report.py`, `backend/report_docx.py`, `frontend/report_preview.py`, `frontend/evidence_review.py`, `docs/stage_93_human_link_resolver.md`, `tests/test_stage93_human_links.py` |
-| Stage 94 reference validation tests | `tests/test_stage94_reference_validation.py`, `tests/test_stage94_reference_validation_live.py`, `docs/stage_94_reference_validation.md`, `pytest.ini` |
-| Stage 95 user-facing analysis summary | `frontend/analysis_summary.py`, `frontend/ui.py`, `docs/stage_95_analysis_summary.md`, `tests/test_stage95_analysis_summary.py` |
-| Stage 96 variant-first status cards | `frontend/variant_status.py`, `frontend/evidence_review.py`, `docs/stage_96_variant_status_cards.md`, `tests/test_stage96_variant_status_cards.py` |
-| Stage 97 warning semantics V2 | `frontend/warning_semantics.py`, `frontend/variant_status.py`, `frontend/evidence_review.py`, `docs/stage_97_warning_semantics.md`, `tests/test_stage97_warning_semantics.py` |
-| Stage 98 technical diagnostics drawer | `frontend/technical_diagnostics.py`, `frontend/evidence_review.py`, `docs/stage_98_technical_diagnostics.md`, `tests/test_stage98_technical_diagnostics.py` |
-| Stage 99 persistence and recovery V4 | `backend/database.py`, `docs/stage_99_persistence_recovery_v4.md`, `tests/test_stage99_persistence_recovery_v4.py` |
-| Stage 100 DOCX export and final package | `backend/final_docx_package.py`, `backend/report_docx.py`, `frontend/evidence_review.py`, `frontend/report_viewer.py`, `docs/stage_100_docx_export_package.md`, `tests/test_stage100_docx_export_package.py` |
-| Stage 101 visual regression harness | `tools/stage101_visual_regression.py`, `tests/fixtures/stage101_visual_scenarios.json`, `tests/golden/stage101/snapshots.json`, `tests/test_stage101_visual_regression.py`, `docs/stage_101_visual_regression.md` |
-| Stage 102 interpretation acceptance suite | `tests/test_stage102_interpretation_acceptance.py`, `docs/stage_102_interpretation_acceptance.md`, `pytest.ini` |
-| Stage 103 reference acceptance suite | `tests/test_stage103_reference_acceptance.py`, `docs/stage_103_reference_acceptance.md`, `pytest.ini` |
-| Stage 104 status and warning UX acceptance suite | `frontend/analysis_summary.py`, `frontend/ui.py`, `tests/test_stage104_status_warning_acceptance.py`, `docs/stage_104_status_warning_acceptance.md`, `pytest.ini` |
-| Stage 105 professor testcase end-to-end acceptance | `tests/test_stage105_professor_testcase.py`, `docs/stage_105_professor_testcase.md`, `pytest.ini` |
-| Stage 106 Persian phenotype extraction hardening | `backend/phenotype_llm.py`, `backend/phenotype_selection.py`, `frontend/ui.py`, `tests/test_defect01_phenotype_extraction.py`, `tests/test_pipeline.py` |
-| Stage 107 valid no-match evidence rescue | `backend/evidence_rescue.py`, `backend/annotation.py`, `backend/report.py`, `tests/test_pipeline.py` |
-| Stage 108 cross-provider retrieval intelligence | `backend/retrieval_intelligence.py`, `backend/annotation.py`, `backend/report.py`, `tests/test_pipeline.py` |
-| Stage 109 exact ClinVar retrieval hardening | `backend/annotation.py`, `tests/test_pipeline.py` |
-| Stage 110 scoped CSpec applicability | `backend/annotation.py`, `backend/report.py`, `backend/variant_report.py`, `frontend/results.py`, `tests/test_pipeline.py` |
-| Stage 111 deterministic evidence readiness | `backend/evidence_readiness.py`, `backend/conditional_enrichment.py`, `backend/pipeline.py`, `backend/database.py`, `backend/variant_interpretation.py`, `tests/test_pipeline.py` |
-| Stage 112 secondary classification recovery | `backend/classification_evidence.py`, `backend/conflict_auditor.py`, `backend/report_data_projection.py`, `backend/variant_report.py`, `frontend/report_preview.py`, `tests/test_classification_evidence.py` |
-| Stage 113 classified interpretation retry | `backend/variant_interpretation.py`, `backend/pipeline.py`, `frontend/evidence_review.py`, `tests/test_defect08_interpretation_recovery.py` |
-| Stage 114 reviewer source-status semantics | `frontend/source_status.py`, `frontend/evidence_review.py`, `frontend/report_preview.py`, `frontend/results.py`, `frontend/warning_semantics.py`, `tests/test_defect09_reviewer_source_status.py` |
-| Local HPO-gene fallback | `backend/local_hpo_gene_fallback.py`, `backend/phenotype.py`, `backend/report.py`, `frontend/results.py`, `tests/test_local_hpo_gene_fallback.py` |
-| gnomAD-to-Ensembl population fallback | `backend/conditional_enrichment.py`, `backend/report.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
-| ClinVar-to-MyVariant derived fallback | `backend/annotation.py`, `backend/report.py`, `backend/conflict_auditor.py`, `backend/variant_report.py`, `tests/test_pipeline.py` |
-| Literature resilience and canonical article links | `backend/conditional_enrichment.py`, `backend/references.py`, `backend/report.py`, `tests/test_pipeline.py` |
-| Editable evidence review | `backend/evidence_review.py`, `frontend/evidence_review.py` |
-| Confirmation packages | `backend/evidence_confirmation.py` |
-| LLM provider and legacy routing compatibility | `backend/llm.py`, `backend/llm_routing.py` |
-| Legacy Output B compatibility | `backend/final_interpretation_report.py`, `frontend/final_interpretation_view.py` |
-| Pipeline V2 and progress | `backend/pipeline.py` |
-| Final Clinical Report composition | `backend/final_clinical_report.py` |
-| SQLite persistence | `backend/database.py` |
-| Privacy, logging, and safe errors | `backend/privacy.py`, `backend/logging_config.py`, `backend/error_handling.py` |
-| Background jobs and refresh recovery | `frontend/execution.py`, `frontend/ui.py` |
-| Report rendering/export | `backend/report_exports.py`, `frontend/report_viewer.py` |
-| Automated and manual verification | `tests/test_pipeline.py`, `tests/test_mydisease.py`, `tests/run_stage59_testing_v3.py`, `tests/run_stage60_acceptance.py`, `tests/run_live_provider_validation.py`, `tests/manual_*.py` |
-| Stage 62 demo and professor-review handoff | `data/samples/stage62_demo_variants.xlsx`, `docs/PROJECT_DECLARATION.md` |
+| `storage/database/clinical_variant.sqlite3` | Validated Draft/Confirmed pipeline snapshots |
+| `storage/evidence_repository/evidence_repository.sqlite3` | Global provider-observation cache (must NOT be git-tracked — see O-1) |
+| `storage/uploads/`, `storage/reports/`, `storage/logs/` | Bounded temporary uploads; artifacts; rotating redacted log |
+| `data/cache/`, `data/hpo/` | App cache; coordinated HPO datasets |
 
-## 15. Known limitations and remaining work
+Privacy/security baseline: secrets only in `.env`; sample/genotype/patient columns
+stripped at input boundary; defensive PHI/credential/raw-VCF log redaction;
+Persian-labelled identifiers + Iranian mobile numbers redacted before extraction
+and rejected from stored content; exact task-specific payload validators prevent
+cross-task mixing; unselected worksheets/rows eliminated before every downstream
+boundary; confirmation-gated PHI attestation; verified HTTPS + explicit deadlines
+everywhere. Free-text detection is defense in depth — users must still supply
+de-identified text. Application-level baseline only; institutional deployment
+requires authN/authZ, encryption/KMS, retention, backups, monitoring, threat
+modeling, and formal regulatory review.
 
-1. Stages 46-114 are implemented and documented. The provider-resilience roadmap is
-   complete, Stage 79 froze the report-first acceptance defects, and Stage 80 defined
-   the professor-report template specification. Stage 83 manual DOCX visual fidelity,
-   Stage 115, professor feedback, and final visual sign-off remain pending.
-2. The system assumes that variant filtering and candidate selection happened before
-   upload; it must not be presented as a genome-wide prioritization engine.
-3. External APIs can change, throttle, or become unavailable. Live smoke tests should
-   be run before a demonstration or deployment.
-4. CSpec records are contextual metadata only; no specification rule engine exists.
-5. GeneBe automated ACMG results are retained as source evidence, not adopted as a
-   final application classification.
-6. Human review is required for every variant before finalization.
-7. Local restart recovery reuses durably persisted drafts; unpersisted work reruns from
-   a sanitized checkpoint and cannot resume the exact interrupted HTTP call. A durable
-   distributed queue would still be required for multi-instance production execution.
-8. SQLite is suitable for the current bounded single-application workflow, not a
-   production multi-user clinical deployment.
-9. Interpretation quality still depends on upstream data quality, evidence currency,
+---
+
+## 12. Open items & known limitations
+
+### Open defects (measured 2026-08-25; fixing them requires code/test changes — out of scope for documentation passes)
+
+| ID | Severity | Description |
+|---|---|---|
+| O-1 | High | `storage/evidence_repository/evidence_repository.sqlite3` is git-tracked and modified; Stage 15 secrets audit fails (`sensitive_file_tracked`/`sensitive_file_committed`). Fix: untrack + ignore the runtime DB (repo hygiene change). |
+| O-2 | Medium | `test_external_api_status_panel_shows_each_service_state` expects label `'ClinGen/GenCC (UCSC)'` absent from current rendered panel — test/UI drift after Stage 11.4 legacy provider-UI removal (`b3b25bf`). |
+| O-3 | Medium | `test_repository_cache_hit_is_distinct_from_live_provider`: expected fresh cache hit returns `outcome=miss` and falls through to the live call — logic defect in `provider_repository.execute_provider_with_repository` cache-hit path. |
+
+### Pending milestones
+
+- Stage 83 manual Word/LibreOffice DOCX visual-fidelity comparison.
+- Stage 115 final visual sign-off + external professor feedback/sign-off.
+- Workstream C **Stage 8 (Franklin)** — pending/on hold awaiting supervisor decision.
+- Stage 91 default-model promotion — requires ≥2 complete live, human-reviewed
+  candidates; offline fixtures can never promote.
+
+### Structural limitations
+
+1. Assumes pre-filtered input; must never be presented as a genome-wide
+   prioritization engine.
+2. External APIs can change/throttle/vanish; run live smokes before demos.
+3. CSpec is contextual metadata only — no rule engine. GeneBe is evidence, never
+   the application's final classification.
+4. Human review required for every variant before finalization.
+5. Restart recovery cannot resume an exactly-interrupted HTTP call; multi-instance
+   production would need a durable distributed queue.
+6. SQLite fits the bounded single-application workflow, not multi-user clinical
+   production.
+7. Interpretation quality depends on upstream data quality, evidence currency,
    reviewer judgment, prompt/model behavior, and phenotype completeness.
+8. Documentation drift risk: several historical `docs/*.md` files and README
+   numbers lag behind code (this document is the verified reference as of
+   2026-08-25).
 
-## 16. Completion statement
+---
 
-The implemented project has passed its Stage 60 offline V3 acceptance gate and Stage
-61 point-in-time live gate and provides
-a coherent evidence-collection, single-model interpretation-before-review, and human
-confirmation workflow with explicit safety boundaries. Stage 45 incorporated the professor review
-into an authoritative V3 contract, Stage 46 implemented first-sheet-only Excel input
-plus the centralized ten-variant boundary, Stage 47 implemented the isolated bounded
-phenotype-extraction LLM contract, Stage 48 added local ontology validation and
-explicit acceptance, and Stage 49 implemented the task-specific model selectors and
-accepted input layout. Stage 50 added and verified the route-free, single Variant
-Interpretation Model contract while preserving conflict as prompt context. Stage 51
-integrated that contract into the analysis phase, moved interpretation before final
-review, preserved failed variants as reviewable evidence, and removed active
-Output A/B routing from the UI. Stage 52 added the coherent, immutable-machine-original
-Draft Variant Report V2 and its professional Streamlit presentation. Stage 53 added
-whitelisted report editing, append-only replayable history, comparison/reset controls,
-and confirmation invalidation. Stage 54 added audited reporting-only inclusion
-decisions, complete excluded-report retention, ordered selection projection, and
-selection-change confirmation invalidation. Stage 55 added normalized canonical
-references, provider-specific exact-record URL builders, strict link allowlisting,
-bounded evidence-only LLM citation IDs, explicit unavailable-link fallbacks, and
-clickable export rendering. Stage 56 added selected-only deterministic Final Clinical
-Report schema `2.0`, exact reviewed-state composition, grouped references,
-audit/provenance disclosure, and text/PDF/Word delivery without a new LLM call.
-Stage 57 added normalized SQLite schema V3 lifecycle projections, pipeline schema
-`2.9` analysis context, bounded Stage 56 migration, explicit unsupported handling
-for legacy Output A/B records, and refresh/restart recovery of persisted drafts
-without rerunning successful interpretation. Stage 58 added separate exact-field LLM
-payload validators, Persian identifier/mobile redaction, end-to-end ignored-sheet
-leakage verification, and report-content privacy rejection while documenting the
-limits of free-text detection. Stage 59 registered eight explicit V3 test groups,
-suite-wide offline HTTP blocking, group-collection checks, and the deterministic
-coverage-enforced Testing V3 runner. Stage 60 added the deterministic redesigned
-ten-variant Excel-to-final-report acceptance scenario, wrapped it with compilation,
-dependency, secret, and Testing V3 checks, and activated the new gate in GitHub
-Actions. Stage 61 revalidated every production provider client and both task-specific
-LLM contracts, probed representative exact links, and removed non-navigable VEP and
-GeneBe POST endpoints from report hyperlinks. Stage 62 reconciled the V3 documents,
-added and verified the multi-sheet demo workbook, corrected stale UI wording, and
-prepared the exact demo and professor-feedback checklist. Stages 63-72 added the
-shared provider-resilience contract, bounded request policy, local HPO-gene and
-population fallback paths, ClinVar-derived fallback, and the provenance-preserving
-literature resilience chain, followed by bounded MyDisease latency and local
-context-only degraded mode, limited VEP-to-VariantValidator validation/HGVS mapping,
-MyVariant-to-Ensembl exact-overlap context fallback, an explicit-freshness CSpec
-last-known-good metadata cache, and a unified source-preserving capability result
-contract consumed generically by draft report statuses, followed by concise UI and
-report provenance notices that disclose every affected fallback capability. Stage 75
-added deterministic outage injection for all required fallback chains and verified
-degraded-source provenance through final report composition. Stage 76 added a bounded
-manual DNS/HTTP reachability checker with safe failure categories and optional JSON
-and CSV exports. Stage 77 consolidated the fallback matrix, architecture,
-configuration, operations, and troubleshooting into this unified declaration. Stage 78
-added and passed the persisted multi-variant resilience acceptance gate, completing
-the provider-resilience roadmap. Stage 79 then froze the acceptance defect registry,
-the confidential professor-report design-reference boundary, and a tested synthetic
-non-PHI golden asset. Stage 80 then converted all four pages of the actual professor
-PDF into an implementation-ready report anatomy and visual/content specification while
-leaving production behavior unchanged. Stage 81 then added the strict renderer-neutral
-ReportData V4 contract with typed evidence, valid missingness/non-concordance,
-source-preserving provenance, and replayable review state. Stage 82 then added the
-authoritative editable Word-native per-allele template,
-reproducible construction, fixed table geometry, privacy-safe placeholders, and the
-independent artifact naming contract. Stage 83 then added deterministic ReportData V4
-template population, a rich synthetic golden record, the committed per-variant DOCX,
-and automated structural fidelity checks. The Word/LibreOffice side-by-side visual
-gate, professor review, and final visual sign-off remain pending. Stage 84 then added
-the report-first three-page HTML review surface and demoted provider dashboards from the
-default visual hierarchy. Stage 85 then added explicit document-region editing,
-field-level audit preservation, confirmation invalidation, and regenerated editable
-DOCX output through transient ReportData V4 projection.
-Stage 86 then persisted one ordered ReportData-backed lifecycle record per accepted
-variant, retained excluded variants as analyzed and auditable records, and made Final
-Clinical Report selection follow the original input order. Stage 87 then added the
-persisted input-index and allele-digest integrity gate, including the dedicated
-seven-variant and duplicate-gene acceptance scenario. Stage 88 then replaced opaque
-interpretation exception names with a stable twelve-category failure taxonomy, added
-secret-free per-variant structured diagnostics, and kept reviewer-facing failures
-concise. Stage 89 then added one bounded transient retry, one constrained
-structured-output repair, and an optional operational-only fallback model while
-preserving the selected model as the primary for every variant. Stage 90 then made
-unrelated phenotype a valid explicit no-supported-association outcome while retaining
-variant interpretation and source-attributed pathogenicity evidence. Stage 91 then
-added the fixed interpretation-quality benchmark and evidence gate without claiming a
-live model recommendation or changing the configured default. Stage 92 then separated
-numbered scientific literature from unnumbered database and tool provenance across
-the active interpretation and report path. Stage 93 then added stable human-facing
-record resolution, rejected raw machine endpoints from normal reviewer links, and
-kept MyVariant.info as explicitly labelled programmatic provenance. Stage 94 then
-added exhaustive deterministic reference-mapping regressions and a separately gated
-optional live human-page check. Stage 95 then added the input-aware product summary,
-exact per-variant outcome counts, and collapsed provider diagnostics. Stage 96 then
-added stable variant-first status cards, variant-local warning attribution, and
-collapsed per-variant provider details. Stage 97 then added the four-level warning
-semantics model, preserved no-match as informational missingness, and replaced raw
-implementation warnings with consequence-oriented reviewer copy. Stage 98 then added
-the collapsed per-variant provider diagnostics drawer, including retained attempt,
-latency, fallback, and failure-category telemetry without exposing raw provider
-payloads. Stage 99 then added SQLite schema V4 report-first persistence, deterministic
-artifact identity, and fail-closed refresh/restart recovery without regenerating
-interpretation. Stage 100 then made the professor-template DOCX authoritative for each
-variant and added deterministic selected-report packaging with artifact-integrity
-checks and no hidden interpretation regeneration. Stage 101 then added six deterministic
-DOCX layout scenarios, exact binary/structural snapshots, and an optional real raster
-matrix. Stage 102 then added the seven-scenario corrected-interpretation acceptance
-gate, including bounded recovery and retained action-required report state after total
-model failure. Stage 103 then added end-to-end user-facing reference acceptance across
-canonical targets, category separation, safe link policy, HTML preview, and DOCX
-output. Stage 104 then added the exact ready-report count and validated that primary
-status cards and consequence notices answer the reviewer questions without opening
-technical details. Stage 105 then added the deterministic offline acceptance suite,
-verifying 7-variant cardinality, preservation of input order, same-gene separation,
-phenotype non-concordance handling, and provider degradation scenarios. Stages 106-114
-then resolved the nine post-acceptance defects: multi-concept Persian phenotype
-extraction, no-match rescue, identifier-aware retrieval, exact ClinVar matching,
-scope-correct CSpec context, deterministic evidence readiness, source-attributed
-classification recovery, persisted-evidence interpretation retry, and reviewer-safe
-source-status wording. Stage 115 is the final visual sign-off gate.
+## 13. Document map & cleanup guidance
+
+### Executed cleanup (2026-08-25)
+
+The following thirteen superseded/audit documents were **deleted** after their
+facts were folded into this declaration (mostly §9) and after confirming zero
+references from code, tests, tools, README, or AGENTS.md:
+`Clinical_Variant_Active_Codex_Roadmap_After_Stage3.md`,
+`EREPO_EXACT_IDENTITY_CONTRACT.md`, `input_preprocessing_stage1_audit.md`,
+`live_run_stage1_evidence_construction_audit.md`,
+`live_run_stage3_provider_resilience_audit.md`,
+`persian_clinical_entity_extraction.md`, `stage_4_3_audit_and_acceptance.md`,
+`stage_6_1_clinical_entity_contract_audit.md`,
+`stage_8_performance_optimization_audit.md`, `stage_9_resilience_validation.md`,
+`stage_10_failure_driven_trace.md`, `stage_11_2_analysis_lifecycle_audit.md`,
+`stage_11_3_variant_failure_isolation_audit.md`.
+
+### Remaining documents and why each is load-bearing
+
+| Document | Kept because |
+|---|---|
+| `AGENTS.md` | Agent operating contract |
+| `COMPLETE_CODEX_EXECUTION_ROADMAP.md` | Active roadmap definition (Workstream C); STATUS section stale but scope/stage specs binding |
+| `AI_HANDOFF_MASTER_EVIDENCE_GRAPH.md` | Authoritative evidence-semantics/correlation/LLM-boundary/human-review contracts |
+| `EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md` | Closed Workstream B record (referenced by AGENTS.md and doc-consistency tests) |
+| `docs/PROJECT_DECLARATION.md` | This document |
+| `acceptance_failures_v1.md` | Referenced by `tests/test_stage79_acceptance_assets.py` |
+| `professor_report_template_spec.md`, `report_style_spec.yaml`, `stage_80_progress.md` | Referenced by `tests/test_stage80_specification.py`; authoritative report design reference for pending Stages 83/115 visual work |
+| `stage_82_template_contract.md` | Referenced by `tests/test_stage82_docx_template.py` |
+| `stage_83_fidelity_gate.md` | Referenced by `tests/test_stage83_docx_fidelity.py` |
+| `stage_6a_counterfactual_audit.md` | Generated/read by `tools/generate_stage6a_counterfactual_audit.py` and `tests/test_stage6a_shadow_composition.py` |
+| `input_preprocessing_stage2b.md`, `stage2c.md`, `stage3.md` | Active behavioral contracts (zero-allele adaptation, reference-route semantics, selected-input workflow) hyperlinked from README |
+
+Deletion rule going forward: never delete a document referenced by an executable
+test, tool, README link, or by `AGENTS.md` without updating the referencing
+artifact in the same reviewed change.
+
+---
+
+## 14. Completion statement
+
+As of 2026-08-25 the implemented system comprises: Declaration Stages 0–114
+(complete), the closed evidence-resilience workstream 1–11, Codex-roadmap Stages
+1–7 (complete), the implemented-but-undocumented Stage 9.2/10/11 series, and
+pending items listed in §12 (Stage 8 Franklin, Stage 83/115 visual sign-offs,
+three open defects O-1..O-3). The platform provides a coherent evidence-collection,
+single-model interpretation-before-review, and human-confirmation workflow within
+explicit safety boundaries. Any agent continuing work here should: honor §2
+without exception, treat §7's schema table as ground truth over older documents,
+check §9 before assuming a stage is done or undone, and STOP for external review
+at stage boundaries per `AGENTS.md`.
