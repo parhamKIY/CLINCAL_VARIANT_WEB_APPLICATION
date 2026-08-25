@@ -568,6 +568,50 @@ def shadow_free_evidence_for_llm(evidence: Mapping[str, object]) -> dict[str, ob
     return result
 
 
+LLM_OPERATIONAL_EVIDENCE_FIELDS = frozenset(
+    {
+        "accepted_uuids",
+        "candidate_count",
+        "cache_retrieved_at",
+        "endpoint",
+        "original_retrieved_at",
+        "query_column",
+        "query_key",
+        "retrieved_at",
+        "source_retrieved_at",
+        "strategy_id",
+        "stored_at",
+    }
+)
+
+
+def semantic_evidence_for_llm(evidence: Mapping[str, object]) -> dict[str, object]:
+    """Remove only duplicated operational transport metadata for the LLM.
+
+    The validated EvidenceObject remains the source of truth. Correlation groups,
+    lineage, capability status/reasons, source releases, exact-query provenance,
+    and compaction limitation counts remain visible because they affect safe
+    interpretation. Only bounded transport/storage timestamps, endpoints, and
+    duplicated retrieval-strategy bookkeeping are removed. Persisted evidence is
+    never modified by this projection.
+    """
+
+    def slim(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {
+                key: slim(item)
+                for key, item in value.items()
+                if key not in LLM_OPERATIONAL_EVIDENCE_FIELDS
+            }
+        if isinstance(value, list):
+            return [slim(item) for item in value]
+        return deepcopy(value)
+
+    result = slim(shadow_free_evidence_for_llm(evidence))
+    assert isinstance(result, dict)
+    return result
+
+
 def compare_shadow_to_vep(
     shadow: Mapping[str, object],
     vep_comparator: Mapping[str, object],
@@ -702,6 +746,7 @@ __all__ = [
     "build_shadow_composition",
     "compare_shadow_to_vep",
     "compose_shadow_annotation",
+    "semantic_evidence_for_llm",
     "shadow_free_evidence_for_llm",
     "validate_shadow_composition",
 ]

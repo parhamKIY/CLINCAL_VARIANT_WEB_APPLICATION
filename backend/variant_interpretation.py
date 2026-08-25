@@ -46,7 +46,10 @@ from backend.report import (
     EvidenceObjectError,
     sanitize_evidence_object,
 )
-from backend.shadow_composition import shadow_free_evidence_for_llm
+from backend.shadow_composition import (
+    semantic_evidence_for_llm,
+    shadow_free_evidence_for_llm,
+)
 from backend.variant_integrity import stable_allele_identity
 from config import settings
 
@@ -506,7 +509,11 @@ def _build_prompt(
     prompt_mode: InterpretationPromptMode,
     readiness_audit: Mapping[str, object],
 ) -> str:
-    semantic_evidence = shadow_free_evidence_for_llm(evidence)
+    # The reference model needs the full sanitized evidence (capability
+    # provenance is validated there); only its literature catalog reaches the
+    # prompt. The payload itself carries the slimmed semantic projection.
+    sanitized_evidence = shadow_free_evidence_for_llm(evidence)
+    semantic_evidence = semantic_evidence_for_llm(evidence)
     try:
         validate_llm_payload(semantic_evidence)
     except ClinicalDataPrivacyError as exc:
@@ -558,7 +565,7 @@ def _build_prompt(
             "identifier": reference["identifier"],
             "title": reference["title"],
         }
-        for reference in build_reference_model_v2(semantic_evidence)[
+        for reference in build_reference_model_v2(sanitized_evidence)[
             "literature_references"
         ]
     ]

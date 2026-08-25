@@ -156,8 +156,12 @@ def test_b_sparse_live_shape_continues_with_limits_and_safe_projection() -> None
         '"section_budget_bytes":',
         '"shadow_composition":',
         '"annotation_promotion":',
+        '"retrieved_at":',
+        '"endpoint":',
     ):
         assert forbidden not in prompt
+    assert '"provider_version":' in prompt
+    assert '"upstream_sources":' in prompt
 
 
 def test_c_missing_optional_evidence_is_unknown_not_negative() -> None:
