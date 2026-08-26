@@ -107,7 +107,11 @@ def controlled_active_annotation_candidate(
 
 def _source_payload(candidate: Mapping[str, object], source: str) -> Mapping[str, object]:
     sources = _mapping(candidate.get("sources"))
-    return _mapping(sources.get("vep" if source == "VariantValidator" else "genebe"))
+    if source != "VariantValidator":
+        return _mapping(sources.get("genebe"))
+    vep = _mapping(sources.get("vep"))
+    verification = _mapping(vep.get("gene_identity_verification"))
+    return verification if verification.get("status") == "success" else vep
 
 
 def _variantvalidator_field_is_retained(
@@ -121,11 +125,20 @@ def _variantvalidator_field_is_retained(
         "hgvs_c": "validated_transcript_hgvs",
         "hgvs_p": "validated_protein_hgvs",
     }[field_name]
-    return (
+    legacy_fallback = (
         payload.get("provider") == "VariantValidator"
         and payload.get("provider_role") == "fallback"
         and payload.get("fallback_for") == "ensembl_vep"
         and payload.get("source_type") == "validation_mapping_fallback"
+    )
+    gene_verification = (
+        payload.get("provider") == "VariantValidator"
+        and payload.get("provider_role") == "verification"
+        and payload.get("trigger") == "vep_gene_context_unresolved"
+        and payload.get("status") == "success"
+    )
+    return (
+        (legacy_fallback or gene_verification)
         and _text(payload.get(expected_key)) == candidate
     )
 

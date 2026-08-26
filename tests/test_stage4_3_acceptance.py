@@ -13,6 +13,7 @@ from openpyxl import Workbook
 import pytest
 
 from backend.excel_processing import parse_excel_input_records
+from backend.gene_identity import resolve_gene_identity
 from backend.llm import LLMClient, LLMTimeoutError
 from backend.logging_config import (
     APP_LOGGER_NAME,
@@ -71,6 +72,10 @@ def _fallback_annotation(variant: dict[str, object]) -> dict[str, object]:
         "ref": variant["ref"],
         "alt": variant["alt"],
     }
+    transcript = str(annotation["transcript"])
+    hgvs_c = f"{transcript}:c.100C>T"
+    annotation["hgvsc"] = hgvs_c
+    annotation["hgvsp"] = annotation["protein_change"]
     annotation["sources"] = {
         "vep": {
             "status": "partial",
@@ -86,9 +91,14 @@ def _fallback_annotation(variant: dict[str, object]) -> dict[str, object]:
             "source_type": "validation_mapping_fallback",
             "upstream_sources": ["VariantValidator"],
             "normalized_variant": normalized_variant,
+            "validated_variant": normalized_variant,
             "validated_genomic_hgvs": None,
-            "validated_transcript_hgvs": None,
-            "validated_protein_hgvs": None,
+            "validated_gene": annotation["gene"],
+            "validated_gene_id": annotation["gene_id"],
+            "validated_transcript": transcript,
+            "validated_transcript_hgvs": hgvs_c,
+            "validated_protein_hgvs": annotation["protein_change"],
+            "selected_record": hgvs_c,
             "consequence_available": False,
             "validation_warnings": [],
             "most_severe_consequence": None,
@@ -111,6 +121,7 @@ def _fallback_annotation(variant: dict[str, object]) -> dict[str, object]:
         "Ensembl VEP was unavailable; VariantValidator retained exact mapping.",
         "GeneBe was unavailable; automated ACMG context was not added.",
     ]
+    annotation["gene_identity_resolution"] = resolve_gene_identity(annotation)
     return annotation
 
 

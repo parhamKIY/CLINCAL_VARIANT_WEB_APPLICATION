@@ -30,6 +30,10 @@ from backend.evidence_readiness import (
     build_evidence_readiness_audit,
     validate_evidence_readiness_audit,
 )
+from backend.gene_identity import (
+    GENE_IDENTITY_UNRESOLVED,
+    evidence_has_resolved_gene_identity,
+)
 from backend.logging_config import get_logger
 from backend.privacy import (
     VARIANT_INTERPRETATION_TASK,
@@ -118,6 +122,7 @@ InterpretationFailureType = Literal[
     "safety_or_finish_failure",
     "internal_conversion_failure",
     "configuration_error",
+    "gene_identity_unresolved",
     "unknown_failure",
 ]
 INTERPRETATION_FAILURE_TYPES = frozenset(
@@ -1293,6 +1298,11 @@ def interpret_variant(
     }:
         raise VariantInterpretationError(
             "Evidence is not ready for interpretation."
+        )
+    if not evidence_has_resolved_gene_identity(evidence):
+        raise VariantInterpretationError(
+            "Gene identity is unresolved for interpretation.",
+            failure_type=GENE_IDENTITY_UNRESOLVED,
         )
     configured_model = _configured_model(model)
     record_execution_event(

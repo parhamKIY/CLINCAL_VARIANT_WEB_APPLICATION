@@ -29,6 +29,10 @@ from backend.evidence_rescue import (
     EvidenceRescueContractError,
     validate_evidence_rescue_trace,
 )
+from backend.gene_identity import (
+    GeneIdentityResolutionError,
+    validate_gene_identity_resolution,
+)
 from backend.llm import LLMClient, LLMResponse, call_llm
 from backend.logging_config import get_logger
 from backend.privacy import (
@@ -1658,6 +1662,14 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
             raise EvidenceObjectError(
                 f"evidence.annotations.{field} must be a dictionary."
             )
+    resolution = annotations["vep"].get("gene_identity_resolution")
+    if resolution is not None:
+        try:
+            validate_gene_identity_resolution(resolution)
+        except GeneIdentityResolutionError as exc:
+            raise EvidenceObjectError(
+                "evidence.annotations.vep.gene_identity_resolution is invalid."
+            ) from exc
 
     pathogenicity = value["pathogenicity"]
     if not isinstance(pathogenicity, dict):
@@ -5944,6 +5956,7 @@ def _build_v2_sections(
                         "retrieved_at",
                         "assembly",
                         "normalized_variant",
+                        "validated_variant",
                         "validated_genomic_hgvs",
                         "validated_gene",
                         "validated_gene_id",
@@ -5956,7 +5969,20 @@ def _build_v2_sections(
                         "most_severe_consequence",
                         "total_transcript_consequences",
                         "transcripts_truncated",
+                        "gene_identity_verification",
                     ),
+                ),
+                **(
+                    {
+                        "gene_identity_resolution": deepcopy(
+                            candidate["gene_identity_resolution"]
+                        )
+                    }
+                    if isinstance(
+                        candidate.get("gene_identity_resolution"),
+                        dict,
+                    )
+                    else {}
                 ),
                 "gene": candidate.get("gene"),
                 "gene_id": candidate.get("gene_id"),

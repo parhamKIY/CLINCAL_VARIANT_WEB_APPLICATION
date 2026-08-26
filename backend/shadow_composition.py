@@ -462,7 +462,15 @@ def _fallback_evidence_from_candidate(
     sources = _mapping(candidate.get("sources"))
     vep = _mapping(sources.get("vep"))
     genebe = _mapping(sources.get("genebe"))
-    vv_identity = _mapping(vep.get("normalized_variant"))
+    verification = _mapping(vep.get("gene_identity_verification"))
+    vv = (
+        verification
+        if verification.get("status") == "success"
+        else vep
+    )
+    vv_identity = _mapping(
+        vv.get("validated_variant") or vep.get("normalized_variant")
+    )
     vv_input: dict[str, object] = {}
     if vv_identity:
         vv_input = {
@@ -473,13 +481,13 @@ def _fallback_evidence_from_candidate(
                 "ref": vv_identity.get("ref"),
                 "alt": vv_identity.get("alt"),
             },
-            "gene": vep.get("validated_gene"),
+            "gene": vv.get("validated_gene"),
             "transcript": (
-                vep.get("validated_transcript")
-                or _transcript_from_hgvs(vep.get("validated_transcript_hgvs"))
+                vv.get("validated_transcript")
+                or _transcript_from_hgvs(vv.get("validated_transcript_hgvs"))
             ),
-            "hgvs_c": vep.get("validated_transcript_hgvs"),
-            "hgvs_p": vep.get("validated_protein_hgvs"),
+            "hgvs_c": vv.get("validated_transcript_hgvs"),
+            "hgvs_p": vv.get("validated_protein_hgvs"),
         }
     gb_identity: dict[str, object] | None = None
     returned = _mapping(genebe.get("returned_variant"))

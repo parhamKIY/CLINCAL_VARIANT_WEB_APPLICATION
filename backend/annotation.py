@@ -26,6 +26,12 @@ from backend.evidence_rescue import (
     build_evidence_rescue_trace,
 )
 from backend.erepo import retrieve_expert_curated_context
+from backend.gene_identity import (
+    GENE_IDENTITY_UNRESOLVED,
+    VEP_GENE_CONTEXT_UNRESOLVED,
+    resolve_gene_identity,
+    vep_gene_context_is_complete,
+)
 from backend.logging_config import get_logger
 from backend.provider_readiness import (
     ProviderReadinessSnapshot,
@@ -1803,28 +1809,14 @@ def _get_clinvar(
 
 def _select_clingen_gene(annotation: AnnotationData) -> str | None:
     """Select one unambiguous gene symbol from standardized source fields."""
-    bundle = annotation.get("identifier_bundle")
-    bundled_gene = (
-        bundle.get("gene_symbol")
-        if isinstance(bundle, dict)
-        else None
-    )
-    candidates = (
-        bundled_gene,
-        annotation.get("gene"),
-        annotation.get("sources", {}).get("myvariant", {}).get("gene"),
-        annotation.get("sources", {}).get("clinvar", {}).get("gene"),
-    )
-
-    for candidate in candidates:
-        if not isinstance(candidate, str):
-            continue
-
-        symbol = candidate.strip()
-        if CLINGEN_GENE_SYMBOL_PATTERN.fullmatch(symbol):
-            return symbol
-
-    return None
+    resolution = annotation.get("gene_identity_resolution")
+    if not isinstance(resolution, dict) or resolution.get("status") != "resolved":
+        return None
+    gene = resolution.get("gene")
+    if not isinstance(gene, str):
+        return None
+    symbol = gene.strip()
+    return symbol if CLINGEN_GENE_SYMBOL_PATTERN.fullmatch(symbol) else None
 
 
 def _to_clingen_ucsc_region(
@@ -5175,7 +5167,9 @@ def _variantvalidator_match(
         "ref": str(variant["ref"]).upper(),
         "alt": str(variant["alt"]).upper(),
     }
-    matches: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    matches: list[
+        tuple[str, dict[str, Any], dict[str, Any], dict[str, object]]
+    ] = []
     for key, value in payload.items():
         if key in {"flag", "metadata"} or not isinstance(value, dict):
             continue
@@ -5198,7 +5192,7 @@ def _variantvalidator_match(
         except (TypeError, ValueError):
             continue
         if returned == expected:
-            matches.append((key, value, locus))
+            matches.append((key, value, locus, returned))
 
     if not matches:
         return None
@@ -5211,7 +5205,7 @@ def _variantvalidator_match(
             item[0],
         )
     )
-    key, record, locus = matches[0]
+    key, record, locus, returned_variant = matches[0]
     gene_ids = record.get("gene_ids")
     gene_ids = gene_ids if isinstance(gene_ids, dict) else {}
     predicted = record.get("hgvs_predicted_protein_consequence")
@@ -5227,6 +5221,8 @@ def _variantvalidator_match(
         "provider_version": _optional_text(
             metadata.get("variantvalidator_version")
         ),
+        "assembly": settings.GENOME_ASSEMBLY,
+        "returned_variant": returned_variant,
         "selected_record": key,
         "gene": _optional_text(record.get("gene_symbol")),
         "gene_id": (
@@ -5570,6 +5566,10 @@ def _apply_vep_fallback(
             "provider_version": match["provider_version"],
             "retrieved_at": _retrieval_timestamp(),
             "validated_genomic_hgvs": match["genomic_hgvs"],
+            "validated_variant": {
+                "assembly": match["assembly"],
+                **match["returned_variant"],
+            },
             "validated_gene": match["gene"],
             "validated_gene_id": match["gene_id"],
             "validated_transcript": match["transcript"],
@@ -5595,6 +5595,94 @@ def _apply_vep_fallback(
         "Consequence, impact, transcript-consequence, and VEP plugin "
         "fields remain unavailable."
     )
+
+
+def _verify_incomplete_vep_gene_context(
+    annotation: AnnotationData,
+    session: requests.Session,
+    circuit_state: ProviderCircuitState,
+) -> None:
+    """Verify an incomplete but operationally successful VEP annotation."""
+
+    vep = annotation["sources"]["vep"]
+    if (
+        vep.get("status") != "success"
+        or vep.get("provider") != VEP_PROVIDER_NAME
+        or vep_gene_context_is_complete(annotation)
+    ):
+        return
+
+    status, match, source_url = _fetch_variantvalidator_fallback(
+        session,
+        annotation["variant"],
+        circuit_state,
+    )
+    verification: dict[str, Any] = {
+        "status": status,
+        "provider": VARIANTVALIDATOR_PROVIDER_NAME,
+        "provider_role": "verification",
+        "trigger": VEP_GENE_CONTEXT_UNRESOLVED,
+        "provider_version": None,
+        "retrieved_at": _retrieval_timestamp(),
+        "validated_variant": None,
+        "validated_genomic_hgvs": None,
+        "validated_gene": None,
+        "validated_gene_id": None,
+        "validated_transcript": None,
+        "validated_transcript_hgvs": None,
+        "validated_protein_hgvs": None,
+        "selected_record": None,
+        "validation_warnings": [],
+    }
+    if status == "success" and match is not None:
+        verification.update(
+            {
+                "provider_version": match["provider_version"],
+                "validated_variant": {
+                    "assembly": match["assembly"],
+                    **match["returned_variant"],
+                },
+                "validated_genomic_hgvs": match["genomic_hgvs"],
+                "validated_gene": match["gene"],
+                "validated_gene_id": match["gene_id"],
+                "validated_transcript": match["transcript"],
+                "validated_transcript_hgvs": match["transcript_hgvs"],
+                "validated_protein_hgvs": match["protein_hgvs"],
+                "selected_record": match["selected_record"],
+                "validation_warnings": match["validation_warnings"],
+            }
+        )
+        annotation["references"].append(
+            {
+                "source": VARIANTVALIDATOR_PROVIDER_NAME,
+                "url": source_url,
+            }
+        )
+    else:
+        annotation["warnings"].append(
+            (
+                "VariantValidator found no exact assembly and allele match "
+                "while verifying incomplete VEP gene context."
+                if status == "no_match"
+                else "VariantValidator could not verify incomplete VEP gene "
+                "context."
+            )
+        )
+    vep["gene_identity_verification"] = verification
+
+
+def _resolve_annotation_gene_identity(annotation: AnnotationData) -> None:
+    resolution = resolve_gene_identity(annotation)
+    annotation["gene_identity_resolution"] = resolution
+    if resolution["status"] == "unresolved":
+        annotation["warnings"].append(
+            "Gene identity could not be resolved from an exact, "
+            "provenance-backed annotation source."
+        )
+        LOGGER.warning(
+            "event=gene_identity_resolution status=unresolved reason=%s",
+            GENE_IDENTITY_UNRESOLVED,
+        )
 
 
 def _identifier_reference(
@@ -6080,6 +6168,11 @@ def annotate_variants(
                     active_session,
                     variantvalidator_circuit,
                 )
+            _verify_incomplete_vep_gene_context(
+                annotation,
+                active_session,
+                variantvalidator_circuit,
+            )
         vep_status, vep_message = _source_progress_summary(
             annotations,
             "vep",
@@ -6232,6 +6325,9 @@ def annotate_variants(
             clinvar_status,
             clinvar_message,
         )
+
+        for annotation in annotations:
+            _resolve_annotation_gene_identity(annotation)
 
         _notify_annotation_progress(
             progress_callback,

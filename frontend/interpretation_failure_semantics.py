@@ -17,6 +17,7 @@ EXPLAINABLE_INTERPRETATION_FAILURE_TYPES = frozenset(
         "output_parse_failure",
         "safety_or_finish_failure",
         "internal_conversion_failure",
+        "gene_identity_unresolved",
     }
 )
 
@@ -47,6 +48,11 @@ def interpretation_failure_message(failure_type: object) -> str:
         )
     if failure_type == "safety_or_finish_failure":
         return "The model stopped before a usable interpretation was produced."
+    if failure_type == "gene_identity_unresolved":
+        return (
+            "AI interpretation was not started because this variant has no "
+            "exact, provenance-backed gene identity."
+        )
     return (
         "Interpretation could not be produced because the model workflow "
         "requires attention."

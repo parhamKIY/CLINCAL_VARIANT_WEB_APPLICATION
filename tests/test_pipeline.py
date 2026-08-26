@@ -7507,6 +7507,7 @@ class TestAnnotation:
             "predictors",
             "population_frequency",
             "population_frequency_provenance",
+            "gene_identity_resolution",
             "identifier_bundle",
             "sources",
             "references",
@@ -7561,7 +7562,7 @@ class TestAnnotation:
         )
         assert "genCC" not in annotation["sources"]["clingen"]
 
-    def test_vep_failure_preserves_other_source_evidence(self) -> None:
+    def test_vep_failure_keeps_cross_checks_without_promoting_gene(self) -> None:
         session = FakeSession(
             [FakeResponse(500, {"error": "temporary failure"})],
             get_responses=[
@@ -7585,16 +7586,18 @@ class TestAnnotation:
         assert annotation["sources"]["vep"]["status"] == "error"
         assert annotation["sources"]["myvariant"]["status"] == "success"
         assert annotation["sources"]["clinvar"]["status"] == "success"
-        assert annotation["sources"]["clingen"]["status"] == "success"
+        assert annotation["sources"]["clingen"]["status"] == "not_applicable"
         assert annotation["population_frequency"] == 0.004
         assert (
             annotation["sources"]["clinvar"]["clinical_significance"]
             == "Pathogenic"
         )
-        assert (
-            annotation["sources"]["clingen"]["curation_count"]
-            == 1
-        )
+        assert annotation["sources"]["clingen"]["curation_count"] == 0
+        assert annotation["gene_identity_resolution"]["status"] == "unresolved"
+        assert annotation["gene_identity_resolution"]["cross_checks"] == {
+            "myvariant": {"gene": "GENE1", "agreement": "not_compared"},
+            "clinvar": {"gene": "GENE1", "agreement": "not_compared"},
+        }
         assert any(
             "Ensembl VEP returned HTTP 500" in warning
             for warning in annotation["warnings"]
@@ -11465,8 +11468,16 @@ class TestEvidenceObject:
             interpretations,
         )
 
-        assert len(adapter.requests) == 7
+        assert len(adapter.requests) == 5
         assert len(interpretations) == 7
+        assert [interpretations[index]["status"] for index in (2, 3)] == [
+            "failed",
+            "failed",
+        ]
+        assert [interpretations[index]["error_type"] for index in (2, 3)] == [
+            "gene_identity_unresolved",
+            "gene_identity_unresolved",
+        ]
         assert [report["variant_index"] for report in reports] == list(
             range(7)
         )

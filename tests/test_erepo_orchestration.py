@@ -48,7 +48,23 @@ def _patch_non_erepo_sources(monkeypatch: pytest.MonkeyPatch) -> None:
         _retries: int,
         *_orchestration: object,
     ) -> list[dict[str, object]]:
-        return [{"input": inputs[0], "assembly_name": "GRCh38", "transcript_consequences": []}]
+        return [
+            {
+                "input": inputs[0],
+                "assembly_name": "GRCh38",
+                "most_severe_consequence": "missense_variant",
+                "transcript_consequences": [
+                    {
+                        "gene_symbol": "PAH",
+                        "gene_id": "ENSG00000171759",
+                        "transcript_id": "ENST00000553106",
+                        "consequence_terms": ["missense_variant"],
+                        "hgvsc": "ENST00000553106:c.782G>A",
+                        "hgvsp": "ENSP00000448059:p.Arg261Gln",
+                    }
+                ],
+            }
+        ]
 
     def fake_genebe(
         annotations: list[dict[str, object]],
