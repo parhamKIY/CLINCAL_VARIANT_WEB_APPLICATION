@@ -43,6 +43,7 @@ _RESOLUTION_REASONS = {
     "Ensembl VEP": frozenset(
         {
             "vep_primary_complete",
+            "vep_primary_gene_resolved_with_limited_context",
             "vep_primary_verified_by_variantvalidator",
             "vep_primary_verified_by_genebe",
         }
@@ -138,6 +139,28 @@ def _missing_fields(
     required: tuple[str, ...],
 ) -> list[str]:
     return [field for field in required if _text(values.get(field)) is None]
+
+
+def _vep_values(annotation: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "gene": annotation.get("gene"),
+        "gene_id": annotation.get("gene_id"),
+        "transcript": annotation.get("transcript"),
+        "hgvs_c": annotation.get("hgvsc"),
+        "hgvs_p": annotation.get("hgvsp") or annotation.get("protein_change"),
+        "consequence": annotation.get("consequence"),
+    }
+
+
+def _merge_vep_context(
+    annotation: Mapping[str, object],
+    supporting: Mapping[str, object],
+) -> dict[str, object]:
+    direct = _vep_values(annotation)
+    return {
+        field: direct.get(field) or supporting.get(field)
+        for field in _CONTEXT_FIELDS
+    }
 
 
 def vep_gene_context_is_complete(annotation: Mapping[str, object]) -> bool:
@@ -248,7 +271,6 @@ def _variantvalidator_candidate(
     if (
         proof is None
         or _gene_symbol(values.get("gene")) is None
-        or _missing_fields(values, ("transcript", "hgvs_c"))
     ):
         return None
     provenance = {
@@ -358,14 +380,7 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
     clinvar = _mapping(sources.get("clinvar"))
 
     if vep_gene_context_is_complete(annotation):
-        values = {
-            "gene": annotation.get("gene"),
-            "gene_id": annotation.get("gene_id"),
-            "transcript": annotation.get("transcript"),
-            "hgvs_c": annotation.get("hgvsc"),
-            "hgvs_p": annotation.get("hgvsp") or annotation.get("protein_change"),
-            "consequence": annotation.get("consequence"),
-        }
+        values = _vep_values(annotation)
         proof = _identity_proof(expected, vep.get("normalized_variant"))
         if proof is not None:
             return _resolution(
@@ -381,13 +396,29 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
                     "provider_version": vep.get("provider_version"),
                     "retrieved_at": vep.get("retrieved_at"),
                 },
-                missing_context_fields=[],
+                missing_context_fields=_missing_fields(
+                    values,
+                    (
+                        "gene_id",
+                        "transcript",
+                        "hgvs_c",
+                        "hgvs_p",
+                        "consequence",
+                    ),
+                ),
                 myvariant_gene=myvariant.get("gene"),
                 clinvar_gene=clinvar.get("gene"),
             )
 
     variantvalidator = _variantvalidator_candidate(annotation, expected)
-    vep_gene = _gene_symbol(annotation.get("gene"))
+    direct_vep = (
+        vep.get("status") == "success"
+        and _text(vep.get("provider")) == "Ensembl VEP"
+        and _identity_proof(expected, vep.get("normalized_variant")) is not None
+    )
+    vep_gene = (
+        _gene_symbol(annotation.get("gene")) if direct_vep else None
+    )
     authoritative_conflict = False
     if variantvalidator is not None:
         values, proof, provenance = variantvalidator
@@ -399,11 +430,7 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
         ):
             authoritative_conflict = True
         elif vep_gene is not None:
-            values = {
-                **values,
-                "gene": vep_gene,
-                "gene_id": annotation.get("gene_id") or values.get("gene_id"),
-            }
+            values = _merge_vep_context(annotation, values)
             return _resolution(
                 expected=expected,
                 source="Ensembl VEP",
@@ -420,7 +447,13 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
                 },
                 missing_context_fields=_missing_fields(
                     values,
-                    ("transcript", "hgvs_c", "consequence"),
+                    (
+                        "gene_id",
+                        "transcript",
+                        "hgvs_c",
+                        "hgvs_p",
+                        "consequence",
+                    ),
                 ),
                 myvariant_gene=myvariant.get("gene"),
                 clinvar_gene=clinvar.get("gene"),
@@ -433,7 +466,16 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
                 values=values,
                 identity_proof=proof,
                 provenance=provenance,
-                missing_context_fields=_missing_fields(values, ("consequence",)),
+                missing_context_fields=_missing_fields(
+                    values,
+                    (
+                        "gene_id",
+                        "transcript",
+                        "hgvs_c",
+                        "hgvs_p",
+                        "consequence",
+                    ),
+                ),
                 myvariant_gene=myvariant.get("gene"),
                 clinvar_gene=clinvar.get("gene"),
             )
@@ -449,11 +491,7 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
         ):
             authoritative_conflict = True
         elif vep_gene is not None:
-            values = {
-                **values,
-                "gene": vep_gene,
-                "gene_id": annotation.get("gene_id") or values.get("gene_id"),
-            }
+            values = _merge_vep_context(annotation, values)
             return _resolution(
                 expected=expected,
                 source="Ensembl VEP",
@@ -470,7 +508,13 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
                 },
                 missing_context_fields=_missing_fields(
                     values,
-                    ("transcript", "hgvs_c", "consequence"),
+                    (
+                        "gene_id",
+                        "transcript",
+                        "hgvs_c",
+                        "hgvs_p",
+                        "consequence",
+                    ),
                 ),
                 myvariant_gene=myvariant.get("gene"),
                 clinvar_gene=clinvar.get("gene"),
@@ -483,7 +527,47 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
                 values=values,
                 identity_proof=proof,
                 provenance=provenance,
-                missing_context_fields=_missing_fields(values, ("consequence",)),
+                missing_context_fields=_missing_fields(
+                    values,
+                    (
+                        "gene_id",
+                        "transcript",
+                        "hgvs_c",
+                        "hgvs_p",
+                        "consequence",
+                    ),
+                ),
+                myvariant_gene=myvariant.get("gene"),
+                clinvar_gene=clinvar.get("gene"),
+            )
+
+    if vep_gene is not None and not authoritative_conflict:
+        values = _vep_values(annotation)
+        proof = _identity_proof(expected, vep.get("normalized_variant"))
+        if proof is not None:
+            return _resolution(
+                expected=expected,
+                source="Ensembl VEP",
+                reason="vep_primary_gene_resolved_with_limited_context",
+                values=values,
+                identity_proof=proof,
+                provenance={
+                    "provider": "Ensembl VEP",
+                    "provider_role": "primary",
+                    "trigger": VEP_GENE_CONTEXT_UNRESOLVED,
+                    "provider_version": vep.get("provider_version"),
+                    "retrieved_at": vep.get("retrieved_at"),
+                },
+                missing_context_fields=_missing_fields(
+                    values,
+                    (
+                        "gene_id",
+                        "transcript",
+                        "hgvs_c",
+                        "hgvs_p",
+                        "consequence",
+                    ),
+                ),
                 myvariant_gene=myvariant.get("gene"),
                 clinvar_gene=clinvar.get("gene"),
             )

@@ -2597,10 +2597,7 @@ def _standardize_vep_response(
 
     annotation.update(
         {
-            "gene": (
-                representative.get("gene_symbol")
-                or representative.get("gene_id")
-            ),
+            "gene": representative.get("gene_symbol"),
             "gene_id": representative.get("gene_id"),
             "transcript": representative.get("transcript_id"),
             "impact": representative.get("impact"),
