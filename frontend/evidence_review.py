@@ -10,6 +10,7 @@ import streamlit as st
 
 from backend.database import DatabaseError, save_pipeline_state
 from backend.evidence_confirmation import ReviewedEvidencePackage
+from backend.error_handling import safe_ui_error_message
 from backend.evidence_review import (
     EvidenceReviewError,
     EvidenceReviewReport,
@@ -1329,9 +1330,9 @@ def _render_confirmation(
         else:
             try:
                 confirmed = confirm_reviewed_evidence(result, [report])
-                result["reviewed_evidence_packages"] = confirmed[
-                    "reviewed_evidence_packages"
-                ]
+                result.clear()
+                result.update(confirmed)
+                st.session_state["pipeline_result"] = result
                 package = next(
                     item
                     for item in result["reviewed_evidence_packages"]
@@ -1347,7 +1348,12 @@ def _render_confirmation(
                         "database persistence failed."
                     )
             except (PipelineError, StopIteration) as exc:
-                st.error(f"Evidence was not confirmed: {exc}")
+                st.error(
+                    safe_ui_error_message(
+                        exc,
+                        context="evidence_confirmation",
+                    )
+                )
 
     package = packages.get(report_id)
     if package is not None:
@@ -1506,10 +1512,12 @@ def _render_finalization_dialog(
                         result,
                         reports=reports_to_confirm or None,
                     )
-            except PipelineError:
+            except PipelineError as exc:
                 st.error(
-                    "The report could not be finalized. The current review "
-                    "state was preserved."
+                    safe_ui_error_message(
+                        exc,
+                        context="report_finalization",
+                    )
                 )
                 return
             result.clear()

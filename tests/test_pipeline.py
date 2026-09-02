@@ -115,6 +115,7 @@ from backend.final_clinical_report import (
     render_final_clinical_report_markdown,
     validate_final_clinical_report,
 )
+from backend.report_lifecycle import build_variant_report_records
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -16250,6 +16251,7 @@ class TestStage40FrontendReviewWorkflow:
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
         )
+
         interpretations = deepcopy(
             app.session_state["pipeline_result"][
                 "variant_interpretation_results"
@@ -16293,6 +16295,73 @@ class TestStage40FrontendReviewWorkflow:
             subheader.value == "Output B — Final interpretation only"
             for subheader in app.subheader
         )
+
+    def test_individual_confirmation_keeps_persisted_lifecycle_in_sync(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        saved: list[PipelineResult] = []
+        monkeypatch.setattr(
+            "frontend.evidence_review.save_pipeline_state",
+            lambda result: saved.append(deepcopy(result)) or result,
+        )
+        result = self._draft_result()
+        result["variant_report_records"] = [
+            dict(record)
+            for record in build_variant_report_records(
+                result["draft_variant_reports"],
+                analysis_id=result["analysis_id"],
+            )
+        ]
+        result = validate_pipeline_result(result)
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        app.session_state["pipeline_result"] = result
+        app.run(timeout=10)
+
+        next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.label.startswith(
+                "I confirm that this reviewed evidence contains no names"
+            )
+        ).set_value(True).run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "Confirm evidence"
+        ).click().run(timeout=10)
+
+        confirmed = app.session_state["pipeline_result"]
+        validate_pipeline_result(confirmed)
+        assert confirmed["variant_report_records"][0]["lifecycle_state"] == (
+            "confirmed"
+        )
+        assert saved[-1]["variant_report_records"][0]["lifecycle_state"] == (
+            "confirmed"
+        )
+
+        next(
+            button
+            for button in app.button
+            if button.label == "Finalize report"
+        ).click().run(timeout=10)
+        next(
+            checkbox
+            for checkbox in app.checkbox
+            if checkbox.label.startswith(
+                "I confirm that I reviewed the current evidence"
+            )
+        ).set_value(True).run(timeout=10)
+        next(
+            button
+            for button in app.button
+            if button.label == "Yes, finalize report"
+        ).click().run(timeout=10)
+
+        assert app.session_state["pipeline_result"]["workflow_state"] == (
+            "completed"
+        )
+        assert not app.error
 
     def test_finalization_dialog_cancel_preserves_review_state(self) -> None:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
@@ -20832,6 +20901,31 @@ class TestSafeErrorHandling:
             "provider credit or select another model. Manual HPO "
             "selection remains available."
         )
+        assert "secret" not in message.casefold()
+
+    @pytest.mark.parametrize(
+        ("context", "action"),
+        [
+            ("evidence_confirmation", "evidence confirmation"),
+            ("report_finalization", "report finalization"),
+        ],
+    )
+    def test_review_lifecycle_error_is_actionable_and_safe(
+        self,
+        context: str,
+        action: str,
+    ) -> None:
+        message = safe_ui_error_message(
+            PipelineResultError(
+                "pipeline.variant_report_records contain secret details"
+            ),
+            context=context,  # type: ignore[arg-type]
+        )
+
+        assert action in message
+        assert "Reload the saved analysis" in message
+        assert "preserved" in message
+        assert "pipeline" not in message.casefold()
         assert "secret" not in message.casefold()
 
 

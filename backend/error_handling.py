@@ -37,6 +37,8 @@ UIErrorContext = Literal[
     "excel_selection",
     "analysis_start",
     "analysis_worker",
+    "evidence_confirmation",
+    "report_finalization",
 ]
 
 
@@ -220,7 +222,22 @@ def safe_ui_error_message(
 ) -> str:
     """Return a fixed UI message without exposing exception text."""
 
-    if (
+    if isinstance(error, PipelineResultError) and context in {
+        "evidence_confirmation",
+        "report_finalization",
+    }:
+        action = (
+            "evidence confirmation"
+            if context == "evidence_confirmation"
+            else "report finalization"
+        )
+        message = (
+            f"The saved review state is out of sync, so {action} was "
+            "stopped safely. Your current review was preserved. Reload "
+            "the saved analysis and try again. If this message returns, "
+            "report the issue to the application administrator."
+        )
+    elif (
         context == "phenotype_extraction"
         and isinstance(error, LLMQuotaError)
     ):
@@ -270,6 +287,16 @@ def safe_ui_error_message(
             "analysis_worker": (
                 "The analysis stopped unexpectedly. Technical details were "
                 "recorded; retained results remain unchanged."
+            ),
+            "evidence_confirmation": (
+                "Evidence could not be confirmed. Review the current draft "
+                "and privacy confirmation, then try again. Your edits were "
+                "preserved."
+            ),
+            "report_finalization": (
+                "The report could not be finalized. Review the status of "
+                "each variant and try again. Your current review was "
+                "preserved."
             ),
         }
         message = messages[context]
