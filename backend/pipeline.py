@@ -88,7 +88,7 @@ from backend.reference_sequence import (
     fetch_grch38_reference_sequence,
     fetch_reference_sequence_cached,
 )
-from backend.llm import LLMClient
+from backend.llm import LLMClient, LLMError
 from backend.provider_readiness import ProviderReadinessSnapshot
 from backend.llm_routing import (
     RoutingProgressCallback,
@@ -134,6 +134,7 @@ from backend.report_lifecycle import (
 from backend.variant_interpretation import (
     VariantInterpretationError,
     interpret_variants,
+    regenerate_variant_interpretation,
     retry_variant_interpretation,
     validate_variant_interpretation_result,
 )
@@ -4721,6 +4722,147 @@ def retry_failed_variant_interpretation(
     return validate_pipeline_result(working)
 
 
+def regenerate_successful_variant_interpretation(
+    result: PipelineResult,
+    *,
+    variant_index: int,
+    model: str | None = None,
+    client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
+    max_retries: int | None = None,
+    timestamp: str | None = None,
+) -> PipelineResult:
+    """Replace one successful AI draft without rerunning evidence providers."""
+
+    working = validate_pipeline_result(deepcopy(result))
+    if (
+        isinstance(variant_index, bool)
+        or not isinstance(variant_index, int)
+        or variant_index < 0
+        or variant_index >= working["variant_count"]
+    ):
+        raise PipelineError(
+            "Interpretation regeneration variant index is invalid."
+        )
+    interpretation_position = _record_position(
+        working["variant_interpretation_results"], variant_index
+    )
+    draft_position = _record_position(
+        working["draft_variant_reports"], variant_index
+    )
+    readiness_position = _record_position(
+        working["evidence_readiness"], variant_index
+    )
+    evidence_by_variant = _evidence_by_variant_index(
+        cast(list[Mapping[str, object]], working["evidence_objects"]),
+        cast(
+            list[Mapping[str, object]],
+            working["evidence_construction_outcomes"],
+        ),
+    )
+    if variant_index not in evidence_by_variant:
+        raise PipelineError(
+            "Interpretation regeneration requires retained evidence."
+        )
+    prior = working["variant_interpretation_results"][interpretation_position]
+    if prior["status"] != "success":
+        raise PipelineError(
+            "Only successful interpretations can be regenerated."
+        )
+    report = working["draft_variant_reports"][draft_position]
+    if (
+        report["edit_history"]
+        or report["selection_history"]
+        or report["review_status"] != "draft"
+        or any(
+            package["variant_index"] == variant_index
+            for package in working["reviewed_evidence_packages"]
+        )
+    ):
+        raise PipelineError(
+            "Interpretation regeneration cannot overwrite reviewer decisions."
+        )
+    try:
+        regenerated = regenerate_variant_interpretation(
+            evidence_by_variant[variant_index],
+            prior,
+            model=model,
+            client=client,
+            fallback_model=fallback_model,
+            fallback_client=fallback_client,
+            max_retries=max_retries,
+            timestamp=timestamp,
+            readiness_audit=working["evidence_readiness"][readiness_position],
+        )
+        rebuilt = build_draft_variant_report(
+            evidence_by_variant[variant_index],
+            regenerated,
+            variant_index=variant_index,
+        )
+    except (
+        LLMError,
+        VariantInterpretationError,
+        DraftVariantReportError,
+    ) as exc:
+        raise PipelineError(
+            "Interpretation regeneration could not be completed; "
+            "the prior draft was preserved."
+        ) from exc
+
+    working["variant_interpretation_results"][interpretation_position] = dict(
+        regenerated
+    )
+    working["draft_variant_reports"][draft_position] = dict(rebuilt)
+    working["reviewed_evidence_packages"] = [
+        package
+        for package in working["reviewed_evidence_packages"]
+        if package["variant_index"] != variant_index
+    ]
+    working["llm_routing_results"] = []
+    working["final_interpretation_report"] = None
+    working["final_clinical_report"] = None
+    failed_count = sum(
+        item["status"] == "failed"
+        for item in working["variant_interpretation_results"]
+    )
+    message = (
+        "AI draft regenerated from the persisted Evidence Object; upstream "
+        "providers were not rerun."
+    )
+    stage_status: PipelineStageStatus = (
+        "warning" if failed_count else "success"
+    )
+    _set_stage(
+        working,
+        "llm",
+        stage_status,
+        progress_percent=100,
+        message=message,
+    )
+    _set_api_status(working, "llm", stage_status, message)
+    working["workflow_state"] = "awaiting_final_review"
+    working["current_stage"] = "completed"
+    working["progress_percent"] = 100
+    working["status"] = (
+        "partial"
+        if failed_count or working["warnings"] or working["errors"]
+        else "success"
+    )
+    _sync_variant_report_records(working)
+    if working["variant_integrity_records"]:
+        _sync_variant_integrity_records(working)
+    record_execution_event(
+        "variant_interpretation_regenerated",
+        scope="variant",
+        stage="llm",
+        variant_index=variant_index,
+        status="success",
+        outcome_category="success",
+    )
+    return validate_pipeline_result(working)
+
+
 def get_selected_draft_variant_reports(
     result: PipelineResult,
 ) -> list[dict[str, object]]:
@@ -5126,6 +5268,7 @@ __all__ = [
     "get_selected_draft_variant_reports",
     "resume_confirmed_analysis",
     "resume_saved_analysis",
+    "regenerate_successful_variant_interpretation",
     "retry_failed_variant_interpretation",
     "create_pipeline_result",
     "migrate_pipeline_schema32_to33",

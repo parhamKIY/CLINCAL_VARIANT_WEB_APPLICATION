@@ -83,7 +83,7 @@ MAX_INTERPRETATION_CHARACTERS = 20_000
 MAX_CONFLICT_ASSESSMENT_CHARACTERS = 8_000
 MAX_INTERPRETATION_WARNINGS = 20
 MAX_INTERPRETATION_WARNING_CHARACTERS = 2_000
-MAX_INTERPRETATION_GENERATION_HISTORY = 20
+MAX_INTERPRETATION_GENERATION_HISTORY = 5
 MEANINGFUL_CONFLICT_SEVERITIES = {"moderate", "major", "critical"}
 URL_PATTERN = re.compile(r"(?i)(?:https?://|www\.)")
 COMBINED_CITATION_PATTERN = re.compile(
@@ -1708,6 +1708,52 @@ def retry_variant_interpretation(
         )
 
 
+def regenerate_variant_interpretation(
+    evidence_object: Mapping[str, object],
+    successful_result: Mapping[str, object],
+    *,
+    model: str | None = None,
+    client: LLMClient | None = None,
+    fallback_model: str | None = None,
+    fallback_client: LLMClient | None = None,
+    max_retries: int | None = None,
+    timestamp: str | None = None,
+    readiness_audit: Mapping[str, object] | None = None,
+) -> VariantInterpretationResult:
+    """Generate a replacement AI draft from retained evidence only."""
+
+    try:
+        evidence = sanitize_evidence_object(deepcopy(evidence_object))
+        prior = validate_variant_interpretation_result(
+            deepcopy(successful_result),
+            evidence=evidence,
+        )
+    except (EvidenceObjectError, VariantInterpretationError) as exc:
+        raise VariantInterpretationError(
+            "Interpretation regeneration inputs are invalid."
+        ) from exc
+    if prior["status"] != "success":
+        raise VariantInterpretationError(
+            "Only a successful interpretation can be regenerated."
+        )
+    replacement = interpret_variant(
+        evidence,
+        variant_index=prior["variant_index"],
+        model=model,
+        client=client,
+        fallback_model=fallback_model,
+        fallback_client=fallback_client,
+        max_retries=max_retries,
+        timestamp=timestamp,
+        readiness_audit=readiness_audit,
+    )
+    return retain_prior_interpretation_generation(
+        prior,
+        replacement,
+        evidence=evidence,
+    )
+
+
 def _result_digest(value: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -2203,6 +2249,7 @@ __all__ = [
     "classify_interpretation_failure",
     "interpret_variant",
     "interpret_variants",
+    "regenerate_variant_interpretation",
     "retry_variant_interpretation",
     "retain_prior_interpretation_generation",
     "validate_variant_interpretation_result",
