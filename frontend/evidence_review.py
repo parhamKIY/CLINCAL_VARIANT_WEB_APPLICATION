@@ -22,6 +22,7 @@ from backend.pipeline import (
     PipelineResult,
     confirm_reviewed_evidence,
     finalize_reviewed_analysis,
+    regenerate_successful_variant_interpretation,
     retry_failed_variant_interpretation,
     update_draft_variant_report,
 )
@@ -935,6 +936,83 @@ def _render_interpretation_retry(
         )
 
 
+def _render_interpretation_regenerate(
+    report: DraftVariantReport,
+    result: PipelineResult,
+    *,
+    model: str | None,
+) -> None:
+    """Offer a one-click AI draft regeneration for a successfully interpreted variant.
+
+    Calls ``regenerate_successful_variant_interpretation`` which reuses the
+    persisted Evidence Object — no annotation or provider re-run occurs.
+    The button is disabled once the reviewer has made any edit or selection
+    decision, protecting existing human-review work.
+    """
+
+    interpretation = report["reviewed_report"]["variant_interpretation"]
+    if interpretation["status"] != "success":
+        return
+    has_reviewer_decisions = bool(
+        report["edit_history"]
+        or report["selection_history"]
+        or report["review_status"] != "draft"
+        or any(
+            package["variant_index"] == report["variant_index"]
+            for package in result["reviewed_evidence_packages"]
+        )
+    )
+    with st.expander(
+        "Regenerate AI interpretation",
+        expanded=False,
+        icon=":material/autorenew:",
+    ):
+        st.caption(
+            "Generates a new AI draft from the persisted Evidence Object. "
+            "Annotation, ClinVar, population, and phenotype providers are "
+            "not rerun. Use this if the current interpretation is unsatisfactory "
+            "and you want the model to produce an alternative draft."
+        )
+        if has_reviewer_decisions:
+            st.caption(
+                ":material/lock: Regeneration is disabled because reviewer "
+                "decisions (edits, selections, or confirmed review) already "
+                "exist for this report."
+            )
+            return
+        if st.button(
+            "Regenerate interpretation",
+            type="secondary",
+            icon=":material/autorenew:",
+            key=f"{_REVIEW_WIDGET_PREFIX}regenerate_{report['report_id']}",
+        ):
+            try:
+                with st.spinner(
+                    "Regenerating AI interpretation from persisted evidence..."
+                ):
+                    updated = regenerate_successful_variant_interpretation(
+                        result,
+                        variant_index=report["variant_index"],
+                        model=model,
+                    )
+            except PipelineError as exc:
+                st.error(f"Interpretation regeneration was not completed: {exc}")
+                return
+            result.clear()
+            result.update(updated)
+            st.session_state["pipeline_result"] = result
+            persisted = _persist_review_state(result)
+            _set_notice(
+                "success" if persisted else "warning",
+                (
+                    "AI interpretation regenerated from persisted evidence."
+                    if persisted
+                    else "AI interpretation regenerated, but persistence failed."
+                ),
+            )
+            st.rerun()
+
+
 def _render_report_editor(
     report: DraftVariantReport,
     result: PipelineResult,
@@ -1660,6 +1738,11 @@ def render_evidence_review(
         total=len(drafts),
     )
     _render_interpretation_retry(
+        draft_variant_report,
+        result,
+        model=retry_model,
+    )
+    _render_interpretation_regenerate(
         draft_variant_report,
         result,
         model=retry_model,
