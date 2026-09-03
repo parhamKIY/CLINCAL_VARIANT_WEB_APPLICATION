@@ -13487,6 +13487,7 @@ class TestStage50SingleModelInterpretation:
             },
             "generated_at": "2026-08-08T10:00:00Z",
             "error_type": None,
+            "generation_history": [],
         }
         request = adapter.requests[0]
         assert request.temperature == 0.0

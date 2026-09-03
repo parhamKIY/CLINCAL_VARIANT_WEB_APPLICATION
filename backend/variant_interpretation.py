@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -58,9 +59,9 @@ from backend.variant_integrity import stable_allele_identity
 from config import settings
 
 
-VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.3"
+VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.4"
 SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset(
-    {"1.1", "1.2", "1.3"}
+    {"1.1", "1.2", "1.3", "1.4"}
 )
 VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.9"
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
@@ -82,6 +83,7 @@ MAX_INTERPRETATION_CHARACTERS = 20_000
 MAX_CONFLICT_ASSESSMENT_CHARACTERS = 8_000
 MAX_INTERPRETATION_WARNINGS = 20
 MAX_INTERPRETATION_WARNING_CHARACTERS = 2_000
+MAX_INTERPRETATION_GENERATION_HISTORY = 20
 MEANINGFUL_CONFLICT_SEVERITIES = {"moderate", "major", "critical"}
 URL_PATTERN = re.compile(r"(?i)(?:https?://|www\.)")
 COMBINED_CITATION_PATTERN = re.compile(
@@ -285,6 +287,16 @@ class ParsedInterpretationResponse(TypedDict):
     field_validation: InterpretationFieldValidation
 
 
+class InterpretationGenerationRecord(TypedDict):
+    """One integrity-protected prior AI draft retained after regeneration."""
+
+    sequence: int
+    reason: Literal["user_requested_regeneration"]
+    replaced_at: str
+    prior_result_sha256: str
+    prior_result: dict[str, object]
+
+
 class VariantInterpretationResult(TypedDict):
     """One route-free interpretation result with bounded provenance."""
 
@@ -309,6 +321,7 @@ class VariantInterpretationResult(TypedDict):
     usage: dict[str, int | None] | None
     generated_at: str
     error_type: str | None
+    generation_history: list[InterpretationGenerationRecord]
 
 
 INTERPRETATION_RESULT_FIELDS = frozenset(
@@ -317,7 +330,13 @@ INTERPRETATION_RESULT_FIELDS = frozenset(
 FIELD_VALIDATION_FIELDS = frozenset(
     InterpretationFieldValidation.__required_keys__
 )
-V1_2_INTERPRETATION_RESULT_FIELDS = INTERPRETATION_RESULT_FIELDS - {
+GENERATION_RECORD_FIELDS = frozenset(
+    InterpretationGenerationRecord.__required_keys__
+)
+V1_3_INTERPRETATION_RESULT_FIELDS = INTERPRETATION_RESULT_FIELDS - {
+    "generation_history",
+}
+V1_2_INTERPRETATION_RESULT_FIELDS = V1_3_INTERPRETATION_RESULT_FIELDS - {
     "phenotype_conclusion",
     "field_validation",
 }
@@ -1427,6 +1446,7 @@ def interpret_variant(
         "usage": _usage(response),
         "generated_at": _timestamp(timestamp),
         "error_type": None,
+        "generation_history": [],
     }
     validated_result = validate_variant_interpretation_result(
         result,
@@ -1512,6 +1532,7 @@ def _failed_result(
         "usage": None,
         "generated_at": _timestamp(timestamp),
         "error_type": diagnostic["failure_type"],
+        "generation_history": [],
     }
     validated_result = validate_variant_interpretation_result(
         result,
@@ -1687,6 +1708,65 @@ def retry_variant_interpretation(
         )
 
 
+def _result_digest(value: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def retain_prior_interpretation_generation(
+    prior_result: Mapping[str, object],
+    replacement_result: Mapping[str, object],
+    *,
+    evidence: Mapping[str, object],
+) -> VariantInterpretationResult:
+    """Attach one prior successful draft to a validated replacement."""
+
+    prior = validate_variant_interpretation_result(
+        deepcopy(prior_result),
+        evidence=evidence,
+    )
+    replacement = validate_variant_interpretation_result(
+        deepcopy(replacement_result),
+        evidence=evidence,
+    )
+    if prior["status"] != "success" or replacement["status"] != "success":
+        raise VariantInterpretationError(
+            "Interpretation generation history requires successful drafts."
+        )
+    if replacement["generation_history"]:
+        raise VariantInterpretationError(
+            "Replacement interpretation already contains generation history."
+        )
+    history = deepcopy(prior["generation_history"])
+    if len(history) >= MAX_INTERPRETATION_GENERATION_HISTORY:
+        raise VariantInterpretationError(
+            "Interpretation generation history limit has been reached."
+        )
+    snapshot = dict(prior)
+    snapshot["generation_history"] = []
+    history.append(
+        {
+            "sequence": len(history) + 1,
+            "reason": "user_requested_regeneration",
+            "replaced_at": replacement["generated_at"],
+            "prior_result_sha256": _result_digest(snapshot),
+            "prior_result": snapshot,
+        }
+    )
+    candidate = dict(replacement)
+    candidate["generation_history"] = history
+    return validate_variant_interpretation_result(
+        candidate,
+        evidence=evidence,
+    )
+
+
 def validate_variant_interpretation_result(
     value: object,
     *,
@@ -1707,7 +1787,12 @@ def validate_variant_interpretation_result(
     fields = set(normalized)
     if (
         schema_version == "1.1"
-        and fields == V1_1_INTERPRETATION_RESULT_FIELDS
+        and fields
+        in {
+            V1_1_INTERPRETATION_RESULT_FIELDS,
+            V1_1_INTERPRETATION_RESULT_FIELDS | {"generation_history"},
+        }
+        and normalized.get("generation_history", []) == []
     ):
         normalized["ai_classification"] = None
         normalized["phenotype_conclusion"] = None
@@ -1720,9 +1805,15 @@ def validate_variant_interpretation_result(
             "phenotype_conclusion": "not_available",
             "citations": "valid" if succeeded else "not_available",
         }
+        normalized["generation_history"] = []
     elif (
         schema_version == "1.2"
-        and fields == V1_2_INTERPRETATION_RESULT_FIELDS
+        and fields
+        in {
+            V1_2_INTERPRETATION_RESULT_FIELDS,
+            V1_2_INTERPRETATION_RESULT_FIELDS | {"generation_history"},
+        }
+        and normalized.get("generation_history", []) == []
     ):
         succeeded = normalized.get("status") == "success"
         normalized["phenotype_conclusion"] = None
@@ -1734,6 +1825,12 @@ def validate_variant_interpretation_result(
             "phenotype_conclusion": "not_available",
             "citations": "valid" if succeeded else "not_available",
         }
+        normalized["generation_history"] = []
+    elif (
+        schema_version == "1.3"
+        and fields == V1_3_INTERPRETATION_RESULT_FIELDS
+    ):
+        normalized["generation_history"] = []
     elif fields != INTERPRETATION_RESULT_FIELDS:
         raise VariantInterpretationError(
             "Variant interpretation result has invalid fields."
@@ -1996,6 +2093,75 @@ def validate_variant_interpretation_result(
         )
     ):
         raise VariantInterpretationError("Interpretation usage is invalid.")
+    generation_history = value["generation_history"]
+    if (
+        not isinstance(generation_history, list)
+        or len(generation_history) > MAX_INTERPRETATION_GENERATION_HISTORY
+    ):
+        raise VariantInterpretationError(
+            "Interpretation generation history is invalid."
+        )
+    current_generated_at = datetime.fromisoformat(
+        value["generated_at"].replace("Z", "+00:00")
+    )
+    previous_replaced_at: datetime | None = None
+    for history_index, record_value in enumerate(generation_history):
+        if (
+            not isinstance(record_value, dict)
+            or set(record_value) != GENERATION_RECORD_FIELDS
+        ):
+            raise VariantInterpretationError(
+                "Interpretation generation history record is invalid."
+            )
+        record = cast(InterpretationGenerationRecord, record_value)
+        if (
+            record["sequence"] != history_index + 1
+            or record["reason"] != "user_requested_regeneration"
+        ):
+            raise VariantInterpretationError(
+                "Interpretation generation history sequence is invalid."
+            )
+        replaced_at = _timestamp(record["replaced_at"])
+        if replaced_at != record["replaced_at"]:
+            raise VariantInterpretationError(
+                "Interpretation generation history timestamp is invalid."
+            )
+        replaced_at_value = datetime.fromisoformat(
+            replaced_at.replace("Z", "+00:00")
+        )
+        if (
+            replaced_at_value > current_generated_at
+            or (
+                previous_replaced_at is not None
+                and replaced_at_value < previous_replaced_at
+            )
+        ):
+            raise VariantInterpretationError(
+                "Interpretation generation history timestamps are out of order."
+            )
+        previous_replaced_at = replaced_at_value
+        try:
+            prior_result = validate_variant_interpretation_result(
+                record["prior_result"],
+                evidence=evidence,
+            )
+        except VariantInterpretationError as exc:
+            raise VariantInterpretationError(
+                "Interpretation generation history prior result is invalid."
+            ) from exc
+        if (
+            prior_result["status"] != "success"
+            or prior_result["generation_history"]
+            or prior_result["variant_index"] != value["variant_index"]
+            or datetime.fromisoformat(
+                prior_result["generated_at"].replace("Z", "+00:00")
+            )
+            > replaced_at_value
+            or record["prior_result_sha256"] != _result_digest(prior_result)
+        ):
+            raise VariantInterpretationError(
+                "Interpretation generation history integrity check failed."
+            )
     try:
         validate_llm_payload(
             {
@@ -2024,6 +2190,7 @@ __all__ = [
     "SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS",
     "SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS",
     "MAX_CONFLICT_ASSESSMENT_CHARACTERS",
+    "MAX_INTERPRETATION_GENERATION_HISTORY",
     "MAX_INTERPRETATION_CHARACTERS",
     "MAX_INTERPRETATION_WARNINGS",
     "VARIANT_INTERPRETATION_PROMPT_VERSION",
@@ -2037,5 +2204,6 @@ __all__ = [
     "interpret_variant",
     "interpret_variants",
     "retry_variant_interpretation",
+    "retain_prior_interpretation_generation",
     "validate_variant_interpretation_result",
 ]
