@@ -24,6 +24,9 @@ SEVERITY_ORDER: dict[str, int] = {
     "major": 3,
     "critical": 4,
 }
+MEANINGFUL_CONFLICT_SEVERITIES: frozenset[str] = frozenset(
+    {"moderate", "major", "critical"}
+)
 
 
 class ConflictAuditError(ValueError):
@@ -320,7 +323,8 @@ def _add_structural_findings(
             sources=["Variant context", "VEP", "GeneBe"],
             message=(
                 "Transcript version suffixes differ across retained evidence "
-                "(same base transcript, annotation currency difference only)."
+                "(same base transcript, annotation currency difference only; "
+                "not a biological conflict)."
                 if version_only
                 else
                 "Transcript identifiers disagree across retained evidence."
@@ -689,9 +693,14 @@ def audit_evidence_conflicts(
         key=lambda severity: SEVERITY_ORDER[severity],
         default="none",
     )
+    status: AuditStatus = (
+        "conflict"
+        if routing_severity in MEANINGFUL_CONFLICT_SEVERITIES
+        else "no_conflict"
+    )
     return {
         "phase": phase,
-        "status": "conflict" if findings else "no_conflict",
+        "status": status,
         "routing_severity": routing_severity,
         "findings": findings,
         "normalized_classifications": classifications,
@@ -702,6 +711,7 @@ def audit_evidence_conflicts(
 __all__ = [
     "ConflictAuditError",
     "ConflictAuditResult",
+    "MEANINGFUL_CONFLICT_SEVERITIES",
     "audit_evidence_conflicts",
     "normalize_classification_label",
 ]

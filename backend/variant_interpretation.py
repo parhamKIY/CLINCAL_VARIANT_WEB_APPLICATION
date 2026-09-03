@@ -403,9 +403,13 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "3. Missing evidence is unknown, not benign or negative evidence.",
         "4. Conflict state is interpretation context only. It never selects "
         "a model and does not authorize forced resolution.",
-        "5. If meaningful conflict is present, explain the disagreement and "
-        "state when it remains unresolved. Otherwise synthesize "
-        "conservatively without claiming certainty.",
+        "5. If meaningful conflict is present (routing_severity of moderate, "
+        "major, or critical), explain the disagreement and state when it "
+        "remains unresolved. Minor findings (such as transcript version "
+        "currency differences or shared upstream sources) are informational "
+        "nuances, not meaningful biological conflicts, and must not prevent "
+        "synthesis. Otherwise synthesize conservatively without claiming "
+        "certainty.",
         "6. For every otherwise successful response, you must return exactly "
         "one ai_classification from: Pathogenic, Likely pathogenic, "
         "Uncertain significance, Likely benign, or Benign. Base this draft "
@@ -419,7 +423,13 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "uncertainty in the interpretation and conflict assessment.",
         "8. A successful response must contain both the draft classification "
         "and a substantive interpretation even when source classifications "
-        "are missing, no_match, unavailable, or incomplete.",
+        "are missing, no_match, unavailable, or incomplete. When ClinVar or "
+        "literature is absent/unreported, but automated ACMG criteria (e.g. "
+        "from GeneBe) and computational/population evidence consistently "
+        "support Likely benign or Likely pathogenic without contradiction, "
+        "synthesize that direction conservatively rather than defaulting to "
+        "Uncertain significance solely due to the absence of ClinVar or "
+        "literature records.",
         "9. Keep provider classifications as source assertions. Do not "
         "overwrite, relabel, or present them as the draft AI classification.",
         "10. Cite only reference IDs present in the supplied allowed reference "
@@ -578,7 +588,11 @@ def _build_prompt(
         "unless the supplied evidence itself clearly resolves it."
         if prompt_mode == "conflict_aware"
         else "Synthesize the evidence conservatively; do not manufacture a "
-        "conflict or overstate agreement."
+        "conflict or overstate agreement. Minor audit findings (such as "
+        "transcript version differences) are not biological conflicts. Where "
+        "automated ACMG criteria and computational evidence consistently "
+        "point to Likely benign or Likely pathogenic, reflect that direction "
+        "in the draft classification."
     )
     phenotype_conclusion = _expected_phenotype_conclusion(semantic_evidence)
     reference_catalog = [
