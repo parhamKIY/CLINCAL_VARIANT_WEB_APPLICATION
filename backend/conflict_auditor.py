@@ -73,6 +73,27 @@ def _term_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
+def _transcript_base(value: str) -> str:
+    """Strip the numeric version suffix from a transcript identifier.
+
+    Examples::
+
+        "ENST00000350721.9"  -> "ENST00000350721"
+        "ENST00000350721.10" -> "ENST00000350721"
+        "NM_001234.5"        -> "NM_001234"
+        "ENST00000350721"    -> "ENST00000350721"  (no suffix, unchanged)
+
+    Only a trailing ``.N`` where N consists entirely of digits is removed.
+    Non-numeric suffixes (e.g. ``.p1``) are preserved so that non-versioned
+    dot-separated identifiers are not incorrectly stripped.
+    """
+    if "." in value:
+        base, _, suffix = value.rpartition(".")
+        if suffix.isdigit():
+            return base
+    return value
+
+
 def normalize_classification_label(value: object) -> str | None:
     """Normalize one unambiguous assertion to the required five classes."""
 
@@ -285,13 +306,25 @@ def _add_structural_findings(
         if value is not None
     }
     if len({value for value in transcript_values.values()}) > 1:
+        # Determine whether the mismatch is purely a version-suffix difference
+        # (e.g. ENST00000350721.9 vs ENST00000350721) or a genuine switch to a
+        # different transcript.  Version-only mismatches are downgraded to
+        # "minor" so they do not trigger conflict_aware LLM prompt mode.
+        base_ids = {_transcript_base(v) for v in transcript_values.values()}
+        version_only = len(base_ids) == 1
         _add_finding(
             findings,
             conflict_type="transcript_mismatch",
-            severity="major",
+            severity="minor" if version_only else "major",
             evidence_paths=list(transcript_values),
             sources=["Variant context", "VEP", "GeneBe"],
-            message="Transcript identifiers disagree across retained evidence.",
+            message=(
+                "Transcript version suffixes differ across retained evidence "
+                "(same base transcript, annotation currency difference only)."
+                if version_only
+                else
+                "Transcript identifiers disagree across retained evidence."
+            ),
         )
 
     assembly_values = {
