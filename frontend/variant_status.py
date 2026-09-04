@@ -10,6 +10,7 @@ from backend.final_disposition import (
     FinalDispositionError,
     build_final_dispositions,
 )
+from frontend.source_status import phenotype_status_category
 from frontend.warning_semantics import WarningNotice, build_warning_notices
 
 
@@ -171,21 +172,19 @@ def build_variant_status_card(
     phenotype_context = (
         _mapping(content.get("phenotype_context")) if content is not None else None
     )
-    phenotype_status = _normalized(
+    phenotype_status = phenotype_status_category(
         phenotype_context.get("phenotype_status")
         if phenotype_context is not None
         else None
     )
-    if phenotype_status in {
-        "supported",
-        "strong_match",
-        "partial_match",
-        "partially_supported",
-    }:
+    if phenotype_status == "supported":
         phenotype = "Phenotype relationship supported"
         phenotype_partial = False
-    elif phenotype_status in {"no_match", "not_supported", "unrelated"}:
+    elif phenotype_status == "no_supported_association":
         phenotype = "Phenotype relationship: no supported association"
+        phenotype_partial = True
+    elif phenotype_status == "unavailable":
+        phenotype = "Phenotype relationship: unavailable"
         phenotype_partial = True
     else:
         phenotype = "Phenotype relationship: not assessed"

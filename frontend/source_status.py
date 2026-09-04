@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 
 class ReviewerSourceStatus(TypedDict):
@@ -12,6 +12,14 @@ class ReviewerSourceStatus(TypedDict):
     category: str
     message: str
     recovery: str | None
+
+
+PhenotypeStatusCategory = Literal[
+    "supported",
+    "no_supported_association",
+    "not_assessed",
+    "unavailable",
+]
 
 
 _OPERATIONAL_FAILURES = frozenset(
@@ -72,6 +80,36 @@ def _normalized(value: object) -> str:
     return str(value or "").strip().casefold().replace(" ", "_")
 
 
+def phenotype_status_category(value: object) -> PhenotypeStatusCategory:
+    """Map current and historical phenotype states to one UI vocabulary."""
+
+    status = _normalized(value)
+    if status in {
+        "exact_match",
+        "partial_match",
+        "supported",
+        "strong_match",
+        "partially_supported",
+    }:
+        return "supported"
+    if status in {
+        "no_exact_match",
+        "no_match",
+        "not_supported",
+        "unrelated",
+    }:
+        return "no_supported_association"
+    if status in {
+        "",
+        "not_applicable",
+        "not_assessed",
+        "not_triggered",
+        "skipped",
+    }:
+        return "not_assessed"
+    return "unavailable"
+
+
 def _capability_from_source(source: str) -> str | None:
     normalized = source.casefold()
     if "erepo" in normalized:
@@ -125,6 +163,14 @@ def build_reviewer_source_status(value: Mapping[str, object]) -> ReviewerSourceS
     capability = _normalized(value.get("capability"))
     status = _normalized(value.get("status"))
     operational_status = _normalized(value.get("operational_status"))
+    if capability == "phenotype_gene":
+        phenotype_category = phenotype_status_category(status)
+        if phenotype_category == "supported":
+            status = "available"
+        elif phenotype_category == "no_supported_association":
+            status = "no_match"
+        elif phenotype_category == "not_assessed":
+            status = "not_assessed"
     if status in {"not_found", "no_exact_match"}:
         status = "no_match"
     if operational_status in {"not_found", "no_exact_match"}:
@@ -245,7 +291,9 @@ def build_reviewer_section_status(
 
 
 __all__ = [
+    "PhenotypeStatusCategory",
     "ReviewerSourceStatus",
     "build_reviewer_section_status",
     "build_reviewer_source_status",
+    "phenotype_status_category",
 ]
