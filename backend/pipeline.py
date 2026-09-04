@@ -3716,6 +3716,36 @@ def run_annovar_like_input_processing(
     ]
     if not canonical_variants:
         result = create_pipeline_result()
+        result["status"] = "partial"
+        result["workflow_state"] = "completed"
+        result["current_stage"] = "completed"
+        result["progress_percent"] = 100
+        _set_stage(
+            result,
+            "input",
+            "warning",
+            progress_percent=100,
+            message="No selected input records could be resolved into canonical variants.",
+        )
+        for stage in (
+            "vcf_processing",
+            "annotation",
+            "phenotype",
+            "evidence",
+            "llm",
+            "report",
+        ):
+            _set_stage(
+                result,
+                stage,
+                "skipped",
+                progress_percent=100,
+                message="Skipped because no canonical variants were available.",
+            )
+        result["warnings"].append(
+            "None of the selected input rows could be normalized into canonical variants. "
+            "Review Selected-input preprocessing details for per-row reasons."
+        )
         result["analysis_context"] = validate_analysis_context(
             {
                 "input_type": "excel",

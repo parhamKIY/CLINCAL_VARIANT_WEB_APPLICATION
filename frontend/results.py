@@ -1111,7 +1111,10 @@ def _render_input_preprocessing(result: PipelineResult) -> None:
         st.metric("Selected source rows", summary["selected_count"], border=True)
         st.metric("Canonical variants", summary["canonical_count"], border=True)
         st.metric("Identity unresolved", summary["unresolved_count"], border=True)
-    with st.expander("Per-row preprocessing status", expanded=False):
+    with st.expander(
+        "Per-row preprocessing status",
+        expanded=summary["canonical_count"] == 0 or summary["unresolved_count"] > 0,
+    ):
         rows: list[dict[str, object]] = []
         for item in records:
             if not isinstance(item, dict):

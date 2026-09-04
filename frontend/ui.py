@@ -665,114 +665,126 @@ def _render_clinical_entity_review() -> bool:
     if not drafts:
         return bool(st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY])
 
-    st.markdown("#### Clinical entity review")
-    st.caption("Review every extracted mention before analysis.")
-    edited_groups: list[pd.DataFrame] = []
-    for entity_type, heading, editor_key in (
-        (
-            "PHENOTYPE",
-            "Observed findings",
-            CLINICAL_ENTITY_FINDINGS_EDITOR_KEY,
-        ),
-        (
-            "DISEASE",
-            "Disease/context mentions",
-            CLINICAL_ENTITY_DISEASE_EDITOR_KEY,
-        ),
-    ):
-        rows = [
-            row for row in drafts if row["entity_type"] == entity_type
-        ]
-        if not rows:
-            continue
-        st.markdown(f"**{heading}**")
-        if entity_type == "PHENOTYPE":
-            st.caption(
-                "Reviewer-accepted findings may be used for phenotype-based "
-                "analysis; assertion state remains visible."
+    with st.container(border=True):
+        st.markdown("#### Clinical entity review")
+        st.caption("Review every extracted mention before analysis.")
+        edited_groups: list[pd.DataFrame] = []
+        for entity_type, heading, editor_key in (
+            (
+                "PHENOTYPE",
+                "Observed findings",
+                CLINICAL_ENTITY_FINDINGS_EDITOR_KEY,
+            ),
+            (
+                "DISEASE",
+                "Disease/context mentions",
+                CLINICAL_ENTITY_DISEASE_EDITOR_KEY,
+            ),
+        ):
+            rows = [
+                row for row in drafts if row["entity_type"] == entity_type
+            ]
+            if not rows:
+                continue
+            st.markdown(f"**{heading}** ({len(rows)})")
+            if entity_type == "PHENOTYPE":
+                st.caption(
+                    "Reviewer-accepted findings may be used for phenotype-based "
+                    "analysis; assertion state remains visible."
+                )
+            else:
+                st.caption(
+                    "Context only — disease mentions do not directly become "
+                    "variant evidence."
+                )
+            edited_groups.append(
+                st.data_editor(
+                    pd.DataFrame(rows),
+                    key=editor_key,
+                    hide_index=True,
+                    num_rows="fixed",
+                    disabled=["source_index", "entity_type", "normalized_text"],
+                    column_order=(
+                        "include",
+                        "original_text",
+                        "entity_type",
+                        "assertion",
+                        "normalized_text",
+                    ),
+                    column_config={
+                        "source_index": None,
+                        "include": st.column_config.CheckboxColumn(
+                            "Include", default=True
+                        ),
+                        "original_text": st.column_config.TextColumn(
+                            "Entity text", required=True, max_chars=500
+                        ),
+                        "entity_type": st.column_config.TextColumn("Type"),
+                        "assertion": st.column_config.SelectboxColumn(
+                            "Assertion",
+                            options=[
+                                "PRESENT",
+                                "SUSPECTED",
+                                "NEGATED",
+                                "HISTORICAL",
+                            ],
+                            required=True,
+                        ),
+                        "normalized_text": st.column_config.TextColumn(
+                            "Normalized text"
+                        ),
+                    },
+                    on_change=_clinical_entity_review_changed,
+                )
             )
-        else:
-            st.caption(
-                "Context only — disease mentions do not directly become "
-                "variant evidence."
-            )
-        edited_groups.append(
-            st.data_editor(
-                pd.DataFrame(rows),
-                key=editor_key,
-                hide_index=True,
-                num_rows="fixed",
-                disabled=["source_index", "entity_type", "normalized_text"],
-                column_order=(
-                    "include",
-                    "original_text",
-                    "entity_type",
-                    "assertion",
-                    "normalized_text",
-                ),
-                column_config={
-                    "source_index": None,
-                    "include": st.column_config.CheckboxColumn(
-                        "Include", default=True
-                    ),
-                    "original_text": st.column_config.TextColumn(
-                        "Entity text", required=True, max_chars=500
-                    ),
-                    "entity_type": st.column_config.TextColumn("Type"),
-                    "assertion": st.column_config.SelectboxColumn(
-                        "Assertion",
-                        options=[
-                            "PRESENT",
-                            "SUSPECTED",
-                            "NEGATED",
-                            "HISTORICAL",
-                        ],
-                        required=True,
-                    ),
-                    "normalized_text": st.column_config.TextColumn(
-                        "Normalized text"
-                    ),
-                },
-                on_change=_clinical_entity_review_changed,
-            )
+
+        is_review_complete = bool(
+            st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY]
         )
 
-    if st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY]:
-        st.success("Clinical entity review accepted.")
-    else:
-        st.warning("Clinical entities are awaiting reviewer confirmation.")
-    if not st.button(
-        "Accept clinical entities",
-        key="accept_clinical_entities",
-        type="primary",
-        icon=":material/check:",
-    ):
-        return bool(st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY])
-
-    rows = [
-        row
-        for edited in edited_groups
-        for row in edited.to_dict(orient="records")
-    ]
-    try:
-        accepted = accept_clinical_entity_review_rows(rows)
-    except ClinicalEntityError as exc:
-        st.error(
-            safe_ui_error_message(
-                exc,
-                context="clinical_entity_acceptance",
+        action_col, status_col = st.columns([1, 2])
+        with action_col:
+            accept_clicked = st.button(
+                "Accept clinical entities",
+                key="accept_clinical_entities",
+                type="primary" if not is_review_complete else "secondary",
+                icon=":material/check:",
+                use_container_width=True,
             )
-        )
-        return False
-    st.session_state[CLINICAL_ENTITIES_KEY] = accepted
-    st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = (
-        prepare_clinical_entity_review_rows(accepted)
-    )
-    st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
-    _retain_hpo_candidates_for_reviewed_entities(accepted)
-    _clear_analysis_result()
-    st.success("Clinical entity review accepted.")
-    return True
+
+        if accept_clicked:
+            rows = [
+                row
+                for edited in edited_groups
+                for row in edited.to_dict(orient="records")
+            ]
+            try:
+                accepted = accept_clinical_entity_review_rows(rows)
+            except ClinicalEntityError as exc:
+                with status_col:
+                    st.error(
+                        safe_ui_error_message(
+                            exc,
+                            context="clinical_entity_acceptance",
+                        )
+                    )
+                return False
+            st.session_state[CLINICAL_ENTITIES_KEY] = accepted
+            st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = (
+                prepare_clinical_entity_review_rows(accepted)
+            )
+            st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
+            is_review_complete = True
+            _retain_hpo_candidates_for_reviewed_entities(accepted)
+            _clear_analysis_result()
+
+        with status_col:
+            if is_review_complete:
+                st.success("Clinical entity review accepted.")
+            else:
+                st.warning("Clinical entities are awaiting reviewer confirmation.")
+
+        return is_review_complete
 
 
 def _render_phenotype_extraction(phenotype_model: str) -> None:

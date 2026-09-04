@@ -266,12 +266,34 @@ def test_all_reference_unavailable_inputs_remain_input_level_unresolved() -> Non
 
     assert result["variants"] == []
     assert result["errors"] == []
+    assert result["status"] == "partial"
+    assert result["current_stage"] == "completed"
+    assert result["progress_percent"] == 100
+    assert result["workflow_state"] == "completed"
+    assert any("could be normalized" in w for w in result["warnings"])
     assert result["input_preprocessing_results"][0]["status"] == (
         "IDENTITY_UNRESOLVED"
     )
     assert result["input_preprocessing_results"][0]["failure_reason"] == (
         "REFERENCE_LOOKUP_UNAVAILABLE"
     )
+
+
+def test_inconsistent_interval_inputs_complete_as_partial_with_clear_warning() -> None:
+    records = [
+        {"row": 12, "chrom": "14", "start": 61720574, "end": 61720584, "ref": "TGAGTTATT", "alt": "0"}
+    ]
+    result = run_annovar_like_input_processing(records, phenotypes=[])
+
+    assert result["variants"] == []
+    assert result["errors"] == []
+    assert result["status"] == "partial"
+    assert result["current_stage"] == "completed"
+    assert result["progress_percent"] == 100
+    assert result["workflow_state"] == "completed"
+    assert any("could be normalized" in w for w in result["warnings"])
+    assert result["input_preprocessing_results"][0]["status"] == "IDENTITY_UNRESOLVED"
+    assert result["input_preprocessing_results"][0]["failure_reason"] == "INVALID_INTERVAL"
 
 
 def test_normalized_deletion_has_a_canonical_hgvs_handoff() -> None:

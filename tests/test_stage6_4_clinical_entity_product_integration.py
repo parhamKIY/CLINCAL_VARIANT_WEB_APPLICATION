@@ -254,6 +254,16 @@ def test_streamlit_separates_entities_and_does_not_auto_accept(
     assert [
         item["entity_type"] for item in app.session_state["clinical_entities"]
     ] == ["PHENOTYPE", "DISEASE"]
+    assert len([s for s in app.success if "accepted" in s.value]) == 1
+
+    accept_again = next(
+        button
+        for button in app.button
+        if button.label == "Accept clinical entities"
+    )
+    accept_again.click().run(timeout=10)
+    assert not app.exception
+    assert len([s for s in app.success if "accepted" in s.value]) == 1
 
 
 def test_analysis_cannot_start_while_entity_review_is_pending() -> None:
