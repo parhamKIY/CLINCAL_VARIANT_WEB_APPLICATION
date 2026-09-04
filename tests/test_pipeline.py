@@ -4753,10 +4753,12 @@ class TestAnnotation:
                     }
                 ],
             },
-            "max_population_frequency": 0.004,
+            "max_population_frequency": None,
+            "max_population": None,
+            "max_population_dataset": None,
             "ensembl_variation": None,
         }
-        assert annotation["population_frequency"] == 0.004
+        assert annotation["population_frequency"] == 0.002
         assert "dbsnp" not in myvariant
         assert session.myvariant_get_calls[0]["verify"] is True
         assert session.myvariant_get_calls[0]["params"] == {
@@ -7528,7 +7530,7 @@ class TestAnnotation:
         }
         assert annotation["gene"] == "GENE1"
         assert annotation["consequence"] == "missense_variant"
-        assert annotation["population_frequency"] == 0.004
+        assert annotation["population_frequency"] == 0.002
         assert (
             annotation["sources"]["clinvar"]["clinical_significance"]
             == "Pathogenic"
@@ -7588,7 +7590,7 @@ class TestAnnotation:
         assert annotation["sources"]["myvariant"]["status"] == "success"
         assert annotation["sources"]["clinvar"]["status"] == "success"
         assert annotation["sources"]["clingen"]["status"] == "not_applicable"
-        assert annotation["population_frequency"] == 0.004
+        assert annotation["population_frequency"] == 0.002
         assert (
             annotation["sources"]["clinvar"]["clinical_significance"]
             == "Pathogenic"

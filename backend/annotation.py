@@ -2303,7 +2303,9 @@ def _base_annotation(
             "assembly": settings.GENOME_ASSEMBLY,
             "retrieved_at": None,
             "selected_frequency": None,
-            "selection_method": "maximum_exact_alt_global_af",
+            "selection_method": (
+                "maximum_gnomad_global_af_across_exome_genome"
+            ),
             "fallback_used": False,
             "primary_provider": "myvariant",
             "primary_failure": None,
@@ -3131,6 +3133,51 @@ def _extract_dbsnp_frequencies(
     return frequencies
 
 
+def _maximum_gnomad_population_frequency(
+    details: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the largest explicitly reported gnomAD population/subgroup AF.
+
+    The value is descriptive context only. It is kept separate from the
+    global AF selected for the legacy scalar population-frequency field.
+    """
+
+    candidates: list[tuple[float, int, str, str]] = []
+    for dataset_order, dataset in enumerate(
+        ("gnomad_exome", "gnomad_genome")
+    ):
+        records = details.get(dataset)
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            populations = record.get("population_allele_frequencies")
+            if not isinstance(populations, dict):
+                continue
+            for population, raw_frequency in populations.items():
+                frequency = _valid_frequency(raw_frequency)
+                if not isinstance(population, str) or frequency is None:
+                    continue
+                candidates.append(
+                    (frequency, dataset_order, population, dataset)
+                )
+    if not candidates:
+        return None
+    frequency, _dataset_order, population, dataset = min(
+        candidates,
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    return {
+        "frequency": frequency,
+        "population": population,
+        "dataset": dataset,
+        "selection_method": (
+            "maximum_reported_gnomad_population_or_subgroup_af"
+        ),
+    }
+
+
 def _myvariant_clinvar_conditions(value: Any) -> list[dict[str, Any]]:
     """Normalize bounded MyVariant ClinVar-derived condition records."""
 
@@ -3338,6 +3385,7 @@ def _standardize_myvariant_response(
     """Add bounded MyVariant evidence without retaining its raw payload."""
     dbsnp = payload.get("dbsnp")
     population_frequencies: dict[str, float] = {}
+    gnomad_global_frequencies: dict[str, float] = {}
     population_frequency_details = {
         "source": "gnomAD via MyVariant.info",
         "assembly": settings.GENOME_ASSEMBLY,
@@ -3354,16 +3402,21 @@ def _standardize_myvariant_response(
         frequency = _extract_global_frequency(payload.get(source_name))
         if frequency is not None:
             population_frequencies[source_name] = frequency
+            if source_name in {"gnomad_exome", "gnomad_genome"}:
+                gnomad_global_frequencies[source_name] = frequency
 
     alternate = str(annotation["variant"]["alt"]).strip().upper()
     population_frequencies.update(
         _extract_dbsnp_frequencies(dbsnp, alternate)
     )
 
-    max_frequency = (
-        max(population_frequencies.values())
-        if population_frequencies
+    selected_global_frequency = (
+        max(gnomad_global_frequencies.values())
+        if gnomad_global_frequencies
         else None
+    )
+    gnomad_population_max = _maximum_gnomad_population_frequency(
+        population_frequency_details
     )
     gene = (
         _first_nested_string(dbsnp, "gene", "symbol")
@@ -3386,20 +3439,25 @@ def _standardize_myvariant_response(
         if payload.get(payload_field) is not None:
             upstream_sources.append(source_name)
 
-    annotation["population_frequency"] = max_frequency
+    annotation["population_frequency"] = selected_global_frequency
     annotation["population_frequency_provenance"] = {
         "status": (
-            "available" if max_frequency is not None else "no_usable_frequency"
+            "available"
+            if selected_global_frequency is not None
+            else "no_usable_gnomad_frequency"
         ),
         "provider": MYVARIANT_PROVIDER_NAME,
         "operational_provider": "myvariant",
-        "underlying_dataset": "MyVariant.info aggregated sources",
+        "underlying_dataset": "gnomAD",
         "assembly": settings.GENOME_ASSEMBLY,
         "retrieved_at": annotation["sources"]["myvariant"]["retrieved_at"],
         "variant_id": variant_id,
-        "selected_frequency": max_frequency,
-        "selection_method": "maximum_exact_alt_global_af",
-        "available_global_af": dict(population_frequencies),
+        "selected_frequency": selected_global_frequency,
+        "selection_method": (
+            "maximum_gnomad_global_af_across_exome_genome"
+        ),
+        "available_global_af": dict(gnomad_global_frequencies),
+        "population_max": gnomad_population_max,
         "fallback_used": False,
         "primary_provider": "myvariant",
         "primary_failure": None,
@@ -3414,7 +3472,21 @@ def _standardize_myvariant_response(
             "gene": gene,
             "population_frequencies": population_frequencies,
             "population_frequency_details": population_frequency_details,
-            "max_population_frequency": max_frequency,
+            "max_population_frequency": (
+                gnomad_population_max["frequency"]
+                if gnomad_population_max is not None
+                else None
+            ),
+            "max_population": (
+                gnomad_population_max["population"]
+                if gnomad_population_max is not None
+                else None
+            ),
+            "max_population_dataset": (
+                gnomad_population_max["dataset"]
+                if gnomad_population_max is not None
+                else None
+            ),
         }
     )
     clinvar_candidate = _myvariant_clinvar_candidate(payload)
