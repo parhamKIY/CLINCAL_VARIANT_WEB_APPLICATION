@@ -43,6 +43,50 @@ class AnalysisSummary(TypedDict):
     interpretations_requiring_attention: int
 
 
+class IdentityResolutionFailurePresentation(TypedDict):
+    """Presentation derived when no selected row has canonical identity."""
+
+    headline: str
+    message: str
+    selected_count: int
+    canonical_count: int
+    unresolved_count: int
+    rows: list[dict[str, object]]
+
+
+IDENTITY_FAILURE_MESSAGES = {
+    "REFERENCE_LOOKUP_UNAVAILABLE": (
+        "GRCh38 reference verification was unavailable.",
+        "Retry the analysis when the reference services are available.",
+    ),
+    "REFERENCE_MISMATCH": (
+        "The supplied reference allele does not match GRCh38.",
+        "Verify the genome build, coordinates, and REF allele.",
+    ),
+    "REFERENCE_SOURCE_CONFLICT": (
+        "Reference services returned conflicting GRCh38 sequence.",
+        "Retry later or verify the allele against an authoritative GRCh38 "
+        "reference.",
+    ),
+    "INVALID_INTERVAL": (
+        "The source interval and allele length are inconsistent.",
+        "Correct the Start, End, or allele value in the source record.",
+    ),
+    "UNSUPPORTED_REPRESENTATION": (
+        "The source allele notation cannot be normalized safely.",
+        "Provide explicit REF and ALT alleles or select a corrected source row.",
+    ),
+    "IDENTITY_NOT_PROVEN": (
+        "An exact canonical allele identity could not be proven.",
+        "Verify the genome build, coordinates, REF, and ALT values.",
+    ),
+    "NORMALIZATION_FAILED": (
+        "A canonical allele could not be constructed safely.",
+        "Verify the source representation and select a corrected row.",
+    ),
+}
+
+
 def input_validation_message(input_type: object) -> str:
     """Return terminology matching the actual persisted input type."""
 
@@ -60,6 +104,74 @@ def _sequence_length(value: object) -> int:
 
 def _normalized_status(value: object) -> str:
     return str(value or "").strip().casefold().replace(" ", "_")
+
+
+def build_identity_resolution_failure_presentation(
+    result: Mapping[str, object],
+) -> IdentityResolutionFailurePresentation | None:
+    """Explain the terminal all-unresolved input state without diagnostics."""
+
+    records_value = result.get("input_preprocessing_results")
+    if (
+        not isinstance(records_value, Sequence)
+        or isinstance(records_value, (str, bytes))
+        or not records_value
+        or _sequence_length(result.get("variants")) != 0
+        or result.get("variant_count") != 0
+    ):
+        return None
+    records = [item for item in records_value if isinstance(item, Mapping)]
+    if len(records) != len(records_value) or any(
+        item.get("status") != "IDENTITY_UNRESOLVED" for item in records
+    ):
+        return None
+    rows: list[dict[str, object]] = []
+    for item in records:
+        provenance_value = item.get("source_provenance")
+        provenance = (
+            provenance_value
+            if isinstance(provenance_value, Mapping)
+            else {}
+        )
+        reason_code = str(item.get("failure_reason") or "").strip().upper()
+        reason, next_action = IDENTITY_FAILURE_MESSAGES.get(
+            reason_code,
+            (
+                "An exact canonical allele identity could not be resolved.",
+                "Verify the source variant fields and select a corrected row.",
+            ),
+        )
+        chrom = provenance.get("source_chrom")
+        start = provenance.get("source_start")
+        end = provenance.get("source_end")
+        coordinate = (
+            f"{chrom}:{start}"
+            if start == end or end is None
+            else f"{chrom}:{start}-{end}"
+        )
+        rows.append(
+            {
+                "Source row": provenance.get("source_row"),
+                "Selected input": (
+                    f"{coordinate} {provenance.get('source_ref')}>"
+                    f"{provenance.get('source_alt')}"
+                ),
+                "Reason": reason,
+                "Next action": next_action,
+            }
+        )
+    return {
+        "headline": "Analysis could not proceed",
+        "message": (
+            "None of the selected rows had a safely resolvable GRCh38 "
+            "variant identity. No downstream annotation or AI interpretation "
+            "step was run."
+        ),
+        "selected_count": len(records),
+        "canonical_count": 0,
+        "unresolved_count": len(records),
+        "rows": rows,
+    }
 
 
 def _has_partial_source_coverage(evidence: object) -> bool:
@@ -98,8 +210,11 @@ def build_analysis_summary(result: Mapping[str, object]) -> AnalysisSummary:
 
     status = str(result.get("status") or "").casefold()
     current_stage = str(result.get("current_stage") or "").casefold()
+    identity_failure = build_identity_resolution_failure_presentation(result)
     headline = (
-        "Analysis completed partially"
+        "Analysis could not proceed"
+        if identity_failure is not None
+        else "Analysis completed partially"
         if status == "partial"
         else "Analysis complete"
         if status == "success" and current_stage == "completed"
@@ -150,5 +265,6 @@ def build_analysis_summary(result: Mapping[str, object]) -> AnalysisSummary:
 __all__ = [
     "AnalysisSummary",
     "build_analysis_summary",
+    "build_identity_resolution_failure_presentation",
     "input_validation_message",
 ]

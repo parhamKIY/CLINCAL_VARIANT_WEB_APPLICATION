@@ -56,6 +56,7 @@ from backend.vcf_processing import (
 from config import MAX_VARIANTS_PER_ANALYSIS, settings
 from frontend.analysis_summary import (
     build_analysis_summary,
+    build_identity_resolution_failure_presentation,
     input_validation_message,
 )
 from frontend.execution import (
@@ -87,6 +88,7 @@ from frontend.results import render_analysis_results
 from frontend.xlsx_selection import (
     XLSXSelectionError,
     select_excel_input_records,
+    selected_source_rows_message,
     source_row_display_rows,
 )
 
@@ -1819,9 +1821,7 @@ def _render_xlsx_row_selection(
         else:
             st.info("Select 1–10 source rows before analysis.")
         return None
-    st.success(
-        f"{len(selected_records)} selected source rows are ready for identity preprocessing."
-    )
+    st.info(selected_source_rows_message(len(selected_records)))
     with st.expander("Selected source rows", expanded=False):
         st.dataframe(source_row_display_rows(selected_records), hide_index=True)
     return selected_records
@@ -1943,6 +1943,8 @@ def _result_status(
 ) -> tuple[str, str, bool]:
     """Return the final status label, state, and expansion mode."""
 
+    if build_identity_resolution_failure_presentation(result) is not None:
+        return "Analysis could not proceed", "error", True
     if result["status"] == "success":
         return "Analysis completed", "complete", False
     if (
@@ -2037,6 +2039,33 @@ def _render_trace_snapshot(snapshot: object) -> None:
 def _render_analysis_summary(result: PipelineResult) -> None:
     """Render the concise product outcome before report/provider details."""
 
+    identity_failure = build_identity_resolution_failure_presentation(result)
+    if identity_failure is not None:
+        with st.container(border=True):
+            st.subheader(identity_failure["headline"])
+            st.warning(identity_failure["message"])
+            with st.container(horizontal=True):
+                st.metric(
+                    "Selected source rows",
+                    identity_failure["selected_count"],
+                    border=True,
+                )
+                st.metric(
+                    "Canonical variants",
+                    identity_failure["canonical_count"],
+                    border=True,
+                )
+                st.metric(
+                    "Rows requiring attention",
+                    identity_failure["unresolved_count"],
+                    border=True,
+                )
+            st.dataframe(
+                identity_failure["rows"],
+                hide_index=True,
+                key="identity_resolution_failure_rows",
+            )
+        return
     summary = build_analysis_summary(result)
     variant_count = summary["variants_analyzed"]
     report_count = summary["draft_reports_prepared"]

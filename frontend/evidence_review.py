@@ -32,6 +32,9 @@ from backend.report_docx import (
     render_report_data_docx,
     report_docx_filename,
 )
+from backend.variant_interpretation import (
+    MAX_INTERPRETATION_GENERATION_HISTORY,
+)
 from backend.variant_report import (
     DraftVariantReport,
     DraftVariantReportError,
@@ -39,8 +42,8 @@ from backend.variant_report import (
     save_draft_variant_report,
     set_draft_variant_report_inclusion,
 )
-from backend.variant_interpretation import (
-    MAX_INTERPRETATION_GENERATION_HISTORY,
+from frontend.analysis_summary import (
+    build_identity_resolution_failure_presentation,
 )
 from frontend.report_preview import (
     render_draft_report_preview_pages,
@@ -1708,6 +1711,14 @@ def render_evidence_review(
     """Render pre-interpreted drafts and final review controls."""
 
     retry_model = strong_model or light_model
+    if build_identity_resolution_failure_presentation(result) is not None:
+        st.subheader("Variant identity review")
+        st.info(
+            "No clinical report was generated because variant identity "
+            "validation did not succeed. Review the row-specific reasons "
+            "above, then correct the source data or retry when appropriate."
+        )
+        return
     st.subheader("Draft Variant Review — Evidence and interpretation")
     _render_notice()
     _render_clinical_context(result)

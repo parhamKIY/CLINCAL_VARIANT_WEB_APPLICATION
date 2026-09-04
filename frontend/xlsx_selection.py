@@ -80,9 +80,21 @@ def build_preprocessing_summary(
     }
 
 
+def selected_source_rows_message(count: int) -> str:
+    """Describe selection as pending validation, not accepted identity."""
+
+    return (
+        f"{count} source {'row' if count == 1 else 'rows'} selected. "
+        f"{'Its' if count == 1 else 'Their'} variant "
+        f"{'identity' if count == 1 else 'identities'} will be validated "
+        "when analysis starts."
+    )
+
+
 __all__ = [
     "XLSXSelectionError",
     "build_preprocessing_summary",
     "select_excel_input_records",
+    "selected_source_rows_message",
     "source_row_display_rows",
 ]
