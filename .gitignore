@@ -16,6 +16,7 @@ storage/uploads/*
 storage/reports/*
 storage/database/*
 storage/logs/*
+storage/evidence_repository/*
 data/cache/*
 /docs/*
 !/docs/EVIDENCE_RESILIENCE_IMPLEMENTATION_ROADMAP.md

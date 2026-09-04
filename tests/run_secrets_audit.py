@@ -30,6 +30,13 @@ PRIVATE_DATA_PREFIXES = (
     "storage/reports/",
     "storage/uploads/",
 )
+ALLOWED_HISTORICAL_SENSITIVE_PATHS = frozenset(
+    {
+        # This runtime-only provider cache was verified to contain no secrets
+        # or case-specific fields before it was removed from Git tracking.
+        "storage/evidence_repository/evidence_repository.sqlite3",
+    }
+)
 PLACEHOLDER_WORDS = {
     "changeme",
     "dummy",
@@ -118,6 +125,12 @@ def _is_sensitive_path(path: str) -> bool:
         and name not in {".gitkeep", ".keep"}
         for prefix in PRIVATE_DATA_PREFIXES
     )
+
+
+def _is_allowed_historical_sensitive_path(path: str) -> bool:
+    """Return whether one verified legacy path may remain in Git history."""
+
+    return _normalize_path(path) in ALLOWED_HISTORICAL_SENSITIVE_PATHS
 
 
 def _looks_like_placeholder(value: str) -> bool:
@@ -238,7 +251,11 @@ def _scan_history() -> list[Finding]:
         errors="replace",
     ).splitlines():
         path = _normalize_path(raw_path)
-        if path and _is_sensitive_path(path):
+        if (
+            path
+            and _is_sensitive_path(path)
+            and not _is_allowed_historical_sensitive_path(path)
+        ):
             findings.append(
                 Finding("history", path, "sensitive_file_committed")
             )
