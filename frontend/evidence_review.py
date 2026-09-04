@@ -39,6 +39,9 @@ from backend.variant_report import (
     save_draft_variant_report,
     set_draft_variant_report_inclusion,
 )
+from backend.variant_interpretation import (
+    MAX_INTERPRETATION_GENERATION_HISTORY,
+)
 from frontend.report_preview import (
     render_draft_report_preview_pages,
     stable_allele_identity,
@@ -962,16 +965,33 @@ def _render_interpretation_regenerate(
             for package in result["reviewed_evidence_packages"]
         )
     )
+    interpretation_result = next(
+        (
+            item
+            for item in result["variant_interpretation_results"]
+            if item["variant_index"] == report["variant_index"]
+        ),
+        None,
+    )
+    generation_count = (
+        len(interpretation_result["generation_history"])
+        if interpretation_result is not None
+        else 0
+    )
+    history_limit_reached = (
+        generation_count >= MAX_INTERPRETATION_GENERATION_HISTORY
+    )
     with st.expander(
-        "Regenerate AI interpretation",
+        "Regenerate AI classification and interpretation",
         expanded=False,
         icon=":material/autorenew:",
     ):
         st.caption(
-            "Generates a new AI draft from the persisted Evidence Object. "
+            "Generates a replacement AI classification and interpretation "
+            "from the persisted Evidence Object. The current draft is kept "
+            "in bounded generation history. "
             "Annotation, ClinVar, population, and phenotype providers are "
-            "not rerun. Use this if the current interpretation is unsatisfactory "
-            "and you want the model to produce an alternative draft."
+            "not rerun."
         )
         if has_reviewer_decisions:
             st.caption(
@@ -979,16 +999,22 @@ def _render_interpretation_regenerate(
                 "decisions (edits, selections, or confirmed review) already "
                 "exist for this report."
             )
-            return
+        if history_limit_reached:
+            st.caption(
+                ":material/history: The generation history limit has been "
+                "reached. Review or edit the current draft instead."
+            )
         if st.button(
-            "Regenerate interpretation",
+            "Regenerate AI classification and interpretation",
             type="secondary",
             icon=":material/autorenew:",
             key=f"{_REVIEW_WIDGET_PREFIX}regenerate_{report['report_id']}",
+            disabled=has_reviewer_decisions or history_limit_reached,
         ):
             try:
                 with st.spinner(
-                    "Regenerating AI interpretation from persisted evidence..."
+                    "Regenerating AI classification and interpretation from "
+                    "persisted evidence..."
                 ):
                     updated = regenerate_successful_variant_interpretation(
                         result,
@@ -996,7 +1022,12 @@ def _render_interpretation_regenerate(
                         model=model,
                     )
             except PipelineError as exc:
-                st.error(f"Interpretation regeneration was not completed: {exc}")
+                st.error(
+                    safe_ui_error_message(
+                        exc,
+                        context="interpretation_regeneration",
+                    )
+                )
                 return
             result.clear()
             result.update(updated)
@@ -1005,9 +1036,11 @@ def _render_interpretation_regenerate(
             _set_notice(
                 "success" if persisted else "warning",
                 (
-                    "AI interpretation regenerated from persisted evidence."
+                    "AI classification and interpretation regenerated from "
+                    "persisted evidence; the prior draft was retained."
                     if persisted
-                    else "AI interpretation regenerated, but persistence failed."
+                    else "AI classification and interpretation regenerated, "
+                    "but persistence failed."
                 ),
             )
             st.rerun()

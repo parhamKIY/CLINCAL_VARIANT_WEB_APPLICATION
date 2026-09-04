@@ -6,13 +6,14 @@ import json
 from copy import deepcopy
 
 import pytest
+from streamlit.testing.v1 import AppTest
 
 from backend.database import (
     load_pipeline_state,
     save_analysis,
     save_pipeline_state,
 )
-from backend.error_handling import PipelineError
+from backend.error_handling import PipelineError, safe_ui_error_message
 from backend.llm import LLMClient, LLMResponse, LLMTimeoutError
 from backend.pipeline import (
     regenerate_successful_variant_interpretation,
@@ -28,6 +29,7 @@ from backend.variant_interpretation import (
 from backend.variant_report import set_draft_variant_report_inclusion
 from test_pipeline import (
     FakeLLMAdapter,
+    PROJECT_ROOT,
     TestEvidenceObject as EvidenceFactory,
     TestStage40FrontendReviewWorkflow as Stage40FrontendReviewWorkflow,
 )
@@ -293,3 +295,240 @@ def test_regeneration_history_survives_pipeline_persistence(tmp_path) -> None:
     assert len(
         restored["variant_interpretation_results"][0]["generation_history"]
     ) == 1
+
+
+def test_regeneration_uses_a_distinct_auditable_prompt_without_randomness() -> None:
+    evidence = EvidenceFactory._complete_evidence_object()
+    initial_adapter = FakeLLMAdapter(
+        LLMResponse(
+            content=json.dumps(
+                {
+                    "ai_classification": "Likely benign",
+                    "interpretation": "Initial evidence-based draft.",
+                    "conflict_assessment": "No material conflict was identified.",
+                    "phenotype_conclusion": "partially supported",
+                    "warnings": [],
+                }
+            ),
+            model="initial-model",
+            finish_reason="stop",
+        )
+    )
+    prior = interpret_variant(
+        evidence,
+        client=LLMClient(initial_adapter),
+        timestamp="2026-09-03T08:00:00Z",
+    )
+    regeneration_adapter = FakeLLMAdapter(
+        LLMResponse(
+            content=json.dumps(
+                {
+                    "ai_classification": "Likely benign",
+                    "interpretation": "Alternative evidence-based draft.",
+                    "conflict_assessment": "No material conflict was identified.",
+                    "phenotype_conclusion": "partially supported",
+                    "warnings": [],
+                }
+            ),
+            model="regeneration-model",
+            finish_reason="stop",
+        )
+    )
+
+    regenerated = regenerate_variant_interpretation(
+        evidence,
+        prior,
+        client=LLMClient(regeneration_adapter),
+        timestamp="2026-09-03T08:05:00Z",
+    )
+
+    initial_request = initial_adapter.requests[0]
+    regeneration_request = regeneration_adapter.requests[0]
+    assert regeneration_request.messages != initial_request.messages
+    assert regeneration_request.temperature == 0.0
+    assert regenerated["prompt_version"] == (
+        "variant-interpretation-regeneration-v1.0"
+    )
+    regeneration_prompt = regeneration_request.messages[1].content
+    assert "comparison context only" in regeneration_prompt.casefold()
+    serialized_prior = regeneration_prompt.split(
+        "BEGIN_PRIOR_VALIDATED_AI_DRAFT\n",
+        1,
+    )[1].split("\nEND_PRIOR_VALIDATED_AI_DRAFT", 1)[0]
+    assert json.loads(serialized_prior) == {
+        "ai_classification": "Likely benign",
+        "interpretation": "Initial evidence-based draft.",
+    }
+    assert set(json.loads(serialized_prior)) == {
+        "ai_classification",
+        "interpretation",
+    }
+
+
+def test_full_generation_history_is_rejected_before_an_llm_request() -> None:
+    evidence, current = _generate(
+        classification="Uncertain significance",
+        narrative="Initial evidence-based AI draft.",
+        timestamp="2026-09-03T08:00:00Z",
+    )
+    for generation in range(5):
+        _, replacement = _generate(
+            classification="Uncertain significance",
+            narrative=f"Alternative draft {generation + 1}.",
+            timestamp=f"2026-09-03T08:{10 + generation:02d}:00Z",
+        )
+        current = retain_prior_interpretation_generation(
+            current,
+            replacement,
+            evidence=evidence,
+        )
+    adapter = FakeLLMAdapter(LLMTimeoutError("must not be called"))
+
+    with pytest.raises(
+        VariantInterpretationError,
+        match="history limit",
+    ):
+        regenerate_variant_interpretation(
+            evidence,
+            current,
+            client=LLMClient(adapter),
+        )
+
+    assert adapter.requests == []
+
+
+def test_historical_success_without_ai_classification_can_be_regenerated() -> None:
+    evidence, current = _generate(
+        classification="Uncertain significance",
+        narrative="Historical interpretation draft.",
+        timestamp="2026-09-03T08:00:00Z",
+    )
+    historical = dict(current)
+    historical["schema_version"] = "1.1"
+    for field in (
+        "ai_classification",
+        "phenotype_conclusion",
+        "field_validation",
+        "generation_history",
+    ):
+        historical.pop(field)
+    adapter = FakeLLMAdapter(
+        LLMResponse(
+            content=json.dumps(
+                {
+                    "ai_classification": "Uncertain significance",
+                    "interpretation": "Replacement interpretation draft.",
+                    "conflict_assessment": "No material conflict was identified.",
+                    "phenotype_conclusion": "partially supported",
+                    "warnings": [],
+                }
+            ),
+            model="regeneration-model",
+            finish_reason="stop",
+        )
+    )
+
+    regenerated = regenerate_variant_interpretation(
+        evidence,
+        historical,
+        client=LLMClient(adapter),
+        timestamp="2026-09-03T08:05:00Z",
+    )
+
+    assert regenerated["ai_classification"] == "Uncertain significance"
+    prior_block = adapter.requests[0].messages[1].content.split(
+        "BEGIN_PRIOR_VALIDATED_AI_DRAFT\n",
+        1,
+    )[1].split("\nEND_PRIOR_VALIDATED_AI_DRAFT", 1)[0]
+    assert json.loads(prior_block)["ai_classification"] is None
+
+
+def test_ui_discloses_that_regeneration_replaces_both_draft_fields() -> None:
+    app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+    app.session_state["pipeline_result"] = (
+        Stage40FrontendReviewWorkflow._draft_result()
+    )
+    app.run(timeout=10)
+
+    button_labels = [button.label for button in app.button]
+    assert "Regenerate AI classification and interpretation" in button_labels
+    assert any(
+        "classification and interpretation" in caption.value.casefold()
+        and "providers are not rerun" in caption.value.casefold()
+        for caption in app.caption
+    )
+
+
+def test_ui_regeneration_failure_hides_internal_error_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "frontend.evidence_review.regenerate_successful_variant_interpretation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PipelineError("secret internal provider detail")
+        ),
+    )
+    app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+    app.session_state["pipeline_result"] = (
+        Stage40FrontendReviewWorkflow._draft_result()
+    )
+    app.run(timeout=10)
+
+    next(
+        button
+        for button in app.button
+        if button.label == "Regenerate AI classification and interpretation"
+    ).click().run(timeout=10)
+
+    assert app.error
+    assert all("secret internal" not in error.value for error in app.error)
+    assert any("current AI draft was preserved" in error.value for error in app.error)
+
+
+def test_ui_disables_regeneration_when_bounded_history_is_full() -> None:
+    current = Stage40FrontendReviewWorkflow._draft_result()
+    for generation in range(5):
+        adapter = FakeLLMAdapter(
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "ai_classification": "Uncertain significance",
+                        "interpretation": f"Alternative draft {generation + 1}.",
+                        "conflict_assessment": (
+                            "No material conflict was identified."
+                        ),
+                        "phenotype_conclusion": "partially supported",
+                        "warnings": [],
+                    }
+                ),
+                model="history-limit-model",
+                finish_reason="stop",
+            )
+        )
+        current = regenerate_successful_variant_interpretation(
+            current,
+            variant_index=0,
+            client=LLMClient(adapter),
+            timestamp=f"2026-09-03T08:{10 + generation:02d}:00Z",
+        )
+    app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+    app.session_state["pipeline_result"] = current
+    app.run(timeout=10)
+
+    regenerate = next(
+        button
+        for button in app.button
+        if button.label == "Regenerate AI classification and interpretation"
+    )
+    assert regenerate.disabled
+    assert any("history limit" in caption.value.casefold() for caption in app.caption)
+
+
+def test_regeneration_ui_error_mapping_is_actionable_and_safe() -> None:
+    message = safe_ui_error_message(
+        PipelineError("secret internal provider detail"),
+        context="interpretation_regeneration",
+    )
+
+    assert "current AI draft was preserved" in message
+    assert "secret internal" not in message

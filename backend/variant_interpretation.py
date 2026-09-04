@@ -64,6 +64,9 @@ SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset(
     {"1.1", "1.2", "1.3", "1.4"}
 )
 VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.9"
+VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION = (
+    "variant-interpretation-regeneration-v1.0"
+)
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
         "variant-interpretation-v1.1",
@@ -75,6 +78,7 @@ SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
         "variant-interpretation-v1.7",
         "variant-interpretation-v1.8",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
+        VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION,
     }
 )
 MAX_INTERPRETATION_EVIDENCE_BYTES = 512 * 1024
@@ -542,6 +546,7 @@ def _build_prompt(
     *,
     prompt_mode: InterpretationPromptMode,
     readiness_audit: Mapping[str, object],
+    prompt_version: str = VARIANT_INTERPRETATION_PROMPT_VERSION,
 ) -> str:
     # The reference model needs the full sanitized evidence (capability
     # provenance is validated there); only its literature catalog reaches the
@@ -648,7 +653,7 @@ def _build_prompt(
             "prompt size limit."
         )
     return (
-        f"Prompt version: {VARIANT_INTERPRETATION_PROMPT_VERSION}\n"
+        f"Prompt version: {prompt_version}\n"
         f"Prompt mode: {prompt_mode}\n"
         f"Task instruction: {mode_instruction}\n"
         "Phenotype instruction: Return the conclusion "
@@ -1145,6 +1150,47 @@ def _structured_repair_instruction(error: Exception) -> str:
     return STRUCTURED_REPAIR_INSTRUCTION + detail
 
 
+def _regeneration_instruction(
+    prior: Mapping[str, object],
+) -> str:
+    """Build bounded comparison context for a user-requested new draft."""
+
+    prior_classification = prior.get("ai_classification")
+    prior_draft = {
+        "ai_classification": (
+            _canonical_ai_classification(prior_classification)
+            if prior_classification is not None
+            else None
+        ),
+        "interpretation": _bounded_text(
+            prior.get("interpretation"),
+            field="Prior interpretation",
+            maximum=MAX_INTERPRETATION_CHARACTERS,
+        ),
+    }
+    serialized_prior = json.dumps(
+        prior_draft,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        "\nREGENERATION_REQUEST\n"
+        "The user requested a replacement AI draft from the same validated "
+        "evidence. Reassess the evidence independently and produce a "
+        "substantively alternative interpretation narrative. The prior "
+        "validated AI draft below is comparison context only; it is not "
+        "scientific evidence and must not be cited as evidence. Do not change "
+        "the classification merely for novelty: retain it if the validated "
+        "evidence still supports it, or change it only when the evidence "
+        "supports the change. Return the complete required structured output.\n"
+        "BEGIN_PRIOR_VALIDATED_AI_DRAFT\n"
+        f"{serialized_prior}\n"
+        "END_PRIOR_VALIDATED_AI_DRAFT"
+    )
+
+
 def _execute_interpretation_request(
     evidence: EvidenceObject,
     *,
@@ -1273,6 +1319,7 @@ def interpret_variant(
     max_retries: int | None = None,
     timestamp: str | None = None,
     readiness_audit: Mapping[str, object] | None = None,
+    _regeneration_prior: Mapping[str, object] | None = None,
 ) -> VariantInterpretationResult:
     """Interpret one validated Evidence Object with one selected model."""
 
@@ -1361,11 +1408,19 @@ def interpret_variant(
     conflict_status, conflict_severity, prompt_mode = _conflict_context(
         evidence
     )
+    prompt_version = (
+        VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION
+        if _regeneration_prior is not None
+        else VARIANT_INTERPRETATION_PROMPT_VERSION
+    )
     user_prompt = _build_prompt(
         evidence,
         prompt_mode=prompt_mode,
         readiness_audit=readiness,
+        prompt_version=prompt_version,
     )
+    if _regeneration_prior is not None:
+        user_prompt += _regeneration_instruction(_regeneration_prior)
     active_model = configured_model
     fallback_used = False
     try:
@@ -1443,7 +1498,7 @@ def interpret_variant(
         "variant_index": variant_index,
         "variant": _variant_identity(evidence),
         "status": "success",
-        "prompt_version": VARIANT_INTERPRETATION_PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "prompt_mode": prompt_mode,
         "conflict_status": conflict_status,
         "conflict_severity": conflict_severity,
@@ -1750,6 +1805,13 @@ def regenerate_variant_interpretation(
         raise VariantInterpretationError(
             "Only a successful interpretation can be regenerated."
         )
+    if (
+        len(prior["generation_history"])
+        >= MAX_INTERPRETATION_GENERATION_HISTORY
+    ):
+        raise VariantInterpretationError(
+            "Interpretation generation history limit has been reached."
+        )
     replacement = interpret_variant(
         evidence,
         variant_index=prior["variant_index"],
@@ -1760,6 +1822,7 @@ def regenerate_variant_interpretation(
         max_retries=max_retries,
         timestamp=timestamp,
         readiness_audit=readiness_audit,
+        _regeneration_prior=prior,
     )
     return retain_prior_interpretation_generation(
         prior,
@@ -2254,6 +2317,7 @@ __all__ = [
     "MAX_INTERPRETATION_CHARACTERS",
     "MAX_INTERPRETATION_WARNINGS",
     "VARIANT_INTERPRETATION_PROMPT_VERSION",
+    "VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION",
     "VARIANT_INTERPRETATION_RESPONSE_SCHEMA",
     "VARIANT_INTERPRETATION_SCHEMA_VERSION",
     "VARIANT_INTERPRETATION_SYSTEM_PROMPT",

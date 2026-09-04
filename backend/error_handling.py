@@ -37,6 +37,7 @@ UIErrorContext = Literal[
     "excel_selection",
     "analysis_start",
     "analysis_worker",
+    "interpretation_regeneration",
     "evidence_confirmation",
     "report_finalization",
 ]
@@ -287,6 +288,11 @@ def safe_ui_error_message(
             "analysis_worker": (
                 "The analysis stopped unexpectedly. Technical details were "
                 "recorded; retained results remain unchanged."
+            ),
+            "interpretation_regeneration": (
+                "A replacement AI classification and interpretation could "
+                "not be generated. The current AI draft was preserved. "
+                "Check the configured LLM service and try again."
             ),
             "evidence_confirmation": (
                 "Evidence could not be confirmed. Review the current draft "
