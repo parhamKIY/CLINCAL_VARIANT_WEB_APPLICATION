@@ -244,6 +244,11 @@ class Settings:
         "https://api.genome.ucsc.edu",
     ).strip().rstrip("/")
 
+    NCBI_SEQUENCE_BASE_URL: str = os.getenv(
+        "NCBI_SEQUENCE_BASE_URL",
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+    ).strip().rstrip("/")
+
     VARIANTVALIDATOR_BASE_URL: str = os.getenv(
         "VARIANTVALIDATOR_BASE_URL",
         "https://rest.variantvalidator.org",
@@ -315,6 +320,16 @@ class Settings:
     UCSC_SEQUENCE_MAX_RETRIES: int = _get_non_negative_int(
         "UCSC_SEQUENCE_MAX_RETRIES",
         1,
+    )
+
+    NCBI_SEQUENCE_TIMEOUT: int = _get_positive_int(
+        "NCBI_SEQUENCE_TIMEOUT",
+        5,
+    )
+
+    NCBI_SEQUENCE_MAX_RETRIES: int = _get_non_negative_int(
+        "NCBI_SEQUENCE_MAX_RETRIES",
+        0,
     )
 
     VARIANTVALIDATOR_TIMEOUT: int = _get_positive_int(
@@ -514,6 +529,11 @@ class Settings:
 
     ENABLE_UCSC_SEQUENCE_FALLBACK: bool = _get_bool(
         "ENABLE_UCSC_SEQUENCE_FALLBACK",
+        True,
+    )
+
+    ENABLE_NCBI_SEQUENCE_FALLBACK: bool = _get_bool(
+        "ENABLE_NCBI_SEQUENCE_FALLBACK",
         True,
     )
 
@@ -718,6 +738,7 @@ class Settings:
             "LLM_BASE_URL": cls.LLM_BASE_URL,
             "VEP_BASE_URL": cls.VEP_BASE_URL,
             "UCSC_SEQUENCE_BASE_URL": cls.UCSC_SEQUENCE_BASE_URL,
+            "NCBI_SEQUENCE_BASE_URL": cls.NCBI_SEQUENCE_BASE_URL,
             "VARIANTVALIDATOR_BASE_URL": (
                 cls.VARIANTVALIDATOR_BASE_URL
             ),
@@ -830,6 +851,7 @@ class Settings:
                 cls.ENABLE_EREPO,
                 cls.ENABLE_MEDGEN,
                 cls.ENABLE_UCSC_SEQUENCE_FALLBACK,
+                cls.ENABLE_NCBI_SEQUENCE_FALLBACK,
             )
         ):
             raise RuntimeError(
@@ -857,6 +879,7 @@ class Settings:
         provider_timeouts = {
             "VEP_TIMEOUT": cls.VEP_TIMEOUT,
             "UCSC_SEQUENCE_TIMEOUT": cls.UCSC_SEQUENCE_TIMEOUT,
+            "NCBI_SEQUENCE_TIMEOUT": cls.NCBI_SEQUENCE_TIMEOUT,
             "VARIANTVALIDATOR_TIMEOUT": (
                 cls.VARIANTVALIDATOR_TIMEOUT
             ),
@@ -915,6 +938,11 @@ class Settings:
         if cls.UCSC_SEQUENCE_MAX_RETRIES > 1:
             raise RuntimeError(
                 "UCSC_SEQUENCE_MAX_RETRIES cannot exceed 1."
+            )
+
+        if cls.NCBI_SEQUENCE_MAX_RETRIES > 1:
+            raise RuntimeError(
+                "NCBI_SEQUENCE_MAX_RETRIES cannot exceed 1."
             )
 
         if cls.MYDISEASE_CACHE_SIZE > 1000:

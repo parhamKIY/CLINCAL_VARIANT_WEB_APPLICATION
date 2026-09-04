@@ -66,6 +66,51 @@ def test_red_ensembl_operational_failure_uses_ucsc_fallback() -> None:
     }
 
 
+def test_ensembl_and_ucsc_unavailable_use_ncbi_refseq_fallback() -> None:
+    primary = _Session([requests.Timeout("primary unavailable")] * 2)
+    fallback = _Session([requests.Timeout("fallback unavailable")] * 2)
+    ncbi = _Session(
+        [
+            _Response(
+                200,
+                text=">NC_000013.11:100-103 Homo sapiens chromosome 13\nGTGC\n",
+            )
+        ]
+    )
+
+    result = fetch_grch38_reference_sequence(
+        assembly="GRCh38",
+        chrom="13",
+        start=100,
+        end=103,
+        session=primary,
+        ucsc_session=fallback,
+        ncbi_session=ncbi,
+    )
+
+    assert result["status"] == "success"
+    assert result["sequence"] == "GTGC"
+    assert result["source"] == "ncbi_refseq_grch38_sequence"
+    assert result["fallback_used"] is True
+    assert [item["source"] for item in result["provider_attempts"]] == [
+        "ensembl_grch38_sequence",
+        "ucsc_hg38_sequence",
+        "ncbi_refseq_grch38_sequence",
+    ]
+    assert result["provider_attempts"][-1]["request_provenance"] == (
+        "ncbi_refseq_NC_000013.11_1based_inclusive"
+    )
+    assert ncbi.calls[0][1]["params"] == {
+        "db": "nuccore",
+        "id": "NC_000013.11",
+        "seq_start": 100,
+        "seq_stop": 103,
+        "rettype": "fasta",
+        "retmode": "text",
+        "strand": 1,
+    }
+
+
 def test_red_primary_success_short_circuits_ucsc() -> None:
     primary = _Session([_Response(200, text="GTGC")])
     fallback = _Session([_Response(200, payload={"dna": "AAAA"})])
@@ -174,9 +219,10 @@ def test_malformed_ensembl_response_uses_ucsc_and_retains_attempt_provenance() -
     )
 
 
-def test_both_reference_routes_unavailable_remain_explicitly_operational() -> None:
+def test_all_reference_routes_unavailable_remain_explicitly_operational() -> None:
     primary = _Session([requests.Timeout("primary unavailable")] * 2)
     fallback = _Session([requests.Timeout("fallback unavailable")] * 2)
+    ncbi = _Session([requests.Timeout("final fallback unavailable")])
 
     result = fetch_grch38_reference_sequence(
         assembly="GRCh38",
@@ -185,12 +231,80 @@ def test_both_reference_routes_unavailable_remain_explicitly_operational() -> No
         end=103,
         session=primary,
         ucsc_session=fallback,
+        ncbi_session=ncbi,
     )
 
     assert result["status"] == "unavailable"
     assert result["failure_reason"] == "REFERENCE_LOOKUP_UNAVAILABLE"
     assert result["fallback_used"] is True
-    assert len(result["provider_attempts"]) == 2
+    assert len(result["provider_attempts"]) == 3
+
+
+def test_malformed_ncbi_sequence_is_rejected_as_invalid_reference_data() -> None:
+    primary = _Session([requests.Timeout("primary unavailable")] * 2)
+    fallback = _Session([requests.Timeout("fallback unavailable")] * 2)
+    ncbi = _Session([_Response(200, text=">NC_000013.11\nNNNN\n")])
+
+    result = fetch_grch38_reference_sequence(
+        assembly="GRCh38",
+        chrom="13",
+        start=100,
+        end=103,
+        session=primary,
+        ucsc_session=fallback,
+        ncbi_session=ncbi,
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["failure_reason"] == "REFERENCE_RESPONSE_INVALID"
+    assert result["provider_attempts"][-1]["status"] == "response_invalid"
+
+
+def test_ncbi_fallback_canonicalizes_observed_grch38_deletion() -> None:
+    primary = _Session([requests.Timeout("primary unavailable")] * 4)
+    fallback = _Session([requests.Timeout("fallback unavailable")] * 4)
+    ncbi = _Session(
+        [
+            _Response(200, text=">NC_000013.11 interval\nGTGC\n"),
+            _Response(200, text=">NC_000013.11 anchor\nG\n"),
+        ]
+    )
+
+    def fetch(**kwargs: object) -> dict[str, object]:
+        return fetch_grch38_reference_sequence(
+            assembly=str(kwargs["assembly"]),
+            chrom=str(kwargs["chrom"]),
+            start=int(kwargs["start"]),
+            end=int(kwargs["end"]),
+            session=primary,
+            ucsc_session=fallback,
+            ncbi_session=ncbi,
+        )
+
+    result = adapt_annovar_like_record(
+        {
+            "chrom": "13",
+            "start": 102875767,
+            "end": 102875770,
+            "ref": "GTGC",
+            "alt": 0,
+            "filter": "QDfilter",
+        },
+        reference_fetcher=fetch,
+    )
+
+    assert result["status"] == "NORMALIZED_AND_ACCEPTED"
+    assert result["canonical_variant"] == {
+        "chrom": "13",
+        "pos": 102875766,
+        "ref": "GGTGC",
+        "alt": "G",
+        "qual": None,
+        "filter": "QDfilter",
+    }
+    assert "ncbi_refseq_fallback" in result["source_provenance"][
+        "reference_verification"
+    ]
 
 
 def _fallback_fetcher(

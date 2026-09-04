@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, MutableMapping
 from copy import deepcopy
+from threading import Lock
 from typing import Literal, TypedDict, cast
 
 import requests
 
 from backend.vcf_processing import normalize_primary_chromosome
+from backend.variant_identity import (
+    CLINVAR_REFSEQ_BASES,
+    CLINVAR_REFSEQ_VERSIONS,
+)
 from config import settings
 
 
@@ -22,10 +28,15 @@ ReferenceProviderStatus = Literal[
     "success", "unavailable", "response_invalid"
 ]
 ReferenceProvider = Literal[
-    "ensembl_grch38_sequence", "ucsc_hg38_sequence"
+    "ensembl_grch38_sequence",
+    "ucsc_hg38_sequence",
+    "ncbi_refseq_grch38_sequence",
 ]
 REFERENCE_SEQUENCE_MAX_ATTEMPTS = 2
 REFERENCE_SEQUENCE_TIMEOUT_SECONDS = 5
+NCBI_REFERENCE_REQUEST_INTERVAL_SECONDS = 0.34
+_NCBI_REFERENCE_LOCK = Lock()
+_LAST_NCBI_REFERENCE_REQUEST_AT = 0.0
 
 
 class ReferenceProviderAttempt(TypedDict):
@@ -76,6 +87,18 @@ def _valid_sequence(value: object, length: int) -> str | None:
     if len(sequence) != length or set(sequence) - {"A", "C", "G", "T"}:
         return None
     return sequence
+
+
+def _wait_for_ncbi_reference_slot() -> None:
+    """Keep reference E-utility traffic below three requests per second."""
+
+    global _LAST_NCBI_REFERENCE_REQUEST_AT
+    with _NCBI_REFERENCE_LOCK:
+        elapsed = time.monotonic() - _LAST_NCBI_REFERENCE_REQUEST_AT
+        remaining = NCBI_REFERENCE_REQUEST_INTERVAL_SECONDS - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+        _LAST_NCBI_REFERENCE_REQUEST_AT = time.monotonic()
 
 
 def _attempt(
@@ -211,6 +234,73 @@ def _request_ucsc_sequence(
     )
 
 
+def _request_ncbi_sequence(
+    *,
+    chrom: str,
+    start: int,
+    end: int,
+    session: requests.Session,
+) -> tuple[str | None, ReferenceProviderAttempt]:
+    """Request the exact GRCh38 RefSeq interval from NCBI E-utilities."""
+
+    accession_base = CLINVAR_REFSEQ_BASES[chrom]
+    accession_version = CLINVAR_REFSEQ_VERSIONS["GRCh38"][chrom]
+    accession = f"{accession_base}.{accession_version}"
+    request_provenance = f"ncbi_refseq_{accession}_1based_inclusive"
+    attempts = 0
+    for attempts in range(1, settings.NCBI_SEQUENCE_MAX_RETRIES + 2):
+        _wait_for_ncbi_reference_slot()
+        try:
+            response = session.get(
+                f"{settings.NCBI_SEQUENCE_BASE_URL}/efetch.fcgi",
+                params={
+                    "db": "nuccore",
+                    "id": accession,
+                    "seq_start": start,
+                    "seq_stop": end,
+                    "rettype": "fasta",
+                    "retmode": "text",
+                    "strand": 1,
+                },
+                headers={"Accept": "text/plain"},
+                timeout=min(
+                    settings.NCBI_SEQUENCE_TIMEOUT,
+                    REFERENCE_SEQUENCE_TIMEOUT_SECONDS,
+                ),
+            )
+        except requests.RequestException:
+            continue
+        if response.status_code in {429, 500, 502, 503, 504}:
+            continue
+        if response.status_code != 200:
+            break
+        sequence_text = "".join(
+            line.strip()
+            for line in response.text.splitlines()
+            if line.strip() and not line.lstrip().startswith(">")
+        )
+        sequence = _valid_sequence(sequence_text, end - start + 1)
+        if sequence is not None:
+            return sequence, _attempt(
+                "ncbi_refseq_grch38_sequence",
+                "success",
+                attempts,
+                request_provenance,
+            )
+        return None, _attempt(
+            "ncbi_refseq_grch38_sequence",
+            "response_invalid",
+            attempts,
+            request_provenance,
+        )
+    return None, _attempt(
+        "ncbi_refseq_grch38_sequence",
+        "unavailable",
+        attempts,
+        request_provenance,
+    )
+
+
 def _unavailable_result(
     *,
     assembly: str,
@@ -246,12 +336,14 @@ def fetch_grch38_reference_sequence(
     end: int,
     session: requests.Session | None = None,
     ucsc_session: requests.Session | None = None,
+    ncbi_session: requests.Session | None = None,
 ) -> ReferenceSequenceResult:
-    """Fetch one exact GRCh38 interval via primary then fallback.
+    """Fetch one exact GRCh38 interval through the bounded provider chain.
 
     The internal request is always ``(assembly, chrom, start, end)`` with
-    1-based inclusive coordinates. UCSC translation is contained here; callers
-    never receive provider-specific coordinates or raw response bodies.
+    1-based inclusive coordinates. Provider coordinate/accession translation
+    is contained here; callers never receive provider-specific coordinates or
+    raw response bodies.
     """
 
     normalized_chrom = normalize_primary_chromosome(chrom)
@@ -284,35 +376,52 @@ def fetch_grch38_reference_sequence(
             "provider_attempts": [primary_attempt],
         }
     attempts = [primary_attempt]
-    if not settings.ENABLE_UCSC_SEQUENCE_FALLBACK:
-        return _unavailable_result(
-            assembly="GRCh38",
+    if settings.ENABLE_UCSC_SEQUENCE_FALLBACK:
+        fallback_session = ucsc_session or session or requests.Session()
+        sequence, fallback_attempt = _request_ucsc_sequence(
             chrom=normalized_chrom,
             start=start,
             end=end,
-            attempts=attempts,
+            session=fallback_session,
         )
-    fallback_session = ucsc_session or session or requests.Session()
-    sequence, fallback_attempt = _request_ucsc_sequence(
-        chrom=normalized_chrom,
-        start=start,
-        end=end,
-        session=fallback_session,
-    )
-    attempts.append(fallback_attempt)
-    if sequence is not None:
-        return {
-            "status": "success",
-            "assembly": "GRCh38",
-            "chrom": normalized_chrom,
-            "start": start,
-            "end": end,
-            "sequence": sequence,
-            "source": "ucsc_hg38_sequence",
-            "fallback_used": True,
-            "failure_reason": None,
-            "provider_attempts": attempts,
-        }
+        attempts.append(fallback_attempt)
+        if sequence is not None:
+            return {
+                "status": "success",
+                "assembly": "GRCh38",
+                "chrom": normalized_chrom,
+                "start": start,
+                "end": end,
+                "sequence": sequence,
+                "source": "ucsc_hg38_sequence",
+                "fallback_used": True,
+                "failure_reason": None,
+                "provider_attempts": attempts,
+            }
+    if settings.ENABLE_NCBI_SEQUENCE_FALLBACK:
+        final_session = (
+            ncbi_session or ucsc_session or session or requests.Session()
+        )
+        sequence, final_attempt = _request_ncbi_sequence(
+            chrom=normalized_chrom,
+            start=start,
+            end=end,
+            session=final_session,
+        )
+        attempts.append(final_attempt)
+        if sequence is not None:
+            return {
+                "status": "success",
+                "assembly": "GRCh38",
+                "chrom": normalized_chrom,
+                "start": start,
+                "end": end,
+                "sequence": sequence,
+                "source": "ncbi_refseq_grch38_sequence",
+                "fallback_used": True,
+                "failure_reason": None,
+                "provider_attempts": attempts,
+            }
     return _unavailable_result(
         assembly="GRCh38",
         chrom=normalized_chrom,
@@ -423,12 +532,23 @@ def reference_verification_provenance(
     """Return bounded reviewer-safe reference-route provenance."""
 
     source = value.get("source")
-    if source == "ucsc_hg38_sequence":
+    if source == "ncbi_refseq_grch38_sequence":
+        route = "ncbi_refseq_fallback"
+    elif source == "ucsc_hg38_sequence":
         route = "ucsc_fallback"
     elif source == "ensembl_grch38_sequence":
         route = "ensembl_primary"
     elif value.get("fallback_used") is True:
-        route = "ensembl_then_ucsc"
+        attempted_sources = {
+            item.get("source")
+            for item in value.get("provider_attempts", [])
+            if isinstance(item, Mapping)
+        }
+        route = (
+            "ensembl_then_ucsc_then_ncbi_refseq"
+            if "ncbi_refseq_grch38_sequence" in attempted_sources
+            else "ensembl_then_ucsc"
+        )
     else:
         route = "ensembl_primary"
     return f"{outcome}_{route}_grch38"

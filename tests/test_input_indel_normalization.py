@@ -407,5 +407,5 @@ def test_reference_accessor_returns_explicit_bounded_operational_unavailability(
     assert result["status"] == "unavailable"
     assert result["source"] == "reference_sequence_unavailable"
     assert result["failure_reason"] == "REFERENCE_LOOKUP_UNAVAILABLE"
-    assert len(session.calls) == 4
+    assert len(session.calls) == 5
     assert all(call["timeout"] == 5 for call in session.calls)
