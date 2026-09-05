@@ -7,11 +7,14 @@ import json
 import pytest
 
 from backend.llm import LLMClient, LLMResponse
+from backend.report_data_projection import build_report_data_from_draft
 from backend.variant_interpretation import (
     interpret_variant,
     interpret_variants,
+    regenerate_variant_interpretation,
     validate_variant_interpretation_result,
 )
+from backend.variant_report import build_draft_variant_report
 from test_pipeline import (
     FakeLLMAdapter,
     SequenceLLMAdapter,
@@ -38,13 +41,28 @@ def _response(**overrides: object) -> LLMResponse:
     )
 
 
-def test_invalid_phenotype_conclusion_preserves_valid_core_without_repair() -> None:
+@pytest.mark.parametrize(
+    "phenotype_conclusion",
+    [
+        "unsupported free-form conclusion",
+        ["supported"],
+        {"value": "supported"},
+        None,
+        1,
+        True,
+    ],
+    ids=["text", "list", "object", "null", "number", "boolean"],
+)
+def test_invalid_phenotype_conclusion_preserves_valid_core_without_repair(
+    phenotype_conclusion: object,
+) -> None:
     adapter = FakeLLMAdapter(
-        _response(phenotype_conclusion="unsupported free-form conclusion")
+        _response(phenotype_conclusion=phenotype_conclusion)
     )
 
+    evidence = EvidenceFactory._complete_evidence_object()
     result = interpret_variant(
-        EvidenceFactory._complete_evidence_object(),
+        evidence,
         client=LLMClient(adapter),
         timestamp=_TIMESTAMP,
     )
@@ -62,6 +80,46 @@ def test_invalid_phenotype_conclusion_preserves_valid_core_without_repair() -> N
     assert result["field_validation"]["interpretation"] == "valid"
     assert result["field_validation"]["conflict_assessment"] == "valid"
     assert result["field_validation"]["phenotype_conclusion"] == "invalid"
+    assert len(adapter.requests) == 1
+
+    draft = build_draft_variant_report(evidence, result, variant_index=0)
+    report_data = build_report_data_from_draft(
+        draft, analysis_id="analysis-" + "4" * 32
+    )
+    assert report_data["conclusive_result"]["classification"] == "Likely pathogenic"
+    assert report_data["interpretation"]["current_reviewer_interpretation"] == (
+        "Strong evidence supports this draft assessment."
+    )
+
+
+def test_regeneration_preserves_core_when_phenotype_conclusion_is_malformed() -> None:
+    evidence = EvidenceFactory._complete_evidence_object()
+    prior = interpret_variant(
+        evidence,
+        client=LLMClient(FakeLLMAdapter(_response())),
+        timestamp=_TIMESTAMP,
+    )
+    adapter = FakeLLMAdapter(
+        _response(
+            phenotype_conclusion=["supported"],
+            interpretation="The retained evidence supports the regenerated draft.",
+        )
+    )
+    result = regenerate_variant_interpretation(
+        evidence,
+        prior,
+        client=LLMClient(adapter),
+        timestamp="2026-08-24T18:01:00Z",
+    )
+
+    assert result["status"] == "success"
+    assert result["ai_classification"] == "Likely pathogenic"
+    assert result["interpretation"] == (
+        "The retained evidence supports the regenerated draft."
+    )
+    assert result["phenotype_conclusion"] is None
+    assert result["field_validation"]["phenotype_conclusion"] == "invalid"
+    assert result["generation_history"][0]["prior_result"] == prior
     assert len(adapter.requests) == 1
 
 

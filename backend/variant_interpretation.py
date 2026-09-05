@@ -845,7 +845,10 @@ def _parse_response(
     )
     raw_phenotype_conclusion = payload.get("phenotype_conclusion")
     phenotype_conclusion: PhenotypeConclusion | None
-    if raw_phenotype_conclusion in allowed_phenotype_conclusions:
+    if (
+        isinstance(raw_phenotype_conclusion, str)
+        and raw_phenotype_conclusion in allowed_phenotype_conclusions
+    ):
         phenotype_conclusion = cast(
             PhenotypeConclusion,
             raw_phenotype_conclusion,
