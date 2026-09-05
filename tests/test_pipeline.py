@@ -24134,10 +24134,29 @@ class TestFrontendFoundation:
             job.join(2)
             release_registered_analysis_job(token)
 
-    def test_completed_job_refresh_switches_to_durable_analysis(self) -> None:
-        analysis_id = f"analysis-{'b' * 32}"
+    def test_completed_job_refresh_switches_to_durable_analysis(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(database_path),
+        )
         expected = TestStage40FrontendReviewWorkflow._draft_result()
+        record = save_analysis(
+            status=expected["status"],
+            warnings=expected["warnings"],
+            database_path=database_path,
+        )
+        analysis_id = record["analysis_id"]
         expected["analysis_id"] = analysis_id
+        expected = save_pipeline_state(
+            expected,
+            database_path=database_path,
+        )
         job = AnalysisJob(lambda _: deepcopy(expected))
         token = register_analysis_job(job)
         job.start()
@@ -24153,6 +24172,148 @@ class TestFrontendFoundation:
         assert "analysis_job" not in refreshed.query_params
         assert refreshed.query_params["analysis"] == [analysis_id]
         assert get_registered_analysis_job(token) is None
+
+    def test_nondurable_analysis_cannot_replace_last_session_pointer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(database_path),
+        )
+        expected = TestStage40FrontendReviewWorkflow._draft_result()
+        record = save_analysis(
+            status=expected["status"],
+            warnings=expected["warnings"],
+            database_path=database_path,
+        )
+        expected["analysis_id"] = record["analysis_id"]
+        save_pipeline_state(expected, database_path=database_path)
+        assert frontend_execution_module.save_last_session_analysis_id(
+            record["analysis_id"]
+        )
+
+        nondurable_id = f"analysis-{'b' * 32}"
+        assert not frontend_execution_module.save_last_session_analysis_id(
+            nondurable_id
+        )
+        assert (
+            frontend_execution_module.load_last_session_analysis_id()
+            == record["analysis_id"]
+        )
+
+    def test_completed_nondurable_job_remains_visible_without_restore_link(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(tmp_path / "analysis.sqlite3"),
+        )
+        expected = TestStage40FrontendReviewWorkflow._draft_result()
+        expected["analysis_id"] = f"analysis-{'d' * 32}"
+        job = AnalysisJob(lambda _: deepcopy(expected))
+        token = register_analysis_job(job)
+        job.start()
+        job.join(2)
+        assert job.view().state == "completed"
+
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
+        app.query_params["analysis_job"] = token
+        app.run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["pipeline_result"] == expected
+        assert "analysis" not in app.query_params
+        assert "analysis_job" not in app.query_params
+        assert get_registered_analysis_job(token) is None
+        assert any(
+            "saved state could not be verified" in warning.value
+            for warning in app.warning
+        )
+
+    def test_restore_button_explains_unavailable_saved_analysis(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(database_path),
+        )
+        recovery_directory = tmp_path / "recovery_jobs"
+        recovery_directory.mkdir()
+        unavailable_id = f"analysis-{'c' * 32}"
+        (recovery_directory / "last_session.json").write_text(
+            json.dumps({"analysis_id": unavailable_id}),
+            encoding="utf-8",
+        )
+
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(
+            timeout=10
+        )
+        restore = next(
+            button for button in app.button if button.label == "Restore"
+        )
+        restore.click().run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["pipeline_result"] is None
+        assert "analysis" not in app.query_params
+        assert any(
+            "previous saved analysis is no longer available"
+            in warning.value.casefold()
+            for warning in app.warning
+        )
+
+    def test_restore_button_loads_previous_persisted_analysis(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        database_path = tmp_path / "analysis.sqlite3"
+        monkeypatch.setattr(
+            settings,
+            "DATABASE_PATH",
+            str(database_path),
+        )
+        expected = TestStage40FrontendReviewWorkflow._draft_result()
+        record = save_analysis(
+            status=expected["status"],
+            warnings=expected["warnings"],
+            database_path=database_path,
+        )
+        expected["analysis_id"] = record["analysis_id"]
+        expected = save_pipeline_state(
+            expected,
+            database_path=database_path,
+        )
+        assert frontend_execution_module.save_last_session_analysis_id(
+            record["analysis_id"]
+        )
+
+        app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(
+            timeout=10
+        )
+        restore = next(
+            button for button in app.button if button.label == "Restore"
+        )
+        restore.click().run(timeout=10)
+
+        assert not app.exception
+        assert app.session_state["pipeline_result"] == expected
+        assert app.query_params["analysis"] == [record["analysis_id"]]
+        assert any(
+            "Restored the saved analysis" in message.value
+            for message in app.info
+        )
 
     def test_page_refresh_restores_persisted_analysis(
         self,

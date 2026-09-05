@@ -193,13 +193,17 @@ def _last_session_path() -> Path | None:
     return root / LAST_SESSION_FILENAME
 
 
-def save_last_session_analysis_id(analysis_id: str) -> None:
-    """Persist the most recently completed analysis ID for bare-URL recovery."""
+def save_last_session_analysis_id(analysis_id: str) -> bool:
+    """Persist a verified resumable analysis ID for bare-URL recovery."""
     if not isinstance(analysis_id, str) or ANALYSIS_ID_PATTERN.fullmatch(analysis_id) is None:
-        return
+        return False
+    try:
+        load_pipeline_state(analysis_id)
+    except DatabaseError:
+        return False
     path = _last_session_path()
     if path is None:
-        return
+        return False
     payload = json.dumps({"analysis_id": analysis_id}).encode("utf-8")
     temporary_path = path.with_suffix(f".{uuid4().hex}.tmp")
     descriptor: int | None = None
@@ -214,10 +218,12 @@ def save_last_session_analysis_id(analysis_id: str) -> None:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary_path, path)
+        return True
     except OSError:
         if descriptor is not None:
             os.close(descriptor)
         temporary_path.unlink(missing_ok=True)
+        return False
 
 
 def load_last_session_analysis_id() -> str | None:
