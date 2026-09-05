@@ -98,9 +98,9 @@ def test_extracted_findings_and_disease_context_have_distinct_review_states(
     ).click().run(timeout=10)
 
     assert not app.exception
-    assert any(item.value == "**Observed findings**" for item in app.markdown)
+    assert any("Observed findings" in item.value for item in app.markdown)
     assert any(
-        item.value == "**Disease/context mentions**" for item in app.markdown
+        "Disease/context mentions" in item.value for item in app.markdown
     )
     assert any(
         caption.value

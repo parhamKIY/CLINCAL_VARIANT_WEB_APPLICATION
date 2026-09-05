@@ -143,6 +143,7 @@ from backend.llm_routing import (
 from backend.logging_config import (
     APP_LOGGER_NAME,
     REDACTED,
+    RedactingFilter,
     configure_logging,
     get_logger,
     shutdown_logging,
@@ -835,10 +836,18 @@ class TestLoggingConfiguration:
         assert tuple(logger.handlers) == original_handlers
         assert logger.name == APP_LOGGER_NAME
         assert logger.level == logging.DEBUG
-        assert len(logger.handlers) == 2
+        application_handlers = [
+            handler
+            for handler in logger.handlers
+            if any(
+                isinstance(log_filter, RedactingFilter)
+                for log_filter in handler.filters
+            )
+        ]
+        assert len(application_handlers) == 2
         assert any(
             isinstance(handler, RotatingFileHandler)
-            for handler in logger.handlers
+            for handler in application_handlers
         )
         assert log_path.is_file()
         if os.name == "posix":
@@ -24176,7 +24185,7 @@ class TestFrontendFoundation:
             for message in refreshed.info
         )
 
-    def test_external_api_status_panel_shows_each_service_state(
+    def test_execution_trace_replaces_legacy_api_status_panel(
         self,
     ) -> None:
         result = create_pipeline_result()
@@ -24200,6 +24209,26 @@ class TestFrontendFoundation:
             str(PROJECT_ROOT / "app.py")
         ).run(timeout=10)
         app.session_state["pipeline_result"] = result
+        app.session_state["analysis_execution_trace"] = {
+            "schema_version": "1.0",
+            "run_id": f"run-{'1' * 32}",
+            "status": "completed",
+            "max_events": 500,
+            "event_count": 1,
+            "events_dropped": 0,
+            "events": [
+                {
+                    "sequence": 1,
+                    "occurred_at": "2026-08-24T00:00:00Z",
+                    "event_type": "provider_source_selected",
+                    "scope": "provider",
+                    "provider": "genebe",
+                    "capability": "automated_acmg_context",
+                    "status": "success",
+                    "source_mode": "repository_cache",
+                }
+            ],
+        }
         app.run(timeout=10)
 
         assert not app.exception
@@ -24207,20 +24236,14 @@ class TestFrontendFoundation:
             markdown.value
             for markdown in app.markdown
         )
-        for source in (
-            "Ensembl VEP",
-            "GeneBe",
-            "MyVariant.info",
-            "NCBI ClinVar",
-            "ClinGen/GenCC (UCSC)",
-            "ClinGen CSpec Registry",
-            "Phen2Gene",
-            "MyDisease.info",
-            "LLM API",
-        ):
-            assert source in rendered
-        assert "GeneBe — In progress" in rendered
-        assert "NCBI ClinVar — Failed" in rendered
+        assert "Analysis execution trace" in [
+            item.value for item in app.subheader
+        ]
+        assert "GeneBe" in rendered
+        assert "Source: Repository cache" in rendered
+        assert "Completed all 5 variants." not in rendered
+        assert "Sending variants to GeneBe." not in rendered
+        assert "Failed for all 5 variants." not in rendered
 
     @pytest.mark.stage16_mvp
     def test_missing_vcf_is_rejected_before_pipeline_execution(

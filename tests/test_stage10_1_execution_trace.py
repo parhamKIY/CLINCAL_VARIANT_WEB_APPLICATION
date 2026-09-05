@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,12 @@ from test_pipeline import (
     _successful_phen2gene_session,
     _variant_interpretation_response,
 )
+
+
+pytestmark = [
+    pytest.mark.regression,
+    pytest.mark.stage59_testing_v3,
+]
 
 
 def _fake_pipeline_collaborators(
@@ -194,6 +201,7 @@ def test_provider_fallback_route_preserves_primary_failure_and_final_success(
 def test_repository_cache_hit_is_distinct_from_live_provider(
     tmp_path: Path,
 ) -> None:
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
     trace = AnalysisExecutionTrace(max_events=50)
     token = bind_execution_trace(trace, f"run-{'1' * 32}")
     repository = EvidenceRepository(tmp_path / "repository.sqlite3")
@@ -217,16 +225,18 @@ def test_repository_cache_hit_is_distinct_from_live_provider(
             context=context,
             live_call=lambda: {
                 "status": "success",
-                "retrieved_at": "2026-08-24T00:00:00Z",
+                "retrieved_at": "2026-08-24T12:00:00Z",
                 "frequency": 0.001,
             },
             validate_result=validate,
+            clock=lambda: now,
         )
         cached = execute_provider_with_repository(
             repository=repository,
             context=context,
             live_call=lambda: pytest.fail("cache hit called the provider"),
             validate_result=validate,
+            clock=lambda: now,
         )
     finally:
         reset_execution_trace(token)

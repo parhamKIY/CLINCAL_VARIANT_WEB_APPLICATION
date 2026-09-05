@@ -12,6 +12,12 @@ from backend.pipeline import PipelineResult, create_pipeline_result
 from frontend.execution import AnalysisJob, execute_analysis
 
 
+pytestmark = [
+    pytest.mark.regression,
+    pytest.mark.stage59_testing_v3,
+]
+
+
 def _snapshot(*events: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": "1.0",
