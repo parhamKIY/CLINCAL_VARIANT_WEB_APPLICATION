@@ -1,9 +1,9 @@
 """Deterministic routing-only conflict checks for Evidence Object V2."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 ConflictSeverity = Literal[
@@ -62,6 +62,7 @@ class ConflictAuditResult(TypedDict):
     findings: list[ConflictFinding]
     normalized_classifications: list[NormalizedClassification]
     final_classification: None
+    classification_policy: NotRequired[str]
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -118,6 +119,47 @@ def normalize_classification_label(value: object) -> str | None:
     return aliases.get(key)
 
 
+def normalize_source_classification_label(value: object) -> str | None:
+    """Retain aggregate source labels without assigning a single final class."""
+    normalized = normalize_classification_label(value)
+    if normalized is not None:
+        return normalized
+    label = _text(value)
+    if label is None:
+        return None
+    return {
+        "pathogenic likely pathogenic": "Pathogenic/Likely pathogenic",
+        "benign likely benign": "Benign/Likely benign",
+        "conflicting": "Conflicting",
+    }.get(_term_key(label))
+
+
+def classification_disagreement_severity(values: Iterable[object]) -> ConflictSeverity:
+    """Distinguish source confidence differences from substantive disagreement."""
+    labels = {
+        normalized
+        for value in values
+        if (normalized := normalize_source_classification_label(value) or _text(value))
+        is not None
+    }
+    if "Conflicting" in labels:
+        return "major"
+    if len(labels) <= 1:
+        return "none"
+    directions = {
+        "Benign": "benign",
+        "Likely Benign": "benign",
+        "Benign/Likely benign": "benign",
+        "Pathogenic": "pathogenic",
+        "Likely Pathogenic": "pathogenic",
+        "Pathogenic/Likely pathogenic": "pathogenic",
+        "VUS": "uncertain",
+    }
+    if len({directions.get(label, label) for label in labels}) == 1:
+        return "minor"
+    return "major"
+
+
 def _source_name(
     evidence: Mapping[str, object],
     evidence_path: str,
@@ -137,7 +179,12 @@ def _source_name(
 
 def _classification_records(
     evidence: Mapping[str, object],
+    *,
+    legacy: bool = False,
 ) -> list[NormalizedClassification]:
+    normalize = (
+        normalize_classification_label if legacy else normalize_source_classification_label
+    )
     annotations = _mapping(evidence.get("annotations"))
     genebe = _mapping(annotations.get("genebe"))
     population = _mapping(annotations.get("population"))
@@ -177,7 +224,7 @@ def _classification_records(
     records: list[NormalizedClassification] = []
     for path, lineage_path, original, review_status, fallback in candidates:
         original_label = _text(original)
-        normalized = normalize_classification_label(original)
+        normalized = normalize(original)
         if original_label is None or normalized is None:
             continue
         records.append(
@@ -202,7 +249,7 @@ def _classification_records(
             if not isinstance(record, Mapping):
                 continue
             original_label = _text(record.get("classification"))
-            normalized = normalize_classification_label(original_label)
+            normalized = normalize(original_label)
             if original_label is None or normalized is None:
                 continue
             evidence_path = (
@@ -549,6 +596,8 @@ def _add_user_override_finding(
     classifications: list[NormalizedClassification],
     reviewed_values: Mapping[str, object],
     findings: list[ConflictFinding],
+    *,
+    legacy: bool = False,
 ) -> None:
     override_paths: list[str] = []
     edited_paths = reviewed_values.get("edited_evidence_paths")
@@ -562,7 +611,12 @@ def _add_user_override_finding(
         reviewed_values.get("classification")
     )
     if classification is not None and any(
-        record["normalized_label"] != classification
+        (
+            record["normalized_label"] != classification
+            if legacy else classification_disagreement_severity(
+                (record["normalized_label"], classification)
+            ) == "major"
+        )
         for record in classifications
     ):
         override_paths.append("reviewed_values.classification")
@@ -608,6 +662,7 @@ def audit_evidence_conflicts(
     *,
     phase: AuditPhase = "pre_review",
     reviewed_values: Mapping[str, object] | None = None,
+    classification_policy: str = "source-direction-v1",
 ) -> ConflictAuditResult:
     """Run deterministic conflict checks without assigning a final class."""
 
@@ -621,19 +676,30 @@ def audit_evidence_conflicts(
     ):
         raise ConflictAuditError("Reviewed values must be a mapping.")
 
-    classifications = _classification_records(evidence)
+    if classification_policy not in {"legacy", "source-direction-v1"}:
+        raise ConflictAuditError("Classification conflict policy is unsupported.")
+    legacy = classification_policy == "legacy"
+    classifications = _classification_records(evidence, legacy=legacy)
     findings: list[ConflictFinding] = []
     labels = {item["normalized_label"] for item in classifications}
-    if len(labels) > 1:
+    disagreement = (
+        ("major" if len(labels) > 1 else "none")
+        if legacy else classification_disagreement_severity(labels)
+    )
+    if disagreement != "none":
         _add_finding(
             findings,
             conflict_type="classification_disagreement",
-            severity="major",
+            severity=disagreement,
             evidence_paths=[
                 item["evidence_path"] for item in classifications
             ],
             sources=[item["source"] for item in classifications],
-            message="Normalized five-class source assertions disagree.",
+            message=(
+                "Source classifications differ in confidence within the same direction."
+                if disagreement == "minor"
+                else "Normalized five-class source assertions disagree."
+            ),
         )
 
     clinvar_records = [
@@ -657,7 +723,7 @@ def audit_evidence_conflicts(
             sources=[item["source"] for item in clinvar_records],
             message="ClinVar-derived review statuses disagree.",
         )
-    if len(labels) > 1:
+    if len(labels) > 1 and disagreement == "major":
         levels = {
             _review_level(item["review_status"])
             for item in classifications
@@ -686,6 +752,7 @@ def audit_evidence_conflicts(
             classifications,
             reviewed_values,
             findings,
+            legacy=legacy,
         )
 
     routing_severity = max(
@@ -698,7 +765,7 @@ def audit_evidence_conflicts(
         if routing_severity in MEANINGFUL_CONFLICT_SEVERITIES
         else "no_conflict"
     )
-    return {
+    result: ConflictAuditResult = {
         "phase": phase,
         "status": status,
         "routing_severity": routing_severity,
@@ -706,6 +773,14 @@ def audit_evidence_conflicts(
         "normalized_classifications": classifications,
         "final_classification": None,
     }
+    # Keep unchanged historical audits byte-compatible; mark changed semantics
+    # explicitly so saved results retain the policy under which they were made.
+    if not legacy and result != audit_evidence_conflicts(
+        evidence, phase=phase, reviewed_values=reviewed_values,
+        classification_policy="legacy",
+    ):
+        result["classification_policy"] = classification_policy
+    return result
 
 
 __all__ = [
@@ -714,4 +789,6 @@ __all__ = [
     "MEANINGFUL_CONFLICT_SEVERITIES",
     "audit_evidence_conflicts",
     "normalize_classification_label",
+    "normalize_source_classification_label",
+    "classification_disagreement_severity",
 ]

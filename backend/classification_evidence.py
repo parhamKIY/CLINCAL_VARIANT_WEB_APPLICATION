@@ -6,7 +6,10 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Literal, TypedDict, cast
 
-from backend.conflict_auditor import normalize_classification_label
+from backend.conflict_auditor import (
+    classification_disagreement_severity,
+    normalize_source_classification_label,
+)
 
 
 CLASSIFICATION_EVIDENCE_SCHEMA_VERSION = "1.0"
@@ -123,7 +126,7 @@ def _finding(
     independent: bool,
 ) -> ClassificationFinding | None:
     original = _text(value)
-    normalized = normalize_classification_label(value)
+    normalized = normalize_source_classification_label(value)
     if original is None:
         return None
     normalized = normalized or original
@@ -342,7 +345,7 @@ def build_classification_evidence_audit(
         classification_available=bool(findings),
     )
     normalized = {item["normalized_classification"] for item in findings}
-    if "Conflicting" in normalized or len(normalized) > 1:
+    if classification_disagreement_severity(normalized) == "major":
         state: ClassificationEvidenceState = "CONFLICTING_CLASSIFICATIONS"
     elif any(item["evidence_role"] == "direct" for item in findings):
         state = "DIRECT_CLASSIFICATION_AVAILABLE"

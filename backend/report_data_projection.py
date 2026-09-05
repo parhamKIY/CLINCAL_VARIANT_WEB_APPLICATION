@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import cast
 
-from backend.conflict_auditor import normalize_classification_label
+from backend.conflict_auditor import classification_disagreement_severity
 from backend.report_data import ReportData, validate_report_data
 from backend.variant_report import (
     DraftVariantReport,
@@ -155,12 +155,10 @@ def _classifications(
                 conclusive_source = (
                     "MyVariant.info (ClinVar-derived rescue)"
                 )
-    normalized = {
-        normalized
-        for value in (clinvar_value, automated_value, derived_value)
-        if (normalized := normalize_classification_label(value)) is not None
-    }
-    if audit_state == "CONFLICTING_CLASSIFICATIONS" or len(normalized) > 1:
+    disagreement = classification_disagreement_severity(
+        (clinvar_value, automated_value, derived_value)
+    )
+    if audit_state == "CONFLICTING_CLASSIFICATIONS" or disagreement == "major":
         return (
             findings,
             clinvar_value,

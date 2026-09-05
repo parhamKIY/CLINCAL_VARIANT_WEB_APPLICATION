@@ -446,6 +446,10 @@ def validate_reviewed_evidence_package(
         original,
         phase="post_review",
         reviewed_values=_extract_reviewed_values(original, reviewed),
+        classification_policy=(
+            post_review.get("classification_policy", "legacy")
+            if isinstance(post_review, dict) else "legacy"
+        ),
     )
     if (
         not isinstance(post_review, dict)

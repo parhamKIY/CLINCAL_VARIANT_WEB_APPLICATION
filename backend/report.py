@@ -1869,6 +1869,10 @@ def _validate_v2_sections(value: dict[str, Any]) -> None:
     expected_pre_review = audit_evidence_conflicts(
         value,
         phase="pre_review",
+        classification_policy=(
+            conflict_audit["pre_review"].get("classification_policy", "legacy")
+            if isinstance(conflict_audit["pre_review"], dict) else "legacy"
+        ),
     )
     if conflict_audit["pre_review"] != expected_pre_review:
         raise EvidenceObjectError(

@@ -5,7 +5,10 @@ from __future__ import annotations
 from html import escape
 from typing import Iterable
 
-from backend.conflict_auditor import normalize_classification_label
+from backend.conflict_auditor import (
+    classification_disagreement_severity,
+    normalize_classification_label,
+)
 from backend.report_narrative import substantive_interpretation_narrative
 from backend.variant_report import (
     DraftVariantReport,
@@ -164,12 +167,8 @@ def _result_classification(report: DraftVariantReport) -> tuple[str, str]:
             genebe = (values["Automated ACMG classification"], section["source"])
 
     retained = [item for item in (clinvar, genebe, myvariant_derived) if item]
-    normalized = {
-        normalized
-        for value, _source in retained
-        if (normalized := normalize_classification_label(value)) is not None
-    }
-    if audit_state == "CONFLICTING_CLASSIFICATIONS" or len(normalized) > 1:
+    disagreement = classification_disagreement_severity(value for value, _source in retained)
+    if audit_state == "CONFLICTING_CLASSIFICATIONS" or disagreement == "major":
         labels: list[str] = []
         if clinvar:
             labels.append(f"ClinVar: {sentence_case(clinvar[0])}")
