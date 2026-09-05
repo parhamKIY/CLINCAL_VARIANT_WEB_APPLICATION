@@ -132,6 +132,61 @@ def test_exact_variantvalidator_match_promotes_gene_with_provenance() -> None:
     assert evidence_has_resolved_gene_identity(evidence) is True
 
 
+def test_unrelated_transcript_gene_does_not_block_exact_gene_promotion() -> None:
+    genebe_response = deepcopy(AnnotationFactory._genebe_variant_response())
+    consequences = genebe_response["consequences"]
+    assert isinstance(consequences, list)
+    unrelated = deepcopy(consequences[0])
+    unrelated["gene_symbol"] = "OVERLAP1"
+    unrelated["gene_hgnc_id"] = 999
+    unrelated["transcript"] = "NM_999999.1"
+    unrelated["mane_select"] = "ENST999999.1"
+    consequences.append(unrelated)
+
+    annotation, _ = _annotate(
+        _vep_without_gene(),
+        variantvalidator_response=FakeResponse(
+            200,
+            AnnotationFactory._variantvalidator_response(),
+        ),
+        genebe_response=genebe_response,
+    )
+    evidence = build_evidence_object(annotation)
+
+    assert annotation["gene_identity_resolution"]["source"] == "VariantValidator"
+    assert evidence["gene"] == "GENE1"
+    assert evidence["variant_context"]["gene"] == "GENE1"
+    assert evidence["annotation_promotion"]["fields"]["gene"]["source"] == (
+        "VariantValidator"
+    )
+    assert evidence_has_resolved_gene_identity(evidence) is True
+
+
+def test_same_transcript_competing_gene_remains_blocked() -> None:
+    genebe_response = deepcopy(AnnotationFactory._genebe_variant_response())
+    consequences = genebe_response["consequences"]
+    assert isinstance(consequences, list)
+    competing = deepcopy(consequences[0])
+    competing["gene_symbol"] = "CONFLICT1"
+    competing["gene_hgnc_id"] = 998
+    consequences.append(competing)
+
+    annotation, _ = _annotate(
+        _vep_without_gene(),
+        variantvalidator_response=FakeResponse(
+            200,
+            AnnotationFactory._variantvalidator_response(),
+        ),
+        genebe_response=genebe_response,
+    )
+    evidence = build_evidence_object(annotation)
+
+    assert annotation["gene_identity_resolution"]["source"] == "VariantValidator"
+    assert evidence["gene"] is None
+    assert evidence["variant_context"]["gene"] is None
+    assert evidence_has_resolved_gene_identity(evidence) is False
+
+
 def test_incomplete_vep_gene_is_retained_only_after_exact_verification() -> None:
     response = deepcopy(AnnotationFactory._vep_response())
     consequences = response["transcript_consequences"]

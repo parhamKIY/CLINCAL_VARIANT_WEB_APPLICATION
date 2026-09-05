@@ -179,14 +179,33 @@ def _accepted_source_field(
 def _gene_is_unconflicted(
     candidate: Mapping[str, object],
     selected_gene: str,
+    transcript_context: str | None,
 ) -> bool:
     observed = {selected_gene}
     vep = _source_payload(candidate, "VariantValidator")
     genebe = _source_payload(candidate, "GeneBe")
-    for value in (vep.get("validated_gene"), genebe.get("gene")):
-        if (gene := _text(value)) is not None:
+    if (gene := _text(vep.get("validated_gene"))) is not None:
+        observed.add(gene)
+
+    genebe_transcript = _text(genebe.get("transcript"))
+    if transcript_context is None or genebe_transcript == transcript_context:
+        if (gene := _text(genebe.get("gene"))) is not None:
             observed.add(gene)
+
     for record in _genebe_records(genebe):
+        record_transcripts = {
+            transcript
+            for transcript in (
+                _text(record.get("transcript")),
+                _text(record.get("mane_select")),
+            )
+            if transcript is not None
+        }
+        if (
+            transcript_context is not None
+            and transcript_context not in record_transcripts
+        ):
+            continue
         if (gene := _text(record.get("gene"))) is not None:
             observed.add(gene)
     return len(observed) == 1
@@ -359,7 +378,11 @@ def promote_active_annotation_fields(
         and _accepted_source_field(
             candidate, str(gene["source"]), "gene", str(gene["candidate"])
         )
-        and _gene_is_unconflicted(candidate, str(gene["candidate"]))
+        and _gene_is_unconflicted(
+            candidate,
+            str(gene["candidate"]),
+            _text(gene.get("transcript_context")),
+        )
     ):
         _set_active_field(evidence, "gene", str(gene["candidate"]))
         records["gene"] = _promotion_record(
