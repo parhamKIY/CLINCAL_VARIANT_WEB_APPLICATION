@@ -309,3 +309,80 @@ def test_myvariant_transient_retry_success_does_not_open_circuit(
     assert len(session.myvariant_calls) == 3
     assert annotations[0]["sources"]["myvariant"]["status"] == "success"
     assert annotations[1]["sources"]["myvariant"]["status"] == "success"
+@pytest.mark.stage59_testing_v3
+@pytest.mark.testing_v3_recovery
+def test_myvariant_identity_mismatch_does_not_open_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact-identity mismatch on variant 1 must NOT open the circuit for variant 2."""
+    monkeypatch.setattr(settings, "ENABLE_EREPO", False)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    session = CountingSession()
+
+    def handler(url: str, **kwargs: Any) -> MockResponse:
+        if "100" in url:
+            # Variant 1 requests chr1:g.100A>G, but MyVariant returns _id=chr1:g.999A>G
+            return MockResponse(
+                200,
+                {
+                    "_id": "chr1:g.999A>G",
+                    "dbsnp": {"rsid": "rs111"},
+                },
+            )
+        # Variant 2 requests chr1:g.200C>T and has a valid matching response
+        return MockResponse(
+            200,
+            {
+                "_id": "chr1:g.200C>T",
+                "dbsnp": {"rsid": "rs999"},
+                "gnomad_exome": {"af": 0.001},
+            },
+        )
+
+    session.myvariant_handler = handler
+    variants = [_make_variant(100, ref="A", alt="G"), _make_variant(200, ref="C", alt="T")]
+    annotations = annotate_variants(
+        variants,
+        session=session,  # type: ignore[arg-type]
+        max_retries=0,
+    )
+
+    # Both variants must be queried because variant 1 mismatch must NOT open the circuit
+    assert len(session.myvariant_calls) == 2
+
+    # Variant 1 must be strictly rejected with error and invalid_response
+    assert annotations[0]["sources"]["myvariant"]["status"] == "error"
+    assert annotations[0]["sources"]["myvariant"]["primary_failure"] == "invalid_response"
+
+    # Variant 2 must be queried and accepted with success
+    assert annotations[1]["sources"]["myvariant"]["status"] == "success"
+    assert annotations[1]["sources"]["myvariant"]["rsid"] == "rs999"
+@pytest.mark.stage59_testing_v3
+@pytest.mark.testing_v3_recovery
+def test_myvariant_malformed_json_still_opens_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine operational invalid_response (e.g. malformed JSON) MUST open the circuit."""
+    monkeypatch.setattr(settings, "ENABLE_EREPO", False)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    session = CountingSession()
+
+    class MalformedResponse(MockResponse):
+        def json(self) -> Any:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    session.myvariant_handler = MalformedResponse(200)
+    variants = [_make_variant(100), _make_variant(200)]
+    annotations = annotate_variants(
+        variants,
+        session=session,  # type: ignore[arg-type]
+        max_retries=0,
+    )
+
+    # Variant 1 fails with invalid JSON -> opens circuit.
+    # Variant 2 makes 0 calls because circuit is open.
+    assert len(session.myvariant_calls) == 1
+    assert annotations[0]["sources"]["myvariant"]["status"] == "error"
+    assert annotations[0]["sources"]["myvariant"]["primary_failure"] == "invalid_response"
+    assert annotations[1]["sources"]["myvariant"]["status"] == "error"
+    assert annotations[1]["sources"]["myvariant"]["primary_failure"] == "invalid_response"

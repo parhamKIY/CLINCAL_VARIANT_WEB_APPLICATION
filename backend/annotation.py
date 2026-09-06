@@ -296,9 +296,12 @@ class MyVariantOperationalError(AnnotationServiceError):
         self,
         message: str,
         provider_status: ProviderStatus,
+        *,
+        open_circuit: bool = True,
     ) -> None:
         super().__init__(message)
         self.provider_status = provider_status
+        self.open_circuit = open_circuit
 
 
 class ClinVarResponseError(AnnotationServiceError):
@@ -1096,17 +1099,12 @@ def _get_myvariant(
             not isinstance(response_id, str)
             or response_id.upper() != variant_id.upper()
         ):
-            if circuit_state is not None:
-                circuit_state.open(
-                    "myvariant",
-                    "invalid_response",
-                    http_status=response.status_code,
-                )
             raise MyVariantOperationalError(
                 "MyVariant.info returned a record that does not exactly "
                 "match the requested assembly, chromosome, position, "
                 "REF, and ALT.",
                 "invalid_response",
+                open_circuit=False,
             )
 
         return payload, variant_id, None
@@ -3596,8 +3594,15 @@ def _annotate_with_myvariant(
         annotation["sources"]["myvariant"]["primary_failure"] = (
             primary_failure
         )
-        if circuit_state is not None and is_operational_failure(
-            primary_failure
+        should_open_circuit = (
+            exc.open_circuit
+            if isinstance(exc, MyVariantOperationalError)
+            else True
+        )
+        if (
+            circuit_state is not None
+            and should_open_circuit
+            and is_operational_failure(primary_failure)
         ):
             circuit_state.open("myvariant", primary_failure)
         annotation["warnings"].append(str(exc))
