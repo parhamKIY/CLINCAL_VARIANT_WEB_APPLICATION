@@ -37,5 +37,4 @@ data/cache/*
 AGENTS.md
 
 
-.codex/coordination/*
-!.codex/coordination/project.yaml
+.codex/
