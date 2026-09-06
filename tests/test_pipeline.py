@@ -23446,10 +23446,11 @@ class TestStage49TaskSpecificModelUI:
         ).run(timeout=10)
 
         assert not app.exception
+        assert "Task-specific models" in [
+            item.value for item in app.sidebar.subheader
+        ]
         subheaders = [item.value for item in app.subheader]
-        assert subheaders.index("Task-specific models") < subheaders.index(
-            "Phenotypes"
-        ) < subheaders.index("Variant input")
+        assert subheaders.index("Phenotypes") < subheaders.index("Variant input")
         selectors = {field.label: field for field in app.selectbox}
         assert selectors["Phenotype Extraction Model"].options == [
             "phenotype-layout-model",

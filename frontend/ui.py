@@ -1291,6 +1291,7 @@ def _render_task_model_selectors() -> tuple[str, str]:
             key="load_provider_models",
             icon=":material/refresh:",
             disabled=job_active,
+            use_container_width=True,
         ):
             _provider_llm_models.clear()
             provider_models, provider_error = _provider_llm_models()
@@ -1316,41 +1317,38 @@ def _render_task_model_selectors() -> tuple[str, str]:
 
         st.divider()
 
-        phenotype_column, interpretation_column = st.columns(2, gap="large")
-        with phenotype_column:
-            with st.container(border=True):
-                phenotype_model = _render_model_preflight_card(
-                    title="Phenotype Extraction",
-                    selector_label="Phenotype Extraction Model",
-                    selector_key=PHENOTYPE_MODEL_KEY,
-                    selector_help=(
-                        "Used only for the optional de-identified Persian "
-                        "clinical-text to HPO-candidate task."
-                    ),
-                    selector_placeholder="Select or enter a phenotype model",
-                    configured_default=settings.PHENOTYPE_EXTRACTION_MODEL,
-                    provider_models=provider_models,
-                    preflight_key=LLM_PREFLIGHT_PHENOTYPE_KEY,
-                    reload_button_key="preflight_reload_phenotype",
-                    job_active=job_active,
-                )
-        with interpretation_column:
-            with st.container(border=True):
-                variant_model = _render_model_preflight_card(
-                    title="Variant Interpretation",
-                    selector_label="Variant Interpretation Model",
-                    selector_key=VARIANT_MODEL_KEY,
-                    selector_help=(
-                        "Selected once for every variant; deterministic "
-                        "conflict status remains evidence context only."
-                    ),
-                    selector_placeholder="Select or enter an interpretation model",
-                    configured_default=settings.VARIANT_INTERPRETATION_MODEL,
-                    provider_models=provider_models,
-                    preflight_key=LLM_PREFLIGHT_VARIANT_KEY,
-                    reload_button_key="preflight_reload_variant",
-                    job_active=job_active,
-                )
+        with st.container(border=True):
+            phenotype_model = _render_model_preflight_card(
+                title="Phenotype Extraction",
+                selector_label="Phenotype Extraction Model",
+                selector_key=PHENOTYPE_MODEL_KEY,
+                selector_help=(
+                    "Used only for the optional de-identified Persian "
+                    "clinical-text to HPO-candidate task."
+                ),
+                selector_placeholder="Select or enter a phenotype model",
+                configured_default=settings.PHENOTYPE_EXTRACTION_MODEL,
+                provider_models=provider_models,
+                preflight_key=LLM_PREFLIGHT_PHENOTYPE_KEY,
+                reload_button_key="preflight_reload_phenotype",
+                job_active=job_active,
+            )
+        with st.container(border=True):
+            variant_model = _render_model_preflight_card(
+                title="Variant Interpretation",
+                selector_label="Variant Interpretation Model",
+                selector_key=VARIANT_MODEL_KEY,
+                selector_help=(
+                    "Selected once for every variant; deterministic "
+                    "conflict status remains evidence context only."
+                ),
+                selector_placeholder="Select or enter an interpretation model",
+                configured_default=settings.VARIANT_INTERPRETATION_MODEL,
+                provider_models=provider_models,
+                preflight_key=LLM_PREFLIGHT_VARIANT_KEY,
+                reload_button_key="preflight_reload_variant",
+                job_active=job_active,
+            )
 
     return phenotype_model, variant_model
 
@@ -2337,11 +2335,12 @@ def render_app() -> None:
             width="stretch",
         ):
             render_evidence_graph()
+        st.divider()
+        phenotype_model, variant_model = _render_task_model_selectors()
 
     st.subheader("Analysis workflow")
     _render_workflow_overview()
     st.divider()
-    phenotype_model, variant_model = _render_task_model_selectors()
     _render_hpo_picker(phenotype_model)
     submission = _render_variant_input(phenotype_model, variant_model)
     st.divider()
