@@ -117,7 +117,6 @@ MAX_RECOVERABLE_ANALYSIS_JOBS = 32
 RECOVERABLE_ANALYSIS_JOB_TTL_SECONDS = 60 * 60
 RECOVERY_REQUEST_SCHEMA_VERSION = 4
 MAX_RECOVERY_REQUEST_BYTES = 1024 * 1024
-LAST_SESSION_FILENAME = "last_session.json"
 
 
 class AnalysisRecoveryRequest(TypedDict):
@@ -183,70 +182,15 @@ def _validate_excel_recovery_records(
     return records
 
 
-def _last_session_path() -> Path | None:
-    """Return the path to the last-session file, or None on error."""
-    try:
-        sentinel = f"job-{'0' * 32}"
-        root = _recovery_request_path(sentinel).parent
-    except FrontendExecutionError:
-        return None
-    return root / LAST_SESSION_FILENAME
-
-
-def save_last_session_analysis_id(analysis_id: str) -> bool:
-    """Persist a verified resumable analysis ID for bare-URL recovery."""
+def has_restorable_analysis(analysis_id: str) -> bool:
+    """Verify a link target without publishing it to other browser sessions."""
     if not isinstance(analysis_id, str) or ANALYSIS_ID_PATTERN.fullmatch(analysis_id) is None:
         return False
     try:
         load_pipeline_state(analysis_id)
     except DatabaseError:
         return False
-    path = _last_session_path()
-    if path is None:
-        return False
-    payload = json.dumps({"analysis_id": analysis_id}).encode("utf-8")
-    temporary_path = path.with_suffix(f".{uuid4().hex}.tmp")
-    descriptor: int | None = None
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(temporary_path, flags, PRIVATE_FILE_MODE)
-        with os.fdopen(descriptor, "wb") as output:
-            descriptor = None
-            output.write(payload)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary_path, path)
-        return True
-    except OSError:
-        if descriptor is not None:
-            os.close(descriptor)
-        temporary_path.unlink(missing_ok=True)
-        return False
-
-
-def load_last_session_analysis_id() -> str | None:
-    """Return the last completed analysis ID from disk, or None."""
-    path = _last_session_path()
-    if path is None:
-        return None
-    try:
-        if not path.is_file() or path.is_symlink():
-            return None
-        payload = path.read_bytes()
-        value = json.loads(payload)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(value, dict):
-        return None
-    analysis_id = value.get("analysis_id")
-    if (
-        not isinstance(analysis_id, str)
-        or ANALYSIS_ID_PATTERN.fullmatch(analysis_id) is None
-    ):
-        return None
-    return analysis_id
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -793,7 +737,6 @@ def _mark_recovery_request_persisted(
         _persist_recovery_request(token, request)
     except FrontendExecutionError:
         return
-    save_last_session_analysis_id(analysis_id)
 
 
 
@@ -1568,6 +1511,5 @@ __all__ = [
     "recover_analysis_job",
     "register_analysis_job",
     "release_registered_analysis_job",
-    "save_last_session_analysis_id",
-    "load_last_session_analysis_id",
+    "has_restorable_analysis",
 ]

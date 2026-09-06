@@ -347,7 +347,7 @@ def test_regeneration_uses_a_distinct_auditable_prompt_without_randomness() -> N
     assert regeneration_request.messages != initial_request.messages
     assert regeneration_request.temperature == 0.0
     assert regenerated["prompt_version"] == (
-        "variant-interpretation-regeneration-v1.1"
+        "variant-interpretation-regeneration-v1.2"
     )
     regeneration_prompt = regeneration_request.messages[1].content
     assert "comparison context only" in regeneration_prompt.casefold()

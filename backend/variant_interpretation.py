@@ -64,9 +64,9 @@ VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.4"
 SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset(
     {"1.1", "1.2", "1.3", "1.4"}
 )
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.10"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.11"
 VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION = (
-    "variant-interpretation-regeneration-v1.1"
+    "variant-interpretation-regeneration-v1.2"
 )
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
@@ -79,7 +79,9 @@ SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
         "variant-interpretation-v1.7",
         "variant-interpretation-v1.8",
         "variant-interpretation-v1.9",
+        "variant-interpretation-v1.10",
         "variant-interpretation-regeneration-v1.0",
+        "variant-interpretation-regeneration-v1.1",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
         VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION,
     }
@@ -472,6 +474,12 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "17. The interpretation's own conclusion must agree with ai_classification. "
         "Clearly attribute any differing source classification. Do not describe "
         "a source's automated criterion as an independently verified experiment.",
+        "18. Write the interpretation in plain clinical language, aiming for "
+        "3-5 complete sentences (roughly 80-150 words). Include the draft "
+        "conclusion, main evidence rationale, and material limitations and unresolved conflicts. "
+        "This is a soft length target: never omit a material caveat to meet this target. "
+        "Avoid exhaustive provider inventories and repetitive technical details. "
+        "End with a complete sentence.",
         "",
         "Human review is required before this interpretation can contribute "
         "to a final report.",

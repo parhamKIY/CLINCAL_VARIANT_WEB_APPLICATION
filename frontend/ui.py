@@ -66,12 +66,11 @@ from frontend.execution import (
     UploadedVCF,
     execute_analysis,
     get_registered_analysis_job,
-    load_last_session_analysis_id,
     prepare_analysis_recovery_request,
     recover_analysis_job,
     register_analysis_job,
     release_registered_analysis_job,
-    save_last_session_analysis_id,
+    has_restorable_analysis,
 )
 from frontend.evidence_review import (
     clear_evidence_review_state,
@@ -341,64 +340,6 @@ def _initialize_session_state() -> None:
         settings.VARIANT_INTERPRETATION_MODEL,
     )
     _restore_refresh_state()
-
-
-def _render_restore_last_session() -> None:
-    """Offer to reload the previous analysis until the user acts on it.
-
-    The banner is only shown when:
-    - No analysis is currently active or already loaded in session state.
-    - The ``?analysis=`` URL param is absent (bare root URL navigation).
-    - A valid last-session analysis ID exists on disk.
-
-    The banner must remain rendered across Streamlit reruns so its button
-    event can be processed.
-    """
-
-    if (
-        _analysis_job() is not None
-        or st.session_state.get(PIPELINE_RESULT_KEY) is not None
-    ):
-        return
-    if _query_param_value(ANALYSIS_RESULT_QUERY_PARAM) is not None:
-        return
-    if _query_param_value(ANALYSIS_JOB_QUERY_PARAM) is not None:
-        return
-
-    last_id = load_last_session_analysis_id()
-    if last_id is None:
-        return
-
-    restore_error: str | None = None
-    with st.container(border=True):
-        col_text, col_button = st.columns([4, 1])
-        with col_text:
-            st.info(
-                ":material/history: **Your previous analysis is saved.** "
-                "Click **Restore** to reload it, or simply run a new analysis "
-                "to start fresh.",
-                icon=None,
-            )
-        with col_button:
-            if st.button(
-                "Restore",
-                key="restore_last_session",
-                icon=":material/restore:",
-                type="primary",
-                width="stretch",
-            ):
-                try:
-                    load_pipeline_state(last_id)
-                except DatabaseError:
-                    restore_error = (
-                        "The previous saved analysis is no longer available. "
-                        "Run a new analysis to create a new restorable result."
-                    )
-                else:
-                    st.query_params[ANALYSIS_RESULT_QUERY_PARAM] = last_id
-                    st.rerun()
-    if restore_error is not None:
-        st.warning(restore_error)
 
 
 def _clear_analysis_result() -> None:
@@ -2228,7 +2169,7 @@ def _finish_analysis_job(job: AnalysisJob) -> None:
     if view.state == "completed" and view.result is not None:
         analysis_id = view.result.get("analysis_id")
         if isinstance(analysis_id, str):
-            durable_result = save_last_session_analysis_id(analysis_id)
+            durable_result = has_restorable_analysis(analysis_id)
             if durable_result:
                 st.query_params[ANALYSIS_RESULT_QUERY_PARAM] = analysis_id
             else:
@@ -2345,7 +2286,6 @@ def render_app() -> None:
     submission = _render_variant_input(phenotype_model, variant_model)
     st.divider()
 
-    _render_restore_last_session()
     _render_analysis_notice()
     pipeline_result: PipelineResult | None = None
     if submission is not None:

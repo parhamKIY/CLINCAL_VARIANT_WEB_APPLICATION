@@ -24174,7 +24174,7 @@ class TestFrontendFoundation:
         assert refreshed.query_params["analysis"] == [analysis_id]
         assert get_registered_analysis_job(token) is None
 
-    def test_nondurable_analysis_cannot_replace_last_session_pointer(
+    def test_restore_link_requires_durable_analysis_without_shared_pointer(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -24193,18 +24193,15 @@ class TestFrontendFoundation:
         )
         expected["analysis_id"] = record["analysis_id"]
         save_pipeline_state(expected, database_path=database_path)
-        assert frontend_execution_module.save_last_session_analysis_id(
+        assert frontend_execution_module.has_restorable_analysis(
             record["analysis_id"]
         )
 
         nondurable_id = f"analysis-{'b' * 32}"
-        assert not frontend_execution_module.save_last_session_analysis_id(
+        assert not frontend_execution_module.has_restorable_analysis(
             nondurable_id
         )
-        assert (
-            frontend_execution_module.load_last_session_analysis_id()
-            == record["analysis_id"]
-        )
+        assert not (tmp_path / "recovery_jobs" / "last_session.json").exists()
 
     def test_completed_nondurable_job_remains_visible_without_restore_link(
         self,
@@ -24238,7 +24235,7 @@ class TestFrontendFoundation:
             for warning in app.warning
         )
 
-    def test_restore_button_explains_unavailable_saved_analysis(
+    def test_fresh_browser_ignores_legacy_shared_recovery_pointer(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -24260,21 +24257,12 @@ class TestFrontendFoundation:
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(
             timeout=10
         )
-        restore = next(
-            button for button in app.button if button.label == "Restore"
-        )
-        restore.click().run(timeout=10)
-
         assert not app.exception
         assert app.session_state["pipeline_result"] is None
         assert "analysis" not in app.query_params
-        assert any(
-            "previous saved analysis is no longer available"
-            in warning.value.casefold()
-            for warning in app.warning
-        )
+        assert not any(button.label == "Restore" for button in app.button)
 
-    def test_restore_button_loads_previous_persisted_analysis(
+    def test_only_explicit_analysis_link_restores_saved_analysis(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -24296,21 +24284,30 @@ class TestFrontendFoundation:
             expected,
             database_path=database_path,
         )
-        assert frontend_execution_module.save_last_session_analysis_id(
-            record["analysis_id"]
+        recovery_directory = tmp_path / "recovery_jobs"
+        recovery_directory.mkdir()
+        (recovery_directory / "last_session.json").write_text(
+            json.dumps({"analysis_id": record["analysis_id"]}), encoding="utf-8"
         )
 
         app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(
             timeout=10
         )
-        restore = next(
-            button for button in app.button if button.label == "Restore"
-        )
-        restore.click().run(timeout=10)
+        assert not app.exception
+        assert app.session_state["pipeline_result"] is None
+        assert not any(button.label == "Restore" for button in app.button)
+
+        app.query_params["analysis"] = record["analysis_id"]
+        app.run(timeout=10)
 
         assert not app.exception
         assert app.session_state["pipeline_result"] == expected
         assert app.query_params["analysis"] == [record["analysis_id"]]
+        other_browser = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=10)
+        assert not other_browser.exception
+        assert other_browser.session_state["pipeline_result"] is None
+        assert "analysis" not in other_browser.query_params
+        assert not any(button.label == "Restore" for button in other_browser.button)
         assert any(
             "Restored the saved analysis" in message.value
             for message in app.info

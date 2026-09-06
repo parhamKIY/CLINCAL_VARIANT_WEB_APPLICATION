@@ -212,10 +212,7 @@ def _brief_interpretation(report: DraftVariantReport) -> str:
     narrative = content["variant_interpretation"]["narrative"]
     if not narrative:
         return "Interpretation is not available and requires human review."
-    first_paragraph = substantive_interpretation_narrative(narrative).split(
-        "\n\n", 1
-    )[0]
-    return first_paragraph[:1200]
+    return substantive_interpretation_narrative(narrative)
 
 
 def _page(content: str, *, page: int) -> str:

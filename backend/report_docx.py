@@ -132,14 +132,7 @@ def _brief_interpretation(report: ReportData) -> str:
     interpretation = report["interpretation"]["current_reviewer_interpretation"]
     if not interpretation:
         return "Interpretation is not available and requires human review."
-    interpretation = substantive_interpretation_narrative(interpretation)
-    sentences = re.split(r"(?<=[.!?])\s+", interpretation.strip())
-    selected: list[str] = []
-    for sentence in sentences[:3]:
-        if sum(len(item.split()) for item in selected + [sentence]) > 100:
-            break
-        selected.append(sentence)
-    return " ".join(selected) or interpretation
+    return substantive_interpretation_narrative(interpretation)
 
 
 def _frequency_text(item: dict[str, object]) -> str:
