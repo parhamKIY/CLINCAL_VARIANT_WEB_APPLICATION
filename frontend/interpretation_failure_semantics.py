@@ -18,12 +18,20 @@ EXPLAINABLE_INTERPRETATION_FAILURE_TYPES = frozenset(
         "safety_or_finish_failure",
         "internal_conversion_failure",
         "gene_identity_unresolved",
+        "insufficient_evidence",
     }
 )
 
 
 def interpretation_failure_message(failure_type: object) -> str:
     """Return safe wording for one persisted model failure category."""
+
+    if failure_type == "insufficient_evidence":
+        return (
+            "The supplied evidence was insufficient for a meaningful draft "
+            "classification. No classification was assigned; additional "
+            "usable evidence or reviewer assessment is needed."
+        )
 
     if failure_type in {
         "request_timeout",

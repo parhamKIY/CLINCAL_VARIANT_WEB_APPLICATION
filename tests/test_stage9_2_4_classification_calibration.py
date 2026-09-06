@@ -10,7 +10,7 @@ import pytest
 from backend.llm import LLMClient, LLMResponse
 from backend.report import build_evidence_object, validate_evidence_object
 from backend.report_data_projection import build_report_data_from_draft
-from backend.variant_interpretation import interpret_variant
+from backend.variant_interpretation import interpret_variant, interpret_variants
 from backend.variant_report import build_draft_variant_report
 from frontend.report_preview import render_draft_report_preview_pages
 from test_pipeline import FakeLLMAdapter, TestEvidenceObject as EvidenceFactory
@@ -123,14 +123,6 @@ def _response(classification: str) -> LLMResponse:
             "none",
             "standard",
         ),
-        (
-            "insufficient",
-            "Uncertain significance",
-            None,
-            None,
-            "none",
-            "standard",
-        ),
     ],
 )
 def test_controlled_classification_scenarios_preserve_source_context(
@@ -181,3 +173,15 @@ def test_controlled_classification_scenarios_preserve_source_context(
     assert f"System classification: {ai_classification}" in preview
     assert "Source classification context:" in preview
     assert "Brief Interpretation(s)" in preview
+
+
+def test_insufficient_context_does_not_receive_a_forced_vus() -> None:
+    evidence = _scenario("insufficient")
+    adapter = FakeLLMAdapter(_response("Uncertain significance"))
+    result = interpret_variants([evidence], client=LLMClient(adapter))[0]
+    assert result["error_type"] == "insufficient_evidence"
+    assert result["ai_classification"] is None
+    assert not adapter.requests
+    draft = build_draft_variant_report(evidence, result, variant_index=0)
+    report_data = build_report_data_from_draft(draft, analysis_id="analysis-" + "4" * 32)
+    assert report_data["conclusive_result"]["classification"] is None

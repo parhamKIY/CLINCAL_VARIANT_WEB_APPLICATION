@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Literal, TypedDict, cast
 
 from backend.execution_trace import record_execution_event
+from backend.interpretation_guardrails import core_output_issue, has_assessment_material
 from backend.llm import (
     LLMAuthenticationError,
     LLMClient,
@@ -63,9 +64,9 @@ VARIANT_INTERPRETATION_SCHEMA_VERSION = "1.4"
 SUPPORTED_VARIANT_INTERPRETATION_SCHEMA_VERSIONS = frozenset(
     {"1.1", "1.2", "1.3", "1.4"}
 )
-VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.9"
+VARIANT_INTERPRETATION_PROMPT_VERSION = "variant-interpretation-v1.10"
 VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION = (
-    "variant-interpretation-regeneration-v1.0"
+    "variant-interpretation-regeneration-v1.1"
 )
 SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
     {
@@ -77,6 +78,8 @@ SUPPORTED_VARIANT_INTERPRETATION_PROMPT_VERSIONS = frozenset(
         "variant-interpretation-v1.6",
         "variant-interpretation-v1.7",
         "variant-interpretation-v1.8",
+        "variant-interpretation-v1.9",
+        "variant-interpretation-regeneration-v1.0",
         VARIANT_INTERPRETATION_PROMPT_VERSION,
         VARIANT_INTERPRETATION_REGENERATION_PROMPT_VERSION,
     }
@@ -129,6 +132,7 @@ InterpretationFailureType = Literal[
     "internal_conversion_failure",
     "configuration_error",
     "gene_identity_unresolved",
+    "insufficient_evidence",
     "unknown_failure",
 ]
 INTERPRETATION_FAILURE_TYPES = frozenset(
@@ -139,6 +143,8 @@ SAFE_FINISH_REASONS = frozenset(
 )
 SAFE_SCHEMA_ERRORS = frozenset(
     {
+        "non_substantive_interpretation",
+        "classification_narrative_mismatch",
         "connection_failed",
         "duplicate_warnings",
         "invalid_adapter_response",
@@ -169,6 +175,8 @@ STRUCTURED_REPAIR_FAILURE_TYPES = frozenset(
 )
 REPAIRABLE_SCHEMA_ERRORS = frozenset(
     {
+        "non_substantive_interpretation",
+        "classification_narrative_mismatch",
         "invalid_ai_classification",
         "invalid_fields",
         "invalid_json",
@@ -211,13 +219,14 @@ UNKNOWN_CITATION_REPAIR_INSTRUCTION = (
 AI_CLASSIFICATION_REPAIR_INSTRUCTION = (
     " Correct ai_classification to exactly one of Pathogenic, Likely "
     "pathogenic, Uncertain significance, Likely benign, or Benign. When "
-    "evidence is conflicting or insufficient, use Uncertain significance; "
-    "do not return a refusal or a classification outside the five allowed "
-    "values."
+    "evidence permits assessment but remains inconclusive, use Uncertain "
+    "significance. If meaningful assessment is impossible, return null and "
+    "explain the evidence limitation; never guess a class."
 )
 CORE_FIELDS_REPAIR_INSTRUCTION = (
-    " Return both required core fields: a five-grade ai_classification and "
-    "a non-empty evidence-grounded interpretation narrative."
+    " Return both core fields: ai_classification (one of the five grades, or "
+    "null if meaningful assessment is impossible) and a substantive, "
+    "evidence-grounded interpretation narrative."
 )
 INVALID_JSON_REPAIR_INSTRUCTION = (
     " Return one valid JSON object only, without prose or code fences."
@@ -363,8 +372,8 @@ VARIANT_INTERPRETATION_RESPONSE_SCHEMA = LLMJSONSchema(
         ],
         "properties": {
             "ai_classification": {
-                "type": "string",
-                "enum": sorted(AI_CLASSIFICATIONS),
+                "type": ["string", "null"],
+                "enum": [*sorted(AI_CLASSIFICATIONS), None],
             },
             "interpretation": {
                 "type": "string",
@@ -420,13 +429,13 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "synthesis only on the supplied evidence. It is not a final "
         "application classification, independent ACMG/AMP adjudication, or "
         "substitute for human review.",
-        "7. You must not return 'cannot independently classify', "
-        "'Insufficient evidence', a refusal, or any classification outside "
-        "the controlled vocabulary. When evidence is conflicting or "
-        "insufficient, return Uncertain significance and explain the "
-        "uncertainty in the interpretation and conflict assessment.",
+        "7. Distinguish an assessable but inconclusive variant (Uncertain "
+        "significance) from evidence too limited or unreliable for meaningful "
+        "assessment. For the latter return ai_classification: null and explain "
+        "the missing basis in interpretation. Null is an explicit abstention, "
+        "not a sixth class. Never force VUS just to complete an output.",
         "8. A successful response must contain both the draft classification "
-        "and a substantive interpretation even when source classifications "
+        "and a substantive interpretation when assessment is possible, even when source classifications "
         "are missing, no_match, unavailable, or incomplete. When ClinVar or "
         "literature is absent/unreported, but automated ACMG criteria (e.g. "
         "from GeneBe) and computational/population evidence consistently "
@@ -454,6 +463,15 @@ VARIANT_INTERPRETATION_SYSTEM_PROMPT = "\n".join(
         "unavailability is not biological absence, no_match is not negative "
         "evidence, and an unavailable result must never be described as "
         "available.",
+        "16. Assess the relevance, quality and strength of the supplied evidence, "
+        "not the number of populated fields. Missing optional gene/transcript/HGVS "
+        "or provider fields alone must not cause abstention. Conversely, generic "
+        "consequence labels, case phenotype, citations without findings, or "
+        "uncalibrated predictions alone do not establish pathogenicity or "
+        "benignity. Explain the actual basis and material limitations of your draft.",
+        "17. The interpretation's own conclusion must agree with ai_classification. "
+        "Clearly attribute any differing source classification. Do not describe "
+        "a source's automated criterion as an independently verified experiment.",
         "",
         "Human review is required before this interpretation can contribute "
         "to a final report.",
@@ -595,9 +613,10 @@ def _build_prompt(
         else "Synthesize the evidence conservatively; do not manufacture a "
         "conflict or overstate agreement. Minor audit findings (such as "
         "transcript version differences) are not biological conflicts. Where "
-        "automated ACMG criteria and computational evidence consistently "
-        "point to Likely benign or Likely pathogenic, reflect that direction "
-        "in the draft classification."
+        "automated ACMG criteria and computational evidence are present, "
+        "assess their relevance and strength before selecting a class. "
+        "Agreement of weak or correlated signals alone does not justify "
+        "Likely benign or Likely pathogenic."
     )
     phenotype_conclusion = _expected_phenotype_conclusion(semantic_evidence)
     reference_catalog = [
@@ -857,8 +876,9 @@ def _parse_response(
         phenotype_conclusion = None
         field_validation["phenotype_conclusion"] = "invalid"
 
-    ai_classification = _canonical_ai_classification(
-        payload["ai_classification"]
+    ai_classification = (
+        _canonical_ai_classification(payload["ai_classification"])
+        if payload["ai_classification"] is not None else None
     )
     interpretation, interpretation_citations = _validate_field_citations(
         _bounded_output_text(
@@ -869,6 +889,17 @@ def _parse_response(
         allowed_reference_ids=allowed_reference_ids,
         auxiliary=False,
     )
+    issue = core_output_issue(ai_classification, interpretation)
+    if issue is not None:
+        raise VariantInterpretationError(
+            "The core interpretation failed a semantic output check.",
+            failure_type="output_schema_failure", schema_error=issue,
+        )
+    if ai_classification is None:
+        raise VariantInterpretationError(
+            "The supplied evidence does not support meaningful classification.",
+            failure_type="insufficient_evidence",
+        )
     if expected_phenotype_conclusion in {
         "no supported association found",
         "phenotype evidence unavailable",
@@ -1140,6 +1171,12 @@ def _is_model_fallback_eligible(error: Exception) -> bool:
 def _structured_repair_instruction(error: Exception) -> str:
     schema_error = getattr(error, "schema_error", None)
     detail = {
+        "non_substantive_interpretation": CORE_FIELDS_REPAIR_INSTRUCTION,
+        "classification_narrative_mismatch": (
+            " Your narrative conclusion contradicted ai_classification. "
+            "Reassess both against the same evidence and return a coherent pair; "
+            "do not merely change a label to hide uncertainty."
+        ),
         "invalid_ai_classification": AI_CLASSIFICATION_REPAIR_INSTRUCTION,
         "invalid_fields": CORE_FIELDS_REPAIR_INSTRUCTION,
         "invalid_json": INVALID_JSON_REPAIR_INSTRUCTION,
@@ -1386,6 +1423,11 @@ def interpret_variant(
         raise VariantInterpretationError(
             "Gene identity is unresolved for interpretation.",
             failure_type=GENE_IDENTITY_UNRESOLVED,
+        )
+    if not has_assessment_material(semantic_evidence_for_llm(evidence)):
+        raise VariantInterpretationError(
+            "No usable variant assessment material is available.",
+            failure_type="insufficient_evidence",
         )
     configured_model = _configured_model(model)
     record_execution_event(

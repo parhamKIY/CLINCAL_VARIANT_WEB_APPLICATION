@@ -46,12 +46,12 @@ def _response(
     )
 
 
-def test_success_contract_requires_exact_five_value_classification() -> None:
+def test_contract_has_five_classes_and_explicit_null_abstention() -> None:
     schema = VARIANT_INTERPRETATION_RESPONSE_SCHEMA.schema
 
     assert "ai_classification" in schema["required"]
     assert set(schema["properties"]["ai_classification"]["enum"]) == (
-        ALLOWED_AI_CLASSIFICATIONS
+        ALLOWED_AI_CLASSIFICATIONS | {None}
     )
 
 
@@ -66,12 +66,9 @@ def test_prompt_requires_draft_and_calibrates_uncertainty() -> None:
 
     system_prompt = adapter.requests[0].messages[0].content
     assert "must return exactly one" in system_prompt.casefold()
-    assert "cannot independently classify" in system_prompt
-    assert "must not" in system_prompt[
-        system_prompt.index("cannot independently classify") - 20 :
-        system_prompt.index("cannot independently classify")
-    ].casefold()
-    assert "conflicting or insufficient" in system_prompt.casefold()
+    assert "ai_classification: null" in system_prompt
+    assert "Never force VUS" in system_prompt
+    assert "not a sixth class" in system_prompt
     assert "Uncertain significance" in system_prompt
     assert "source assertions" in system_prompt
     assert result["ai_classification"] == "Uncertain significance"
@@ -158,4 +155,4 @@ def test_classification_repair_is_targeted_to_the_failed_core_field() -> None:
     assert result["status"] == "success"
     assert "ai_classification" in repaired_prompt
     assert "Uncertain significance" in repaired_prompt
-    assert "classification outside the five allowed values" in repaired_prompt
+    assert "meaningful assessment is impossible, return null" in repaired_prompt

@@ -152,17 +152,6 @@ def _vep_values(annotation: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _merge_vep_context(
-    annotation: Mapping[str, object],
-    supporting: Mapping[str, object],
-) -> dict[str, object]:
-    direct = _vep_values(annotation)
-    return {
-        field: direct.get(field) or supporting.get(field)
-        for field in _CONTEXT_FIELDS
-    }
-
-
 def vep_gene_context_is_complete(annotation: Mapping[str, object]) -> bool:
     """Return whether direct VEP supplied the minimum interpretation context."""
 
@@ -430,7 +419,9 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
         ):
             authoritative_conflict = True
         elif vep_gene is not None:
-            values = _merge_vep_context(annotation, values)
+            # Exact allele/gene agreement does not establish transcript equivalence.
+            # Supporting context remains under its own provider provenance.
+            values = _vep_values(annotation)
             return _resolution(
                 expected=expected,
                 source="Ensembl VEP",
@@ -491,7 +482,7 @@ def resolve_gene_identity(annotation: Mapping[str, object]) -> dict[str, Any]:
         ):
             authoritative_conflict = True
         elif vep_gene is not None:
-            values = _merge_vep_context(annotation, values)
+            values = _vep_values(annotation)
             return _resolution(
                 expected=expected,
                 source="Ensembl VEP",

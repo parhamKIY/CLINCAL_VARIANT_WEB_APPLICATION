@@ -78,6 +78,7 @@ def test_output_schema_is_strict_and_has_no_model_confidence_field() -> None:
         "phenotype evidence unavailable",
     }
     assert set(properties["ai_classification"]["enum"]) == {
+        None,
         "Pathogenic",
         "Likely pathogenic",
         "Uncertain significance",

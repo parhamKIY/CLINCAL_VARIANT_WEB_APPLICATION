@@ -209,8 +209,10 @@ def build_warning_notices(report: object) -> list[WarningNotice]:
         notices.append(
             _notice(
                 "ACTION REQUIRED",
-                f"{failure_message} Review the collected evidence and retry "
-                "interpretation.",
+                failure_message if failure_type == "insufficient_evidence" else (
+                    f"{failure_message} Review the collected evidence and retry "
+                    "interpretation."
+                ),
             )
         )
     else:

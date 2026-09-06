@@ -210,8 +210,16 @@ def _indexed_records(value: object) -> dict[int, Mapping[str, object]]:
 
 
 def _interpretation_failure_presentation(
-    _failure_type: object,
+    failure_type: object,
 ) -> tuple[str, str, str]:
+    if failure_type == "insufficient_evidence":
+        return (
+            "Insufficient evidence",
+            "No draft classification was assigned because the supplied evidence "
+            "did not support a meaningful assessment.",
+            "Review the retained evidence and obtain additional usable evidence "
+            "before requesting another automated assessment.",
+        )
     return (
         "Automated interpretation",
         (
