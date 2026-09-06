@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from typing import TypedDict, cast
 
@@ -1653,6 +1654,7 @@ def _render_finalization_dialog(
 def _render_finalization_action(
     result: PipelineResult,
     drafts: list[EvidenceReviewReport],
+    on_start_new_analysis: Callable[[], None] | None = None,
 ) -> None:
     summary = _build_finalization_summary(result, drafts)
     reviewable_count = len(summary["reviewable_indexes"])
@@ -1676,20 +1678,20 @@ def _render_finalization_action(
                 "state for all remaining reviewable variants before "
                 "finalization."
             )
-        if st.button(
-            "Report finalized" if completed else "Finalize report",
-            type="primary",
-            icon=":material/task_alt:",
-            disabled=completed or reviewable_count == 0,
-            key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
-        ):
-            st.session_state[_FINALIZATION_DIALOG_KEY] = True
-            st.rerun(scope="app")
-        if completed:
+        if not completed:
+            if st.button(
+                "Finalize report",
+                type="primary",
+                icon=":material/task_alt:",
+                disabled=reviewable_count == 0,
+                key=f"{_REVIEW_WIDGET_PREFIX}finalize_review",
+            ):
+                st.session_state[_FINALIZATION_DIALOG_KEY] = True
+                st.rerun(scope="app")
+            if st.session_state.get(_FINALIZATION_DIALOG_KEY, False):
+                _render_finalization_dialog(result, drafts)
+        else:
             st.session_state[_FINALIZATION_DIALOG_KEY] = False
-        elif st.session_state.get(_FINALIZATION_DIALOG_KEY, False):
-            _render_finalization_dialog(result, drafts)
-        if completed:
             failed_count = len(summary["interpretation_failed_indexes"])
             if failed_count:
                 st.warning(
@@ -1700,6 +1702,21 @@ def _render_finalization_action(
                 st.success(
                     "Final review is confirmed. No additional LLM call was made."
                 )
+            if st.button(
+                "Start new analysis",
+                type="primary",
+                icon=":material/add_circle:",
+                key=f"{_REVIEW_WIDGET_PREFIX}start_new_analysis",
+                help=(
+                    "Clear the current patient's analysis and reset "
+                    "the workspace to analyze a new patient."
+                ),
+            ):
+                if on_start_new_analysis is not None:
+                    on_start_new_analysis()
+                else:
+                    st.session_state["reset_workspace_requested"] = True
+                    st.rerun(scope="app")
 
 
 def render_evidence_review(
@@ -1707,6 +1724,7 @@ def render_evidence_review(
     *,
     light_model: str | None = None,
     strong_model: str | None = None,
+    on_start_new_analysis: Callable[[], None] | None = None,
 ) -> None:
     """Render pre-interpreted drafts and final review controls."""
 
@@ -1838,7 +1856,11 @@ def render_evidence_review(
         _render_history(report)
     with confirm_tab:
         _render_confirmation(drafts[selected], result)
-    _render_finalization_action(result, drafts)
+    _render_finalization_action(
+        result,
+        drafts,
+        on_start_new_analysis=on_start_new_analysis,
+    )
     if result.get("workflow_state") == "completed":
         render_final_clinical_report_viewer(result)
 

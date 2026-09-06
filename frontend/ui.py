@@ -330,6 +330,7 @@ def _initialize_session_state() -> None:
     st.session_state.setdefault(LLM_PROVIDER_MODELS_ERROR_KEY, False)
     st.session_state.setdefault(LLM_PREFLIGHT_PHENOTYPE_KEY, None)
     st.session_state.setdefault(LLM_PREFLIGHT_VARIANT_KEY, None)
+    st.session_state.setdefault("vcf_uploader_version", 0)
     initialize_provider_readiness_state()
     _initialize_task_model(
         PHENOTYPE_MODEL_KEY,
@@ -375,10 +376,77 @@ def _discard_analysis_result() -> None:
     clear_evidence_review_state()
 
 
+def reset_analysis_workspace(*, rerun: bool = True) -> None:
+    """Fully reset the workspace for a new patient analysis."""
+
+    st.session_state[PIPELINE_RESULT_KEY] = None
+    st.session_state[ANALYSIS_EXECUTION_TRACE_KEY] = None
+    st.session_state[ANALYSIS_NOTICE_KEY] = None
+    st.session_state[ANALYSIS_NOTICE_LEVEL_KEY] = "info"
+    _clear_query_param(ANALYSIS_RESULT_QUERY_PARAM)
+
+    token = _query_param_value(ANALYSIS_JOB_QUERY_PARAM)
+    if token is not None:
+        release_registered_analysis_job(token)
+        _clear_query_param(ANALYSIS_JOB_QUERY_PARAM)
+
+    job = _analysis_job()
+    if job is not None:
+        try:
+            job.cancel()
+        except Exception:
+            pass
+    st.session_state[ANALYSIS_JOB_KEY] = None
+    st.session_state[ANALYSIS_JOB_TOKEN_KEY] = None
+
+    st.session_state.pop("selected_evidence_object", None)
+    clear_evidence_review_state()
+
+    st.session_state[SELECTED_HPO_KEY] = []
+    st.session_state[HPO_RESULTS_KEY] = []
+    st.session_state[HPO_MODEL_CANDIDATES_KEY] = []
+    st.session_state[HPO_MODEL_REJECTIONS_KEY] = []
+    st.session_state[PHENOTYPE_NON_HPO_MENTIONS_KEY] = {}
+    st.session_state[PHENOTYPE_EXTRACTION_PROVENANCE_KEY] = None
+    st.session_state[CLINICAL_ENTITIES_KEY] = []
+    st.session_state[CLINICAL_ENTITY_DRAFTS_KEY] = []
+    st.session_state[CLINICAL_ENTITY_REVIEW_COMPLETE_KEY] = True
+    st.session_state.pop(HPO_CANDIDATE_EDITOR_KEY, None)
+    st.session_state.pop(CLINICAL_ENTITY_FINDINGS_EDITOR_KEY, None)
+    st.session_state.pop(CLINICAL_ENTITY_DISEASE_EDITOR_KEY, None)
+    st.session_state.pop("hpo_search_query", None)
+    st.session_state.pop("manual_hpo_select", None)
+
+    st.session_state["phenotype_input_version"] = (
+        st.session_state.get("phenotype_input_version", 0) + 1
+    )
+    st.session_state["vcf_uploader_version"] = (
+        st.session_state.get("vcf_uploader_version", 0) + 1
+    )
+    st.session_state["manual_input_version"] = (
+        st.session_state.get("manual_input_version", 0) + 1
+    )
+
+    st.session_state.pop("xlsx_upload_identity", None)
+    st.session_state.pop("xlsx_selected_worksheet", None)
+    st.session_state.pop("xlsx_selected_source_rows", None)
+    st.session_state["variant_input_mode_version"] = (
+        st.session_state.get("variant_input_mode_version", 0) + 1
+    )
+    st.session_state["reset_workspace_requested"] = False
+    if rerun:
+        st.rerun()
+
+
 def _manual_widget_key(field: str, row_index: int) -> str:
     """Return one stable key for a manual-variant row widget."""
 
-    return f"manual_variant_{field}_{row_index}"
+    manual_version = st.session_state.get("manual_input_version", 0)
+    return (
+        f"manual_variant_{field}_{row_index}"
+        if manual_version == 0
+        else f"manual_variant_{manual_version}_{field}_{row_index}"
+    )
 
 
 def _manual_chromosome_changed(row_index: int) -> None:
@@ -746,9 +814,15 @@ def _render_phenotype_extraction(phenotype_model: str) -> None:
         "against the installed local ontology. "
         f"Selected model: {phenotype_model}."
     )
+    phenotype_version = st.session_state.get("phenotype_input_version", 0)
+    text_key = (
+        "phenotype_clinical_text_fa"
+        if phenotype_version == 0
+        else f"phenotype_clinical_text_fa_{phenotype_version}"
+    )
     clinical_text = st.text_area(
         "Persian clinical description",
-        key="phenotype_clinical_text_fa",
+        key=text_key,
         max_chars=4_000,
         height=120,
         placeholder="شرح کوتاه و بدون نام یا شناسه بیمار",
@@ -1778,12 +1852,17 @@ def _render_variant_input(
     """Render source selection and the batched analysis submission form."""
 
     with st.container(border=True):
-        st.subheader("Variant input")
+        input_mode_version = st.session_state.get("variant_input_mode_version", 0)
+        input_mode_key = (
+            f"variant_input_mode_{input_mode_version}"
+            if input_mode_version
+            else "variant_input_mode"
+        )
         input_mode = st.segmented_control(
             "Input source",
             (VCF_INPUT_MODE, MANUAL_INPUT_MODE),
             default=VCF_INPUT_MODE,
-            key="variant_input_mode",
+            key=input_mode_key,
             on_change=_clear_analysis_result,
             width="stretch",
         )
@@ -1809,11 +1888,17 @@ def _render_variant_input(
 
         excel_input_records: list[dict[str, object]] | None = None
         if input_mode == VCF_INPUT_MODE:
+            uploader_version = st.session_state.get("vcf_uploader_version", 0)
+            uploader_key = (
+                "vcf_upload"
+                if uploader_version == 0
+                else f"vcf_upload_{uploader_version}"
+            )
             uploaded_vcf = st.file_uploader(
-                    "Variant file",
-                    type=("vcf", "gz", "xlsx"),
-                    key="vcf_upload",
-                    help=(
+                "Variant file",
+                type=("vcf", "gz", "xlsx"),
+                key=uploader_key,
+                help=(
                         "Accepted formats: .vcf, .vcf.gz, and .xlsx. "
                         "For Excel, select a worksheet and source rows before "
                         "analysis; required "
@@ -2251,6 +2336,8 @@ def render_app() -> None:
         initial_sidebar_state="collapsed",
     )
     _initialize_session_state()
+    if st.session_state.pop("reset_workspace_requested", False):
+        reset_analysis_workspace()
     _load_styles()
 
     st.title(PAGE_TITLE)
@@ -2311,6 +2398,7 @@ def render_app() -> None:
                 pipeline_result,
                 light_model=variant_model,
                 strong_model=variant_model,
+                on_start_new_analysis=reset_analysis_workspace,
             )
         with technical_tab:
             _render_pipeline_status(pipeline_result)
