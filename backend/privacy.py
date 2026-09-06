@@ -180,6 +180,35 @@ IRANIAN_PHONE_PATTERN = re.compile(
     rf"(?<!\w)(?:\+?(?:98|۹۸|٩٨)[ .-]?)?"
     rf"(?:0|۰|٠)?(?:9|۹|٩)[{PERSIAN_DIGIT}]{{9}}(?!\w)"
 )
+PROMPT_INJECTION_PATTERNS = (
+    re.compile(
+        r"(?i)\b(?:ignore|disregard|forget|bypass)\s+(?:all\s+)?"
+        r"(?:previous|prior|above)\s+(?:instructions?|directions?|prompts?|rules?)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:you\s+are\s+now|act\s+as|pretend\s+to\s+be)\s+(?:a\s+)?"
+        r"(?:new|different|an?\s+unrestricted|jailbroken|dan)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:system\s+prompt|developer\s+mode|administrative\s+override)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:print|reveal|output|display|show)\s+(?:the\s+)?"
+        r"(?:system\s+prompt|api\s+key|secret|instructions?)\b"
+    ),
+    re.compile(
+        r"(?i)(?:دستورات|دستورهای|پیام‌های|پرامپت)\s+(?:قبلی|پیشین|قبل)\s+را\s+"
+        r"(?:فراموش\s+کن|نادیده\s+بگیر|بی‌خیال\s+شو|حذف\s+کن|رد\s+کن)"
+    ),
+    re.compile(
+        r"(?i)(?:از\s+این\s+به\s+بعد|حالا)\s+(?:شما|تو)\s+یک\s+"
+        r"(?:هوش\s+مصنوعی\s+بدون\s+محدودیت|دستیار\s+دیگر|شخصیت\s+دیگر)\s+هستی"
+    ),
+    re.compile(
+        r"(?i)(?:پرامپت\s+سیستم|کلید\s+api|دستورات\s+سیستمی)\s+را\s+"
+        r"(?:چاپ\s+کن|نمایش\s+بده|بگو|لو\s+بده)"
+    ),
+)
 
 
 class ClinicalDataPrivacyError(ValueError):
@@ -514,6 +543,11 @@ def sanitize_phenotype_clinical_text(value: object) -> str:
     ):
         raise ClinicalDataPrivacyError(
             "The clinical description contains invalid control characters."
+        )
+    if any(pattern.search(normalized) for pattern in PROMPT_INJECTION_PATTERNS):
+        raise ClinicalDataPrivacyError(
+            "The clinical description contains prohibited instruction or "
+            "prompt injection patterns."
         )
     sanitized = redact_clinical_text(normalized).strip()
     validate_llm_payload(
