@@ -47,6 +47,7 @@ from backend.provider_resilience import (
     call_provider_with_policy,
     classify_http_status,
     classify_request_exception,
+    is_operational_failure,
     should_trigger_fallback,
 )
 from backend.retrieval_intelligence import (
@@ -952,8 +953,18 @@ def _get_myvariant(
     session: requests.Session,
     variant: VariantData,
     max_retries: int,
+    circuit_state: ProviderCircuitState | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     """Retrieve one exact MyVariant.info record with bounded retries."""
+    if circuit_state is not None:
+        open_record = circuit_state.get("myvariant")
+        if open_record is not None:
+            raise MyVariantOperationalError(
+                "MyVariant.info request failed because the service "
+                "was unavailable.",
+                open_record.status,
+            )
+
     variant_id = _to_myvariant_hgvs(variant)
     if variant_id is None:
         return None, None, (
@@ -989,10 +1000,15 @@ def _get_myvariant(
                 exception=exc,
             )
             if attempt >= max_retries:
+                provider_status = classify_request_exception(exc)
+                if circuit_state is not None and is_operational_failure(
+                    provider_status
+                ):
+                    circuit_state.open("myvariant", provider_status)
                 raise MyVariantOperationalError(
                     "MyVariant.info request failed because the service "
                     "was unavailable.",
-                    classify_request_exception(exc),
+                    provider_status,
                 ) from exc
 
             delay = _retry_delay(attempt)
@@ -1034,21 +1050,42 @@ def _get_myvariant(
                 continue
 
         if not 200 <= response.status_code < 300:
+            provider_status = classify_http_status(response.status_code)
+            if circuit_state is not None and is_operational_failure(
+                provider_status
+            ):
+                circuit_state.open(
+                    "myvariant",
+                    provider_status,
+                    http_status=response.status_code,
+                )
             raise MyVariantOperationalError(
                 "MyVariant.info returned HTTP "
                 f"{response.status_code}.",
-                classify_http_status(response.status_code),
+                provider_status,
             )
 
         try:
             payload = response.json()
         except ValueError as exc:
+            if circuit_state is not None:
+                circuit_state.open(
+                    "myvariant",
+                    "invalid_response",
+                    http_status=response.status_code,
+                )
             raise MyVariantOperationalError(
                 "MyVariant.info returned invalid JSON.",
                 "invalid_response",
             ) from exc
 
         if not isinstance(payload, dict):
+            if circuit_state is not None:
+                circuit_state.open(
+                    "myvariant",
+                    "invalid_response",
+                    http_status=response.status_code,
+                )
             raise MyVariantOperationalError(
                 "MyVariant.info returned an unexpected response structure.",
                 "invalid_response",
@@ -1059,6 +1096,12 @@ def _get_myvariant(
             not isinstance(response_id, str)
             or response_id.upper() != variant_id.upper()
         ):
+            if circuit_state is not None:
+                circuit_state.open(
+                    "myvariant",
+                    "invalid_response",
+                    http_status=response.status_code,
+                )
             raise MyVariantOperationalError(
                 "MyVariant.info returned a record that does not exactly "
                 "match the requested assembly, chromosome, position, "
@@ -1068,6 +1111,8 @@ def _get_myvariant(
 
         return payload, variant_id, None
 
+    if circuit_state is not None:
+        circuit_state.open("myvariant", "unavailable")
     raise MyVariantOperationalError(
         "MyVariant.info retry loop ended unexpectedly.",
         "unavailable",
@@ -3510,16 +3555,31 @@ def _annotate_with_myvariant(
     annotation: AnnotationData,
     session: requests.Session,
     max_retries: int,
+    circuit_state: ProviderCircuitState | None = None,
 ) -> None:
     """Add isolated MyVariant evidence to one existing VEP annotation."""
     annotation["sources"]["myvariant"][
         "retrieved_at"
     ] = _retrieval_timestamp()
+    if circuit_state is not None:
+        open_record = circuit_state.get("myvariant")
+        if open_record is not None:
+            annotation["sources"]["myvariant"]["status"] = "error"
+            annotation["sources"]["myvariant"]["primary_failure"] = (
+                open_record.status
+            )
+            annotation["warnings"].append(
+                "MyVariant.info request failed because the service "
+                "was unavailable."
+            )
+            return
+
     try:
         payload, variant_id, unsupported_warning = _get_myvariant(
             session,
             annotation["variant"],
             max_retries,
+            circuit_state=circuit_state,
         )
     except AnnotationServiceError as exc:
         LOGGER.error(
@@ -3528,11 +3588,18 @@ def _annotate_with_myvariant(
             type(exc).__name__,
         )
         annotation["sources"]["myvariant"]["status"] = "error"
-        annotation["sources"]["myvariant"]["primary_failure"] = (
+        primary_failure = (
             exc.provider_status
             if isinstance(exc, MyVariantOperationalError)
             else "unavailable"
         )
+        annotation["sources"]["myvariant"]["primary_failure"] = (
+            primary_failure
+        )
+        if circuit_state is not None and is_operational_failure(
+            primary_failure
+        ):
+            circuit_state.open("myvariant", primary_failure)
         annotation["warnings"].append(str(exc))
         return
 
@@ -6311,11 +6378,13 @@ def annotate_variants(
             "Querying MyVariant.info.",
         )
         myvariant_baselines = deepcopy(annotations)
+        myvariant_circuit = ProviderCircuitState()
         for annotation in annotations:
             _annotate_with_myvariant(
                 annotation,
                 active_session,
                 resolved_retries,
+                myvariant_circuit,
             )
         myvariant_retry_rounds = _retry_failed_source_annotations(
             annotations,
@@ -6327,9 +6396,12 @@ def annotate_variants(
                     candidate,
                     active_session,
                     0,
+                    myvariant_circuit,
                 ),
             ),
             progress_callback=progress_callback,
+            circuit_state=myvariant_circuit,
+            circuit_provider="myvariant",
         )
         ensembl_variation_circuit = ProviderCircuitState()
         for annotation in annotations:
