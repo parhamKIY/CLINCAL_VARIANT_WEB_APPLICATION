@@ -44,7 +44,7 @@ nano .env
 # ۱. مشخصات ارائه‌دهنده مدل زبانی (LLM)
 LLM_PROVIDER=openai_compatible
 LLM_BASE_URL=https://api.openai.com/v1          # یا آدرس اندپوینت سرور محلی/ارائه‌دهنده شما
-LLM_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxx        # کلید API معتبر
+LLM_API_KEY=your-api-key-here                   # کلید API معتبر
 LLM_MODEL=gpt-4o-mini                           # یا هر مدل مدنظر
 
 # ۲. نام مدل‌ها برای مراحل مختلف (می‌تواند همان LLM_MODEL باشد)
