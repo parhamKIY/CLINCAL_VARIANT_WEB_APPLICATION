@@ -122,7 +122,7 @@ def default_observation_status(
     status = result.get("status")
     if status in {"available", "partial", "success"}:
         return "success"
-    if status == "no_match":
+    if status in {"no_match", "not_found"}:
         return "no_match"
     return None
 
@@ -223,7 +223,7 @@ def _payload_result(
     if upstream_version is not None and not isinstance(upstream_version, str):
         return None
     if record.observation_status == "no_match" and (
-        result.get("status") != "no_match"
+        result.get("status") not in {"no_match", "not_found"}
     ):
         return None
     return result, cast(str | None, upstream_version)
@@ -508,12 +508,258 @@ def execute_provider_with_repository(
     return decorated
 
 
+def execute_batch_provider_with_repository(
+    *,
+    repository: EvidenceRepository,
+    contexts: list[ProviderRepositoryContext],
+    live_batch_call: Callable[[list[int]], list[Mapping[str, object]]],
+    validate_result: ProviderResultValidator,
+    resolve_status: ProviderStatusResolver = default_observation_status,
+    clock: ProviderClock = lambda: datetime.now(UTC),
+    freshness_policy: EvidenceFreshnessPolicy | None = None,
+    metrics: ProviderRepositoryMetrics | None = None,
+) -> list[dict[str, Any]]:
+    """Reuse or store a batch of normalized provider results, preserving order."""
+
+    if not isinstance(repository, EvidenceRepository):
+        raise ProviderRepositoryResultError(
+            "repository must be an EvidenceRepository."
+        )
+    if not isinstance(contexts, list) or any(
+        not isinstance(ctx, ProviderRepositoryContext) for ctx in contexts
+    ):
+        raise ProviderRepositoryResultError(
+            "contexts must be a list of ProviderRepositoryContext."
+        )
+    if not callable(live_batch_call) or not callable(validate_result):
+        raise ProviderRepositoryResultError(
+            "Provider repository callbacks must be callable."
+        )
+    policy = freshness_policy or EvidenceFreshnessPolicy.from_settings()
+    if not isinstance(policy, EvidenceFreshnessPolicy):
+        raise ProviderRepositoryResultError(
+            "freshness_policy must be an EvidenceFreshnessPolicy."
+        )
+    metric_store = metrics or PROVIDER_REPOSITORY_METRICS
+    if not isinstance(metric_store, ProviderRepositoryMetrics):
+        raise ProviderRepositoryResultError(
+            "metrics must be ProviderRepositoryMetrics."
+        )
+
+    lookup_time = clock()
+    results: list[dict[str, Any] | None] = [None] * len(contexts)
+    miss_indices: list[int] = []
+
+    for idx, context in enumerate(contexts):
+        stale_found = False
+        invalid_records = 0
+        cached: dict[str, Any] | None = None
+        try:
+            cached, stale_found, invalid_records = _load_cached_result(
+                repository,
+                context=context,
+                validate_result=validate_result,
+                freshness_policy=policy,
+                now=lookup_time,
+            )
+        except (EvidenceRepositoryIntegrityError, ProviderRepositoryResultError):
+            invalid_records = 1
+            LOGGER.warning(
+                "event=evidence_repository_lookup outcome=invalid "
+                "provider=%s semantic_node=%s",
+                context.provider,
+                context.semantic_node,
+            )
+            record_execution_event(
+                "repository_record_rejected",
+                scope="repository",
+                provider=context.provider,
+                capability=context.semantic_node,
+                status="invalid",
+                outcome_category="invalid_record",
+                reason_category="integrity_or_validation_failure",
+            )
+            cached = None
+        except (EvidenceRepositoryError, EvidenceRepositoryValidationError):
+            LOGGER.warning(
+                "event=evidence_repository_lookup outcome=repository_error "
+                "provider=%s semantic_node=%s",
+                context.provider,
+                context.semantic_node,
+            )
+            record_execution_event(
+                "repository_lookup_failed",
+                scope="repository",
+                provider=context.provider,
+                capability=context.semantic_node,
+                status="error",
+                outcome_category="repository_error",
+                reason_category="repository_error",
+            )
+            cached = None
+
+        if cached is not None:
+            metric_store._increment("cache_hits")
+            if invalid_records:
+                metric_store._increment(
+                    "invalid_records_rejected",
+                    invalid_records,
+                )
+            LOGGER.info(
+                "event=evidence_repository_lookup outcome=hit provider=%s "
+                "semantic_node=%s invalid_records=%s",
+                context.provider,
+                context.semantic_node,
+                invalid_records,
+            )
+            record_execution_event(
+                "repository_lookup_hit",
+                scope="repository",
+                provider=context.provider,
+                capability=context.semantic_node,
+                status="success",
+                outcome_category="cache_hit",
+                source_mode="repository_cache",
+                provider_role=context.provider_role,
+                fallback_for=context.fallback_for,
+            )
+            record_execution_event(
+                "provider_source_selected",
+                scope="provider",
+                provider=context.provider,
+                capability=context.semantic_node,
+                status=str(cached.get("status", "success")),
+                outcome_category="success",
+                source_mode="repository_cache",
+                provider_role=context.provider_role,
+                fallback_for=context.fallback_for,
+            )
+            results[idx] = cached
+        else:
+            metric_store._increment("cache_misses")
+            if stale_found:
+                metric_store._increment("stale_lookups")
+            if invalid_records:
+                metric_store._increment(
+                    "invalid_records_rejected",
+                    invalid_records,
+                )
+            LOGGER.info(
+                "event=evidence_repository_lookup outcome=miss provider=%s "
+                "semantic_node=%s stale=%s invalid=%s",
+                context.provider,
+                context.semantic_node,
+                str(stale_found).casefold(),
+                str(bool(invalid_records)).casefold(),
+            )
+            record_execution_event(
+                (
+                    "repository_lookup_stale"
+                    if stale_found
+                    else "repository_lookup_miss"
+                ),
+                scope="repository",
+                provider=context.provider,
+                capability=context.semantic_node,
+                status="stale" if stale_found else "missing",
+                outcome_category="cache_miss",
+                provider_role=context.provider_role,
+                fallback_for=context.fallback_for,
+            )
+            miss_indices.append(idx)
+
+    if not miss_indices:
+        return cast(list[dict[str, Any]], results)
+
+    raw_live_results = live_batch_call(miss_indices)
+    if not isinstance(raw_live_results, list) or len(raw_live_results) != len(
+        miss_indices
+    ):
+        raise ProviderRepositoryResultError(
+            "live_batch_call must return a list of mappings matching miss_indices cardinality."
+        )
+
+    for miss_idx, raw_live_result in zip(
+        miss_indices, raw_live_results, strict=True
+    ):
+        if not isinstance(raw_live_result, Mapping):
+            raise ProviderRepositoryResultError(
+                "Normalized provider result must be a mapping."
+            )
+        live_result = deepcopy(dict(raw_live_result))
+        context = contexts[miss_idx]
+        observation_status = resolve_status(live_result)
+        if observation_status is not None:
+            live_result = validate_result(live_result)
+        retrieved_at = _retrieved_at(live_result)
+        upstream_version = _upstream_version(context, live_result)
+        if observation_status is not None:
+            payload = {
+                "schema_version": PROVIDER_REPOSITORY_PAYLOAD_SCHEMA_VERSION,
+                "status": observation_status,
+                "provider_result": deepcopy(live_result),
+                "upstream_version": upstream_version,
+                "fallback_for": context.fallback_for,
+                "primary_failure": context.primary_failure,
+            }
+            try:
+                repository.store_provider_observation(
+                    canonical_variant=context.canonical_variant,
+                    assembly=context.assembly,
+                    semantic_node=context.semantic_node,
+                    provider=context.provider,
+                    provider_role=context.provider_role,
+                    source=context.source,
+                    query_identity=context.query_identity,
+                    normalized_payload=payload,
+                    observation_status=observation_status,
+                    retrieved_at=retrieved_at,
+                )
+            except (
+                EvidenceRepositoryError,
+                EvidenceRepositoryValidationError,
+            ):
+                LOGGER.warning(
+                    "event=evidence_repository_store_failed provider=%s "
+                    "semantic_node=%s status=%s",
+                    context.provider,
+                    context.semantic_node,
+                    observation_status,
+                )
+        decorated = _decorate_result(
+            live_result,
+            context=context,
+            source_mode="live_provider",
+            original_retrieved_at=retrieved_at,
+            cache_retrieved_at=None,
+            upstream_version=upstream_version,
+        )
+        record_execution_event(
+            "provider_source_selected",
+            scope="provider",
+            provider=context.provider,
+            capability=context.semantic_node,
+            status=str(decorated.get("status", "success")),
+            outcome_category=(
+                "no_match" if observation_status == "no_match" else "success"
+            ),
+            source_mode="live_provider",
+            provider_role=context.provider_role,
+            fallback_for=context.fallback_for,
+        )
+        results[miss_idx] = decorated
+
+    return cast(list[dict[str, Any]], results)
+
+
 __all__ = [
     "PROVIDER_REPOSITORY_PAYLOAD_SCHEMA_VERSION",
     "PROVIDER_REPOSITORY_METRICS",
+    "ProviderClock",
     "ProviderRepositoryContext",
     "ProviderRepositoryMetrics",
     "ProviderRepositoryResultError",
     "default_observation_status",
     "execute_provider_with_repository",
+    "execute_batch_provider_with_repository",
 ]

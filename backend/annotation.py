@@ -4,10 +4,10 @@ import math
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from threading import Lock
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
@@ -26,6 +26,12 @@ from backend.evidence_rescue import (
     build_evidence_rescue_trace,
 )
 from backend.erepo import retrieve_expert_curated_context
+from backend.evidence_repository import (
+    EvidenceRepository,
+    EvidenceRepositoryError,
+    EvidenceRepositoryValidationError,
+)
+from backend.evidence_repository_freshness import EvidenceFreshnessPolicy
 from backend.gene_identity import (
     GENE_IDENTITY_UNRESOLVED,
     VEP_GENE_CONTEXT_UNRESOLVED,
@@ -49,6 +55,16 @@ from backend.provider_resilience import (
     classify_request_exception,
     is_operational_failure,
     should_trigger_fallback,
+)
+from backend.provider_repository import (
+    ProviderClock,
+    ProviderObservationStatus,
+    ProviderRepositoryContext,
+    ProviderRepositoryMetrics,
+    ProviderRepositoryResultError,
+    default_observation_status,
+    execute_batch_provider_with_repository,
+    execute_provider_with_repository,
 )
 from backend.retrieval_intelligence import (
     IdentifierReference,
@@ -410,6 +426,227 @@ def _resolve_retries(max_retries: int | None) -> int:
         )
 
     return resolved_retries
+
+
+def _resolve_repository_use(
+    *,
+    session: requests.Session | None,
+    evidence_repository: EvidenceRepository | None,
+    use_repository: bool | None,
+) -> tuple[EvidenceRepository | None, bool]:
+    if use_repository is not None and not isinstance(use_repository, bool):
+        raise AnnotationError("use_repository must be a boolean.")
+    enabled = (
+        session is None or evidence_repository is not None
+    ) if use_repository is None else use_repository
+    if not enabled:
+        return None, False
+    if evidence_repository is not None and not isinstance(
+        evidence_repository,
+        EvidenceRepository,
+    ):
+        raise AnnotationError(
+            "evidence_repository must be an EvidenceRepository."
+        )
+    if evidence_repository is not None:
+        return evidence_repository, True
+    try:
+        return EvidenceRepository(), True
+    except EvidenceRepositoryError:
+        LOGGER.warning("event=evidence_repository_configuration_failed")
+        return None, False
+
+
+_VEP_REUSABLE_FIELDS = (
+    "consequence",
+    "gene",
+    "gene_id",
+    "transcript",
+    "impact",
+    "hgvsc",
+    "hgvsp",
+    "protein_change",
+    "is_canonical",
+    "mane_select",
+    "mane_plus_clinical",
+    "predictors",
+)
+
+
+def _vep_repository_context(variant: VariantData) -> ProviderRepositoryContext:
+    return ProviderRepositoryContext(
+        canonical_variant=variant,
+        assembly=settings.GENOME_ASSEMBLY,
+        semantic_node="annotation",
+        provider="vep",
+        provider_role="primary",
+        source="ensembl_vep",
+        query_identity={
+            "operation": "annotate_variant",
+            "assembly": settings.GENOME_ASSEMBLY,
+            "chrom": str(variant["chrom"]),
+            "pos": int(variant["pos"]),
+            "ref": str(variant["ref"]).upper(),
+            "alt": str(variant["alt"]).upper(),
+        },
+    )
+
+
+def _extract_vep_record(annotation: AnnotationData) -> dict[str, Any]:
+    record = dict(annotation["sources"]["vep"])
+    record["_top_level"] = {
+        field: annotation.get(field)
+        for field in _VEP_REUSABLE_FIELDS
+        if annotation.get(field) is not None
+    }
+    vep_warnings = [
+        w for w in annotation.get("warnings", [])
+        if "Ensembl VEP" in w or "transcript" in w
+    ]
+    if vep_warnings:
+        record["_warnings"] = vep_warnings
+    return record
+
+
+def _apply_vep_record(annotation: AnnotationData, vep_record: dict[str, Any]) -> None:
+    vep_copy = dict(vep_record)
+    top_level = vep_copy.pop("_top_level", None)
+    warnings = vep_copy.pop("_warnings", None)
+    if isinstance(top_level, dict):
+        for field, value in top_level.items():
+            if field in _VEP_REUSABLE_FIELDS:
+                annotation[field] = value
+    if isinstance(warnings, list):
+        for w in warnings:
+            if w not in annotation["warnings"]:
+                annotation["warnings"].append(w)
+    annotation["sources"]["vep"] = vep_copy
+
+
+def _genebe_repository_context(variant: VariantData) -> ProviderRepositoryContext:
+    return ProviderRepositoryContext(
+        canonical_variant=variant,
+        assembly=settings.GENOME_ASSEMBLY,
+        semantic_node="automated_acmg_context",
+        provider="genebe",
+        provider_role="primary",
+        source="genebe",
+        query_identity={
+            "operation": "annotate_variant",
+            "assembly": settings.GENOME_ASSEMBLY,
+            "variant": _to_genebe_variant(variant),
+        },
+    )
+
+
+def _extract_genebe_record(annotation: AnnotationData) -> dict[str, Any]:
+    record = dict(annotation["sources"]["genebe"])
+    genebe_warnings = [
+        w for w in annotation.get("warnings", [])
+        if "GeneBe" in w
+    ]
+    if genebe_warnings:
+        record["_warnings"] = genebe_warnings
+    return record
+
+
+def _apply_genebe_record(annotation: AnnotationData, genebe_record: dict[str, Any]) -> None:
+    genebe_copy = dict(genebe_record)
+    warning = genebe_copy.pop("_warning", None)
+    if warning and warning not in annotation["warnings"]:
+        annotation["warnings"].append(warning)
+    warnings = genebe_copy.pop("_warnings", None)
+    if isinstance(warnings, list):
+        for w in warnings:
+            if w not in annotation["warnings"]:
+                annotation["warnings"].append(w)
+    annotation["sources"]["genebe"] = genebe_copy
+    if genebe_copy.get("status") == "success":
+        ref = {
+            "source": "GeneBe automated annotation",
+            "url": f"{settings.GENEBE_BASE_URL}/api-public/v1/variants",
+        }
+        if ref not in annotation["references"]:
+            annotation["references"].append(ref)
+
+
+def _myvariant_repository_context(variant: VariantData) -> ProviderRepositoryContext:
+    variant_id = _to_myvariant_hgvs(variant) or ""
+    return ProviderRepositoryContext(
+        canonical_variant=variant,
+        assembly=settings.GENOME_ASSEMBLY,
+        semantic_node="annotation",
+        provider="myvariant",
+        provider_role="primary",
+        source="myvariant",
+        query_identity={
+            "operation": "lookup_variant",
+            "assembly": settings.GENOME_ASSEMBLY,
+            "variant_id": variant_id,
+        },
+    )
+
+
+def _extract_myvariant_record(annotation: AnnotationData) -> dict[str, Any]:
+    record = dict(annotation["sources"]["myvariant"])
+    if annotation.get("population_frequency") is not None:
+        record["_population_frequency"] = annotation["population_frequency"]
+    if annotation.get("population_frequency_provenance") is not None:
+        record["_population_frequency_provenance"] = annotation["population_frequency_provenance"]
+    myvariant_warnings = [
+        w for w in annotation.get("warnings", [])
+        if "MyVariant" in w
+    ]
+    if myvariant_warnings:
+        record["_warnings"] = myvariant_warnings
+    return record
+
+
+def _apply_myvariant_record(annotation: AnnotationData, myvariant_record: dict[str, Any]) -> None:
+    myvariant_copy = dict(myvariant_record)
+    pop_freq = myvariant_copy.pop("_population_frequency", None)
+    pop_prov = myvariant_copy.pop("_population_frequency_provenance", None)
+    warnings = myvariant_copy.pop("_warnings", None)
+    if pop_freq is not None:
+        annotation["population_frequency"] = pop_freq
+    if pop_prov is not None:
+        prov_copy = deepcopy(pop_prov)
+        prov_copy["source_mode"] = myvariant_copy.get("source_mode", "live_provider")
+        annotation["population_frequency_provenance"] = prov_copy
+    if isinstance(warnings, list):
+        for w in warnings:
+            if w not in annotation["warnings"]:
+                annotation["warnings"].append(w)
+    annotation["sources"]["myvariant"] = myvariant_copy
+    if myvariant_copy.get("status") == "success" and myvariant_copy.get("variant_id"):
+        ref = {
+            "source": "MyVariant.info",
+            "url": (
+                f"{settings.MYVARIANT_BASE_URL}/variant/"
+                f"{quote(myvariant_copy['variant_id'], safe='')}"
+                f"?assembly={MYVARIANT_ASSEMBLIES[settings.GENOME_ASSEMBLY]}"
+            ),
+        }
+        if ref not in annotation["references"]:
+            annotation["references"].append(ref)
+
+
+def _validate_vep_record(result: object) -> dict[str, Any]:
+    if not isinstance(result, Mapping) or "status" not in result:
+        raise ProviderRepositoryResultError("Invalid VEP result")
+    return dict(result)
+
+
+def _validate_genebe_record(result: object) -> dict[str, Any]:
+    if not isinstance(result, Mapping) or "status" not in result:
+        raise ProviderRepositoryResultError("Invalid GeneBe result")
+    return dict(result)
+
+
+def _validate_myvariant_record(result: object) -> dict[str, Any]:
+    if not isinstance(result, Mapping) or "status" not in result:
+        raise ProviderRepositoryResultError("Invalid MyVariant result")
+    return dict(result)
 
 
 def _iter_batches(
@@ -2974,79 +3211,178 @@ def _annotate_with_genebe(
     circuit_state: ProviderCircuitState,
     readiness_snapshot: ProviderReadinessSnapshot | None,
     confirmation_state: _ReadinessConfirmationState,
+    evidence_repository: EvidenceRepository | None = None,
+    use_repository: bool | None = None,
+    repository_freshness_policy: EvidenceFreshnessPolicy | None = None,
+    repository_metrics: ProviderRepositoryMetrics | None = None,
+    repository_clock: ProviderClock = lambda: datetime.now(UTC),
 ) -> bool:
     """Batch GeneBe evidence without overwriting VEP annotations."""
 
     provider_wide_failure = False
+    repo_enabled = evidence_repository is not None and (
+        True if use_repository is None else use_repository
+    )
     for offset in range(0, len(annotations), MAX_GENEBE_BATCH_SIZE):
         batch = annotations[offset:offset + MAX_GENEBE_BATCH_SIZE]
-        request_variants = [
-            _to_genebe_variant(annotation["variant"])
-            for annotation in batch
-        ]
-        try:
-            responses = _post_genebe_batch(
-                session,
-                request_variants,
-                max_retries,
-                circuit_state,
-                readiness_snapshot,
-                confirmation_state,
-            )
-        except AnnotationServiceError as exc:
-            variant_level = isinstance(exc, GeneBeVariantLevelError)
-            provider_wide_failure = (
-                provider_wide_failure or not variant_level
-            )
-            LOGGER.error(
-                "event=annotation_source_failed service=genebe "
-                "error_type=%s",
-                type(exc).__name__,
-            )
-            for annotation in batch:
-                annotation["sources"]["genebe"].update(
-                    {
-                        "status": (
-                            "invalid_response"
-                            if variant_level
-                            or (
-                                isinstance(exc, GeneBeOperationalError)
-                                and exc.provider_status == "invalid_response"
-                            )
-                            else "unavailable"
-                        ),
-                        "primary_failure": (
-                            None
-                            if variant_level
-                            else (
-                                exc.provider_status
-                                if isinstance(exc, GeneBeOperationalError)
-                                else "unavailable"
-                            )
-                        ),
-                        "failure_scope": (
-                            "variant_level"
-                            if variant_level
-                            else "provider_wide"
-                        ),
-                        "retrieved_at": _retrieval_timestamp(),
-                    }
-                )
-                annotation["warnings"].append(str(exc))
-            continue
+        if repo_enabled and evidence_repository is not None:
+            contexts = [_genebe_repository_context(ann["variant"]) for ann in batch]
 
-        for annotation, response in zip(batch, responses, strict=True):
+            def live_batch_call(miss_indices: list[int]) -> list[dict[str, Any]]:
+                nonlocal provider_wide_failure
+                miss_batch = [batch[i] for i in miss_indices]
+                request_variants = [
+                    _to_genebe_variant(ann["variant"])
+                    for ann in miss_batch
+                ]
+                try:
+                    responses = _post_genebe_batch(
+                        session,
+                        request_variants,
+                        max_retries,
+                        circuit_state,
+                        readiness_snapshot,
+                        confirmation_state,
+                    )
+                except AnnotationServiceError as exc:
+                    variant_level = isinstance(exc, GeneBeVariantLevelError)
+                    provider_wide_failure = (
+                        provider_wide_failure or not variant_level
+                    )
+                    LOGGER.error(
+                        "event=annotation_source_failed service=genebe "
+                        "error_type=%s",
+                        type(exc).__name__,
+                    )
+                    err_records: list[dict[str, Any]] = []
+                    for ann in miss_batch:
+                        err_res = {
+                            "status": (
+                                "invalid_response"
+                                if variant_level
+                                or (
+                                    isinstance(exc, GeneBeOperationalError)
+                                    and exc.provider_status == "invalid_response"
+                                )
+                                else "unavailable"
+                            ),
+                            "primary_failure": (
+                                None
+                                if variant_level
+                                else (
+                                    exc.provider_status
+                                    if isinstance(exc, GeneBeOperationalError)
+                                    else "unavailable"
+                                )
+                            ),
+                            "failure_scope": (
+                                "variant_level"
+                                if variant_level
+                                else "provider_wide"
+                            ),
+                            "retrieved_at": _retrieval_timestamp(),
+                            "_warning": str(exc),
+                        }
+                        err_records.append(err_res)
+                    return err_records
+
+                live_records: list[dict[str, Any]] = []
+                for ann, response in zip(miss_batch, responses, strict=True):
+                    temp_ann = deepcopy(ann)
+                    try:
+                        _standardize_genebe_response(temp_ann, response)
+                    except AnnotationServiceError as exc:
+                        temp_ann["sources"]["genebe"].update(
+                            {
+                                "status": "invalid_response",
+                                "failure_scope": "variant_level",
+                                "retrieved_at": _retrieval_timestamp(),
+                            }
+                        )
+                        temp_ann["sources"]["genebe"]["_warning"] = str(exc)
+                    live_records.append(_extract_genebe_record(temp_ann))
+                return live_records
+
+            batch_records = execute_batch_provider_with_repository(
+                repository=evidence_repository,
+                contexts=contexts,
+                live_batch_call=live_batch_call,
+                validate_result=_validate_genebe_record,
+                clock=repository_clock,
+                freshness_policy=repository_freshness_policy,
+                metrics=repository_metrics,
+            )
+
+            for ann, record in zip(batch, batch_records, strict=True):
+                _apply_genebe_record(ann, record)
+        else:
+            request_variants = [
+                _to_genebe_variant(annotation["variant"])
+                for annotation in batch
+            ]
             try:
-                _standardize_genebe_response(annotation, response)
-            except AnnotationServiceError as exc:
-                annotation["sources"]["genebe"].update(
-                    {
-                        "status": "invalid_response",
-                        "failure_scope": "variant_level",
-                        "retrieved_at": _retrieval_timestamp(),
-                    }
+                responses = _post_genebe_batch(
+                    session,
+                    request_variants,
+                    max_retries,
+                    circuit_state,
+                    readiness_snapshot,
+                    confirmation_state,
                 )
-                annotation["warnings"].append(str(exc))
+            except AnnotationServiceError as exc:
+                variant_level = isinstance(exc, GeneBeVariantLevelError)
+                provider_wide_failure = (
+                    provider_wide_failure or not variant_level
+                )
+                LOGGER.error(
+                    "event=annotation_source_failed service=genebe "
+                    "error_type=%s",
+                    type(exc).__name__,
+                )
+                for annotation in batch:
+                    annotation["sources"]["genebe"].update(
+                        {
+                            "status": (
+                                "invalid_response"
+                                if variant_level
+                                or (
+                                    isinstance(exc, GeneBeOperationalError)
+                                    and exc.provider_status == "invalid_response"
+                                )
+                                else "unavailable"
+                            ),
+                            "primary_failure": (
+                                None
+                                if variant_level
+                                else (
+                                    exc.provider_status
+                                    if isinstance(exc, GeneBeOperationalError)
+                                    else "unavailable"
+                                )
+                            ),
+                            "failure_scope": (
+                                "variant_level"
+                                if variant_level
+                                else "provider_wide"
+                            ),
+                            "retrieved_at": _retrieval_timestamp(),
+                        }
+                    )
+                    annotation["warnings"].append(str(exc))
+                continue
+
+            for annotation, response in zip(batch, responses, strict=True):
+                try:
+                    _standardize_genebe_response(annotation, response)
+                except AnnotationServiceError as exc:
+                    annotation["sources"]["genebe"].update(
+                        {
+                            "status": "invalid_response",
+                            "failure_scope": "variant_level",
+                            "retrieved_at": _retrieval_timestamp(),
+                        }
+                    )
+                    annotation["warnings"].append(str(exc))
 
     return provider_wide_failure
 
@@ -3554,8 +3890,108 @@ def _annotate_with_myvariant(
     session: requests.Session,
     max_retries: int,
     circuit_state: ProviderCircuitState | None = None,
+    evidence_repository: EvidenceRepository | None = None,
+    use_repository: bool | None = None,
+    repository_freshness_policy: EvidenceFreshnessPolicy | None = None,
+    repository_metrics: ProviderRepositoryMetrics | None = None,
+    repository_clock: ProviderClock = lambda: datetime.now(UTC),
 ) -> None:
     """Add isolated MyVariant evidence to one existing VEP annotation."""
+    repo_enabled = evidence_repository is not None and (
+        True if use_repository is None else use_repository
+    )
+    if repo_enabled and evidence_repository is not None:
+        context = _myvariant_repository_context(annotation["variant"])
+
+        def live_call() -> dict[str, Any]:
+            temp_anno = deepcopy(annotation)
+            temp_anno["sources"]["myvariant"]["retrieved_at"] = (
+                _retrieval_timestamp()
+            )
+            if circuit_state is not None:
+                open_record = circuit_state.get("myvariant")
+                if open_record is not None:
+                    temp_anno["sources"]["myvariant"]["status"] = "error"
+                    temp_anno["sources"]["myvariant"]["primary_failure"] = (
+                        open_record.status
+                    )
+                    temp_anno["warnings"].append(
+                        "MyVariant.info request failed because the service "
+                        "was unavailable."
+                    )
+                    return _extract_myvariant_record(temp_anno)
+
+            payload, variant_id, unsupported_warning = _get_myvariant(
+                session,
+                temp_anno["variant"],
+                max_retries,
+                circuit_state=circuit_state,
+            )
+
+            if unsupported_warning is not None:
+                temp_anno["sources"]["myvariant"]["status"] = "unsupported"
+                temp_anno["warnings"].append(unsupported_warning)
+            elif payload is None or variant_id is None:
+                temp_anno["sources"]["myvariant"].update(
+                    {
+                        "status": "not_found",
+                        "variant_id": variant_id,
+                    }
+                )
+                temp_anno["warnings"].append(
+                    "MyVariant.info returned no exact result for this variant."
+                )
+            else:
+                _standardize_myvariant_response(
+                    temp_anno,
+                    payload,
+                    variant_id,
+                )
+
+            return _extract_myvariant_record(temp_anno)
+
+        try:
+            myvariant_record = execute_provider_with_repository(
+                repository=evidence_repository,
+                context=context,
+                live_call=live_call,
+                validate_result=_validate_myvariant_record,
+                clock=repository_clock,
+                freshness_policy=repository_freshness_policy,
+                metrics=repository_metrics,
+            )
+        except AnnotationServiceError as exc:
+            LOGGER.error(
+                "event=annotation_source_failed service=myvariant "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+            annotation["sources"]["myvariant"]["status"] = "error"
+            primary_failure = (
+                exc.provider_status
+                if isinstance(exc, MyVariantOperationalError)
+                else "unavailable"
+            )
+            annotation["sources"]["myvariant"]["primary_failure"] = (
+                primary_failure
+            )
+            should_open_circuit = (
+                exc.open_circuit
+                if isinstance(exc, MyVariantOperationalError)
+                else True
+            )
+            if (
+                circuit_state is not None
+                and should_open_circuit
+                and is_operational_failure(primary_failure)
+            ):
+                circuit_state.open("myvariant", primary_failure)
+            annotation["warnings"].append(str(exc))
+            return
+
+        _apply_myvariant_record(annotation, myvariant_record)
+        return
+
     annotation["sources"]["myvariant"][
         "retrieved_at"
     ] = _retrieval_timestamp()
@@ -6155,6 +6591,11 @@ def annotate_variants(
     progress_callback: AnnotationProgressCallback | None = None,
     use_cache: bool | None = None,
     readiness_snapshot: ProviderReadinessSnapshot | None = None,
+    evidence_repository: EvidenceRepository | None = None,
+    use_repository: bool | None = None,
+    repository_freshness_policy: EvidenceFreshnessPolicy | None = None,
+    repository_metrics: ProviderRepositoryMetrics | None = None,
+    repository_clock: ProviderClock = lambda: datetime.now(UTC),
 ) -> list[AnnotationData]:
     """Annotate with VEP, GeneBe, MyVariant, ClinVar, ClinGen, and CSpec evidence.
 
@@ -6176,6 +6617,12 @@ def annotate_variants(
     resolved_use_cache = session is None if use_cache is None else use_cache
     if not isinstance(resolved_use_cache, bool):
         raise AnnotationError("use_cache must be a boolean.")
+
+    evidence_repo, repo_enabled = _resolve_repository_use(
+        session=session,
+        evidence_repository=evidence_repository,
+        use_repository=use_repository,
+    )
 
     resolved_batch_size = _resolve_batch_size(batch_size)
     resolved_retries = _resolve_retries(max_retries)
@@ -6206,82 +6653,191 @@ def annotate_variants(
             "Sending variants to Ensembl VEP.",
         )
         for batch in _iter_batches(variant_items, resolved_batch_size):
-            vep_inputs = [
-                _to_vep_input(token, variant)
-                for token, variant in batch
-            ]
-
-            try:
-                responses = _post_vep_batch(
-                    active_session,
-                    vep_inputs,
-                    resolved_retries,
-                    vep_circuit,
-                    readiness_snapshot,
-                    vep_confirmation_state,
-                )
-            except AnnotationServiceError as exc:
-                variant_level = isinstance(exc, VepVariantLevelError)
-                vep_provider_wide_failure = (
-                    vep_provider_wide_failure or not variant_level
-                )
-                LOGGER.error(
-                    "event=annotation_source_failed "
-                    "service=ensembl_vep error_type=%s",
-                    type(exc).__name__,
-                )
-                annotations.extend(
-                    _base_annotation(
-                        variant,
-                        status="error",
-                        warning=str(exc),
-                        vep_failure=(
-                            None
-                            if variant_level
-                            else (
-                                exc.provider_status
-                                if isinstance(exc, VepOperationalError)
-                                else "unavailable"
-                            )
-                        ),
-                        vep_failure_scope=(
-                            "variant_level"
-                            if variant_level
-                            else "provider_wide"
-                        ),
-                    )
+            if repo_enabled and evidence_repo is not None:
+                contexts = [
+                    _vep_repository_context(variant)
                     for _, variant in batch
+                ]
+
+                def live_batch_call(miss_indices: list[int]) -> list[dict[str, Any]]:
+                    nonlocal vep_provider_wide_failure
+                    miss_items = [batch[i] for i in miss_indices]
+                    vep_inputs = [
+                        _to_vep_input(token, variant)
+                        for token, variant in miss_items
+                    ]
+                    try:
+                        responses = _post_vep_batch(
+                            active_session,
+                            vep_inputs,
+                            resolved_retries,
+                            vep_circuit,
+                            readiness_snapshot,
+                            vep_confirmation_state,
+                        )
+                    except AnnotationServiceError as exc:
+                        variant_level = isinstance(exc, VepVariantLevelError)
+                        vep_provider_wide_failure = (
+                            vep_provider_wide_failure or not variant_level
+                        )
+                        LOGGER.error(
+                            "event=annotation_source_failed "
+                            "service=ensembl_vep error_type=%s",
+                            type(exc).__name__,
+                        )
+                        return [
+                            _extract_vep_record(
+                                _base_annotation(
+                                    variant,
+                                    status="error",
+                                    warning=str(exc),
+                                    vep_failure=(
+                                        None
+                                        if variant_level
+                                        else (
+                                            exc.provider_status
+                                            if isinstance(exc, VepOperationalError)
+                                            else "unavailable"
+                                        )
+                                    ),
+                                    vep_failure_scope=(
+                                        "variant_level"
+                                        if variant_level
+                                        else "provider_wide"
+                                    ),
+                                )
+                            )
+                            for _, variant in miss_items
+                        ]
+
+                    responses_by_token = {
+                        token: response
+                        for response in responses
+                        if (token := _extract_response_token(response))
+                    }
+                    live_records: list[dict[str, Any]] = []
+                    for token, variant in miss_items:
+                        response = responses_by_token.get(token)
+                        if response is None:
+                            live_records.append(
+                                _extract_vep_record(
+                                    _base_annotation(
+                                        variant,
+                                        status="not_found",
+                                        warning=(
+                                            "Ensembl VEP returned no result for "
+                                            "this variant."
+                                        ),
+                                    )
+                                )
+                            )
+                        else:
+                            live_records.append(
+                                _extract_vep_record(
+                                    _standardize_vep_response(
+                                        variant,
+                                        response,
+                                    )
+                                )
+                            )
+                    return live_records
+
+                batch_vep_records = execute_batch_provider_with_repository(
+                    repository=evidence_repo,
+                    contexts=contexts,
+                    live_batch_call=live_batch_call,
+                    validate_result=_validate_vep_record,
+                    clock=repository_clock,
+                    freshness_policy=repository_freshness_policy,
+                    metrics=repository_metrics,
                 )
-                continue
 
-            responses_by_token = {
-                token: response
-                for response in responses
-                if (token := _extract_response_token(response))
-            }
+                for (_, variant), vep_record in zip(batch, batch_vep_records, strict=True):
+                    ann = _base_annotation(
+                        variant,
+                        status=vep_record.get("status", "success"),
+                        vep_failure=vep_record.get("primary_failure"),
+                        vep_failure_scope=vep_record.get("failure_scope"),
+                    )
+                    _apply_vep_record(ann, vep_record)
+                    annotations.append(ann)
+            else:
+                vep_inputs = [
+                    _to_vep_input(token, variant)
+                    for token, variant in batch
+                ]
 
-            for token, variant in batch:
-                response = responses_by_token.get(token)
-
-                if response is None:
-                    annotations.append(
+                try:
+                    responses = _post_vep_batch(
+                        active_session,
+                        vep_inputs,
+                        resolved_retries,
+                        vep_circuit,
+                        readiness_snapshot,
+                        vep_confirmation_state,
+                    )
+                except AnnotationServiceError as exc:
+                    variant_level = isinstance(exc, VepVariantLevelError)
+                    vep_provider_wide_failure = (
+                        vep_provider_wide_failure or not variant_level
+                    )
+                    LOGGER.error(
+                        "event=annotation_source_failed "
+                        "service=ensembl_vep error_type=%s",
+                        type(exc).__name__,
+                    )
+                    annotations.extend(
                         _base_annotation(
                             variant,
-                            status="not_found",
-                            warning=(
-                                "Ensembl VEP returned no result for "
-                                "this variant."
+                            status="error",
+                            warning=str(exc),
+                            vep_failure=(
+                                None
+                                if variant_level
+                                else (
+                                    exc.provider_status
+                                    if isinstance(exc, VepOperationalError)
+                                    else "unavailable"
+                                )
+                            ),
+                            vep_failure_scope=(
+                                "variant_level"
+                                if variant_level
+                                else "provider_wide"
                             ),
                         )
+                        for _, variant in batch
                     )
                     continue
 
-                annotations.append(
-                    _standardize_vep_response(
-                        variant,
-                        response,
+                responses_by_token = {
+                    token: response
+                    for response in responses
+                    if (token := _extract_response_token(response))
+                }
+
+                for token, variant in batch:
+                    response = responses_by_token.get(token)
+
+                    if response is None:
+                        annotations.append(
+                            _base_annotation(
+                                variant,
+                                status="not_found",
+                                warning=(
+                                    "Ensembl VEP returned no result for "
+                                    "this variant."
+                                ),
+                            )
+                        )
+                        continue
+
+                    annotations.append(
+                        _standardize_vep_response(
+                            variant,
+                            response,
+                        )
                     )
-                )
 
         vep_retry_rounds = 0
         if not vep_provider_wide_failure:
@@ -6342,6 +6898,11 @@ def annotate_variants(
             genebe_circuit,
             readiness_snapshot,
             genebe_confirmation_state,
+            evidence_repo,
+            repo_enabled,
+            repository_freshness_policy,
+            repository_metrics,
+            repository_clock,
         )
         genebe_retry_rounds = 0
         if not genebe_provider_wide_failure:
@@ -6358,6 +6919,11 @@ def annotate_variants(
                         genebe_circuit,
                         readiness_snapshot,
                         genebe_confirmation_state,
+                        evidence_repo,
+                        repo_enabled,
+                        repository_freshness_policy,
+                        repository_metrics,
+                        repository_clock,
                     ),
                 ),
                 progress_callback=progress_callback,
@@ -6390,6 +6956,11 @@ def annotate_variants(
                 active_session,
                 resolved_retries,
                 myvariant_circuit,
+                evidence_repo,
+                repo_enabled,
+                repository_freshness_policy,
+                repository_metrics,
+                repository_clock,
             )
         myvariant_retry_rounds = _retry_failed_source_annotations(
             annotations,
@@ -6402,6 +6973,11 @@ def annotate_variants(
                     active_session,
                     0,
                     myvariant_circuit,
+                    evidence_repo,
+                    repo_enabled,
+                    repository_freshness_policy,
+                    repository_metrics,
+                    repository_clock,
                 ),
             ),
             progress_callback=progress_callback,
