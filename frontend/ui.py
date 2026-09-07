@@ -1439,13 +1439,13 @@ def _normalize_manual_table(
             for column in MANUAL_VARIANT_COLUMNS
         ):
             continue
-        required = ("chrom", "pos", "ref", "alt")
+        required = ("chrom", "pos")
         if any(
             _is_blank_table_value(raw_row[column])
             for column in required
         ):
             raise ValueError(
-                f"Complete CHROM, POS, REF, and ALT in row "
+                f"Complete CHROM and POS in row "
                 f"{row_index + 1}."
             )
         raw_position = raw_row["pos"]
@@ -1493,8 +1493,8 @@ def _normalize_manual_table(
             {
                 "chrom": chromosome,
                 "pos": int(raw_position),
-                "ref": str(raw_row["ref"]).strip(),
-                "alt": str(raw_row["alt"]).strip(),
+                "ref": "" if _is_blank_table_value(raw_row["ref"]) else str(raw_row["ref"]).strip(),
+                "alt": "" if _is_blank_table_value(raw_row["alt"]) else str(raw_row["alt"]).strip(),
                 "qual": quality,
                 "filter": (
                     None
@@ -1608,6 +1608,7 @@ def _render_manual_variant_table(
                 "REF" if first_row else f"Row {row_label} REF",
                 key=_manual_widget_key("ref", row_index),
                 placeholder="e.g. A",
+                help="For an insertion, use '-' or leave REF blank. POS is the base before the insertion.",
                 on_change=_clear_analysis_result,
                 label_visibility=visible_label,
                 width=95,
@@ -1617,8 +1618,8 @@ def _render_manual_variant_table(
                 key=_manual_widget_key("alt", row_index),
                 placeholder="e.g. G",
                 help=(
-                    "Use a nucleotide allele or a supported symbolic "
-                    "allele such as <DEL>."
+                    "For a deletion, use '-' or leave ALT blank. POS is the first deleted base; "
+                    "REF must contain the deleted sequence. Anchored VCF alleles and supported symbolic alleles remain accepted."
                 ),
                 on_change=_clear_analysis_result,
                 label_visibility=visible_label,
@@ -1879,8 +1880,10 @@ def _render_variant_input(
             st.caption(
                 f"Enter up to {MAX_VARIANTS_PER_ANALYSIS} already-filtered "
                 "variants. "
-                "CHROM, POS, REF, and ALT are required. Every row "
-                "is analyzed in order and receives a Draft Variant Report."
+                "CHROM and POS are required. For INDELs, one allele may be '-' or blank; "
+                "the other must be one A/C/G/T sequence. For insertion, POS is the base before "
+                "the insertion; for deletion, POS is the first deleted base. "
+                "Unanchored INDELs require reference-sequence verification before analysis."
             )
             manual_table, position_errors = (
                 _render_manual_variant_table()

@@ -330,6 +330,8 @@ def _manual_quality(value: object, row_index: int) -> float | None:
 def _parse_manual_row(
     row: Mapping[str, object],
     row_index: int,
+    *,
+    allow_gap_alleles: bool = False,
 ) -> list[VariantData]:
     """Validate and split one manually entered VCF-style row."""
 
@@ -366,19 +368,23 @@ def _parse_manual_row(
             f"{chromosome_length:,} for chromosome {chromosome} in "
             f"{settings.GENOME_ASSEMBLY}."
         )
-    reference = _manual_text(
+    gap_ref = allow_gap_alleles and is_manual_gap_allele(row["ref"])
+    gap_alt = allow_gap_alleles and is_manual_gap_allele(row["alt"])
+    if gap_ref and gap_alt:
+        raise VCFProcessingError("REF and ALT cannot both be empty or '-'.")
+    reference = "-" if gap_ref else _manual_text(
         row["ref"],
         "REF",
         row_index,
     ).upper()
-    if not _is_supported_manual_allele(
+    if not gap_ref and not _is_supported_manual_allele(
         reference,
         allow_symbolic=False,
     ):
         raise VCFProcessingError(
             f"Manual row {row_index + 1} REF allele is invalid."
         )
-    alternates = [
+    alternates = ["-"] if gap_alt else [
         alternate.strip().upper()
         for alternate in _manual_text(
             row["alt"],
@@ -386,15 +392,22 @@ def _parse_manual_row(
             row_index,
         ).split(",")
     ]
-    if not alternates or any(
+    if not gap_alt and (not alternates or any(
         not _is_supported_manual_allele(
             alternate,
             allow_symbolic=True,
         )
         for alternate in alternates
-    ):
+    )):
         raise VCFProcessingError(
             f"Manual row {row_index + 1} ALT allele is invalid."
+        )
+    if (gap_ref or gap_alt) and (
+        len(alternates) != 1
+        or not set(alternates[0] if gap_ref else reference) <= set("ACGT")
+    ):
+        raise VCFProcessingError(
+            "A gap INDEL requires one explicit A/C/G/T sequence in the other allele."
         )
     quality = _manual_quality(row["qual"], row_index)
     raw_filter = row["filter"]
@@ -452,6 +465,46 @@ def parse_manual_variants(
                 "multiallelic splitting."
             )
     return variants
+
+
+def is_manual_gap_allele(value: object) -> bool:
+    """Recognize source-only gap notation, never a canonical VCF allele."""
+    return value is None or isinstance(value, str) and value.strip() in {"", "-"}
+
+
+def manual_gap_source_records(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]] | None:
+    """Keep manual source rows separate until reference anchoring succeeds.
+
+    Insertion POS is the preceding base; deletion POS is the first deleted base.
+    Return None for ordinary VCF input so its existing path stays intact.
+    """
+    if not any(
+        isinstance(row, Mapping) and any(
+            field in row and is_manual_gap_allele(row[field]) for field in ("ref", "alt")
+        ) for row in rows
+    ):
+        return None
+    if not 1 <= len(rows) <= MAX_VARIANTS_PER_ANALYSIS:
+        raise VCFProcessingError("Manual input exceeds the selected-variant limit.")
+    records = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise VCFProcessingError("Manual rows must be mappings.")
+        for variant in _parse_manual_row(row, index, allow_gap_alleles=True):
+            deletion = is_manual_gap_allele(variant["alt"])
+            records.append(dict(
+                worksheet=None, row=index + 1, chrom=variant["chrom"],
+                start=variant["pos"],
+                end=variant["pos"] + (len(variant["ref"]) - 1 if deletion else 0),
+                ref=row["ref"] if is_manual_gap_allele(row["ref"]) else variant["ref"],
+                alt=row["alt"] if is_manual_gap_allele(row["alt"]) else variant["alt"],
+                qual=variant["qual"], filter=variant["filter"], depth=None, ad=None, gq=None,
+            ))
+    if len(records) > MAX_VARIANTS_PER_ANALYSIS:
+        raise VCFProcessingError("Manual input exceeds the selected-variant limit after splitting.")
+    return records
 
 
 def process_vcf(

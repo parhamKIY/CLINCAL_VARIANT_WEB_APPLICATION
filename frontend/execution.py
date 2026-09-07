@@ -60,6 +60,7 @@ from backend.input_preprocessing import classify_source_representation
 from backend.logging_config import get_logger
 from backend.provider_readiness import ProviderReadinessSnapshot
 from backend.vcf_processing import (
+    manual_gap_source_records,
     VCFProcessingError,
     process_vcf,
 )
@@ -1161,6 +1162,10 @@ def prepare_analysis_recovery_request(
             "The clinical entity context is invalid."
         ) from exc
     try:
+        if uploaded_vcf is None and excel_input_records is None and manual_variants is not None:
+            excel_input_records = manual_gap_source_records(manual_variants)
+            if excel_input_records is not None:
+                input_type = "manual"
         if excel_input_records is not None:
             request = AnalysisRecoveryRequest(
                 schema_version=RECOVERY_REQUEST_SCHEMA_VERSION,
@@ -1288,6 +1293,15 @@ def execute_analysis(
             "Choose either a variant-file upload or manual table rows."
         )
 
+    if uploaded_vcf is None and excel_input_records is None and manual_variants is not None:
+        try:
+            excel_input_records = manual_gap_source_records(manual_variants)
+        except VCFProcessingError as exc:
+            raise FrontendExecutionError(str(exc)) from exc
+        if excel_input_records is not None:
+            manual_variants = None
+            input_type = "manual"
+
     if excel_input_records is not None:
         if manual_variants is not None:
             raise FrontendExecutionError(
@@ -1297,6 +1311,7 @@ def execute_analysis(
             excel_input_records,
             phenotypes=phenotypes,
             clinical_entities=clinical_entities,
+            **({"source_type": "manual"} if input_type == "manual" else {}),
         )
         if not prepared["variants"]:
             return prepared

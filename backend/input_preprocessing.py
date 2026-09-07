@@ -14,7 +14,7 @@ from backend.reference_sequence import (
     reference_verification_provenance,
 )
 from backend.variant_identity import normalize_chromosome, normalize_variant_edit
-from backend.vcf_processing import get_primary_chromosome_length
+from backend.vcf_processing import get_primary_chromosome_length, is_manual_gap_allele
 from config import settings
 
 
@@ -341,6 +341,30 @@ def adapt_annovar_like_record(
             ),
         ),
     }
+
+
+def adapt_manual_source_record(
+    record: Mapping[str, object],
+    *,
+    reference_fetcher: ReferenceFetcher = fetch_grch38_reference_sequence,
+) -> dict[str, object]:
+    """Use the approved reference anchor resolver, preserving manual notation."""
+    working = dict(record)
+    for field in ("ref", "alt"):
+        if is_manual_gap_allele(working.get(field)):
+            working[field] = "0"
+    result = adapt_annovar_like_record(working, reference_fetcher=reference_fetcher)
+    provenance = result["source_provenance"]
+    for field in ("ref", "alt"):
+        value = record.get(field)
+        provenance[f"source_{field}"] = (str(value).strip() or None) if value is not None else None
+    provenance["normalization_provenance"] = provenance["normalization_provenance"].replace(
+        "annovar_", "manual_gap_"
+    )
+    provenance["source_representation"] = provenance["source_representation"].replace(
+        "ANNOVAR_", "MANUAL_GAP_"
+    )
+    return result
 
 
 def _text(value: object, path: str, *, optional: bool = False) -> str | None:

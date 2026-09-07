@@ -80,6 +80,7 @@ from backend.input_preprocessing import (
     InputPreprocessingError,
     InputPreprocessingStatus,
     adapt_annovar_like_record,
+    adapt_manual_source_record,
     build_accepted_input_result,
     build_unresolved_input_result,
     validate_input_preprocessing_results,
@@ -3684,11 +3685,14 @@ def run_annovar_like_input_processing(
     *,
     clinical_entities: Sequence[Mapping[str, object]] | None = None,
     reference_fetcher: Callable[..., Mapping[str, object]] | None = None,
+    source_type: str = "excel",
 ) -> PipelineResult:
     """Process source records through the canonical input boundary only."""
 
     if not input_records:
         raise PipelineInputError("At least one selected input is required.")
+    if source_type not in {"excel", "manual"}:
+        raise PipelineInputError("Unsupported source record type.")
     active_fetcher = reference_fetcher or fetch_grch38_reference_sequence
     reference_cache: dict[tuple[str, str, int, int], Mapping[str, object]] = {}
 
@@ -3702,8 +3706,9 @@ def run_annovar_like_input_processing(
             fetcher=cast(Callable[..., Mapping[str, object]], active_fetcher),
         )
 
+    adapter = adapt_manual_source_record if source_type == "manual" else adapt_annovar_like_record
     adapted = [
-        adapt_annovar_like_record(
+        adapter(
             record,
             reference_fetcher=cached_reference_fetcher,
         )
@@ -3748,7 +3753,7 @@ def run_annovar_like_input_processing(
         )
         result["analysis_context"] = validate_analysis_context(
             {
-                "input_type": "excel",
+                "input_type": source_type,
                 "accepted_hpo_terms": list(phenotypes),
                 "clinical_entities": (
                     [dict(entity) for entity in clinical_entities]
@@ -3765,7 +3770,7 @@ def run_annovar_like_input_processing(
             dict(
                 build_unresolved_input_result(
                     source_index=source_index,
-                    source_type="excel",
+                    source_type=source_type,
                     source_provenance=cast(
                         Mapping[str, object], candidate["source_provenance"]
                     ),
@@ -3783,7 +3788,7 @@ def run_annovar_like_input_processing(
     result = create_pipeline_result()
     result["analysis_context"] = validate_analysis_context(
         {
-            "input_type": "excel",
+            "input_type": source_type,
             "accepted_hpo_terms": list(phenotypes),
             "clinical_entities": (
                 [dict(entity) for entity in clinical_entities]
@@ -3800,7 +3805,7 @@ def run_annovar_like_input_processing(
         request,
         result,
         adapted_input_records=adapted,
-        source_type="excel",
+        source_type=source_type,
     )
     return validate_pipeline_result(result)
 
