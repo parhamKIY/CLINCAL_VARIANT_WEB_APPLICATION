@@ -204,3 +204,50 @@ def test_existing_stage2_preprocessing_accounts_for_selected_source_rows_only() 
     ]
     assert result["input_preprocessing_results"][2]["canonical_variant"] is None
     assert result["input_preprocessing_results"][0]["source_provenance"]["source_filter"] == "QDfilter"
+
+
+def test_excel_with_mistyped_numeric_dash_and_dot_cells() -> None:
+    """Export tools often mistype '-' or '.' as numeric cells; sanitizer must rescue them."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(("Chr", "Start", "End", "Ref", "Alt", "Quality", "Filter"))
+    ws.append(("1", 1000, 1000, "A", "G", 30, "PASS"))
+    buf = BytesIO()
+    wb.save(buf)
+
+    zin = zipfile.ZipFile(BytesIO(buf.getvalue()), "r")
+    out = BytesIO()
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    ET.register_namespace("", ns)
+
+    with zipfile.ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                tree = ET.parse(BytesIO(data))
+                root = tree.getroot()
+                for c in root.iter(f"{{{ns}}}c"):
+                    if c.get("r") == "E2":
+                        c.set("t", "n")
+                        for child in list(c):
+                            c.remove(child)
+                        v = ET.SubElement(c, f"{{{ns}}}v")
+                        v.text = "-"
+                xml_buf = BytesIO()
+                tree.write(xml_buf, xml_declaration=True, encoding="UTF-8")
+                data = xml_buf.getvalue()
+            zout.writestr(item, data)
+
+    payload = out.getvalue()
+    worksheets = discover_excel_worksheets(payload)
+    assert len(worksheets) == 1
+    assert worksheets[0]["candidate_count"] == 1
+
+    records = parse_excel_input_records(payload, worksheet_name="Sheet")
+    assert len(records) == 1
+    assert records[0]["alt"] == "-"
+    assert records[0]["ref"] == "A"
+    assert records[0]["start"] == 1000

@@ -157,15 +157,41 @@ def _manual_row_from_excel(
 _SPREADSHEETML_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
-def _sanitize_dot_numeric_cells(payload: bytes) -> bytes:
-    """Rewrite xlsx XML to fix cells where '.' is mistyped as numeric.
+def _is_invalid_numeric_cell_text(text: str | None) -> bool:
+    """Return whether a cell typed as numeric contains non-numeric text.
 
-    VCF-exported Excel files commonly use '.' for missing values.  When the
-    export tool writes these into the XML as ``<c t="n"><v>.</v></c>``,
-    openpyxl's ``_cast_number`` calls ``float('.')`` and raises ValueError.
+    VCF-exported Excel files (e.g. from ANNOVAR) commonly use '.' or '-'
+    for missing values or gap alleles. When written as <c t="n"><v>.</v></c>
+    or <c t="n"><v>-</v></c>, openpyxl's _cast_number calls float/int and
+    raises ValueError.
+    """
+    if text is None:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped in {".", "-", "-.", "NA", "N/A", "null", "None"}:
+        return True
+    try:
+        if "." in stripped or "E" in stripped or "e" in stripped:
+            float(stripped)
+        else:
+            int(stripped)
+        return False
+    except ValueError:
+        return True
+
+
+def _sanitize_dot_numeric_cells(payload: bytes) -> bytes:
+    """Rewrite xlsx XML to fix cells where non-numeric text is mistyped as numeric.
+
+    VCF-exported Excel files commonly use '.' for missing values and '-' for
+    gap INDEL alleles. When the export tool writes these into the XML as
+    ``<c t="n"><v>.</v></c>`` or ``<c t="n"><v>-</v></c>``, openpyxl's
+    ``_cast_number`` calls ``float('.')`` or ``int('-')`` and raises ValueError.
 
     This pre-processor rewrites such cells to inline-string type so openpyxl
-    sees them as the text ``'.'`` instead of crashing.
+    sees them as text instead of crashing.
     """
 
     try:
@@ -186,7 +212,7 @@ def _sanitize_dot_numeric_cells(payload: bytes) -> bytes:
                 if c.get("t", "n") != "n":
                     continue
                 v = c.find(f"{{{ns}}}v")
-                if v is not None and v.text == ".":
+                if v is not None and _is_invalid_numeric_cell_text(v.text):
                     needs_rewrite = True
                     break
             if needs_rewrite:
@@ -214,12 +240,13 @@ def _sanitize_dot_numeric_cells(payload: bytes) -> bytes:
                         if c.get("t", "n") != "n":
                             continue
                         v = c.find(f"{{{ns}}}v")
-                        if v is not None and v.text == ".":
+                        if v is not None and _is_invalid_numeric_cell_text(v.text):
                             c.set("t", "inlineStr")
+                            cell_text = v.text
                             c.remove(v)
                             is_el = ET.SubElement(c, f"{{{ns}}}is")
                             t_el = ET.SubElement(is_el, f"{{{ns}}}t")
-                            t_el.text = "."
+                            t_el.text = cell_text
                     out = io.BytesIO()
                     tree.write(out, xml_declaration=True, encoding="UTF-8")
                     data = out.getvalue()
