@@ -97,12 +97,16 @@ class InputPreprocessingError(ValueError):
     """Raised when a selected-input result violates the bounded contract."""
 
 
-def _zero_token(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and value == 0
-    ) or (isinstance(value, str) and value.strip() == "0")
+def _gap_token(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)) and value == 0:
+        return True
+    if isinstance(value, str):
+        return value.strip() in {"0", "-", ".", ""}
+    return False
 
 
 def _allele(value: object) -> str | None:
@@ -120,11 +124,18 @@ def classify_source_representation(
 
     if _allele(reference) is not None and _allele(alternate) is not None:
         return "STANDARD_ALLELE"
-    if _allele(reference) is not None and _zero_token(alternate):
+    if _allele(reference) is not None and _gap_token(alternate):
         return "ANNOVAR_DELETION"
-    if _zero_token(reference) and _allele(alternate) is not None:
+    if _gap_token(reference) and _allele(alternate) is not None:
         return "ANNOVAR_INSERTION"
     return "UNSUPPORTED_OR_AMBIGUOUS"
+
+
+def _clean_source_str(value: object) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned if cleaned else None
 
 
 def _source_provenance_from_record(
@@ -137,12 +148,12 @@ def _source_provenance_from_record(
     return {
         "source_worksheet": record.get("worksheet"),
         "source_row": record.get("row"),
-        "source_chrom": str(record.get("chrom")).strip() if record.get("chrom") is not None else None,
+        "source_chrom": _clean_source_str(record.get("chrom")),
         "source_start": record.get("start"),
         "source_end": record.get("end"),
-        "source_ref": str(record.get("ref")).strip() if record.get("ref") is not None else None,
-        "source_alt": str(record.get("alt")).strip() if record.get("alt") is not None else None,
-        "source_filter": record.get("filter"),
+        "source_ref": _clean_source_str(record.get("ref")),
+        "source_alt": _clean_source_str(record.get("alt")),
+        "source_filter": _clean_source_str(record.get("filter")),
         "source_qual": record.get("qual"),
         "source_depth": record.get("depth"),
         "source_ad": record.get("ad"),
@@ -193,8 +204,12 @@ def adapt_annovar_like_record(
     chromosome = normalize_chromosome(record.get("chrom"))
     start = record.get("start")
     end = record.get("end")
-    if end is None and representation == "STANDARD_ALLELE":
+    if end is None and representation in {"STANDARD_ALLELE", "ANNOVAR_INSERTION"}:
         end = start
+    elif end is None and representation == "ANNOVAR_DELETION":
+        deleted = _allele(record.get("ref"))
+        if deleted is not None and isinstance(start, int) and not isinstance(start, bool):
+            end = start + len(deleted) - 1
     if (
         assembly != "GRCh38"
         or chromosome is None
@@ -391,12 +406,34 @@ def _index(value: object, path: str, *, optional: bool = False) -> int | None:
 def _number(value: object, path: str) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         raise InputPreprocessingError(f"{path} is invalid.")
-    converted = float(value)
-    if not isfinite(converted):
-        raise InputPreprocessingError(f"{path} is invalid.")
-    return converted
+    if isinstance(value, (int, float)):
+        converted = float(value)
+        if not isfinite(converted):
+            raise InputPreprocessingError(f"{path} is invalid.")
+        return converted
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped in {".", "-", "NA", "N/A", "null", "None"}:
+            return None
+        if "," in stripped:
+            parts = [p.strip() for p in stripped.split(",") if p.strip()]
+            try:
+                converted = float(parts[0])
+                if isfinite(converted):
+                    return converted
+            except ValueError:
+                pass
+            return None
+        try:
+            converted = float(stripped)
+            if not isfinite(converted):
+                raise InputPreprocessingError(f"{path} is invalid.")
+            return converted
+        except ValueError:
+            return None
+    raise InputPreprocessingError(f"{path} is invalid.")
 
 
 def _source_provenance(value: object) -> SourceVariantProvenance:

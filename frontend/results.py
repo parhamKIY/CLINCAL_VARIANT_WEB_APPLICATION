@@ -1213,6 +1213,26 @@ def render_analysis_results(result: PipelineResult) -> None:
 
     _render_partial_analysis(result)
 
+    preprocessing_records = result.get("input_preprocessing_results", [])
+    if isinstance(preprocessing_records, list) and preprocessing_records:
+        unresolved = [
+            item for item in preprocessing_records
+            if isinstance(item, dict) and item.get("status") == "IDENTITY_UNRESOLVED"
+        ]
+        if unresolved and result["variant_count"] > 0:
+            unresolved_rows = [
+                str(item.get("source_provenance", {}).get("source_row") or idx + 1)
+                for idx, item in enumerate(unresolved)
+            ]
+            count = len(unresolved)
+            st.warning(
+                f"{count} selected source {'row was' if count == 1 else 'rows were'} "
+                f"(Row {', '.join(unresolved_rows)}) excluded from analysis "
+                "because exact canonical variant identity could not be resolved. "
+                "Review the 'Input variants' tab below for per-row reasons.",
+                icon=":material/warning:",
+            )
+
     variants_tab, annotations_tab, phenotype_tab, evidence_tab = (
         st.tabs(
             (

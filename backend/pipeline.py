@@ -647,6 +647,25 @@ def attach_input_preprocessing_results(
     candidate["input_preprocessing_results"] = [
         dict(item) for item in input_preprocessing_results
     ]
+    warnings = list(candidate.get("warnings") or [])
+    unresolved_inputs = [
+        c for c in candidate["input_preprocessing_results"]
+        if c.get("status") == "IDENTITY_UNRESOLVED"
+    ]
+    if unresolved_inputs:
+        unresolved_labels = [
+            f"row {c.get('source_provenance', {}).get('source_row') or i + 1}"
+            for i, c in enumerate(unresolved_inputs)
+        ]
+        count = len(unresolved_inputs)
+        warning_msg = (
+            f"{count} selected input {'row was' if count == 1 else 'rows were'} "
+            f"({', '.join(unresolved_labels)}) excluded from analysis because canonical identity "
+            "could not be resolved. Review Selected-input preprocessing for details."
+        )
+        if warning_msg not in warnings:
+            warnings.append(warning_msg)
+    candidate["warnings"] = warnings
     return validate_pipeline_result(candidate)
 
 
@@ -2715,6 +2734,22 @@ def _process_filtered_variants(
             )
             canonical_index += 1
         result["input_preprocessing_results"] = input_results
+        unresolved_inputs = [
+            c for c in input_results if c.get("status") == "IDENTITY_UNRESOLVED"
+        ]
+        if unresolved_inputs:
+            unresolved_labels = [
+                f"row {c.get('source_provenance', {}).get('source_row') or i + 1}"
+                for i, c in enumerate(unresolved_inputs)
+            ]
+            count = len(unresolved_inputs)
+            warning_msg = (
+                f"{count} selected input {'row was' if count == 1 else 'rows were'} "
+                f"({', '.join(unresolved_labels)}) excluded from analysis because canonical identity "
+                "could not be resolved. Review Selected-input preprocessing for details."
+            )
+            if warning_msg not in result["warnings"]:
+                result["warnings"].append(warning_msg)
     LOGGER.info(
         "event=filtered_variants_loaded variant_count=%d",
         result["variant_count"],

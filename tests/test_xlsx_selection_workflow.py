@@ -251,3 +251,184 @@ def test_excel_with_mistyped_numeric_dash_and_dot_cells() -> None:
     assert records[0]["alt"] == "-"
     assert records[0]["ref"] == "A"
     assert records[0]["start"] == 1000
+
+
+def test_excel_gap_indel_deletion_and_insertion_normalization() -> None:
+    source_rows = [
+        {
+            "worksheet": "Top_Phen",
+            "row": 9,
+            "chrom": "3",
+            "start": 46709587,
+            "end": 46709589,
+            "ref": "AAG",
+            "alt": "-",
+            "qual": 3570.0,
+            "filter": "PASS",
+            "depth": "75,75",
+            "ad": "64,64",
+            "gq": 99,
+        },
+        {
+            "worksheet": "All_Phen_Related",
+            "row": 106,
+            "chrom": "16",
+            "start": 3729216,
+            "end": 3729216,
+            "ref": "-",
+            "alt": "C",
+            "qual": 5.0,
+            "filter": "PASS",
+            "depth": 84,
+            "ad": 8,
+            "gq": 31,
+        },
+    ]
+
+    def reference_fetcher(**kwargs: object) -> dict[str, object]:
+        chrom = str(kwargs["chrom"])
+        start = kwargs["start"]
+        end = kwargs["end"]
+        if chrom == "3" and start == 46709587 and end == 46709589:
+            seq = "AAG"
+        elif chrom == "3" and start == 46709586 and end == 46709586:
+            seq = "G"
+        elif chrom == "16" and start == 3729216 and end == 3729216:
+            seq = "G"
+        else:
+            seq = "N"
+        return {
+            "status": "success",
+            "assembly": "GRCh38",
+            "chrom": chrom,
+            "start": start,
+            "end": end,
+            "sequence": seq,
+            "source": "ensembl_grch38_sequence",
+            "fallback_used": False,
+            "failure_reason": None,
+            "provider_attempts": [],
+        }
+
+    result = run_annovar_like_input_processing(
+        source_rows,
+        phenotypes=[],
+        reference_fetcher=reference_fetcher,
+    )
+
+    assert result["variant_count"] == 2
+    assert [item["status"] for item in result["input_preprocessing_results"]] == [
+        "NORMALIZED_AND_ACCEPTED",
+        "NORMALIZED_AND_ACCEPTED",
+    ]
+    # Deletion: 3:46709587-46709589 AAG>- anchors to 3:46709586 GAAG>G
+    assert result["variants"][0]["chrom"] == "3"
+    assert result["variants"][0]["pos"] == 46709586
+    assert result["variants"][0]["ref"] == "GAAG"
+    assert result["variants"][0]["alt"] == "G"
+    # Multi-sample depth string '75,75' parsed gracefully
+    assert result["input_preprocessing_results"][0]["source_provenance"]["source_depth"] == 75.0
+    assert result["input_preprocessing_results"][0]["source_provenance"]["source_alt"] == "-"
+
+    # Insertion: 16:3729216 -> anchors to 16:3729216 G>GC
+    assert result["variants"][1]["chrom"] == "16"
+    assert result["variants"][1]["pos"] == 3729216
+    assert result["variants"][1]["ref"] == "G"
+    assert result["variants"][1]["alt"] == "GC"
+    assert result["input_preprocessing_results"][1]["source_provenance"]["source_ref"] == "-"
+
+
+def test_excel_unresolved_variant_generates_pipeline_warning() -> None:
+    source_rows = [
+        {
+            "worksheet": "Top_Phen",
+            "row": 2,
+            "chrom": "22",
+            "start": 37974173,
+            "end": 37974173,
+            "ref": "A",
+            "alt": "T",
+            "qual": 10.0,
+            "filter": "PASS",
+            "depth": 99,
+            "ad": 24,
+            "gq": 99,
+        },
+        {
+            "worksheet": "Top_Phen",
+            "row": 5,
+            "chrom": "22",
+            "start": 100,
+            "end": 100,
+            "ref": "N",
+            "alt": "G",
+            "qual": 10.0,
+            "filter": "PASS",
+            "depth": 50,
+            "ad": 10,
+            "gq": 99,
+        },
+    ]
+
+    result = run_annovar_like_input_processing(
+        source_rows,
+        phenotypes=[],
+    )
+
+    assert result["variant_count"] == 1
+    assert any(
+        "1 selected input row was (row 5) excluded from analysis" in w
+        for w in result["warnings"]
+    )
+
+
+def test_excel_deletion_without_end_column_auto_derives_end() -> None:
+    source_rows = [
+        {
+            "worksheet": "Top_Phen",
+            "row": 9,
+            "chrom": "3",
+            "start": 46709587,
+            "end": None,  # No end column in workbook
+            "ref": "AAG",
+            "alt": "-",
+            "qual": 10.0,
+            "filter": "PASS",
+            "depth": 50,
+            "ad": 10,
+            "gq": 99,
+        },
+    ]
+
+    def reference_fetcher(**kwargs: object) -> dict[str, object]:
+        start = kwargs["start"]
+        end = kwargs["end"]
+        if start == 46709587 and end == 46709589:
+            seq = "AAG"
+        elif start == 46709586 and end == 46709586:
+            seq = "G"
+        else:
+            seq = "N"
+        return {
+            "status": "success",
+            "assembly": "GRCh38",
+            "chrom": "3",
+            "start": start,
+            "end": end,
+            "sequence": seq,
+            "source": "ensembl_grch38_sequence",
+            "fallback_used": False,
+            "failure_reason": None,
+            "provider_attempts": [],
+        }
+
+    result = run_annovar_like_input_processing(
+        source_rows,
+        phenotypes=[],
+        reference_fetcher=reference_fetcher,
+    )
+
+    assert result["variant_count"] == 1
+    assert result["input_preprocessing_results"][0]["status"] == "NORMALIZED_AND_ACCEPTED"
+    assert result["variants"][0]["ref"] == "GAAG"
+    assert result["variants"][0]["alt"] == "G"

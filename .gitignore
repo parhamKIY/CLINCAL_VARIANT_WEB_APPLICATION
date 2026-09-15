@@ -35,7 +35,7 @@ data/cache/*
 !/docs/stage_11_2_analysis_lifecycle_audit.md
 !/docs/stage_11_3_variant_failure_isolation_audit.md
 AGENTS.md
-
+/SYSTEM_PROMPTS_OVERVIEW.txt/
 
 .codex/
 Phen_Candidates*.xlsx
