@@ -558,6 +558,74 @@ class OpenAICompatibleAdapter:
 
         if (
             response.status_code in {400, 422}
+            and payload.get("temperature") == 0.0
+            and self._is_unsupported_temperature_error(response)
+        ):
+            fallback_payload = dict(payload)
+            fallback_payload["temperature"] = 1.0
+            LOGGER.info(
+                "event=llm_temperature_fallback model=%s "
+                "reason=temperature_0_unsupported_status_%d",
+                self._model,
+                response.status_code,
+            )
+            try:
+                fallback_response = self._session.post(
+                    self._endpoint,
+                    json=fallback_payload,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=self._timeout,
+                    verify=True,
+                )
+            except requests.Timeout as exc:
+                raise LLMTimeoutError(
+                    "The LLM provider request timed out."
+                ) from exc
+            except requests.RequestException as exc:
+                raise LLMRequestError(
+                    "Could not connect to the LLM provider.",
+                    schema_error="connection_failed",
+                ) from exc
+
+            if 200 <= fallback_response.status_code < 300:
+                response = fallback_response
+                payload = fallback_payload
+            elif (
+                fallback_response.status_code in {400, 422}
+                and self._is_unsupported_temperature_error(fallback_response)
+            ):
+                omit_temp_payload = dict(fallback_payload)
+                omit_temp_payload.pop("temperature", None)
+                try:
+                    omit_temp_response = self._session.post(
+                        self._endpoint,
+                        json=omit_temp_payload,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        timeout=self._timeout,
+                        verify=True,
+                    )
+                    if 200 <= omit_temp_response.status_code < 300:
+                        response = omit_temp_response
+                        payload = omit_temp_payload
+                    else:
+                        response = omit_temp_response
+                        payload = omit_temp_payload
+                except (requests.Timeout, requests.RequestException):
+                    pass
+            else:
+                response = fallback_response
+                payload = fallback_payload
+
+        if (
+            response.status_code in {400, 422}
             and isinstance(request.response_format, LLMJSONSchema)
         ):
             fallback_payload = dict(payload)
@@ -661,6 +729,27 @@ class OpenAICompatibleAdapter:
         if not normalized.isdigit():
             return None
         return min(float(int(normalized)), MAX_LLM_RETRY_DELAY_SECONDS)
+
+    @staticmethod
+    def _is_unsupported_temperature_error(response: requests.Response) -> bool:
+        """Detect whether provider rejected temperature parameter (e.g. 0.0 with reasoning models)."""
+        if response.status_code not in {400, 422}:
+            return False
+        try:
+            payload = response.json()
+        except (requests.JSONDecodeError, ValueError):
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            message = str(error.get("message", "")).casefold()
+            param = str(error.get("param", "")).casefold()
+            if "temperature" in message or param == "temperature":
+                return True
+        elif isinstance(error, str) and "temperature" in error.casefold():
+            return True
+        return False
 
     @staticmethod
     def _provider_error_code(response: requests.Response) -> str | None:

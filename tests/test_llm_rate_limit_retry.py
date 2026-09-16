@@ -6,7 +6,14 @@ from collections.abc import Mapping
 
 import pytest
 
-from backend.llm import LLMClient, OpenAICompatibleAdapter, call_llm
+from backend.llm import (
+    LLMClient,
+    LLMMessage,
+    LLMRequest,
+    LLMRequestError,
+    OpenAICompatibleAdapter,
+    call_llm,
+)
 
 
 class _Response:
@@ -28,8 +35,10 @@ class _Response:
 class _Session:
     def __init__(self, responses: list[_Response]) -> None:
         self.responses = list(responses)
+        self.captured_posts: list[dict] = []
 
-    def post(self, _url: str, **_kwargs: object) -> _Response:
+    def post(self, url: str, **kwargs: object) -> _Response:
+        self.captured_posts.append({"url": url, **kwargs})
         return self.responses.pop(0)
 
     def get(self, _url: str, **_kwargs: object) -> _Response:
@@ -128,3 +137,131 @@ def test_invalid_retry_after_uses_existing_exponential_delay(
     )
 
     assert delays == [1.0]
+
+
+def test_temperature_fallback_retries_with_temp_1_on_400() -> None:
+    """When a model rejects temperature=0.0 with 400, adapter falls back to temperature=1.0."""
+    session = _Session(
+        [
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Unsupported value: 'temperature' does not support 0.0 with this model. Only the default (1) value is supported.",
+                        "type": "invalid_request",
+                        "param": None,
+                        "code": "invalid_request",
+                    }
+                },
+            ),
+            _success(),
+        ]
+    )
+
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.avalai.ir/v1",
+        api_key="test-key",
+        model="gpt-5.6-luna",
+        timeout=10.0,
+        session=session,
+    )
+
+    request = LLMRequest(
+        messages=(LLMMessage("user", "ready"),),
+        temperature=0.0,
+        max_tokens=30,
+    )
+
+    response = adapter.generate(request)
+
+    assert response.content == "{}"
+    assert len(session.captured_posts) == 2
+    assert session.captured_posts[0]["json"]["temperature"] == 0.0
+    assert session.captured_posts[1]["json"]["temperature"] == 1.0
+
+
+def test_temperature_fallback_omits_temp_when_param_unsupported() -> None:
+    """When a model rejects temperature parameter completely, adapter omits it."""
+    session = _Session(
+        [
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Unsupported value: 'temperature' does not support 0.0.",
+                        "param": "temperature",
+                    }
+                },
+            ),
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Unsupported parameter: 'temperature' is not supported with this model.",
+                        "param": "temperature",
+                    }
+                },
+            ),
+            _success(),
+        ]
+    )
+
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        model="o1-preview",
+        timeout=10.0,
+        session=session,
+    )
+
+    request = LLMRequest(
+        messages=(LLMMessage("user", "ready"),),
+        temperature=0.0,
+        max_tokens=30,
+    )
+
+    response = adapter.generate(request)
+
+    assert response.content == "{}"
+    assert len(session.captured_posts) == 3
+    assert session.captured_posts[0]["json"]["temperature"] == 0.0
+    assert session.captured_posts[1]["json"]["temperature"] == 1.0
+    assert "temperature" not in session.captured_posts[2]["json"]
+
+
+def test_non_temperature_400_does_not_trigger_temperature_fallback() -> None:
+    """Other 400 errors (e.g. invalid model) do not trigger temperature retry."""
+    session = _Session(
+        [
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Model 'invalid-model' not found.",
+                        "type": "invalid_request_error",
+                    }
+                },
+            ),
+        ]
+    )
+
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.avalai.ir/v1",
+        api_key="test-key",
+        model="invalid-model",
+        timeout=10.0,
+        session=session,
+    )
+
+    request = LLMRequest(
+        messages=(LLMMessage("user", "ready"),),
+        temperature=0.0,
+        max_tokens=30,
+    )
+
+    with pytest.raises(LLMRequestError) as exc_info:
+        adapter.generate(request)
+
+    assert exc_info.value.http_status == 400
+    assert len(session.captured_posts) == 1
+
