@@ -35,6 +35,7 @@ from backend.llm import (
     LLMResponseError,
     LLMTimeoutError,
     OpenAICompatibleAdapter,
+    strip_markdown_json_fences,
 )
 from backend.logging_config import get_logger
 from config import settings
@@ -183,7 +184,7 @@ def check_llm_connectivity(
     try:
         response = adapter.generate(request)
         try:
-            parsed = json.loads(response.content)
+            parsed = json.loads(strip_markdown_json_fences(response.content))
             if not isinstance(parsed, Mapping):
                 raise LLMResponseError(
                     "The preflight JSON response is not an object.",

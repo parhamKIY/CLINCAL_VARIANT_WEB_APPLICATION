@@ -26,6 +26,7 @@ from backend.llm import (
     LLMTimeoutError,
     LLMValidationError,
     call_llm,
+    strip_markdown_json_fences,
 )
 from backend.evidence_readiness import (
     EvidenceReadinessError,
@@ -820,7 +821,7 @@ def _parse_response(
 
     try:
         payload = json.loads(
-            response.content,
+            strip_markdown_json_fences(response.content),
             parse_constant=reject_nonstandard_constant,
         )
     except (json.JSONDecodeError, ValueError) as exc:

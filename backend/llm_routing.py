@@ -18,7 +18,13 @@ from backend.evidence_confirmation import (
     ReviewedEvidencePackage,
     validate_reviewed_evidence_package,
 )
-from backend.llm import LLMClient, LLMError, LLMResponse, call_llm
+from backend.llm import (
+    LLMClient,
+    LLMError,
+    LLMResponse,
+    call_llm,
+    strip_markdown_json_fences,
+)
 from backend.privacy import ClinicalDataPrivacyError, validate_llm_payload
 from config import settings
 
@@ -185,7 +191,7 @@ def _parse_response(
     if len(response.content.encode("utf-8")) > MAX_STAGE35_RESPONSE_BYTES:
         raise Stage35RoutingError("The Stage 35 response exceeds its size limit.")
     try:
-        payload = json.loads(response.content)
+        payload = json.loads(strip_markdown_json_fences(response.content))
     except json.JSONDecodeError as exc:
         raise Stage35RoutingError("The Stage 35 response is not valid JSON.") from exc
     expected = {"final_interpretation", "resolution_status", "warnings"}

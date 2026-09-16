@@ -22,6 +22,7 @@ from backend.llm import (
     LLMJSONSchema,
     LLMResponse,
     call_llm,
+    strip_markdown_json_fences,
 )
 from backend.privacy import (
     PHENOTYPE_EXTRACTION_TASK,
@@ -419,7 +420,7 @@ def _parse_extraction(
 
     try:
         payload = json.loads(
-            response.content,
+            strip_markdown_json_fences(response.content),
             parse_constant=reject_nonstandard_constant,
         )
     except (json.JSONDecodeError, ValueError) as exc:

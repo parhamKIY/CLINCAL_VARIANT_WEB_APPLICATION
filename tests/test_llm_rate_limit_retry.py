@@ -13,6 +13,7 @@ from backend.llm import (
     LLMRequestError,
     OpenAICompatibleAdapter,
     call_llm,
+    strip_markdown_json_fences,
 )
 
 
@@ -264,4 +265,27 @@ def test_non_temperature_400_does_not_trigger_temperature_fallback() -> None:
 
     assert exc_info.value.http_status == 400
     assert len(session.captured_posts) == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"status": "ready"}', '{"status": "ready"}'),
+        ('```json\n{"status": "ready"}\n```', '{"status": "ready"}'),
+        ('```JSON\n{"status": "ready"}\n```', '{"status": "ready"}'),
+        ('```\n{"status": "ready"}\n```', '{"status": "ready"}'),
+        ('```json\r\n{"status": "ready"}\r\n```', '{"status": "ready"}'),
+        ('```json {"status": "ready"} ```', '{"status": "ready"}'),
+        (
+            'Here is the JSON result:\n```json\n{"status": "ready"}\n```\nHope that helps!',
+            '{"status": "ready"}',
+        ),
+        ('[1, 2, 3]', '[1, 2, 3]'),
+        ('```json\n[1, 2, 3]\n```', '[1, 2, 3]'),
+        ('plain text without json', 'plain text without json'),
+    ],
+)
+def test_strip_markdown_json_fences(raw: str, expected: str) -> None:
+    assert strip_markdown_json_fences(raw) == expected
+
 

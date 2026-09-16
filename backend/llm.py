@@ -265,6 +265,36 @@ class LLMJSONObject:
         return {"type": "json_object"}
 
 
+def strip_markdown_json_fences(content: str) -> str:
+    """Safely remove markdown code fences (e.g. ```json ... ```) enclosing JSON content."""
+    if not isinstance(content, str):
+        return content
+    text = content.strip()
+    if "```" in text:
+        start_idx = text.find("```")
+        first_newline = text.find("\n", start_idx)
+        if first_newline != -1:
+            last_fence = text.rfind("```")
+            if last_fence > first_newline:
+                inner = text[first_newline + 1 : last_fence].strip()
+                if (inner.startswith("{") and inner.endswith("}")) or (
+                    inner.startswith("[") and inner.endswith("]")
+                ):
+                    return inner
+        if text.startswith("```"):
+            last_fence = text.rfind("```")
+            if last_fence > 3:
+                inner = text[3:last_fence].strip()
+                if inner.lower().startswith("json"):
+                    inner = inner[4:].strip()
+                if (inner.startswith("{") and inner.endswith("}")) or (
+                    inner.startswith("[") and inner.endswith("]")
+                ):
+                    return inner
+    return text
+
+
+
 @dataclass(frozen=True, slots=True)
 class LLMRequest:
     """Validated input passed from application code to an LLM adapter."""
@@ -1135,4 +1165,5 @@ __all__ = [
     "OpenAICompatibleAdapter",
     "call_llm",
     "get_default_llm_client",
+    "strip_markdown_json_fences",
 ]
