@@ -656,6 +656,96 @@ class OpenAICompatibleAdapter:
 
         if (
             response.status_code in {400, 422}
+            and "max_tokens" in payload
+            and self._is_unsupported_max_tokens_error(response)
+        ):
+            fallback_payload = dict(payload)
+            tokens_val = fallback_payload.pop("max_tokens")
+            fallback_payload["max_completion_tokens"] = tokens_val
+            LOGGER.info(
+                "event=llm_max_completion_tokens_fallback model=%s "
+                "reason=max_tokens_unsupported_status_%d",
+                self._model,
+                response.status_code,
+            )
+            try:
+                fallback_response = self._session.post(
+                    self._endpoint,
+                    json=fallback_payload,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=self._timeout,
+                    verify=True,
+                )
+            except requests.Timeout as exc:
+                raise LLMTimeoutError(
+                    "The LLM provider request timed out."
+                ) from exc
+            except requests.RequestException as exc:
+                raise LLMRequestError(
+                    "Could not connect to the LLM provider.",
+                    schema_error="connection_failed",
+                ) from exc
+
+            if 200 <= fallback_response.status_code < 300:
+                response = fallback_response
+                payload = fallback_payload
+            else:
+                response = fallback_response
+                payload = fallback_payload
+
+            if (
+                response.status_code in {400, 422}
+                and payload.get("temperature") == 0.0
+                and self._is_unsupported_temperature_error(response)
+            ):
+                fallback_payload = dict(payload)
+                fallback_payload["temperature"] = 1.0
+                try:
+                    fallback_response = self._session.post(
+                        self._endpoint,
+                        json=fallback_payload,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        timeout=self._timeout,
+                        verify=True,
+                    )
+                    if 200 <= fallback_response.status_code < 300:
+                        response = fallback_response
+                        payload = fallback_payload
+                    elif (
+                        fallback_response.status_code in {400, 422}
+                        and self._is_unsupported_temperature_error(fallback_response)
+                    ):
+                        omit_temp_payload = dict(fallback_payload)
+                        omit_temp_payload.pop("temperature", None)
+                        omit_temp_response = self._session.post(
+                            self._endpoint,
+                            json=omit_temp_payload,
+                            headers={
+                                "Authorization": f"Bearer {self._api_key}",
+                                "Content-Type": "application/json",
+                                "Accept": "application/json",
+                            },
+                            timeout=self._timeout,
+                            verify=True,
+                        )
+                        response = omit_temp_response
+                        payload = omit_temp_payload
+                    else:
+                        response = fallback_response
+                        payload = fallback_payload
+                except (requests.Timeout, requests.RequestException):
+                    pass
+
+        if (
+            response.status_code in {400, 422}
             and isinstance(request.response_format, LLMJSONSchema)
         ):
             fallback_payload = dict(payload)
@@ -740,9 +830,11 @@ class OpenAICompatibleAdapter:
                 ),
             )
 
+        failure_type = OpenAICompatibleAdapter._detect_client_failure_type(response)
         raise LLMRequestError(
             f"The LLM provider returned HTTP {status_code}.",
             http_status=status_code,
+            failure_type=failure_type,
         )
 
     @staticmethod
@@ -780,6 +872,77 @@ class OpenAICompatibleAdapter:
         elif isinstance(error, str) and "temperature" in error.casefold():
             return True
         return False
+
+    @staticmethod
+    def _is_unsupported_max_tokens_error(response: requests.Response) -> bool:
+        """Detect whether provider rejected max_tokens in favor of max_completion_tokens."""
+        if response.status_code not in {400, 422}:
+            return False
+        try:
+            payload = response.json()
+        except (requests.JSONDecodeError, ValueError):
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            message = str(error.get("message", "")).casefold()
+            param = str(error.get("param", "")).casefold()
+            if "max_completion_tokens" in message or (
+                param == "max_tokens" and "max_completion_tokens" in message
+            ):
+                return True
+        elif isinstance(error, str) and "max_completion_tokens" in error.casefold():
+            return True
+        return False
+
+    @staticmethod
+    def _detect_client_failure_type(response: requests.Response) -> str | None:
+        """Read provider error structure to categorize client-side 400/422 errors safely."""
+        if response.status_code not in {400, 422}:
+            return None
+        try:
+            payload = response.json()
+        except (requests.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        error = payload.get("error")
+        message = ""
+        param = ""
+        code = ""
+        if isinstance(error, Mapping):
+            message = str(error.get("message", "")).casefold()
+            param = str(error.get("param", "")).casefold()
+            code = str(error.get("code", "")).casefold()
+        elif isinstance(error, str):
+            message = error.casefold()
+
+        if (
+            "response_format" in message
+            or param == "response_format"
+            or "json_schema" in message
+            or "json_object" in message
+            or "structured" in message
+        ):
+            return "unsupported_response_format"
+        if "temperature" in message or param == "temperature":
+            return "unsupported_temperature"
+        if (
+            "max_tokens" in message
+            or "max_completion_tokens" in message
+            or param in {"max_tokens", "max_completion_tokens"}
+        ):
+            return "unsupported_max_tokens"
+        if (
+            "context_length" in message
+            or "maximum context length" in message
+            or code == "context_length_exceeded"
+        ):
+            return "context_length_exceeded"
+        if code == "model_not_found" or ("model" in message and "not found" in message):
+            return "model_not_found"
+        return None
 
     @staticmethod
     def _provider_error_code(response: requests.Response) -> str | None:

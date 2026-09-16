@@ -61,6 +61,9 @@ _CATEGORY_QUOTA = "Quota exhausted"
 _CATEGORY_UNAVAILABLE = "Model unavailable"
 _CATEGORY_TIMEOUT = "Timeout"
 _CATEGORY_STRUCTURED_OUTPUT = "Structured output unsupported"
+_CATEGORY_PARAM_UNSUPPORTED = "Model parameter unsupported"
+_CATEGORY_CONTEXT_EXCEEDED = "Context length exceeded"
+_CATEGORY_BAD_REQUEST = "Bad request (HTTP 400)"
 _CATEGORY_FAILED = "Request failed"
 
 
@@ -89,8 +92,17 @@ def _map_failure_category(error: LLMError) -> str:
     if isinstance(error, LLMResponseError):
         return _CATEGORY_STRUCTURED_OUTPUT
     if isinstance(error, LLMRequestError):
-        if getattr(error, "http_status", None) in {400, 422}:
+        ft = getattr(error, "failure_type", None)
+        if ft == "unsupported_response_format":
             return _CATEGORY_STRUCTURED_OUTPUT
+        if ft in {"unsupported_temperature", "unsupported_max_tokens"}:
+            return _CATEGORY_PARAM_UNSUPPORTED
+        if ft == "context_length_exceeded":
+            return _CATEGORY_CONTEXT_EXCEEDED
+        if ft == "model_not_found":
+            return _CATEGORY_UNAVAILABLE
+        if getattr(error, "http_status", None) in {400, 422}:
+            return _CATEGORY_BAD_REQUEST
         return _CATEGORY_FAILED
     return _CATEGORY_FAILED
 

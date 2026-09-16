@@ -457,3 +457,68 @@ def test_preflight_structured_output_non_object_json(
 
     assert result.ok is False
     assert result.failure_category == "Structured output unsupported"
+
+
+def test_preflight_generic_400_maps_to_bad_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generic 400 error maps to 'Bad request (HTTP 400)' and not 'Structured output unsupported'."""
+    fake_session = _FakeHTTPSession(
+        _FakeHTTPResponse(
+            400,
+            {"error": {"message": "Invalid request body syntax"}},
+        )
+    )
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("test-model")
+
+    assert result.ok is False
+    assert result.failure_category == "Bad request (HTTP 400)"
+
+
+def test_preflight_unsupported_param_maps_to_param_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported parameter 400 error maps to 'Model parameter unsupported'."""
+    fake_session = _FakeHTTPSession(
+        _FakeHTTPResponse(
+            400,
+            {
+                "error": {
+                    "message": "Unsupported parameter: 'temperature' is not supported.",
+                    "param": "temperature",
+                }
+            },
+        )
+    )
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("test-model")
+
+    assert result.ok is False
+    assert result.failure_category == "Model parameter unsupported"
+
+
+def test_preflight_context_length_exceeded_maps_to_context_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context length exceeded error maps to 'Context length exceeded'."""
+    fake_session = _FakeHTTPSession(
+        _FakeHTTPResponse(
+            400,
+            {
+                "error": {
+                    "message": "This model's maximum context length is 8192 tokens.",
+                    "code": "context_length_exceeded",
+                }
+            },
+        )
+    )
+    _patch_adapter(monkeypatch, fake_session)
+
+    result = check_llm_connectivity("test-model")
+
+    assert result.ok is False
+    assert result.failure_category == "Context length exceeded"
+

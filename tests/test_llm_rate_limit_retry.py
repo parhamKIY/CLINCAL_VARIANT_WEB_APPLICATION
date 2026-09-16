@@ -267,6 +267,105 @@ def test_non_temperature_400_does_not_trigger_temperature_fallback() -> None:
     assert len(session.captured_posts) == 1
 
 
+def test_max_completion_tokens_fallback_on_400() -> None:
+    """When a model rejects max_tokens in favor of max_completion_tokens, adapter retries and succeeds."""
+    session = _Session(
+        [
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+                        "type": "invalid_request_error",
+                        "param": "max_tokens",
+                        "code": "unsupported_parameter",
+                    }
+                },
+            ),
+            _success(),
+        ]
+    )
+
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        model="o1-mini",
+        timeout=10.0,
+        session=session,
+    )
+
+    request = LLMRequest(
+        messages=(LLMMessage("user", "ready"),),
+        temperature=1.0,
+        max_tokens=100,
+    )
+
+    response = adapter.generate(request)
+
+    assert response.content == "{}"
+    assert len(session.captured_posts) == 2
+    assert "max_tokens" in session.captured_posts[0]["json"]
+    assert "max_completion_tokens" not in session.captured_posts[0]["json"]
+    assert "max_tokens" not in session.captured_posts[1]["json"]
+    assert session.captured_posts[1]["json"]["max_completion_tokens"] == 100
+
+
+def test_combined_temperature_and_max_tokens_fallback() -> None:
+    """When a model rejects both temperature=0.0 and max_tokens sequentially, adapter recovers."""
+    session = _Session(
+        [
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Unsupported value: 'temperature' does not support 0.0 with this model.",
+                        "param": "temperature",
+                    }
+                },
+            ),
+            _Response(
+                400,
+                {
+                    "error": {
+                        "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+                        "param": "max_tokens",
+                    }
+                },
+            ),
+            _success(),
+        ]
+    )
+
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        model="o3-mini",
+        timeout=10.0,
+        session=session,
+    )
+
+    request = LLMRequest(
+        messages=(LLMMessage("user", "ready"),),
+        temperature=0.0,
+        max_tokens=60,
+    )
+
+    response = adapter.generate(request)
+
+    assert response.content == "{}"
+    assert len(session.captured_posts) == 3
+    # First attempt: temp=0.0, max_tokens=60
+    assert session.captured_posts[0]["json"]["temperature"] == 0.0
+    assert session.captured_posts[0]["json"]["max_tokens"] == 60
+    # Second attempt: temp=1.0, max_tokens=60
+    assert session.captured_posts[1]["json"]["temperature"] == 1.0
+    assert session.captured_posts[1]["json"]["max_tokens"] == 60
+    # Third attempt: temp=1.0, max_completion_tokens=60
+    assert session.captured_posts[2]["json"]["temperature"] == 1.0
+    assert session.captured_posts[2]["json"]["max_completion_tokens"] == 60
+
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
