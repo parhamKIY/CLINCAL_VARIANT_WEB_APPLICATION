@@ -364,8 +364,8 @@ def test_preflight_no_clinical_data_in_request(
             f"Preflight request unexpectedly contained clinical term: {term!r}"
         )
 
-    # Token budget must be minimal
-    assert payload.get("max_tokens", 9999) <= 20
+    # Token budget must be minimal (bounded check)
+    assert payload.get("max_tokens", 9999) <= 64
     assert payload.get("response_format") == {"type": "json_object"}
 
 

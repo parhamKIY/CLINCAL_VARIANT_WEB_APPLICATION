@@ -45,7 +45,7 @@ LOGGER = get_logger("llm_preflight")
 # Preflight request constants — minimal, anonymous, deterministic structured JSON check.
 _PREFLIGHT_SYSTEM = "Respond only with a JSON object: {\"status\": \"ready\"}"
 _PREFLIGHT_USER = "ready"
-_PREFLIGHT_MAX_TOKENS = 15
+_PREFLIGHT_MAX_TOKENS = 50
 _PREFLIGHT_TEMPERATURE = 0.0
 _PREFLIGHT_RESPONSE_FORMAT = LLMJSONObject()
 
